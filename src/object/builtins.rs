@@ -408,6 +408,9 @@ pub(crate) fn seed_primitive_type_cache(name: &str, ty: PyObjectRef) {
         c.borrow_mut().insert(name.to_string(), ty);
     });
 }
+pub(crate) fn get_primitive_type(name: &str) -> Option<PyObjectRef> {
+    PRIMITIVE_TYPE_CACHE.with(|c| c.borrow().get(name).cloned())
+}
 
 pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() == 1 {
@@ -2422,7 +2425,9 @@ pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // copied key-by-key, matching real `dict(mapping)` semantics.
             // Only objects without `.keys()` fall back to being treated
             // as an iterable of (key, value) pairs.
-            let keys_method = args[0].borrow().get_attribute("keys").ok();
+            let type_name = args[0].borrow().type_name();
+            let is_view = matches!(type_name.as_str(), "dict_items" | "dict_keys" | "dict_values" | "KeysView" | "ItemsView" | "ValuesView" | "MappingView");
+            let keys_method = if is_view { None } else { args[0].borrow().get_attribute("keys").ok() };
             if let Some(keys_raw) = keys_method {
                 let keys_iterable = call_bound_method(keys_raw, args[0].clone(), vec![])?;
                 let it = builtin_iter(&[keys_iterable])?;
@@ -3025,8 +3030,12 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             {
                 let mut seen = std::collections::HashSet::new();
                 for key in tdict.keys() {
+                    let s = interner::lookup_str(*key);
+                    if s.starts_with("__native") {
+                        continue;
+                    }
                     if seen.insert(*key) {
-                        names.push(py_str(interner::lookup_str(*key)));
+                        names.push(py_str(s));
                     }
                 }
                 for base in mro {
@@ -3035,9 +3044,12 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     } = &*base.borrow()
                     {
                         for key in base_dict.keys() {
+                            let s = interner::lookup_str(*key);
+                            if s.starts_with("__native") {
+                                continue;
+                            }
                             if seen.insert(*key) {
-                                names
-                                    .push(py_str(interner::lookup_str(*key)));
+                                names.push(py_str(s));
                             }
                         }
                     }
@@ -3067,8 +3079,12 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // a mixin base for any multiple-inheritance test class.
             let mut seen = std::collections::HashSet::new();
             for key in dict.keys() {
+                let s = interner::lookup_str(*key);
+                if s.starts_with("__native") {
+                    continue;
+                }
                 if seen.insert(*key) {
-                    names.push(py_str(interner::lookup_str(*key)));
+                    names.push(py_str(s));
                 }
             }
             for base in mro {
@@ -3077,8 +3093,12 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 } = &*base.borrow()
                 {
                     for key in base_dict.keys() {
+                        let s = interner::lookup_str(*key);
+                        if s.starts_with("__native") {
+                            continue;
+                        }
                         if seen.insert(*key) {
-                            names.push(py_str(interner::lookup_str(*key)));
+                            names.push(py_str(s));
                         }
                     }
                 }
@@ -4067,17 +4087,38 @@ pub fn builtin_enumerate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let mut iterable: Option<PyObjectRef> = None;
     let mut start_val: Option<PyObjectRef> = None;
     let mut positional: Vec<PyObjectRef> = Vec::new();
-    for a in args {
-        if let PyObject::Dict(d) = &*a.borrow() {
+    let kwargs_dict = if let Some(last) = args.last() {
+        if let PyObject::Dict(d) = &*last.borrow() {
+            let has_iterable = d.get(&py_str("iterable")).ok().flatten().is_some();
+            let has_start = d.get(&py_str("start")).ok().flatten().is_some();
+            if has_iterable || has_start {
+                Some(last.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let positional_args: &[PyObjectRef] = if kwargs_dict.is_some() {
+        &args[..args.len() - 1]
+    } else {
+        args
+    };
+    if let Some(kw) = kwargs_dict {
+        if let PyObject::Dict(d) = &*kw.borrow() {
             if let Ok(Some(v)) = d.get(&py_str("iterable")) {
                 iterable = Some(v.clone());
             }
             if let Ok(Some(v)) = d.get(&py_str("start")) {
                 start_val = Some(v.clone());
             }
-        } else {
-            positional.push(a.clone());
         }
+    }
+    for a in positional_args {
+        positional.push(a.clone());
     }
     if iterable.is_none() && positional.is_empty() {
         return Err(PyError::type_error("enumerate() takes at least 1 argument"));

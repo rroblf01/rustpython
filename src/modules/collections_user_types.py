@@ -212,7 +212,27 @@ class UserDict:
             self.data.update(kwargs)
 
     def copy(self):
-        return self.__class__(self.data)
+        if self.__class__ is UserDict:
+            return UserDict(self.data.copy())
+        import copy as _copy
+        new = self.__class__.__new__(self.__class__)
+        new.__dict__.update(self.__dict__)
+        new.data = self.data.copy()
+        return new
+
+    def __copy__(self):
+        return self.copy()
+
+    def __deepcopy__(self, memo):
+        import copy as _copy
+        new = self.__class__.__new__(self.__class__)
+        memo[id(self)] = new
+        new.__dict__.update(_copy.deepcopy(self.__dict__, memo))
+        return new
+
+    @classmethod
+    def fromkeys(cls, iterable, value=None):
+        return cls(dict.fromkeys(iterable, value))
 
 
 class Counter(dict):
@@ -302,7 +322,7 @@ class Counter(dict):
         return sum(self.values())
 
     def copy(self):
-        return Counter(self)
+        return self.__class__(self)
 
     def __delitem__(self, elem):
         if elem in self:
@@ -374,11 +394,38 @@ class Counter(dict):
     def __iadd__(self, other):
         for elem, count in other.items():
             self[elem] = self.get(elem, 0) + count
+        to_del = [k for k, v in self.items() if v <= 0]
+        for k in to_del:
+            del self[k]
         return self
 
     def __isub__(self, other):
         for elem, count in other.items():
             self[elem] = self.get(elem, 0) - count
+        to_del = [k for k, v in self.items() if v <= 0]
+        for k in to_del:
+            del self[k]
+        return self
+
+    def __ior__(self, other):
+        for elem, count in other.items():
+            newcount = count if self.get(elem, 0) < count else self.get(elem, 0)
+            if newcount > 0:
+                self[elem] = newcount
+            elif elem in self:
+                del self[elem]
+        return self
+
+    def __iand__(self, other):
+        for elem in list(self.keys()):
+            if elem in other:
+                newcount = self[elem] if self[elem] < other[elem] else other[elem]
+                if newcount > 0:
+                    self[elem] = newcount
+                else:
+                    del self[elem]
+            else:
+                del self[elem]
         return self
 
 
@@ -707,6 +754,10 @@ class UserString:
     def join(self, seq):
         return self.__class__(self.data.join(seq))
 
+    @staticmethod
+    def maketrans(*args, **kwargs):
+        return str.maketrans(*args, **kwargs)
+
 
 class ChainMap:
     """A ChainMap groups multiple dicts (or other mappings) together
@@ -737,10 +788,25 @@ class ChainMap:
         return self.__missing__(key)
 
     def get(self, key, default=None):
-        try:
-            return self[key]
-        except KeyError:
-            return default
+        for m in self.maps:
+            try:
+                try:
+                    contains = key in m
+                except Exception:
+                    try:
+                        m[key]
+                        contains = True
+                    except KeyError:
+                        contains = False
+                    except Exception:
+                        contains = False
+                if contains:
+                    return m[key]
+            except KeyError:
+                pass
+            except Exception:
+                pass
+        return default
 
     def __len__(self):
         return len(set().union(*self.maps))
@@ -752,7 +818,82 @@ class ChainMap:
         return iter(d)
 
     def __contains__(self, key):
-        return any(key in m for m in self.maps)
+        for m in self.maps:
+            try:
+                if key in m:
+                    return True
+            except Exception:
+                try:
+                    m[key]
+                    return True
+                except KeyError:
+                    pass
+                except Exception:
+                    pass
+                continue
+        return False
+
+    def __or__(self, other):
+        if isinstance(other, ChainMap):
+            other = dict(other)
+        if isinstance(other, dict):
+            new_first = self.maps[0].copy()
+            for k, v in other.items():
+                new_first[k] = v
+            return self.__class__(new_first, *self.maps[1:])
+        if hasattr(other, 'keys'):
+            new_first = self.maps[0].copy()
+            for k in other.keys():
+                new_first[k] = other[k]
+            return self.__class__(new_first, *self.maps[1:])
+        try:
+            new_first = self.maps[0].copy()
+            for k, v in other:
+                new_first[k] = v
+            return self.__class__(new_first, *self.maps[1:])
+        except Exception:
+            return NotImplemented
+
+    def __ror__(self, other):
+        if isinstance(other, ChainMap):
+            other = dict(other)
+        if isinstance(other, dict):
+            merged = other.copy()
+            merged.update(dict(self))
+            return self.__class__(merged)
+        if hasattr(other, 'keys'):
+            merged = dict(other)
+            merged.update(dict(self))
+            return self.__class__(merged)
+        return NotImplemented
+
+    def __ior__(self, other):
+        if isinstance(other, ChainMap):
+            other = dict(other)
+        if isinstance(other, dict):
+            for k, v in other.items():
+                self.maps[0][k] = v
+            return self
+        if hasattr(other, 'keys'):
+            for k in other.keys():
+                self.maps[0][k] = other[k]
+            return self
+        try:
+            for k, v in other:
+                self.maps[0][k] = v
+            return self
+        except Exception:
+            return NotImplemented
+
+    def __copy__(self):
+        return self.__class__(self.maps[0].copy(), *self.maps[1:])
+
+    def __deepcopy__(self, memo):
+        from copy import deepcopy
+        return self.__class__(*[deepcopy(m, memo) for m in self.maps])
+
+    def __reduce__(self):
+        return (self.__class__, tuple(self.maps))
 
     def __bool__(self):
         return any(self.maps)

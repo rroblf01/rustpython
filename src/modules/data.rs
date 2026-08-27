@@ -375,9 +375,76 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
                 "namedtuple() requires at least 1 field name",
             ));
         }
+        // Handle keyword-only args: rename, defaults, module
+        let mut rename = false;
+        let mut defaults_vals: Vec<PyObjectRef> = Vec::new();
+        let mut module_val: Option<PyObjectRef> = None;
+        if let Some(last) = args.last() {
+            if let PyObject::Dict(d) = &*last.borrow() {
+                let has_rename = d.get(&py_str("rename")).ok().flatten().is_some() || d.get(&py_str("rename")).is_ok() && d.get(&py_str("rename")).ok().is_some();
+                // Use contains check via get
+                let has_rename2 = d.get(&py_str("rename")).ok().flatten().is_some();
+                let has_defaults = d.get(&py_str("defaults")).ok().flatten().is_some();
+                let has_module = d.get(&py_str("module")).ok().flatten().is_some();
+                // also check if dict contains those keys even if value is None/false
+                let contains_rename = d.get(&py_str("rename")).is_ok();
+                // Actually check via get with Ok
+                let check_contains = |k: &str| d.get(&py_str(k)).is_ok();
+                let cr = check_contains("rename");
+                let cd = check_contains("defaults");
+                let cm = check_contains("module");
+                if cr || cd || cm || has_rename2 || has_defaults || has_module {
+                    if args.len() > 3 {
+                        return Err(PyError::type_error("namedtuple() takes 2 positional arguments but more were given"));
+                    }
+                    if let Ok(Some(v)) = d.get(&py_str("rename")) {
+                        rename = v.truthy();
+                    }
+                    if let Ok(Some(v)) = d.get(&py_str("defaults")) {
+                        if !matches!(&*v.borrow(), PyObject::None) {
+                            match &*v.borrow() {
+                                PyObject::List(items) | PyObject::Tuple(items) => {
+                                    defaults_vals = items.clone();
+                                }
+                                _ => {
+                                    if let Ok(collected) = crate::object::collect_iterable(&v) {
+                                        defaults_vals = collected;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Ok(Some(v)) = d.get(&py_str("module")) {
+                        module_val = Some(v.clone());
+                    }
+                } else if args.len() > 2 {
+                    return Err(PyError::type_error("namedtuple() takes 2 positional arguments but 3 were given"));
+                }
+            } else if args.len() > 2 {
+                return Err(PyError::type_error("namedtuple() takes 2 positional arguments but 3 were given"));
+            }
+        } else if args.len() > 2 {
+            return Err(PyError::type_error("namedtuple() takes 2 positional arguments but 3 were given"));
+        }
+        let mut fields = fields;
+        if rename {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (i, f) in fields.iter_mut().enumerate() {
+                let is_valid = !f.is_empty() && f.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false) && f.chars().all(|c| c.is_alphanumeric() || c == '_') && !["def","class","return","if","for","while","import","from","as","pass","break","continue","and","or","not","in","is","lambda","with","yield","try","except","finally","raise","assert","del","global","nonlocal","True","False","None"].contains(&f.as_str()) && !f.starts_with('_');
+                if !is_valid || seen.contains(f) {
+                    *f = format!("_{}", i);
+                }
+                seen.insert(f.clone());
+            }
+        }
+        if defaults_vals.len() > fields.len() {
+            return Err(PyError::type_error("Too many defaults"));
+        }
         let n = fields.len();
+        let defaults_start = n.saturating_sub(defaults_vals.len());
         let f_clone = fields.clone();
         let tn_clone = typename.clone();
+        let defaults_clone = defaults_vals.clone();
         // __init__: called by Type handler after creating empty Instance
         let init_fn = move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
             if args.len() < 1 {
@@ -385,26 +452,63 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
             }
             let self_obj = &args[0];
             let pos_args = &args[1..];
-            if pos_args.len() != n {
+            let mut kwargs_map: std::collections::HashMap<String, PyObjectRef> = std::collections::HashMap::new();
+            let mut actual_pos: Vec<PyObjectRef> = pos_args.to_vec();
+            if let Some(last) = pos_args.last() {
+                if let PyObject::Dict(d) = &*last.borrow() {
+                    let mut is_kwargs = false;
+                    for f in &f_clone {
+                        if d.get(&py_str(f)).ok().flatten().is_some() {
+                            is_kwargs = true;
+                            break;
+                        }
+                    }
+                    if is_kwargs {
+                        for (k, v) in d.items() {
+                            kwargs_map.insert(k.str(), v);
+                        }
+                        actual_pos.pop();
+                    }
+                }
+            }
+            if actual_pos.len() < defaults_start || actual_pos.len() > n {
                 return Err(PyError::type_error(format!(
                     "{} expects {} arguments, got {}",
                     tn_clone,
                     n,
-                    pos_args.len()
+                    actual_pos.len()
                 )));
             }
-            // Set field values as attributes on self
+            let mut full_vals: Vec<PyObjectRef> = Vec::with_capacity(n);
+            for i in 0..n {
+                let field = &f_clone[i];
+                if i < actual_pos.len() {
+                    full_vals.push(actual_pos[i].clone());
+                } else if let Some(v) = kwargs_map.get(field) {
+                    full_vals.push(v.clone());
+                } else if i >= defaults_start {
+                    let idx = i - defaults_start;
+                    full_vals.push(defaults_clone[idx].clone());
+                } else {
+                    return Err(PyError::type_error(format!("missing value for field {}", field)));
+                }
+            }
+            for k in kwargs_map.keys() {
+                if !f_clone.contains(k) {
+                    return Err(PyError::type_error(format!("Got unexpected field names: {}", k)));
+                }
+            }
             for (i, f) in f_clone.iter().enumerate() {
                 self_obj
                     .borrow_mut()
-                    .set_attribute(f, pos_args[i].clone())
+                    .set_attribute(f, full_vals[i].clone())
                     .ok();
             }
             self_obj
                 .borrow_mut()
                 .set_attribute(
                     "_fields",
-                    PyObjectRef::new(PyObject::List(f_clone.iter().map(|f| py_str(f)).collect())),
+                    PyObjectRef::new(PyObject::Tuple(f_clone.iter().map(|f| py_str(f)).collect())),
                 )
                 .ok();
             Ok(py_none())
@@ -412,6 +516,43 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
         let init_obj = PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(init_fn)));
         let mut type_dict = HashMap::new();
         type_dict.insert_str("__init__", init_obj);
+        type_dict.insert_str("__slots__", py_tuple(vec![]));
+        type_dict.insert_str("__match_args__", py_tuple(fields.iter().map(|f| py_str(f)).collect()));
+        type_dict.insert_str("_fields", py_tuple(fields.iter().map(|f| py_str(f)).collect()));
+        {
+            let mut fd = crate::object::PyDict::new();
+            for (i, f) in fields.iter().enumerate() {
+                if i >= defaults_start {
+                    let _ = fd.set(py_str(f), defaults_vals[i - defaults_start].clone());
+                }
+            }
+            type_dict.insert_str("_field_defaults", PyObjectRef::new(PyObject::Dict(Box::new(fd))));
+        }
+        type_dict.insert_str("__module__", module_val.clone().unwrap_or_else(|| py_str("collections")));
+        type_dict.insert_str("__doc__", py_str(&format!("{}({})", typename, fields.join(", "))));
+        {
+            let fields_for_setattr = fields.clone();
+            type_dict.insert_str("__setattr__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                if args.len() < 3 { return Err(PyError::type_error("__setattr__ requires 3 args")); }
+                let name = args[1].str();
+                if fields_for_setattr.contains(&name) {
+                    return Err(PyError::attribute_error(format!("can't set attribute '{}'", name)));
+                }
+                args[0].borrow_mut().set_attribute(&name, args[2].clone())?;
+                Ok(py_none())
+            }))));
+        }
+        {
+            let fields_for_del = fields.clone();
+            type_dict.insert_str("__delattr__", PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                if args.len() < 2 { return Err(PyError::type_error("__delattr__ requires 2 args")); }
+                let name = args[1].str();
+                if fields_for_del.contains(&name) {
+                    return Err(PyError::attribute_error(format!("can't delete attribute '{}'", name)));
+                }
+                return Err(PyError::attribute_error(format!("can't delete attribute '{}'", name)));
+            }))));
+        }
 
         // A real `namedtuple` instance IS a tuple (subclasses `tuple` in
         // real CPython) — comparing/hashing/iterating/indexing it must
@@ -437,6 +578,7 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
         fn nt_fields(self_obj: &PyObjectRef) -> PyResult<Vec<String>> {
             match self_obj.borrow().get_attribute("_fields")?.borrow().clone() {
                 PyObject::List(items) => Ok(items.iter().map(|v| v.str()).collect()),
+                PyObject::Tuple(items) => Ok(items.iter().map(|v| v.str()).collect()),
                 _ => Err(PyError::type_error("not a namedtuple instance")),
             }
         }
@@ -540,7 +682,7 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
             }
             new_dict.insert_str(
                 "_fields",
-                PyObjectRef::new(PyObject::List(fields.iter().map(|f| py_str(f)).collect())),
+                PyObjectRef::new(PyObject::Tuple(fields.iter().map(|f| py_str(f)).collect())),
             );
             Ok(PyObjectRef::new(PyObject::Instance {
                 typ,
@@ -679,7 +821,7 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
                     let mut new_dict = AttrMap::new();
                     new_dict.insert_str(
                         "_fields",
-                        PyObjectRef::new(PyObject::List(
+                        PyObjectRef::new(PyObject::Tuple(
                             make_fields.iter().map(|f| py_str(f)).collect(),
                         )),
                     );
@@ -714,12 +856,21 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
                 }),
             );
         }
-        Ok(PyObjectRef::new(PyObject::Type {
-            name: typename,
+        let tuple_type = crate::object::get_primitive_type("tuple").unwrap_or_else(|| py_none());
+        let typ = PyObjectRef::new(PyObject::Type {
+            name: typename.clone(),
             dict: Box::new(str_map_to_typedict(type_dict)),
-            bases: vec![],
+            bases: if matches!(&*tuple_type.borrow(), PyObject::Type { .. }) { vec![tuple_type.clone()] } else { vec![] },
             mro: vec![],
-        }))
+        });
+        if matches!(&*tuple_type.borrow(), PyObject::Type { .. }) {
+            if let PyObject::Type { mro, .. } = &mut *typ.borrow_mut() {
+                *mro = vec![typ.clone(), tuple_type.clone()];
+            }
+        } else if let PyObject::Type { mro, .. } = &mut *typ.borrow_mut() {
+            *mro = vec![typ.clone()];
+        }
+        Ok(typ)
     });
 
     // collections.abc submodule (Iterable, Hashable, etc.)

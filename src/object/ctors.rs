@@ -543,12 +543,22 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
             PyObject::Instance { dict, .. } if dict.get_str("_fields").is_some() => {
                 let mut vals: Vec<PyObjectRef> = Vec::new();
                 if let Some(fields) = dict.get_str("_fields") {
-                    if let PyObject::List(fields) = &*fields.borrow() {
-                        for f in fields {
-                            if let Some(v) = dict.get(&f.str()) {
-                                vals.push(v.clone());
+                    match &*fields.borrow() {
+                        PyObject::List(fields) => {
+                            for f in fields {
+                                if let Some(v) = dict.get(&f.str()) {
+                                    vals.push(v.clone());
+                                }
                             }
                         }
+                        PyObject::Tuple(fields) => {
+                            for f in fields {
+                                if let Some(v) = dict.get(&f.str()) {
+                                    vals.push(v.clone());
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 arg_iter = Some(Box::new(vals.into_iter()));

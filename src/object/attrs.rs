@@ -12937,6 +12937,9 @@ impl ObjectAccess for PyObject {
     fn set_attribute(&mut self, name: &str, value: PyObjectRef) -> PyResult<()> {
         match self {
             PyObject::Instance { dict, typ } => {
+                if crate::object::get_type_name_for_instance(typ) == "Dialect" {
+                    return Err(PyError::AttributeError("attribute is read-only".to_string()));
+                }
                 // Check __slots__ restriction if defined on the type or its MRO
                 if let Some(slots) = get_instance_slots(typ) {
                     if !slots.iter().any(|s| s == name) {
@@ -13043,6 +13046,9 @@ impl ObjectAccess for PyObject {
     fn del_attribute(&mut self, name: &str) -> PyResult<()> {
         match self {
             PyObject::Instance { dict, typ } => {
+                if crate::object::get_type_name_for_instance(typ) == "Dialect" {
+                    return Err(PyError::AttributeError("attribute is read-only".to_string()));
+                }
                 // Check __slots__ restriction if defined on the type or its MRO
                 if let Some(slots) = get_instance_slots(typ) {
                     if !slots.iter().any(|s| s == name) {

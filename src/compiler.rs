@@ -4405,6 +4405,7 @@ impl Compiler {
             }
             Expr::GeneratorExp { elt, generators } => {
                 self.compile_comprehension(elt, generators, false)?;
+                self.emit(Opcode::GET_ITER, 0);
             }
             Expr::Slice { lower, upper, step } => {
                 let const_none = self.get_const_index(ConstValue::None) as u32;

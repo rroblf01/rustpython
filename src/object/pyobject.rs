@@ -1432,9 +1432,12 @@ impl PyObject {
             | (PyObject::BuiltinFunction { .. }, PyObject::BuiltinFunction { .. })
             | (PyObject::BuiltinMethod { .. }, PyObject::BuiltinMethod { .. })
             | (PyObject::Type { .. }, PyObject::Type { .. })
-            | (PyObject::Module { .. }, PyObject::Module { .. })
-            | (PyObject::BoundMethod { .. }, PyObject::BoundMethod { .. }) => {
+            | (PyObject::Module { .. }, PyObject::Module { .. }) => {
                 std::ptr::eq(self as *const PyObject, &*other as *const PyObject)
+            }
+            (PyObject::BoundMethod { func: a_func, self_obj: a_self }, PyObject::BoundMethod { func: b_func, self_obj: b_self }) => {
+                (a_func.is(b_func) || a_func.equals(b_func).unwrap_or(false))
+                    && (a_self.is(b_self) || a_self.equals(b_self).unwrap_or(false))
             }
             _ => false,
         };

@@ -1194,8 +1194,8 @@ impl VirtualMachine {
         weakref_mod_dict.insert_str("WeakSet", create_weakref_weak_set());
         modules.insert_str("weakref", create_module("weakref", weakref_mod_dict));
 
-        // Native copy module (replaces CPython copy.py which uses unsupported syntax)
-        modules.insert_str("copy", create_module("copy", create_copy_dict()));
+        // Native copy module DISABLED: use Lib/copy.py
+        // modules.insert_str("copy", create_module("copy", create_copy_dict()));
 
         // Native types module (replaces CPython types.py)
         modules.insert_str(
@@ -11746,6 +11746,48 @@ impl VirtualMachine {
         }
         crate::object::register_class(&class);
 
+        // Compute __abstractmethods__ for ABC support
+        {
+            use std::collections::HashSet;
+            let mut abstracts: HashSet<String> = HashSet::new();
+            for base in &bases_vec {
+                if let Ok(am) = base.borrow().get_attribute("__abstractmethods__") {
+                    match &*am.borrow() {
+                        PyObject::FrozenSet(s) => {
+                            for v in s.iter() { abstracts.insert(v.str()); }
+                        }
+                        PyObject::Set(s) => {
+                            for v in s.iter() { abstracts.insert(v.str()); }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut to_remove = Vec::new();
+            for name in abstracts.iter() {
+                if let Some(v) = namespace_dict.get(name) {
+                    let is_abs = v.borrow().get_attribute("__isabstractmethod__").map(|b| b.truthy()).unwrap_or(false);
+                    if !is_abs && !matches!(&*v.borrow(), PyObject::None) {
+                        to_remove.push(name.clone());
+                    }
+                }
+            }
+            for n in to_remove { abstracts.remove(&n); }
+            for (k, v) in &namespace_dict {
+                if v.borrow().get_attribute("__isabstractmethod__").map(|b| b.truthy()).unwrap_or(false) {
+                    abstracts.insert(k.clone());
+                }
+            }
+            let mut set = crate::object::PySet::new();
+            for n in abstracts.iter() { let _ = set.add(py_str(n)); }
+            if let PyObject::Type { dict, .. } = &mut *class.borrow_mut() {
+                dict.insert_str("__abstractmethods__", PyObjectRef::new(PyObject::FrozenSet(set)));
+                if !dict.contains_key_str("_abc_registry") {
+                    dict.insert_str("_abc_registry", PyObjectRef::new(PyObject::FrozenSet(crate::object::PySet::new())));
+                }
+            }
+        }
+
         // __set_name__ protocol: for each descriptor in the class dict that has __set_name__, call it
         for (attr_name, value) in namespace_dict.iter() {
             // Get __set_name__ from the TYPE (not the instance) to avoid double-binding
@@ -12030,7 +12072,7 @@ impl VirtualMachine {
                 cls_mro.iter().any(|base| base.is(&abc_t))
             }).unwrap_or(false);
             // Also trigger if the metaclass is ABCMeta itself
-            let is_abc_meta = abc_mod.as_ref().map(|m| {
+            let is_abc_meta = abc_mod.as_ref().map(|_| {
                 let name = metaclass.borrow().type_name();
                 name == "ABCMeta" || name == "builtin_function_or_method"
                     && metaclass.borrow().repr().contains("ABCMeta")
