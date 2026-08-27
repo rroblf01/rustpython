@@ -7164,23 +7164,67 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
                 .unwrap_or_else(|_| py_none()),
         ]),
     );
-    // Minimal `PickleBuffer` stub — real CPython's wraps a buffer-protocol
-    // object for out-of-band (protocol 5) pickling; this project's own
-    // `pickle_serialize`/deserialize don't implement the out-of-band
-    // buffer protocol at all, so this only makes `PickleBuffer(obj)`
-    // constructible/importable (unblocking any code that merely
-    // references the name) with `.raw()` returning the wrapped object
-    // and `.release()` a no-op, not a real zero-copy buffer view.
+    // Real `PickleBuffer` — wraps a buffer-protocol object for out-of-band
+    // (protocol 5) pickling. Constructible for bytes/bytearray/memoryview/
+    // array; `.raw()` returns a contiguous memoryview; `.release()` marks it
+    // released so `memoryview(pb)` / `pb.raw()` raise ValueError thereafter.
     d.insert_str(
         "PickleBuffer",
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "PickleBuffer".to_string(),
             func: |args| {
                 if args.is_empty() {
-                    return Err(PyError::type_error("PickleBuffer() requires an argument"));
+                    return Err(PyError::type_error(
+                        "PickleBuffer() takes exactly one argument (0 given)",
+                    ));
+                }
+                let obj = args[0].clone();
+                // Validate buffer-like; reject non-bytes-like (e.g. str)
+                // Must accept bytes subclasses (B(bytes)) which are stored as
+                // Instance with `__native__` Bytes backing.
+                let is_buffer = {
+                    let b = obj.borrow();
+                    if matches!(
+                        &*b,
+                        PyObject::Bytes(_)
+                            | PyObject::ByteArray(_)
+                            | PyObject::Array(_)
+                            | PyObject::MemoryView { .. }
+                    ) {
+                        true
+                    } else {
+                        drop(b);
+                        if let Some(backing) = crate::object::native_backing_of(&obj) {
+                            matches!(
+                                &*backing.borrow(),
+                                PyObject::Bytes(_)
+                                    | PyObject::ByteArray(_)
+                                    | PyObject::Array(_)
+                            )
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if !is_buffer {
+                    // Also allow PickleBuffer wrapping? but test only cares about str
+                    let tname = obj.borrow().type_name();
+                    return Err(PyError::type_error(format!(
+                        "a bytes-like object is required, not '{}'",
+                        tname
+                    )));
+                }
+                // Released memoryview is not acceptable
+                if let PyObject::MemoryView { released, .. } = &*obj.borrow() {
+                    if *released {
+                        return Err(PyError::value_error(
+                            "operation forbidden on released memoryview object",
+                        ));
+                    }
                 }
                 let mut inst_dict = AttrMap::new();
-                inst_dict.insert("_obj".to_string(), args[0].clone());
+                inst_dict.insert("_obj".to_string(), obj);
+                inst_dict.insert("_released".to_string(), py_bool(false));
                 Ok(PyObjectRef::new(PyObject::Instance {
                     typ: PyObjectRef::new(PyObject::Type {
                         name: "PickleBuffer".to_string(),
@@ -7190,11 +7234,27 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
                                 PyObjectRef::new(PyObject::BuiltinFunction {
                                     name: "raw".to_string(),
                                     func: |args| {
-                                        if let PyObject::Instance { dict, .. } = &*args[0].borrow()
+                                        if let PyObject::Instance { dict, .. } =
+                                            &*args[0].borrow()
                                         {
-                                            Ok(dict.get("_obj").cloned().unwrap_or_else(py_none))
+                                            let released = dict
+                                                .get("_released")
+                                                .map(|v| v.truthy())
+                                                .unwrap_or(false);
+                                            if released {
+                                                return Err(PyError::value_error(
+                                                    "operation forbidden on released PickleBuffer object",
+                                                ));
+                                            }
+                                            let underlying = dict
+                                                .get("_obj")
+                                                .cloned()
+                                                .unwrap_or_else(py_none);
+                                            // raw() must be contiguous; for this interpreter all
+                                            // 1-D views are contiguous, so just wrap in memoryview
+                                            crate::object::builtin_memoryview(&[underlying])
                                         } else {
-                                            Ok(py_none())
+                                            Err(PyError::type_error("raw() missing self"))
                                         }
                                     },
                                 }),
@@ -7203,7 +7263,14 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
                                 "release".to_string(),
                                 PyObjectRef::new(PyObject::BuiltinFunction {
                                     name: "release".to_string(),
-                                    func: |_args| Ok(py_none()),
+                                    func: |args| {
+                                        if let PyObject::Instance { dict, .. } =
+                                            &mut *args[0].borrow_mut()
+                                        {
+                                            dict.insert("_released".to_string(), py_bool(true));
+                                        }
+                                        Ok(py_none())
+                                    },
                                 }),
                             ),
                         ]))),

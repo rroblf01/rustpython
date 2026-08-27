@@ -63,6 +63,23 @@ fn array_bytes_to_elem(typecode: char, bytes: &[u8]) -> f64 {
 /// clone is thrown away immediately), NOT used for writes (see
 /// `mv_write_bytes`, which mutates the source in place instead).
 pub(crate) fn mv_source_bytes(source: &PyObjectRef) -> Vec<u8> {
+    // Check direct types first, then Instance subclasses with native backing
+    // (e.g. `class B(bytes): pass; B(b"foo")` stores Bytes under `__native__`).
+    if let Some(backing) = crate::object::native_backing_of(source) {
+        match &*backing.borrow() {
+            PyObject::Bytes(b) => return b.clone(),
+            PyObject::ByteArray(b) => return b.clone(),
+            PyObject::Array(arr) => {
+                let mut out =
+                    Vec::with_capacity(arr.data.len() * mv_itemsize(&arr.typecode.to_string()));
+                for &v in &arr.data {
+                    out.extend(array_elem_to_bytes(arr.typecode, v));
+                }
+                return out;
+            }
+            _ => {}
+        }
+    }
     match &*source.borrow() {
         PyObject::Bytes(b) => b.clone(),
         PyObject::ByteArray(b) => b.clone(),
@@ -84,6 +101,9 @@ pub(crate) fn mv_source_bytes(source: &PyObjectRef) -> Vec<u8> {
 }
 
 pub(crate) fn mv_write_bytes(source: &PyObjectRef, offset: usize, data: &[u8]) -> PyResult<()> {
+    if let Some(backing) = crate::object::native_backing_of(source) {
+        return mv_write_bytes(&backing, offset, data);
+    }
     match &mut *source.borrow_mut() {
         PyObject::ByteArray(b) => {
             if offset + data.len() > b.len() {
@@ -124,8 +144,14 @@ pub(crate) fn mv_fields(
         itemsize,
         offset,
         readonly,
+        released,
     } = &*v.borrow()
     {
+        if *released {
+            return Err(PyError::value_error(
+                "operation forbidden on released memoryview object",
+            ));
+        }
         Ok((
             source.clone(),
             format.clone(),
@@ -201,11 +227,40 @@ fn nest_list(items: &[PyObjectRef], shape: &[usize]) -> PyObjectRef {
     py_list(rows)
 }
 
+fn is_picklebuffer_obj(obj: &PyObjectRef) -> Option<(PyObjectRef, bool)> {
+    if let PyObject::Instance { typ, dict } = &*obj.borrow() {
+        let is_pb = if let PyObject::Type { name, .. } = &*typ.borrow() {
+            name == "PickleBuffer"
+        } else {
+            false
+        };
+        if is_pb {
+            let released = dict
+                .get("_released")
+                .map(|v| v.truthy())
+                .unwrap_or(false);
+            let underlying = dict.get("_obj").cloned().unwrap_or_else(py_none);
+            return Some((underlying, released));
+        }
+    }
+    None
+}
+
 pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error(
             "memoryview() takes exactly one argument",
         ));
+    }
+    // PickleBuffer delegation (CPython: memoryview(PickleBuffer(b"foo")) is valid)
+    if let Some((underlying, released)) = is_picklebuffer_obj(&args[0]) {
+        if released {
+            return Err(PyError::value_error(
+                "operation forbidden on released PickleBuffer object",
+            ));
+        }
+        // delegate to underlying bytes-like object
+        return builtin_memoryview(&[underlying]);
     }
     let existing = if let PyObject::MemoryView {
         source,
@@ -214,8 +269,14 @@ pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         itemsize,
         offset,
         readonly,
+        released,
     } = &*args[0].borrow()
     {
+        if *released {
+            return Err(PyError::value_error(
+                "operation forbidden on released memoryview object",
+            ));
+        }
         Some((
             source.clone(),
             format.clone(),
@@ -235,20 +296,37 @@ pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             itemsize,
             offset,
             readonly,
+            released: false,
         }));
     }
-    let (readonly, format, len) = match &*args[0].borrow() {
-        PyObject::Bytes(b) => (true, "B".to_string(), b.len()),
-        PyObject::ByteArray(b) => (false, "B".to_string(), b.len()),
-        // `array.array` uses its OWN typecode as the memoryview's format
-        // (matching real Python: `memoryview(array.array('i', ...)).format
-        // == 'i'`), not the generic byte view `bytes`/`bytearray` get.
-        PyObject::Array(arr) => (false, arr.typecode.to_string(), arr.data.len()),
-        other => {
-            return Err(PyError::type_error(format!(
-                "memoryview: a bytes-like object is required, not '{}'",
-                other.type_name()
-            )))
+    let (readonly, format, len) = if let Some(backing) =
+        crate::object::native_backing_of(&args[0])
+    {
+        match &*backing.borrow() {
+            PyObject::Bytes(b) => (true, "B".to_string(), b.len()),
+            PyObject::ByteArray(b) => (false, "B".to_string(), b.len()),
+            PyObject::Array(arr) => (false, arr.typecode.to_string(), arr.data.len()),
+            _ => {
+                return Err(PyError::type_error(format!(
+                    "memoryview: a bytes-like object is required, not '{}'",
+                    args[0].borrow().type_name()
+                )))
+            }
+        }
+    } else {
+        match &*args[0].borrow() {
+            PyObject::Bytes(b) => (true, "B".to_string(), b.len()),
+            PyObject::ByteArray(b) => (false, "B".to_string(), b.len()),
+            // `array.array` uses its OWN typecode as the memoryview's format
+            // (matching real Python: `memoryview(array.array('i', ...)).format
+            // == 'i'`), not the generic byte view `bytes`/`bytearray` get.
+            PyObject::Array(arr) => (false, arr.typecode.to_string(), arr.data.len()),
+            other => {
+                return Err(PyError::type_error(format!(
+                    "memoryview: a bytes-like object is required, not '{}'",
+                    other.type_name()
+                )))
+            }
         }
     };
     let itemsize = mv_itemsize(&format);
@@ -259,6 +337,7 @@ pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         itemsize,
         offset: 0,
         readonly,
+        released: false,
     }))
 }
 
@@ -340,6 +419,7 @@ fn mv_cast_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         itemsize: new_itemsize,
         offset,
         readonly,
+        released: false,
     }))
 }
 
@@ -368,7 +448,16 @@ pub(crate) fn mv_getattr(name: &str) -> Option<PyObjectRef> {
                     .collect::<String>(),
             ))
         }),
-        "release" => method!(|_args| Ok(py_none())),
+        "release" => method!(|args| {
+            if args.is_empty() {
+                return Ok(py_none());
+            }
+            let mut b = args[0].borrow_mut();
+            if let PyObject::MemoryView { released, .. } = &mut *b {
+                *released = true;
+            }
+            Ok(py_none())
+        }),
         "__enter__" => method!(|args| Ok(args[0].clone())),
         "__exit__" => method!(|_args| Ok(py_bool(false))),
         "__len__" => method!(|args| Ok(py_int(mv_len(&args[0])? as i64))),
@@ -434,6 +523,7 @@ pub(crate) fn mv_getitem(v: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObj
             itemsize,
             offset: offset + (start_n as usize) * row_size,
             readonly: _readonly,
+            released: false,
         }));
     }
     let i = index
@@ -459,6 +549,7 @@ pub(crate) fn mv_getitem(v: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObj
             itemsize,
             offset: offset + (i as usize) * row_size * itemsize,
             readonly: _readonly,
+            released: false,
         }))
     }
 }

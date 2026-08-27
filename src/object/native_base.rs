@@ -179,13 +179,23 @@ pub(crate) fn native_base_of_type(typ: &PyObjectRef) -> Option<String> {
 /// calling `Exception(*args)` directly would (see the call site in
 /// `vm.rs`'s Type-instantiation logic).
 pub(crate) fn find_exception_base_name(typ: &PyObjectRef) -> Option<String> {
-    let (bases, mro): (Vec<PyObjectRef>, Vec<PyObjectRef>) = {
-        if let PyObject::Type { bases, mro, .. } = &*typ.borrow() {
-            (bases.clone(), mro.clone())
+    let (name, bases, mro): (String, Vec<PyObjectRef>, Vec<PyObjectRef>) = {
+        if let PyObject::Type { name, bases, mro, .. } = &*typ.borrow() {
+            (name.clone(), bases.clone(), mro.clone())
         } else {
             return None;
         }
     };
+    // Direct name check: any type whose name maps to an exception
+    // (via the catch-all `Exception` default) should be considered
+    // exception-derived even if its bases list is empty (e.g.
+    // `subprocess.CalledProcessError` created in `net.rs` with empty
+    // bases/mro for historical reasons). Without this, `isinstance(e,
+    // BaseException)` failed for that type, breaking `mock`'s
+    // `_is_exception` detection and any `except Exception:` catching it.
+    if crate::vm::is_exception_subclass(&name, "BaseException") {
+        return Some(name.clone());
+    }
     let mut base_lists: Vec<Vec<PyObjectRef>> = vec![bases];
     for m in &mro {
         if let PyObject::Type { bases: b, .. } = &*m.borrow() {

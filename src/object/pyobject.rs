@@ -357,6 +357,7 @@ pub enum PyObject {
         itemsize: usize,
         offset: usize,
         readonly: bool,
+        released: bool,
     },
     CompiledRegex {
         regex: Box<fancy_regex::Regex>,

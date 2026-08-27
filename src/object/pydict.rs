@@ -3,6 +3,23 @@
 // hash-based dict implementation backing `PyObject::Dict`.
 use super::*;
 
+thread_local! {
+    static MODULE_GLOBALS_REGISTRY: std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<std::cell::RefCell<std::collections::HashMap<crate::interner::StrId, PyObjectRef>>>>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+pub fn register_module_globals(name: &str, globals: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<crate::interner::StrId, PyObjectRef>>>) {
+    MODULE_GLOBALS_REGISTRY.with(|m| m.borrow_mut().insert(name.to_string(), globals));
+}
+
+pub fn update_module_globals(module_name: &str, attr_name: &str, value: PyObjectRef) {
+    MODULE_GLOBALS_REGISTRY.with(|m| {
+        if let Some(g) = m.borrow().get(module_name) {
+            g.borrow_mut()
+                .insert(crate::interner::intern(attr_name), value);
+        }
+    });
+}
+
 // ---- PyDict: hash-based dict with arbitrary hashable keys ----
 //
 // Dense-array-plus-index-table design (the same shape real CPython's own
@@ -281,6 +298,26 @@ impl PyDict {
                 // into the copy and `f.author` never saw it.
                 PyObject::Function(f) => {
                     f.dict.insert(key.str(), val_for_instance);
+                }
+                PyObject::Module { dict, name } => {
+                    let sid = crate::interner::intern(&key.str());
+                    dict.insert(sid, val_for_instance.clone());
+                    // Also keep the module's `frame.globals` (the Rc
+                    // captured by functions defined in that module) in
+                    // sync — `exec_module_source` registers it in
+                    // MODULE_GLOBALS_REGISTRY, and `STORE_GLOBAL` in
+                    // vm.rs mirrors the other direction. Without this,
+                    // `module.__dict__['__cached...'] = None` (used by
+                    // `test.support.script_helper`'s setUp/tearDown to
+                    // reset its cache) would update only `module.dict`
+                    // and stay invisible to `LOAD_GLOBAL` inside the
+                    // function, so the cache never appeared to reset
+                    // and `mock.patch`'d `check_call` was never hit.
+                    MODULE_GLOBALS_REGISTRY.with(|reg| {
+                        if let Some(g) = reg.borrow().get(name) {
+                            g.borrow_mut().insert(sid, val_for_instance.clone());
+                        }
+                    });
                 }
                 _ => {}
             }
@@ -978,6 +1015,104 @@ pub fn make_dict_view(kind: &str, d: PyObjectRef) -> crate::object::PyObjectRef 
                     a.iter().filter(|e| !has(e, b).unwrap_or(false)).cloned().collect();
                 for e in b {
                     if !has(e, a)? {
+                        out.push(e.clone());
+                    }
+                }
+                Ok(out)
+            })
+        }));
+        td.insert("__le__".into(), bf("__le__", |args| {
+            let mine = view_elems(&args[0]);
+            let theirs = match elems_of(&args[1]) {
+                Some(v) => v,
+                None => return Ok(py_not_implemented()),
+            };
+            if mine.len() > theirs.len() {
+                return Ok(py_bool(false));
+            }
+            for m in &mine {
+                if !lin_contains(&theirs, m)? {
+                    return Ok(py_bool(false));
+                }
+            }
+            Ok(py_bool(true))
+        }));
+        td.insert("__lt__".into(), bf("__lt__", |args| {
+            let mine = view_elems(&args[0]);
+            let theirs = match elems_of(&args[1]) {
+                Some(v) => v,
+                None => return Ok(py_not_implemented()),
+            };
+            if mine.len() >= theirs.len() {
+                return Ok(py_bool(false));
+            }
+            for m in &mine {
+                if !lin_contains(&theirs, m)? {
+                    return Ok(py_bool(false));
+                }
+            }
+            Ok(py_bool(true))
+        }));
+        td.insert("__ge__".into(), bf("__ge__", |args| {
+            let mine = view_elems(&args[0]);
+            let theirs = match elems_of(&args[1]) {
+                Some(v) => v,
+                None => return Ok(py_not_implemented()),
+            };
+            if mine.len() < theirs.len() {
+                return Ok(py_bool(false));
+            }
+            for t in &theirs {
+                if !lin_contains(&mine, t)? {
+                    return Ok(py_bool(false));
+                }
+            }
+            Ok(py_bool(true))
+        }));
+        td.insert("__gt__".into(), bf("__gt__", |args| {
+            let mine = view_elems(&args[0]);
+            let theirs = match elems_of(&args[1]) {
+                Some(v) => v,
+                None => return Ok(py_not_implemented()),
+            };
+            if mine.len() <= theirs.len() {
+                return Ok(py_bool(false));
+            }
+            for t in &theirs {
+                if !lin_contains(&mine, t)? {
+                    return Ok(py_bool(false));
+                }
+            }
+            Ok(py_bool(true))
+        }));
+        // reflected set ops for `set | dict_keys` etc.
+        td.insert("__ror__".into(), bf("__ror__", |args| {
+            view_setop(&[args[1].clone(), args[0].clone()], |a, b, has| {
+                let mut out = b.clone();
+                for e in a {
+                    if !has(e, b)? {
+                        out.push(e.clone());
+                    }
+                }
+                Ok(out)
+            })
+        }));
+        td.insert("__rand__".into(), bf("__rand__", |args| {
+            view_setop(&[args[1].clone(), args[0].clone()], |a, b, has| {
+                Ok(b.iter().filter(|e| has(e, a).unwrap_or(false)).cloned().collect())
+            })
+        }));
+        td.insert("__rsub__".into(), bf("__rsub__", |args| {
+            view_setop(&[args[1].clone(), args[0].clone()], |a, b, has| {
+                Ok(a.iter().filter(|e| !has(e, b).unwrap_or(false)).cloned().collect())
+            })
+        }));
+        td.insert("__rxor__".into(), bf("__rxor__", |args| {
+            view_setop(&[args[1].clone(), args[0].clone()], |a, b, has| {
+                let mut out: Vec<PyObjectRef> =
+                    b.iter().filter(|e| !has(e, a).unwrap_or(false)).cloned().collect();
+                for e in a {
+                    if !has(e, b)? {
                         out.push(e.clone());
                     }
                 }

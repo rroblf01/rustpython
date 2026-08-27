@@ -160,10 +160,28 @@ pub fn convert_to_set(obj: &PyObjectRef) -> PyResult<PySet> {
             let chars: Vec<PyObjectRef> = s.chars().map(|c| py_str(&c.to_string())).collect();
             Ok(PySet::from_vec(chars)?)
         }
-        _ => Err(PyError::type_error(format!(
-            "cannot convert '{}' to set",
-            borrowed.type_name()
-        ))),
+        _ => {
+            let type_name = borrowed.type_name().to_string();
+            drop(borrowed);
+            // Fallback: any iterable (dict views, generators, etc.)
+            if let Ok(iterator) = crate::object::builtin_iter(&[obj.clone()]) {
+                let mut elts: Vec<PyObjectRef> = Vec::new();
+                loop {
+                    match crate::object::builtin_next(&[iterator.clone()]) {
+                        Ok(v) => elts.push(v),
+                        Err(PyError::StopIteration) => break,
+                        Err(PyError::Exception(msg, _)) if msg == "StopIteration" => break,
+                        Err(e) if crate::object::is_stop_iteration_error(&e) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+                return PySet::from_vec(elts);
+            }
+            Err(PyError::type_error(format!(
+                "cannot convert '{}' to set",
+                type_name
+            )))
+        }
     }
 }
 

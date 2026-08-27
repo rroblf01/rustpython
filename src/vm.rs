@@ -2930,6 +2930,7 @@ impl VirtualMachine {
             );
         }
         let module_globals = Rc::new(RefCell::new(globals_map));
+        crate::object::register_module_globals(name, Rc::clone(&module_globals));
         // Register module in sys.modules BEFORE executing (needed for sys.modules[__name__] checks)
         if let Some(sys_mod) = self.modules.get("sys") {
             if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
@@ -3597,10 +3598,43 @@ impl VirtualMachine {
                         dict.insert_str(&name, val.clone());
                     }
                 }
-                self.frames[fi]
-                    .globals
-                    .borrow_mut()
-                    .insert(interner::intern(&name), val);
+                let sid = interner::intern(&name);
+                self.frames[fi].globals.borrow_mut().insert(sid, val.clone());
+                // Mirror to module.__dict__ for function frames where
+                // live_module is None (e.g. `global __cached...` inside
+                // `interpreter_requires_environment`). `STORE_NAME` is
+                // used for that global (not STORE_GLOBAL) in this
+                // codebase's compiler, so without this the cache update
+                // stays only in `frame.globals` (the Rc captured by the
+                // function) and is invisible via `module.__dict__`, so
+                // `script_helper.__dict__['__cached...'] = None` resets
+                // in tests never actually clear the function's view.
+                // Do NOT mirror for class-body frames (name_order.is_some()):
+                // class attributes like `type = ...` or `pprint = ...`
+                // would otherwise leak into the enclosing module's globals
+                // and shadow builtins/module-level names (e.g. `type`,
+                // `pprint` in `_colorize`/`pprint` modules).
+                if self.frames[fi].name_order.is_none() {
+                    let mod_name_opt = self.frames[fi]
+                        .globals
+                        .borrow()
+                        .get(&interner::intern("__name__"))
+                        .cloned();
+                    if let Some(mod_name_ref) = mod_name_opt {
+                        if let PyObject::Str(s) = &*mod_name_ref.borrow() {
+                            if let Some(mod_ref) = self.modules.get(s.as_str()).cloned() {
+                                if let PyObject::Module { dict, .. } = &mut *mod_ref.borrow_mut() {
+                                    dict.insert(sid, val.clone());
+                                }
+                            }
+                        }
+                    }
+                    if let Some(mg) = self.frames[fi].module_globals.clone() {
+                        mg.borrow_mut().insert(sid, val);
+                    } else if self.frames[fi].globals.borrow().contains_key(&sid) {
+                        // already inserted above
+                    }
+                }
                 if self.frames[fi].frame_locals_obj.is_some() {
                     self.sync_frame_locals(fi);
                 }
@@ -3767,10 +3801,34 @@ impl VirtualMachine {
                 let name_idx = arg as usize;
                 let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let val = self.frames[fi].pop()?;
-                self.frames[fi]
+                let sid = interner::intern(&name);
+                self.frames[fi].globals.borrow_mut().insert(sid, val.clone());
+                // Keep `module.__dict__` in sync with `frame.globals`
+                // (see `exec_module_source`'s copying of `module_globals`
+                // into `module.dict` — they are separate HashMaps, so a
+                // `global` assignment inside a function would otherwise
+                // update only `frame.globals` and stay invisible via
+                // `module.__dict__` / `module.__dict__['name']` live view,
+                // breaking the `__cached_interp_requires_environment` cache
+                // in `test.support.script_helper`).
+                let mod_name_opt = self.frames[fi]
                     .globals
-                    .borrow_mut()
-                    .insert(interner::intern(&name), val);
+                    .borrow()
+                    .get(&interner::intern("__name__"))
+                    .cloned();
+                if let Some(mod_name_ref) = mod_name_opt {
+                    if let PyObject::Str(s) = &*mod_name_ref.borrow() {
+                        if let Some(mod_ref) = self.modules.get(s.as_str()).cloned() {
+                            if let PyObject::Module { dict, .. } = &mut *mod_ref.borrow_mut() {
+                                dict.insert(sid, val.clone());
+                            }
+                        }
+                    }
+                }
+                // Also keep `module_globals` in sync for class-body frames
+                if let Some(mg) = self.frames[fi].module_globals.clone() {
+                    mg.borrow_mut().insert(sid, val);
+                }
             }
 
             Opcode::LOAD_DEREF => {
@@ -5272,6 +5330,19 @@ impl VirtualMachine {
                                         continue;
                                     }
                                     let _ = pd.set(py_str(k), v.clone());
+                                }
+                            }
+                            drop(obj_borrowed);
+                            pd.instance_ref = Some(obj.clone());
+                            self.frames[fi].push(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
+                            return Ok(None);
+                        }
+                        PyObject::Module { .. } if name == "__dict__" => {
+                            let mut pd = crate::object::PyDict::new();
+                            if let PyObject::Module { dict, .. } = &*obj.borrow() {
+                                for (k, v) in dict.iter() {
+                                    let key = py_str(crate::interner::lookup_str(*k));
+                                    let _ = pd.set(key, v.clone());
                                 }
                             }
                             drop(obj_borrowed);
@@ -8707,6 +8778,14 @@ impl VirtualMachine {
         // False (matching real Python's "hasattr calls getattr and catches
         // the exception" semantics), but raw retrieval never invokes the
         // getter at all, so it can never observe that failure.
+        // Also, Instances with `__getattr__` (notably `unittest.mock`'s
+        // `MagicMock`, whose `__getattr__` auto-creates child mocks for any
+        // attribute) must have `hasattr(mock, "any_name")` return True, since
+        // `getattr(mock, "any_name")`/dot access both succeed via `__getattr__`.
+        // The plain `get_attribute` path never consults `__getattr__`, so
+        // `hasattr` was always False for such mocks (real trigger:
+        // `_colorize.can_colorize`'s `hasattr(file, "fileno")` guard, which
+        // incorrectly returned False for a mocked `sys.stdout`/`file`).
         {
             let is_hasattr = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_hasattr as crate::object::BuiltinFunc));
             if is_hasattr && args.len() == 2 {
@@ -8723,7 +8802,23 @@ impl VirtualMachine {
                 if self.resolve_descriptor_attr(&obj, &attr_name).is_some() {
                     return Ok(py_bool(true));
                 }
-                return Ok(py_bool(obj.borrow().get_attribute(&attr_name).is_ok()));
+                if obj.borrow().get_attribute(&attr_name).is_ok() {
+                    return Ok(py_bool(true));
+                }
+                // Fall back to `__getattr__` (e.g. MagicMock's auto-creation)
+                // — `hasattr` is `getattr` catching failures, so if `__getattr__`
+                // succeeds, hasattr is True; if it raises, hasattr is False.
+                if let PyObject::Instance { typ, .. } = &*obj.borrow() {
+                    if let Some(f) = crate::object::lookup_dunder_via_mro(typ, "__getattr__") {
+                        let res = self.call_function(
+                            f,
+                            vec![obj.clone(), crate::object::py_str(&attr_name)],
+                            vec![],
+                        );
+                        return Ok(py_bool(res.is_ok()));
+                    }
+                }
+                return Ok(py_bool(false));
             }
         }
 
@@ -10355,7 +10450,18 @@ impl VirtualMachine {
                 // __init__ — CPython's type_call always does this when
                 // isinstance(result, cls) is true.
                 let r = result.borrow();
-                let is_instance_of_class = matches!(&*r, PyObject::Instance { typ, .. } if typ.is(&callable));
+                let is_instance_of_class = match &*r {
+                    PyObject::Instance { typ, .. } => {
+                        if typ.is(&callable) {
+                            true
+                        } else if let PyObject::Type { mro, .. } = &*typ.borrow() {
+                            mro.iter().any(|b| b.is(&callable))
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
                 drop(r);
                 if is_instance_of_class && init_func.is_some() {
                     let init_fn = init_func.clone().unwrap();
@@ -12106,6 +12212,16 @@ pub(crate) fn opcode_hist_dump() {
 pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool {
     if child_type == parent_type {
         return true;
+    }
+    // `io.UnsupportedOperation` is a special dual-inheritance case in
+    // CPython: `issubclass(io.UnsupportedOperation, OSError)` and
+    // `issubclass(io.UnsupportedOperation, ValueError)` are BOTH True
+    // (it subclasses each). The single-parent table below can't express
+    // this, so handle it explicitly before the table.
+    if child_type == "UnsupportedOperation" {
+        return parent_type == "UnsupportedOperation"
+            || is_exception_subclass("OSError", parent_type)
+            || is_exception_subclass("ValueError", parent_type);
     }
     // Map each exception type to its direct parent in the hierarchy.
     // BaseException is the root — it has no parent.

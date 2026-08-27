@@ -2511,6 +2511,44 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         Ok(PyObjectRef::imm(PyObject::Bytes(Vec::new())))
     } else {
+        // PickleBuffer and memoryview are bytes-like via buffer protocol
+        {
+            let b = args[0].borrow();
+            if let PyObject::Instance { typ, dict } = &*b {
+                let is_pb = if let PyObject::Type { name, .. } = &*typ.borrow() {
+                    name == "PickleBuffer"
+                } else {
+                    false
+                };
+                if is_pb {
+                    let released = dict
+                        .get("_released")
+                        .map(|v| v.truthy())
+                        .unwrap_or(false);
+                    if released {
+                        return Err(PyError::value_error(
+                            "operation forbidden on released PickleBuffer object",
+                        ));
+                    }
+                    let underlying = dict.get("_obj").cloned().unwrap_or_else(py_none);
+                    drop(b);
+                    return builtin_bytes(&[underlying]);
+                }
+            }
+            if let PyObject::MemoryView { released, .. } = &*b {
+                if *released {
+                    return Err(PyError::value_error(
+                        "operation forbidden on released memoryview object",
+                    ));
+                }
+                // fall through to dedicated memoryview handling below after drop
+            }
+        }
+        // memoryview -> bytes is a direct tobytes copy
+        if matches!(&*args[0].borrow(), PyObject::MemoryView { .. }) {
+            let bytes = crate::object::mv_tobytes(&args[0])?;
+            return Ok(PyObjectRef::imm(PyObject::Bytes(bytes)));
+        }
         let obj = args[0].borrow();
         match &*obj {
             // Same fix as `bytearray(n)` above: `bytes(n)` zero-fills a

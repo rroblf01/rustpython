@@ -12792,8 +12792,16 @@ impl ObjectAccess for PyObject {
                 dict.insert_str(&name, value);
                 Ok(())
             }
-            PyObject::Module { dict, .. } => {
-                dict.insert_str(&name, value);
+            PyObject::Module { dict, name: mod_name } => {
+                dict.insert_str(&name, value.clone());
+                // Keep `frame.globals` (the Rc captured by functions
+                // defined in this module) in sync with `module.__dict__`
+                // when `setattr(module, name, value)` is used (e.g.
+                // `mock.patch.object(script_helper, 'interpreter_requires_environment',
+                // return_value=True)`). `LOAD_GLOBAL` inside
+                // `run_python_until_end` reads from `frame.globals`, not
+                // `module.dict`, so without this the mock is invisible.
+                crate::object::pydict::update_module_globals(mod_name, name, value.clone());
                 Ok(())
             }
             PyObject::Type { dict, .. } => {
