@@ -47,6 +47,45 @@ pub fn try_native_backing(
     Some(rebound.unwrap_or(val))
 }
 
+/// PEP 3134 traceback/chaining fallback for exception subclasses
+pub fn try_exception_attributes(
+    typ: &PyObjectRef,
+    name: &str,
+    obj: &PyObjectRef,
+) -> Option<PyObjectRef> {
+    if matches!(
+        name,
+        "with_traceback" | "add_note" | "__traceback__" | "__context__" | "__cause__" | "__suppress_context__" | "__notes__"
+    ) && find_exception_base_name(typ).is_some()
+    {
+        Some(match name {
+            "with_traceback" => PyObjectRef::imm(PyObject::BuiltinMethod {
+                name: "with_traceback".to_string(),
+                func: |args| {
+                    if args.is_empty() {
+                        return Err(PyError::type_error(
+                            "with_traceback() takes exactly one argument",
+                        ));
+                    }
+                    Ok(args[0].clone())
+                },
+                self_obj: obj.clone(),
+            }),
+            "add_note" => PyObjectRef::imm(PyObject::BuiltinMethod {
+                name: "add_note".to_string(),
+                func: |_args| Ok(py_none()),
+                self_obj: obj.clone(),
+            }),
+            "__context__" | "__traceback__" | "__cause__" => py_none(),
+            "__suppress_context__" => py_bool(false),
+            "__notes__" => py_list(vec![]),
+            _ => unreachable!(),
+        })
+    } else {
+        None
+    }
+}
+
 /// Fallback for dict methods on dict-derived instances (e.g. Counter, defaultdict subclasses)
 pub fn try_dict_methods(obj: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
     if name == "__iter__"

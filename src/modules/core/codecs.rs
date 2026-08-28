@@ -5,53 +5,7 @@ use num_traits::{Signed, ToPrimitive};
 use std::rc::Rc;
 
 thread_local! {
-    static CODEC_SEARCH_FUNCTIONS: std::cell::RefCell<Vec<crate::object::PyObjectRef>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-
-
-// ── _codecs builtin module helpers ──────────────────────────────────────────
-
-/// Encode a string as UTF-8/ASCII/Latin-1 (used by codecs.lookup() results).
-fn _codecs_encode(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 1 {
-        return Err(PyError::type_error("encode() requires at least 1 argument"));
-    }
-    let s = args[0].str();
-    let len = s.len();
-    Ok(PyObjectRef::new(PyObject::Tuple(vec![
-        PyObjectRef::imm(PyObject::Bytes(s.into_bytes())),
-        py_int(len as i64),
-    ])))
-}
-
-/// Decode bytes as UTF-8 (used by codecs.lookup() results).
-fn _codecs_decode(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 1 {
-        return Err(PyError::type_error("decode() requires at least 1 argument"));
-    }
-    let data = {
-        let obj = args[0].borrow();
-        match &*obj {
-            PyObject::Bytes(b) => b.clone(),
-            _ => return Err(PyError::type_error("decode() argument must be bytes")),
-        }
-    };
-    let s = String::from_utf8(data)
-        .map_err(|e| PyError::value_error(format!("decode error: {}", e)))?;
-    let len = s.len();
-    Ok(PyObjectRef::new(PyObject::Tuple(vec![
-        py_str(&s),
-        py_int(len as i64),
-    ])))
-}
-
-fn _codecs_reader(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    Err(PyError::value_error("stream reader not implemented"))
-}
-
-fn _codecs_writer(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    Err(PyError::value_error("stream writer not implemented"))
+    pub(crate) static CODEC_SEARCH_FUNCTIONS: std::cell::RefCell<Vec<crate::object::PyObjectRef>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 thread_local! {
@@ -59,141 +13,12 @@ thread_local! {
     // `codecs.lookup_error` / `_codecs._unregister_error` all operate on
     // this) — real CPython keeps it in `_codecs`; this interpreter's
     // Lib/codecs.py delegates to these natives.
-    static CODEC_ERROR_HANDLERS: std::cell::RefCell<std::collections::HashMap<String, PyObjectRef>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    pub(crate) static CODEC_ERROR_HANDLERS: std::cell::RefCell<std::collections::HashMap<String, PyObjectRef>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-pub(crate) fn _codecs_register_error(name: &str, handler: PyObjectRef) {
-    CODEC_ERROR_HANDLERS.with(|h| {
-        h.borrow_mut().insert(name.to_lowercase(), handler);
-    });
-}
-
-fn _codecs_lookup_error(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 1 {
-        return Err(PyError::type_error(
-            "lookup_error() requires at least 1 argument",
-        ));
-    }
-    let name = args[0].str().to_lowercase();
-    let found = CODEC_ERROR_HANDLERS.with(|h| h.borrow().get(&name).cloned());
-    match found {
-        Some(h) => Ok(h),
-        None => Err(PyError::Exception(
-            "LookupError".to_string(),
-            PyObjectRef::new(PyObject::Exception {
-                typ: "LookupError".to_string(),
-                args: vec![py_str(&format!("unknown error handler: '{}'", name))],
-                cause: None,
-                suppress_context: false,
-                context: None,
-                traceback: None,
-                extra: None,
-            }),
-        )),
-    }
-}
-
-fn _codecs_lookup(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 1 {
-        return Err(PyError::type_error("lookup() requires at least 1 argument"));
-    }
-    let encoding = args[0].str().to_lowercase().replace('-', "_");
-    match encoding.as_str() {
-        "utf_8" | "ascii" | "latin_1" | "utf8" => Ok(PyObjectRef::new(PyObject::Tuple(vec![
-            PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "encode".to_string(),
-                func: _codecs_encode,
-            }),
-            PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "decode".to_string(),
-                func: _codecs_decode,
-            }),
-            PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "stream_reader".to_string(),
-                func: _codecs_reader,
-            }),
-            PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "stream_writer".to_string(),
-                func: _codecs_writer,
-            }),
-            py_str(&encoding),
-        ]))),
-        _ => {
-            // Consult `codecs.register()`-ed search functions, like real
-            // CPython's lookup (test_charmapcodec registers `testcodec`).
-            let result = CODEC_SEARCH_FUNCTIONS.with(|fns| {
-                for f in fns.borrow().iter() {
-                    match crate::object::builtin_call(f, &[py_str(&args[0].str())]) {
-                        Ok(res) if !matches!(&*res.borrow(), PyObject::None) => return Some(res),
-                        _ => continue,
-                    }
-                }
-                None
-            });
-            if let Some(entry) = result {
-                return Ok(entry);
-            }
-            Err(PyError::value_error(format!(
-                "unknown encoding: {}",
-                encoding
-            )))
-        }
-    }
-}
-
-fn _codecs_encode_func(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 {
-        return Err(PyError::type_error(
-            "encode() requires at least 2 arguments",
-        ));
-    }
-    let s = args[0].str();
-    let encoding = args[1].str().to_lowercase().replace('-', "_");
-    match encoding.as_str() {
-        "utf_8" | "ascii" | "latin_1" | "utf8" => {
-            let len = s.len();
-            Ok(PyObjectRef::new(PyObject::Tuple(vec![
-                PyObjectRef::imm(PyObject::Bytes(s.into_bytes())),
-                py_int(len as i64),
-            ])))
-        }
-        _ => Err(PyError::value_error(format!(
-            "unknown encoding: {}",
-            encoding
-        ))),
-    }
-}
-
-fn _codecs_decode_func(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 {
-        return Err(PyError::type_error(
-            "decode() requires at least 2 arguments",
-        ));
-    }
-    let data = {
-        let obj = args[0].borrow();
-        match &*obj {
-            PyObject::Bytes(b) => b.clone(),
-            _ => return Err(PyError::type_error("decode() argument must be bytes")),
-        }
-    };
-    let encoding = args[1].str().to_lowercase().replace('-', "_");
-    match encoding.as_str() {
-        "utf_8" | "ascii" | "latin_1" | "utf8" => {
-            let s = String::from_utf8(data)
-                .map_err(|e| PyError::value_error(format!("decode error: {}", e)))?;
-            let len = s.len();
-            Ok(PyObjectRef::new(PyObject::Tuple(vec![
-                py_str(&s),
-                py_int(len as i64),
-            ])))
-        }
-        _ => Err(PyError::value_error(format!(
-            "unknown encoding: {}",
-            encoding
-        ))),
-    }
-}
+mod helpers;
+mod registry;
+pub use registry::lookup_codec;
 
 // ── charmap helpers ───────────────────────────────────────────────────────
 
@@ -736,50 +561,6 @@ fn _codecs_charmap_encode(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     ])))
 }
 
-fn _codecs_charmap_build(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() {
-        return Err(PyError::type_error(
-            "charmap_build() requires at least 1 argument",
-        ));
-    }
-    let s = args[0].str();
-    let chars: Vec<char> = s.chars().collect();
-    let mut dict = PyDict::new();
-    for (i, &ch) in chars.iter().enumerate() {
-        if i >= 256 {
-            break;
-        }
-        if ch == '\u{FFFE}' {
-            continue;
-        }
-        let cp = ch as u32;
-        let key = py_int(cp as i64);
-        let val = py_int(i as i64);
-        // handle duplicate: if already present, set to None (undefined) like Python's make_encoding_map
-        let existing = dict.get(&key).ok().flatten();
-        if existing.is_some() {
-            let _ = dict.set(key, py_none());
-        } else {
-            let _ = dict.set(key, val);
-        }
-    }
-    Ok(PyObjectRef::new(PyObject::Dict(Box::new(dict))))
-}
-
-pub fn lookup_codec(encoding: &str) -> Option<PyObjectRef> {
-    // Normalize like _codecs_lookup but try search functions for any encoding
-    let candidate = CODEC_SEARCH_FUNCTIONS.with(|fns| {
-        for f in fns.borrow().iter() {
-            match crate::object::builtin_call(f, &[py_str(encoding)]) {
-                Ok(res) if !matches!(&*res.borrow(), PyObject::None) => return Some(res),
-                _ => continue,
-            }
-        }
-        None
-    });
-    candidate
-}
-
 /// Create the `_codecs` module dictionary.
 pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
@@ -787,7 +568,7 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
         "lookup_error",
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "lookup_error".to_string(),
-            func: _codecs_lookup_error,
+            func: helpers::_codecs_lookup_error,
         }),
     );
     d.insert_str(
@@ -800,7 +581,7 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
                         "_register_error() requires at least 2 arguments",
                     ));
                 }
-                _codecs_register_error(&args[0].str(), args[1].clone());
+                helpers::_codecs_register_error(&args[0].str(), args[1].clone());
                 Ok(py_none())
             },
         }),
@@ -816,8 +597,6 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
                     ));
                 }
                 let name = args[0].str().to_lowercase();
-                // Built-in handler names cannot be unregistered (real CPython
-                // raises ValueError).
                 if matches!(
                     name.as_str(),
                     "strict"
@@ -843,21 +622,21 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
         "lookup",
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "lookup".to_string(),
-            func: _codecs_lookup,
+            func: helpers::_codecs_lookup,
         }),
     );
     d.insert_str(
         "encode",
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "encode".to_string(),
-            func: _codecs_encode_func,
+            func: helpers::_codecs_encode_func,
         }),
     );
     d.insert_str(
         "decode",
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "decode".to_string(),
-            func: _codecs_decode_func,
+            func: helpers::_codecs_decode_func,
         }),
     );
     d.insert_str(
@@ -912,14 +691,10 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
         "charmap_build",
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "charmap_build".to_string(),
-            func: _codecs_charmap_build,
+            func: registry::_codecs_charmap_build,
         }),
     );
 
-    // Builtin codec error handlers (`codecs.backslashreplace_errors` etc. —
-    // real CPython exposes these from the C `_codecs` module). Each takes a
-    // Unicode{Encode,Decode,Translate}Error and returns (replacement, end).
-    // Extract start/end/object/reason from the exception by attribute.
     fn err_bounds(exc: &PyObjectRef) -> (usize, usize, Option<PyObjectRef>) {
         let getattr = |name: &str| -> Option<PyObjectRef> { exc.borrow().get_attribute(name).ok() };
         let end = getattr("end").and_then(|e| e.as_i64()).unwrap_or(0) as usize;
@@ -930,7 +705,6 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
     fn err_object_str(obj: &Option<PyObjectRef>) -> String {
         obj.as_ref().map(|o| o.str()).unwrap_or_default()
     }
-    // backslashreplace: encode -> \xNN/\uNNNN/\UNNNNNNNN; decode -> \xNN per byte.
     fn backslashreplace_impl(exc: &PyObjectRef) -> PyResult<PyObjectRef> {
         let (start, end, obj) = err_bounds(exc);
         let s = err_object_str(&obj);
@@ -949,7 +723,6 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
         }
         Ok(py_tuple(vec![py_str(&out), py_int(end as i64)]))
     }
-    // xmlcharrefreplace: -> &#NN; / &#xNNNN;
     fn xmlcharrefreplace_impl(exc: &PyObjectRef) -> PyResult<PyObjectRef> {
         let (start, end, obj) = err_bounds(exc);
         let s = err_object_str(&obj);
@@ -966,7 +739,6 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
         }
         Ok(py_tuple(vec![py_str(&out), py_int(end as i64)]))
     }
-    // surrogateescape: decode handler mapping raw bytes to low surrogates.
     fn surrogateescape_impl(exc: &PyObjectRef) -> PyResult<PyObjectRef> {
         let (start, end, obj) = err_bounds(exc);
         let raw = obj
@@ -990,7 +762,6 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
             py_int(end as i64),
         ]))
     }
-    // surrogatepass: pass the surrogates through unchanged (accept).
     fn surrogatepass_impl(exc: &PyObjectRef) -> PyResult<PyObjectRef> {
         let (start, end, obj) = err_bounds(exc);
         let s = err_object_str(&obj);
@@ -1058,5 +829,3 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
     );
     d
 }
-
-

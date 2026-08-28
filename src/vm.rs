@@ -51,6 +51,7 @@ pub mod op_call;
 pub mod op_var;
 pub mod op_exc;
 pub mod op_attr;
+pub mod op_attr_helpers;
 pub mod op_store;
 pub mod dispatch;
 pub mod call_class;

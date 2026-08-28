@@ -2,7 +2,6 @@ use crate::bytecode::Opcode;
 use crate::object::*;
 use crate::vm::helpers::deref_proxy;
 use crate::vm::VirtualMachine;
-use std::rc::Rc;
 
 impl VirtualMachine {
     pub(crate) fn handle_attr(&mut self, fi: usize, op: Opcode, arg: u32) -> PyResult<bool> {
@@ -445,124 +444,16 @@ impl VirtualMachine {
                                 })()
                             };
                             let attr = attr?;
-                            // Not overridden anywhere in the mro: for a class
-                            // that transparently subclasses list/dict/str
-                            // (`class Foo(list): ...`), delegate to the real
-                            // native value's own attribute resolution, rebound
-                            // to the native backing (not this instance) since
-                            // that's the object whose state actually mutates.
-                            // Must run BEFORE the generic dict-like fallback
-                            // below, which would otherwise misinterpret the
-                            // native backing's own dict entry as plain
-                            // instance-attribute data.
                             let attr = attr.or_else(|| {
-                                let native = dict.get(crate::object::NATIVE_BACKING_KEY)?;
-                                // A deque subclass's `__copy__`/`copy()` must
-                                // return a NEW instance of the SAME subclass
-                                // (not a raw deque) — build that closure here,
-                                // since this inline resolution path mirrors
-                                // `get_attribute_impl`'s own handling.
-                                if matches!(&*native.borrow(), PyObject::Deque { .. })
-                                    && (name == "__copy__" || name == "copy")
-                                {
-                                    let typ_clone = typ.clone();
-                                    let new_native = {
-                                        let b = native.borrow();
-                                        if let PyObject::Deque { data, maxlen } = &*b {
-                                            py_deque(data.clone(), *maxlen)
-                                        } else {
-                                            unreachable!()
-                                        }
-                                    };
-                                    return Some(PyObjectRef::new(PyObject::Closure(Rc::new(
-                                        move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                                            let mut new_dict = crate::object::AttrMap::new();
-                                            new_dict.insert(
-                                                crate::object::NATIVE_BACKING_KEY.to_string(),
-                                                new_native.clone(),
-                                            );
-                                            Ok(PyObjectRef::new(PyObject::Instance {
-                                                typ: typ_clone.clone(),
-                                                dict: new_dict,
-                                            }))
-                                        },
-                                    ))));
-                                }
-                                let val = native.borrow().get_attribute(&name).ok()?;
-                                let rebound = match &*val.borrow() {
-                                    PyObject::BuiltinMethod { name: n, func, .. } => {
-                                        Some(PyObjectRef::imm(PyObject::BuiltinMethod {
-                                            name: n.clone(),
-                                            func: *func,
-                                            self_obj: native.clone(),
-                                        }))
-                                    }
-                                    _ => None,
-                                };
-                                Some(rebound.unwrap_or(val))
+                                crate::vm::op_attr_helpers::try_native_backing(dict, typ, &name)
                             });
-                            // Fallback for dict methods on dict-derived instances
                             let attr = attr.or_else(|| {
-                                if name == "__iter__"
-                                    || name == "items"
-                                    || name == "keys"
-                                    || name == "values"
-                                    || name == "get"
-                                {
-                                    let func: crate::object::BuiltinFunc = match name.as_str() {
-                                        "__iter__" => crate::object::dict_method_iter,
-                                        "items" => crate::object::dict_method_items,
-                                        "keys" => crate::object::dict_method_keys,
-                                        "values" => crate::object::dict_method_values,
-                                        "get" => crate::object::dict_method_get,
-                                        _ => return None,
-                                    };
-                                    Some(PyObjectRef::imm(PyObject::BuiltinMethod {
-                                        name: name.clone(),
-                                        func,
-                                        self_obj: obj.clone(),
-                                    }))
-                                } else {
-                                    None
-                                }
+                                crate::vm::op_attr_helpers::try_dict_methods(&obj, &name)
                             });
-                            // PEP 3134 traceback/chaining protocol methods
-                            // for a user-defined exception class that
-                            // doesn't override them — same fix, same
-                            // rationale, as the `get_attribute_impl` copy of
-                            // this logic (`object.rs`); this is LOAD_ATTR's
-                            // own separate, inline copy of instance
-                            // attribute resolution (kept for its attribute
-                            // cache), which needs the identical fallback.
                             let attr = attr.or_else(|| {
-                                if matches!(name.as_str(), "with_traceback" | "add_note" | "__traceback__" | "__context__" | "__cause__" | "__suppress_context__" | "__notes__")
-                                    && crate::object::find_exception_base_name(typ).is_some() {
-                                    Some(match name.as_str() {
-                                        "with_traceback" => PyObjectRef::imm(PyObject::BuiltinMethod {
-                                            name: "with_traceback".to_string(),
-                                            func: |args| {
-                                                if args.is_empty() { return Err(PyError::type_error("with_traceback() takes exactly one argument")); }
-                                                Ok(args[0].clone())
-                                            },
-                                            self_obj: obj.clone(),
-                                        }),
-                                        "add_note" => PyObjectRef::imm(PyObject::BuiltinMethod {
-                                            name: "add_note".to_string(),
-                                            func: |_args| Ok(py_none()),
-                                            self_obj: obj.clone(),
-                                        }),
-                                        // See the matching fix (and its full
-                                        // explanation) in `get_attribute_impl`'s
-                                        // copy of this same list (`attrs.rs`) —
-                                        // `__cause__` was missing from both.
-                                        "__context__" | "__traceback__" | "__cause__" => py_none(),
-                                        "__suppress_context__" => py_bool(false),
-                                        "__notes__" => py_list(vec![]),
-                                        _ => unreachable!(),
-                                    })
-                                } else {
-                                    None
-                                }
+                                crate::vm::op_attr_helpers::try_exception_attributes(
+                                    typ, &name, &obj,
+                                )
                             });
                             match attr {
                                 Some(val) => {

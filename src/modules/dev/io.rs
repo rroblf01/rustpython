@@ -4,7 +4,9 @@ use crate::object::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use crate::buffered_class;
+
+mod buffered;
+use self::buffered::register_buffered_classes;
 
 pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
@@ -870,14 +872,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         PyObjectRef::new(PyObject::Closure(stringio_closure)),
     );
 
-    let br_cls = buffered_class!("BufferedReader", buf_cls);
-    d.insert_str("BufferedReader", br_cls.clone());
-    let bw_cls = buffered_class!("BufferedWriter", buf_cls);
-    d.insert_str("BufferedWriter", bw_cls.clone());
-    let brp_cls = buffered_class!("BufferedRWPair", buf_cls);
-    d.insert_str("BufferedRWPair", brp_cls.clone());
-    let brnd_cls = buffered_class!("BufferedRandom", buf_cls);
-    d.insert_str("BufferedRandom", brnd_cls.clone());
+    register_buffered_classes(&mut d, &buf_cls);
 
     // TextIOWrapper shares the delegation behavior, adding text-mode bits.
     let tiw_inner = {
