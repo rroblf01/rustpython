@@ -4,6 +4,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+mod format;
+pub(crate) use format::{mv_itemsize, mv_total_items, mv_source_bytes, mv_write_bytes, nest_list};
+mod codec;
+pub(crate) use codec::{mv_decode_elem, mv_encode_elem, is_picklebuffer_obj, extract_flags_for_buffer, check_buffer_flags};
+
 thread_local! {
     static BYTEARRAY_EXPORTS: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
     static VIEW_EXPORTER: RefCell<HashMap<usize, PyObjectRef>> = RefCell::new(HashMap::new());
@@ -80,125 +85,6 @@ fn remove_view_exporter(view: &PyObjectRef) {
     }
 }
 
-pub(crate) fn mv_itemsize(format: &str) -> usize {
-    match format {
-        "b" | "B" | "c" | "?" | "x" => 1,
-        "h" | "H" | "e" => 2,
-        "i" | "I" | "l" | "L" | "f" => 4,
-        "q" | "Q" | "d" | "n" | "N" => 8,
-        _ => 1,
-    }
-}
-
-pub(crate) fn mv_total_items(shape: &[usize]) -> usize {
-    if shape.is_empty() {
-        1
-    } else {
-        shape.iter().product()
-    }
-}
-
-fn array_elem_to_bytes(typecode: char, val: f64) -> Vec<u8> {
-    let isz = mv_itemsize(&typecode.to_string());
-    if array_typecode_is_float(typecode) {
-        if isz == 4 {
-            (val as f32).to_ne_bytes().to_vec()
-        } else {
-            val.to_ne_bytes().to_vec()
-        }
-    } else {
-        let n = val as i64;
-        match isz {
-            1 => vec![n as u8],
-            2 => (n as i16).to_ne_bytes().to_vec(),
-            4 => (n as i32).to_ne_bytes().to_vec(),
-            _ => n.to_ne_bytes().to_vec(),
-        }
-    }
-}
-
-fn array_bytes_to_elem(typecode: char, bytes: &[u8]) -> f64 {
-    if array_typecode_is_float(typecode) {
-        if bytes.len() == 4 {
-            f32::from_ne_bytes(bytes.try_into().unwrap()) as f64
-        } else {
-            f64::from_ne_bytes(bytes.try_into().unwrap())
-        }
-    } else {
-        match bytes.len() {
-            1 => bytes[0] as i64 as f64,
-            2 => i16::from_ne_bytes(bytes.try_into().unwrap()) as f64,
-            4 => i32::from_ne_bytes(bytes.try_into().unwrap()) as f64,
-            _ => i64::from_ne_bytes(bytes.try_into().unwrap()) as f64,
-        }
-    }
-}
-
-pub(crate) fn mv_source_bytes(source: &PyObjectRef) -> Vec<u8> {
-    if let Some(backing) = crate::object::native_backing_of(source) {
-        match &*backing.borrow() {
-            PyObject::Bytes(b) => return b.clone(),
-            PyObject::ByteArray(b) => return b.clone(),
-            PyObject::Array(arr) => {
-                let mut out =
-                    Vec::with_capacity(arr.data.len() * mv_itemsize(&arr.typecode.to_string()));
-                for &v in &arr.data {
-                    out.extend(array_elem_to_bytes(arr.typecode, v));
-                }
-                return out;
-            }
-            _ => {}
-        }
-    }
-    match &*source.borrow() {
-        PyObject::Bytes(b) => b.clone(),
-        PyObject::ByteArray(b) => b.clone(),
-        PyObject::Array(arr) => {
-            let mut out =
-                Vec::with_capacity(arr.data.len() * mv_itemsize(&arr.typecode.to_string()));
-            for &v in &arr.data {
-                out.extend(array_elem_to_bytes(arr.typecode, v));
-            }
-            out
-        }
-        _ => Vec::new(),
-    }
-}
-
-pub(crate) fn mv_write_bytes(source: &PyObjectRef, offset: usize, data: &[u8]) -> PyResult<()> {
-    if let Some(backing) = crate::object::native_backing_of(source) {
-        return mv_write_bytes(&backing, offset, data);
-    }
-    match &mut *source.borrow_mut() {
-        PyObject::ByteArray(b) => {
-            if offset + data.len() > b.len() {
-                return Err(PyError::index_error("memoryview assignment out of range"));
-            }
-            b[offset..offset + data.len()].copy_from_slice(data);
-            Ok(())
-        }
-        PyObject::Array(arr) => {
-            let isz = mv_itemsize(&arr.typecode.to_string());
-            if data.len() % isz != 0 || offset % isz != 0 {
-                return Err(PyError::value_error(
-                    "memoryview assignment: lvalue and rvalue have different structures",
-                ));
-            }
-            let start_elem = offset / isz;
-            let n_elems = data.len() / isz;
-            if start_elem + n_elems > arr.data.len() {
-                return Err(PyError::index_error("memoryview assignment out of range"));
-            }
-            for i in 0..n_elems {
-                arr.data[start_elem + i] =
-                    array_bytes_to_elem(arr.typecode, &data[i * isz..(i + 1) * isz]);
-            }
-            Ok(())
-        }
-        _ => Err(PyError::type_error("cannot modify read-only memory")),
-    }
-}
-
 pub(crate) fn mv_fields(
     v: &PyObjectRef,
 ) -> PyResult<(PyObjectRef, String, Vec<usize>, usize, usize, bool)> {
@@ -242,106 +128,6 @@ pub(crate) fn mv_fields(
     } else {
         Err(PyError::type_error("not a memoryview"))
     }
-}
-
-fn mv_decode_elem(format: &str, bytes: &[u8]) -> PyObjectRef {
-    match format {
-        "b" => py_int(bytes[0] as i8 as i64),
-        "c" => PyObjectRef::imm(PyObject::Bytes(vec![bytes[0]])),
-        "?" => py_bool(bytes[0] != 0),
-        "h" => py_int(i16::from_ne_bytes([bytes[0], bytes[1]]) as i64),
-        "H" => py_int(u16::from_ne_bytes([bytes[0], bytes[1]]) as i64),
-        "i" | "l" => py_int(i32::from_ne_bytes(bytes[..4].try_into().unwrap()) as i64),
-        "I" | "L" => py_int(u32::from_ne_bytes(bytes[..4].try_into().unwrap()) as i64),
-        "q" | "n" => py_int(i64::from_ne_bytes(bytes[..8].try_into().unwrap())),
-        "Q" | "N" => py_int(u64::from_ne_bytes(bytes[..8].try_into().unwrap())),
-        "f" => py_float(f32::from_ne_bytes(bytes[..4].try_into().unwrap()) as f64),
-        "d" => py_float(f64::from_ne_bytes(bytes[..8].try_into().unwrap())),
-        _ => py_int(bytes[0] as i64),
-    }
-}
-
-fn mv_encode_elem(format: &str, val: &PyObjectRef) -> PyResult<Vec<u8>> {
-    let bad = || PyError::type_error("memoryview: invalid type for format");
-    Ok(match format {
-        "c" => match &*val.borrow() {
-            PyObject::Bytes(b) if b.len() == 1 => vec![b[0]],
-            _ => {
-                return Err(PyError::type_error(
-                    "memoryview: invalid value for format 'c'",
-                ))
-            }
-        },
-        "?" => vec![if val.truthy() { 1 } else { 0 }],
-        "f" => (val.as_f64().ok_or_else(bad)? as f32)
-            .to_ne_bytes()
-            .to_vec(),
-        "d" => val.as_f64().ok_or_else(bad)?.to_ne_bytes().to_vec(),
-        _ => {
-            let n = val.as_i64().ok_or_else(bad)?;
-            match format {
-                "b" | "B" => vec![n as u8],
-                "h" | "H" => (n as i16).to_ne_bytes().to_vec(),
-                "q" | "Q" | "n" | "N" => n.to_ne_bytes().to_vec(),
-                _ => (n as i32).to_ne_bytes().to_vec(),
-            }
-        }
-    })
-}
-
-fn nest_list(items: &[PyObjectRef], shape: &[usize]) -> PyObjectRef {
-    if shape.len() <= 1 {
-        return py_list(items.to_vec());
-    }
-    let inner_shape = &shape[1..];
-    let inner_size = mv_total_items(inner_shape);
-    let mut rows = Vec::with_capacity(shape[0]);
-    for i in 0..shape[0] {
-        rows.push(nest_list(
-            &items[i * inner_size..(i + 1) * inner_size],
-            inner_shape,
-        ));
-    }
-    py_list(rows)
-}
-
-fn is_picklebuffer_obj(obj: &PyObjectRef) -> Option<(PyObjectRef, bool)> {
-    if let PyObject::Instance { typ, dict } = &*obj.borrow() {
-        let is_pb = if let PyObject::Type { name, .. } = &*typ.borrow() {
-            name == "PickleBuffer"
-        } else {
-            false
-        };
-        if is_pb {
-            let released = dict
-                .get("_released")
-                .map(|v| v.truthy())
-                .unwrap_or(false);
-            let underlying = dict.get("_obj").cloned().unwrap_or_else(py_none);
-            return Some((underlying, released));
-        }
-    }
-    None
-}
-
-pub(crate) fn extract_flags_for_buffer(obj: &PyObjectRef) -> PyResult<i64> {
-    let flags_big = crate::object::to_index(obj)?;
-    if flags_big.to_i64().is_none() {
-        return Err(PyError::overflow_error("Python int too large to convert to C int"));
-    }
-    let v = flags_big.to_i64().unwrap();
-    if v > i32::MAX as i64 || v < i32::MIN as i64 {
-        return Err(PyError::overflow_error("Python int too large to convert to C int"));
-    }
-    Ok(v)
-}
-
-pub(crate) fn check_buffer_flags(flags: i64) -> PyResult<()> {
-    // READ=0x100, WRITE=0x200 are invalid for getbuffer (CPython raises SystemError)
-    if flags & 0x100 != 0 || flags & 0x200 != 0 {
-        return Err(PyError::system_error("invalid buffer flags"));
-    }
-    Ok(())
 }
 
 pub(crate) fn do_mv_release(view: &PyObjectRef) -> PyResult<()> {
