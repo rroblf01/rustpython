@@ -188,6 +188,31 @@ pub fn pickle_serialize(
             pickle_serialize(&py_int(stop.clone()), buf, memo, protocol)?;
             pickle_serialize(&py_int(step.clone()), buf, memo, protocol)?;
         }
+        PyObject::DictIter { keys, index, .. } => {
+            buf.push(b'i');
+            let remaining: Vec<PyObjectRef> = keys[*index..].to_vec();
+            pickle_serialize(&py_list(remaining), buf, memo, protocol)?;
+            pickle_serialize(&py_int(0), buf, memo, protocol)?;
+        }
+        PyObject::DictValuesIter { values, index, .. } => {
+            buf.push(b'i');
+            let remaining: Vec<PyObjectRef> = values[*index..].to_vec();
+            pickle_serialize(&py_list(remaining), buf, memo, protocol)?;
+            pickle_serialize(&py_int(0), buf, memo, protocol)?;
+        }
+        PyObject::DictItemsIter { items, index, .. } => {
+            buf.push(b'i');
+            let remaining: Vec<PyObjectRef> = items[*index..].iter().map(|(k, v)| py_tuple(vec![k.clone(), v.clone()])).collect();
+            pickle_serialize(&py_list(remaining), buf, memo, protocol)?;
+            pickle_serialize(&py_int(0), buf, memo, protocol)?;
+        }
+        PyObject::DictRevIter { keys, index, .. } => {
+            buf.push(b'i');
+            let idx = *index;
+            let remaining: Vec<PyObjectRef> = if idx < 0 { vec![] } else { keys[..=idx as usize].iter().rev().cloned().collect() };
+            pickle_serialize(&py_list(remaining), buf, memo, protocol)?;
+            pickle_serialize(&py_int(0), buf, memo, protocol)?;
+        }
         // A `fractions.Fraction` (or subclass) instance — serialize the
         // class reference + a plain instance dict carrying numerator/
         // denominator. `__reduce__`-style reconstruction isn't needed since
@@ -367,6 +392,87 @@ pub fn pickle_serialize(
                 memo,
                 protocol,
             )?;
+        }
+        PyObject::BuiltinFunction { .. } | PyObject::Closure(_) => {
+            let own_name = match &*obj.borrow() {
+                PyObject::BuiltinFunction { name, .. } => name.clone(),
+                _ => String::new(),
+            };
+            let target_ptr = container_ptr(obj);
+            let mut found: Option<(String, String)> = None;
+            crate::object::with_vm_mut(|vm| {
+                for (mod_name_str, mref) in vm.modules.iter() {
+                    let mname = mod_name_str.clone();
+                    let mborrow = mref.borrow();
+                    if let PyObject::Module { dict, .. } = &*mborrow {
+                        for (k, v) in dict.iter() {
+                            let ptr_match = if let (Some(tp), Some(vp)) =
+                                (target_ptr, container_ptr(&v))
+                            {
+                                tp == vp
+                            } else {
+                                false
+                            };
+                            let k_str = crate::interner::lookup_str(*k);
+                            let name_match = !own_name.is_empty()
+                                && k_str == own_name
+                                && v.borrow().type_name() == "builtin_function_or_method";
+                            if ptr_match || name_match {
+                                found = Some((mname.clone(), k_str.to_string()));
+                                break;
+                            }
+                        }
+                        if found.is_some() {
+                            break;
+                        }
+                    }
+                }
+                if found.is_none() {
+                    for (k, v) in vm.builtins.iter() {
+                        let bname = crate::interner::lookup_str(*k);
+                        let ptr_match = if let (Some(tp), Some(vp)) =
+                            (target_ptr, container_ptr(&v))
+                        {
+                            tp == vp
+                        } else {
+                            false
+                        };
+                        let name_match = !own_name.is_empty() && bname == own_name;
+                        if ptr_match || name_match {
+                            found = Some(("builtins".to_string(), bname.to_string()));
+                            break;
+                        }
+                    }
+                }
+            })
+            .ok();
+            if let Some((mod_name, attr_name)) = found {
+                buf.push(b'E');
+                pickle_serialize(&py_str(&mod_name), buf, memo, protocol)?;
+                pickle_serialize(&py_str(&attr_name), buf, memo, protocol)?;
+            } else if !own_name.is_empty() {
+                let mod_guess = if [
+                    "add", "sub", "mul", "truediv", "floordiv", "mod", "pow", "lt", "le",
+                    "eq", "ne", "ge", "gt", "and_", "or_", "xor", "not_", "getitem",
+                    "setitem", "delitem", "contains", "index", "indexOf", "countOf",
+                    "truth", "neg", "pos", "abs", "inv", "lshift", "rshift", "length_hint",
+                    "is_", "is_not", "itemgetter", "attrgetter", "methodcaller",
+                ]
+                .contains(&own_name.as_str())
+                {
+                    "operator"
+                } else {
+                    "builtins"
+                };
+                buf.push(b'E');
+                pickle_serialize(&py_str(mod_guess), buf, memo, protocol)?;
+                pickle_serialize(&py_str(&own_name), buf, memo, protocol)?;
+            } else {
+                return Err(PyError::type_error(format!(
+                    "cannot pickle {} object",
+                    obj.borrow().type_name()
+                )));
+            }
         }
         PyObject::Exception {
             typ, args, extra, ..

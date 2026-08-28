@@ -16,7 +16,7 @@ pub(crate) use slice::{extract_slice_fields, normalize_slice_bounds, slice_indic
 pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let PyObject::WeakProxy { target, .. } = &*obj.borrow() {
         if let Some(rc) = target.upgrade() {
-            return py_getitem(&PyObjectRef::Imm(rc), index);
+            return py_getitem(&PyObjectRef::Mut(rc), index);
         } else {
             return Err(PyError::reference_error("weakly-referenced object no longer exists"));
         }
@@ -135,7 +135,17 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 };
                 match missing_fn {
                     Some(f) => call_bound_method(f, obj.clone(), vec![index.clone()]),
-                    None => Err(PyError::key_error(index.str())),
+                    None => Err(PyError::key_error_obj(index)),
+                }
+            }
+            Err(PyError::Exception(t, o)) if t == "KeyError" => {
+                let missing_fn = match &*obj.borrow() {
+                    PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__missing__"),
+                    _ => None,
+                };
+                match missing_fn {
+                    Some(f) => call_bound_method(f, obj.clone(), vec![index.clone()]),
+                    None => Err(PyError::Exception(t, o)),
                 }
             }
             other => other,
@@ -150,12 +160,12 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
     // very dict, which would re-enter `borrow()`/`borrow_mut()` on the same
     // RefCell and panic if the hash were computed while already borrowed.
     if matches!(&*obj.borrow(), PyObject::Dict(_)) {
-        let h = index.hash()?;
+        let h = crate::object::PyDict::dict_hash(index)?;
         let o = obj.borrow();
         if let PyObject::Dict(d) = &*o {
             return match d.get_with_hash(index, h) {
                 Some(val) => Ok(val),
-                None => Err(PyError::key_error(index.str())),
+                None => Err(PyError::key_error_obj(index)),
             };
         }
     }
@@ -543,7 +553,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
 pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) -> PyResult<()> {
     if let PyObject::WeakProxy { target, .. } = &*obj.borrow() {
         if let Some(rc) = target.upgrade() {
-            return py_setitem(&PyObjectRef::Imm(rc), index, value);
+            return py_setitem(&PyObjectRef::Mut(rc), index, value);
         } else {
             return Err(PyError::reference_error("weakly-referenced object no longer exists"));
         }
@@ -864,7 +874,7 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
 pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
     if let PyObject::WeakProxy { target, .. } = &*obj.borrow() {
         if let Some(rc) = target.upgrade() {
-            return py_delitem(&PyObjectRef::Imm(rc), index);
+            return py_delitem(&PyObjectRef::Mut(rc), index);
         } else {
             return Err(PyError::reference_error("weakly-referenced object no longer exists"));
         }

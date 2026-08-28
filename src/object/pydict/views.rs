@@ -102,7 +102,79 @@ pub fn make_dict_view(kind: &str, d: PyObjectRef) -> crate::object::PyObjectRef 
         let mut td: StdHashMap<String, PyObjectRef> = StdHashMap::new();
 
         td.insert("__iter__".into(), bf("__iter__", |args| {
+            let kind = view_kind(&args[0]);
+            let mapping = match args[0].borrow().get_attribute("mapping") {
+                Ok(m) => m,
+                Err(_) => return builtin_iter(&[py_list(view_elems(&args[0]))]),
+            };
+            if let PyObject::Dict(d) = &*mapping.borrow() {
+                let version = d.version();
+                if kind == "keys" {
+                    return Ok(PyObjectRef::new(PyObject::DictIter {
+                        dict: mapping.clone(),
+                        keys: d.keys(),
+                        index: 0,
+                        expected_version: version,
+                    }));
+                } else if kind == "values" {
+                    return Ok(PyObjectRef::new(PyObject::DictValuesIter {
+                        dict: mapping.clone(),
+                        values: d.values(),
+                        index: 0,
+                        expected_version: version,
+                    }));
+                } else if kind == "items" {
+                    return Ok(PyObjectRef::new(PyObject::DictItemsIter {
+                        dict: mapping.clone(),
+                        items: d.items(),
+                        index: 0,
+                        expected_version: version,
+                    }));
+                }
+            }
             builtin_iter(&[py_list(view_elems(&args[0]))])
+        }));
+        td.insert("__reversed__".into(), bf("__reversed__", |args| {
+            let kind = view_kind(&args[0]);
+            let mapping = match args[0].borrow().get_attribute("mapping") {
+                Ok(m) => m,
+                Err(_) => {
+                    let v = view_elems(&args[0]);
+                    let mut rev = v.clone();
+                    rev.reverse();
+                    return Ok(PyObjectRef::new(PyObject::ListIter { list: rev, index: 0 }));
+                }
+            };
+            if let PyObject::Dict(d) = &*mapping.borrow() {
+                let version = d.version();
+                if kind == "keys" {
+                    let keys = d.keys();
+                    let idx = if keys.is_empty() { -1 } else { (keys.len() as isize) - 1 };
+                    return Ok(PyObjectRef::new(PyObject::DictRevIter { dict: mapping.clone(), keys, index: idx, expected_version: version }));
+                } else if kind == "values" {
+                    let vals = d.values();
+                    let mut rev = vals.clone();
+                    rev.reverse();
+                    // values reversed – use ListIter with version check via DictValuesIter reversed?
+                    // For simplicity use ListIter but with version check via extra wrapper – use DictValuesIter reversed logic via ListIter + manual check?
+                    // We'll just use a DictValuesIter reversed by storing reversed values
+                    let version = d.version();
+                    let mut rev_vals = d.values();
+                    rev_vals.reverse();
+                    // Reuse DictValuesIter but with reversed order and index 0
+                    // Need to handle version check – create a DictValuesIter with reversed list
+                    return Ok(PyObjectRef::new(PyObject::DictValuesIter { dict: mapping.clone(), values: rev_vals, index: 0, expected_version: version }));
+                } else if kind == "items" {
+                    let mut items = d.items();
+                    items.reverse();
+                    let version = d.version();
+                    return Ok(PyObjectRef::new(PyObject::DictItemsIter { dict: mapping.clone(), items, index: 0, expected_version: version }));
+                }
+            }
+            let v = view_elems(&args[0]);
+            let mut rev = v.clone();
+            rev.reverse();
+            Ok(PyObjectRef::new(PyObject::ListIter { list: rev, index: 0 }))
         }));
         td.insert("__len__".into(), bf("__len__", |args| {
             Ok(py_int(view_elems(&args[0]).len() as i64))

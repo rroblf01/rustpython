@@ -164,10 +164,13 @@ impl VirtualMachine {
                             }));
                         }
                         PyObject::Dict(ref pydict) => {
-                            let keys: Vec<PyObjectRef> = pydict.keys();
-                            self.frames[fi].push(PyObjectRef::new(PyObject::ListIter {
-                                list: keys,
+                            let keys = pydict.keys();
+                            let version = pydict.version();
+                            self.frames[fi].push(PyObjectRef::new(PyObject::DictIter {
+                                dict: val.clone(),
+                                keys,
                                 index: 0,
+                                expected_version: version,
                             }));
                         }
                         PyObject::Globals(g) => {
@@ -391,7 +394,11 @@ impl VirtualMachine {
                             | PyObject::GetItemIter { .. }
                             | PyObject::CallSentinelIter { .. }
                             | PyObject::DequeIter { .. }
-                            | PyObject::DequeRevIter { .. } => {
+                            | PyObject::DequeRevIter { .. }
+                            | PyObject::DictIter { .. }
+                            | PyObject::DictValuesIter { .. }
+                            | PyObject::DictItemsIter { .. }
+                            | PyObject::DictRevIter { .. } => {
                                 drop(obj);
                                 match crate::object::builtin_next(&[iter_val.clone()]) {
                                     Ok(val) => {

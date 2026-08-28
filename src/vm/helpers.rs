@@ -89,7 +89,7 @@ pub(crate) fn unbound_local_msg(f: &Frame, idx: usize) -> PyError {
 pub(crate) fn deref_proxy(obj: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let PyObject::WeakProxy { target, .. } = &*obj.borrow() {
         if let Some(rc) = target.upgrade() {
-            Ok(PyObjectRef::Imm(rc))
+            Ok(PyObjectRef::Mut(rc))
         } else {
             Err(PyError::reference_error("weakly-referenced object no longer exists"))
         }
@@ -128,7 +128,7 @@ pub(crate) fn inplace_binary_op(
                         _ => None,
                     };
                     if let Some(name) = idunder {
-                        if matches!(&*left.borrow(), PyObject::Instance { .. }) {
+                        if matches!(&*left.borrow(), PyObject::Instance { .. } | PyObject::Dict(_)) {
                             if let Some(r) = crate::object::try_dunder_binop(&left, &right, name)? {
                                 return Ok(Some(r));
                             }

@@ -177,7 +177,7 @@ impl PyObject {
                             func: |args| {
                                 if let PyObject::WeakRef { target, .. } = &*args[0].borrow() {
                                     return Ok(match target.upgrade() {
-                                        Some(rc) => PyObjectRef::Imm(rc),
+                                        Some(rc) => PyObjectRef::Mut(rc),
                                         None => {
                                             if let Some(default) = args.get(1) {
                                                 default.clone()
@@ -782,8 +782,53 @@ impl PyObject {
             }
             PyObject::BuiltinFunction { .. } => return callable::get(self, name),            PyObject::FrozenSet(_items) => return frozenset::get(self, name),
             PyObject::Slice { .. } => return slice::get(self, name),
-            PyObject::Code(_) => return callable::get(self, name),            PyObject::BuiltinMethod { .. } => return callable::get(self, name),            PyObject::ListIter { .. }
-            | PyObject::MapIterator { .. }
+            PyObject::Code(_) => return callable::get(self, name),            PyObject::BuiltinMethod { .. } => return callable::get(self, name),
+            PyObject::ListIter { list, index } => match name {
+                "__next__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: "__next__".to_string(),
+                    func: builtin_next,
+                    self_obj: PyObjectRef::new(self.clone()),
+                })),
+                "__iter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: "__iter__".to_string(),
+                    func: builtin_iter,
+                    self_obj: PyObjectRef::new(self.clone()),
+                })),
+                "__length_hint__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: "__length_hint__".to_string(),
+                    func: |args| {
+                        if let PyObject::ListIter { list, index } = &*args[0].borrow() {
+                            Ok(py_int(list.len().saturating_sub(*index) as i64))
+                        } else {
+                            Err(PyError::runtime_error("__length_hint__ on non-list_iterator"))
+                        }
+                    },
+                    self_obj: PyObjectRef::new(self.clone()),
+                })),
+                "__setstate__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: "__setstate__".to_string(),
+                    func: crate::object::builtins::list_iter_setstate,
+                    self_obj: PyObjectRef::new(self.clone()),
+                })),
+                "__reduce__" | "__reduce_ex__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: name.to_string(),
+                    func: |args| {
+                        if let PyObject::ListIter { list, index } = &*args[0].borrow() {
+                            let iter_obj = args[0].clone();
+                            let state = py_int(*index as i64);
+                            Ok(py_tuple(vec![py_str("list_iterator"), py_tuple(vec![iter_obj, state])]))
+                        } else {
+                            Err(PyError::runtime_error("__reduce__ on non-list_iterator"))
+                        }
+                    },
+                    self_obj: PyObjectRef::new(self.clone()),
+                })),
+                _ => Err(PyError::attribute_error(format!(
+                    "'list_iterator' object has no attribute '{}'",
+                    name
+                ))),
+            },
+            PyObject::MapIterator { .. }
             | PyObject::FilterIterator { .. }
             | PyObject::ZipIterator { .. }
             | PyObject::CycleIter { .. }

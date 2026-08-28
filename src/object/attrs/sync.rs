@@ -231,6 +231,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     "clear" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "clear".to_string(),
                         func: |args| {
+                            if args.len() != 1 {
+                                return Err(PyError::type_error(format!(
+                                    "clear() takes no arguments ({} given)",
+                                    args.len() - 1
+                                )));
+                            }
                             if let PyObject::Globals(g) = &*args[0].borrow() {
                                 g.borrow_mut().clear();
                                 Ok(py_none())
@@ -249,6 +255,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     "copy" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "copy".to_string(),
                         func: |args| {
+                            if args.len() != 1 {
+                                return Err(PyError::type_error(format!(
+                                    "copy() takes no arguments ({} given)",
+                                    args.len() - 1
+                                )));
+                            }
                             if let PyObject::Globals(g) = &*args[0].borrow() {
                                 let mut d = crate::object::PyDict::new();
                                 for (k, v) in g.borrow().iter() {

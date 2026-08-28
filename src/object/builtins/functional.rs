@@ -375,6 +375,13 @@ pub fn builtin_callable(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("callable() takes exactly one argument"));
     }
+    if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
+        if let Some(rc) = target.upgrade() {
+            return builtin_callable(&[PyObjectRef::Mut(rc)]);
+        } else {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
+    }
     let obj = args[0].borrow();
     let is_callable = matches!(
         &*obj,

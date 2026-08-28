@@ -567,27 +567,39 @@ pub fn pickle_deserialize(
             })
         }
         b'E' => {
-            // Function by reference (see the matching serializer arm).
+            // Function / builtin by reference (see the matching serializer arm).
             let module = pickle_deserialize(data, pos, memo)?;
             let name = pickle_deserialize(data, pos, memo)?;
             let module_str = module.str();
             let name_str = name.str();
             let func = crate::modules::get_module(&module_str)
                 .and_then(|m| m.borrow().get_attribute(&name_str).ok())
+                .or_else(|| {
+                    crate::object::with_vm_mut(|vm| {
+                        if let Some(mref) = vm.modules.get(&module_str) {
+                            if let Ok(v) = mref.borrow().get_attribute(&name_str) {
+                                return Some(v);
+                            }
+                        }
+                        if module_str == "builtins" {
+                            if let Some(b) =
+                                vm.builtins.get(&crate::interner::intern(&name_str))
+                            {
+                                return Some(b.clone());
+                            }
+                        }
+                        None
+                    })
+                    .ok()
+                    .flatten()
+                })
                 .ok_or_else(|| {
                     PyError::type_error(format!(
                         "cannot find function {}.{} referenced by pickle data",
                         module_str, name_str
                     ))
                 })?;
-            if matches!(&*func.borrow(), PyObject::Function(_)) {
-                Ok(func)
-            } else {
-                Err(PyError::type_error(format!(
-                    "{}.{} is not a function",
-                    module_str, name_str
-                )))
-            }
+            Ok(func)
         }
         b'X' => {
             let typ = pickle_deserialize(data, pos, memo)?.str();

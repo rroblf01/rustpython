@@ -682,7 +682,7 @@ impl VirtualMachine {
         // default when one is passed (`w(default)`), matching CPython.
         if let PyObject::WeakRef { target, .. } = &*callable.borrow() {
             return Ok(match target.upgrade() {
-                Some(rc) => PyObjectRef::Imm(rc),
+                Some(rc) => PyObjectRef::Mut(rc),
                 None => {
                     if let Some(default) = args.first() {
                         default.clone()
@@ -695,7 +695,7 @@ impl VirtualMachine {
         // Callable proxy: proxy is callable if target is callable
         if let PyObject::WeakProxy { target, .. } = &*callable.borrow() {
             if let Some(rc) = target.upgrade() {
-                let target_ref = PyObjectRef::Imm(rc);
+                let target_ref = PyObjectRef::Mut(rc);
                 return self.call_function(target_ref, args.to_vec(), keywords);
             } else {
                 return Err(PyError::reference_error("weakly-referenced object no longer exists"));

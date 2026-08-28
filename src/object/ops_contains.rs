@@ -16,6 +16,14 @@ fn class_name_for_obj(obj: &PyObjectRef) -> String {
 }
 
 pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
+    // WeakProxy: forward to target if alive, else ReferenceError
+    if let PyObject::WeakProxy { target, .. } = &*a.borrow() {
+        if let Some(rc) = target.upgrade() {
+            return contains_op(&PyObjectRef::Imm(rc), b);
+        } else {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
+    }
     // Check for __contains__ on instances
     let f = {
         let container = a.borrow();
@@ -254,10 +262,30 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
                 Ok(false)
             }
         }
-        _ => Err(PyError::type_error(format!(
-            "argument of type '{}' is not iterable",
-            container.type_name()
-        ))),
+        _ => {
+            // Generic iterable fallback (generator, iterator, custom iterable)
+            // Must drop the borrow before calling builtin_iter which may borrow again
+            let type_name = container.type_name();
+            drop(container);
+            let it = match builtin_iter(&[a.clone()]) {
+                Ok(it) => it,
+                Err(_) => return Err(PyError::type_error(format!(
+                    "argument of type '{}' is not iterable",
+                    type_name
+                ))),
+            };
+            loop {
+                match builtin_next(&[it.clone()]) {
+                    Ok(item) => {
+                        if item.equals(b)? {
+                            return Ok(true);
+                        }
+                    }
+                    Err(e) if is_stop_iteration_error(&e) => return Ok(false),
+                    Err(e) => return Err(e),
+                }
+            }
+        }
     }
 }
 

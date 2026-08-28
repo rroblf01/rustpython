@@ -71,6 +71,30 @@ pub enum PyObject {
         index: isize,
         start_len: usize,
     },
+    DictIter {
+        dict: PyObjectRef,
+        keys: Vec<PyObjectRef>,
+        index: usize,
+        expected_version: u64,
+    },
+    DictValuesIter {
+        dict: PyObjectRef,
+        values: Vec<PyObjectRef>,
+        index: usize,
+        expected_version: u64,
+    },
+    DictItemsIter {
+        dict: PyObjectRef,
+        items: Vec<(PyObjectRef, PyObjectRef)>,
+        index: usize,
+        expected_version: u64,
+    },
+    DictRevIter {
+        dict: PyObjectRef,
+        keys: Vec<PyObjectRef>,
+        index: isize,
+        expected_version: u64,
+    },
     /// Backing for the "old-style sequence iteration" fallback: real Python
     /// makes ANY object with `__getitem__` but no `__iter__` iterable by
     /// calling `obj[0]`, `obj[1]`, ... until `IndexError` (converted to
@@ -449,6 +473,10 @@ impl PyObject {
             PyObject::Process { .. } => "Popen",
             PyObject::CycleIter { .. } => "itertools.cycle",
             PyObject::GroupByIter { .. } => "itertools.groupby",
+            PyObject::DictIter { .. } => "dict_keyiterator",
+            PyObject::DictValuesIter { .. } => "dict_valueiterator",
+            PyObject::DictItemsIter { .. } => "dict_itemiterator",
+            PyObject::DictRevIter { .. } => "dict_reversekeyiterator",
         }
         .to_string()
     }
@@ -861,11 +889,13 @@ impl PyObject {
             // Reference-identity types (matching the identity-based hash
             // above): equal iff it's really the same underlying object.
             (PyObject::Function(_), PyObject::Function(_))
-            | (PyObject::BuiltinFunction { .. }, PyObject::BuiltinFunction { .. })
             | (PyObject::BuiltinMethod { .. }, PyObject::BuiltinMethod { .. })
             | (PyObject::Type { .. }, PyObject::Type { .. })
             | (PyObject::Module { .. }, PyObject::Module { .. }) => {
                 std::ptr::eq(self as *const PyObject, &*other as *const PyObject)
+            }
+            (PyObject::BuiltinFunction { name: a_name, func: a_func }, PyObject::BuiltinFunction { name: b_name, func: b_func }) => {
+                a_name == b_name && std::ptr::fn_addr_eq(*a_func, *b_func)
             }
             (PyObject::BoundMethod { func: a_func, self_obj: a_self }, PyObject::BoundMethod { func: b_func, self_obj: b_self }) => {
                 (a_func.is(b_func) || a_func.equals(b_func).unwrap_or(false))

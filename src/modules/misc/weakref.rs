@@ -23,7 +23,6 @@ fn is_weakrefable(obj: &PyObjectRef) -> bool {
             | PyObject::Bytes(_)
             | PyObject::Tuple(_)
             | PyObject::Code { .. }
-            | PyObject::BuiltinFunction { .. }
     ) && matches!(obj, PyObjectRef::Mut(_) | PyObjectRef::Imm(_))
 }
 fn target_ptr(obj: &PyObjectRef) -> Option<usize> {
@@ -376,19 +375,25 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
 
     // Type constants - as real Type objects so type(proxy) is ProxyType etc
     {
-        let ref_type = PyObjectRef::new(PyObject::Type { name: "weakref".to_string(), dict: Box::new(TypeDict::default()), bases: vec![], mro: vec![] });
+        let mut dict = TypeDict::default();
+        dict.insert_str("__module__", py_str("weakref"));
+        let ref_type = PyObjectRef::new(PyObject::Type { name: "ReferenceType".to_string(), dict: Box::new(dict), bases: vec![], mro: vec![] });
         if let PyObject::Type { mro, .. } = &mut *ref_type.borrow_mut() { *mro = vec![ref_type.clone()]; }
         crate::object::seed_primitive_type_cache("weakref", ref_type.clone());
         d.insert_str("ReferenceType", ref_type);
     }
     {
-        let proxy_type = PyObjectRef::new(PyObject::Type { name: "weakproxy".to_string(), dict: Box::new(TypeDict::default()), bases: vec![], mro: vec![] });
+        let mut dict = TypeDict::default();
+        dict.insert_str("__module__", py_str("weakref"));
+        let proxy_type = PyObjectRef::new(PyObject::Type { name: "ProxyType".to_string(), dict: Box::new(dict), bases: vec![], mro: vec![] });
         if let PyObject::Type { mro, .. } = &mut *proxy_type.borrow_mut() { *mro = vec![proxy_type.clone()]; }
         crate::object::seed_primitive_type_cache("weakproxy", proxy_type.clone());
         d.insert_str("ProxyType", proxy_type);
     }
     {
-        let cproxy_type = PyObjectRef::new(PyObject::Type { name: "weakcallableproxy".to_string(), dict: Box::new(TypeDict::default()), bases: vec![], mro: vec![] });
+        let mut dict = TypeDict::default();
+        dict.insert_str("__module__", py_str("weakref"));
+        let cproxy_type = PyObjectRef::new(PyObject::Type { name: "CallableProxyType".to_string(), dict: Box::new(dict), bases: vec![], mro: vec![] });
         if let PyObject::Type { mro, .. } = &mut *cproxy_type.borrow_mut() { *mro = vec![cproxy_type.clone()]; }
         crate::object::seed_primitive_type_cache("weakcallableproxy", cproxy_type.clone());
         d.insert_str("CallableProxyType", cproxy_type);
@@ -404,6 +409,14 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
             }
         }
         Ok(py_none())
+    });
+
+    // helper for WeakKeyDictionary to raise TypeError for non-weakrefable keys
+    wr_func!("_is_weakrefable", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("_is_weakrefable() requires 1 argument"));
+        }
+        Ok(py_bool(is_weakrefable(&args[0])))
     });
 
     d

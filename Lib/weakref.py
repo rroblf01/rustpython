@@ -18,6 +18,15 @@ from _weakref import (
      ProxyType,
      ReferenceType,
      _remove_dead_weakref)
+try:
+    from _weakref import _is_weakrefable
+except ImportError:
+    def _is_weakrefable(o):
+        try:
+            ref(o)
+            return True
+        except TypeError:
+            return False
 
 try:
     from _weakrefset import WeakSet
@@ -39,13 +48,15 @@ __all__ = ["ref", "proxy", "getweakrefcount", "getweakrefs",
 
 _collections_abc.MutableSet.register(WeakSet)
 
-class WeakMethod(ref):
+class WeakMethod(ReferenceType):
     """
     A custom `weakref.ref` subclass which simulates a weak reference to
     a bound method, working around the lifetime problem of bound methods.
+    Reimplemented to avoid relying on `ref.__new__` subclassing limitations
+    by using `object.__new__` and storing underlying weakrefs.
     """
 
-    __slots__ = "_func_ref", "_meth_type", "_alive", "__weakref__"
+    __slots__ = ("_obj_ref", "_func_ref", "_meth_type", "_alive", "_hash", "__weakref__")
 
     def __new__(cls, meth, callback=None):
         try:
@@ -54,25 +65,33 @@ class WeakMethod(ref):
         except AttributeError:
             raise TypeError("argument should be a bound method, not {}"
                             .format(type(meth))) from None
-        def _cb(arg):
-            # The self-weakref trick is needed to avoid creating a reference
-            # cycle.
-            self = self_wr()
-            if self._alive:
-                self._alive = False
-                if callback is not None:
-                    callback(self)
-        self = ref.__new__(cls, obj, _cb)
-        self._func_ref = ref(func, _cb)
-        self._meth_type = type(meth)
+        self = object.__new__(cls)
+        import types
+        self._meth_type = types.MethodType
         self._alive = True
+        self._hash = None
         self_wr = ref(self)
+        def _cb(arg, self_wr=self_wr):
+            self_obj = self_wr()
+            if self_obj is not None and self_obj._alive:
+                self_obj._alive = False
+                if callback is not None:
+                    callback(self_obj)
+        self._obj_ref = ref(obj, _cb)
+        self._func_ref = ref(func, _cb)
+        del obj, func, meth
         return self
 
+    def __init__(self, meth, callback=None):
+        pass
+
     def __call__(self):
-        obj = super().__call__()
+        if not self._alive:
+            return None
+        obj = self._obj_ref()
         func = self._func_ref()
         if obj is None or func is None:
+            self._alive = False
             return None
         return self._meth_type(func, obj)
 
@@ -80,17 +99,31 @@ class WeakMethod(ref):
         if isinstance(other, WeakMethod):
             if not self._alive or not other._alive:
                 return self is other
-            return ref.__eq__(self, other) and self._func_ref == other._func_ref
+            return self._obj_ref == other._obj_ref and self._func_ref == other._func_ref
         return NotImplemented
 
     def __ne__(self, other):
         if isinstance(other, WeakMethod):
             if not self._alive or not other._alive:
                 return self is not other
-            return ref.__ne__(self, other) or self._func_ref != other._func_ref
+            return self._obj_ref != other._obj_ref or self._func_ref != other._func_ref
         return NotImplemented
 
-    __hash__ = ref.__hash__
+    def __hash__(self):
+        if self._hash is not None:
+            return self._hash
+        if not self._alive or self._obj_ref() is None or self._func_ref() is None:
+            raise TypeError("weak object has gone away")
+        try:
+            h = hash(self._obj_ref) ^ hash(self._func_ref)
+        except TypeError:
+            raise TypeError("unhashable type: 'WeakMethod'")
+        self._hash = h
+        return h
+
+    @property
+    def alive(self):
+        return self._alive and self._obj_ref() is not None and self._func_ref() is not None
 
 
 class WeakValueDictionary(_collections_abc.MutableMapping):
@@ -355,9 +388,13 @@ class WeakKeyDictionary(_collections_abc.MutableMapping):
             self.update(dict)
 
     def __delitem__(self, key):
+        if not _is_weakrefable(key):
+            raise TypeError("cannot create weak reference to '%s' object" % type(key).__name__)
         del self.data[id(key)]
 
     def __getitem__(self, key):
+        if not _is_weakrefable(key):
+            raise TypeError("cannot create weak reference to '%s' object" % type(key).__name__)
         wid = id(key)
         wr, val = self.data[wid]
         if wr() is None:
@@ -382,6 +419,8 @@ class WeakKeyDictionary(_collections_abc.MutableMapping):
         self.data.clear()
 
     def __setitem__(self, key, value):
+        if not _is_weakrefable(key):
+            raise TypeError("cannot create weak reference to '%s' object" % type(key).__name__)
         wid = id(key)
         def _cb(wr, wid=wid, selfref=ref(self)):
             self = selfref()

@@ -419,6 +419,11 @@ pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Ok(py_bool(false));
     }
+    if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
+        if target.upgrade().is_none() {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
+    }
     let typ_opt = {
         let obj = args[0].borrow();
         if let PyObject::Instance { typ, .. } = &*obj {

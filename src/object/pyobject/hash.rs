@@ -185,7 +185,6 @@ impl PyObject {
                 return Err(PyError::type_error("unhashable type: 'weakproxy'"));
             }
             PyObject::Function(_)
-            | PyObject::BuiltinFunction { .. }
             | PyObject::BuiltinMethod { .. }
             | PyObject::Type { .. }
             | PyObject::Module { .. }
@@ -197,6 +196,10 @@ impl PyObject {
             | PyObject::RangeIter { .. }
             | PyObject::DequeIter { .. }
             | PyObject::DequeRevIter { .. }
+            | PyObject::DictIter { .. }
+            | PyObject::DictValuesIter { .. }
+            | PyObject::DictItemsIter { .. }
+            | PyObject::DictRevIter { .. }
             | PyObject::MapIterator { .. }
             | PyObject::FilterIterator { .. }
             | PyObject::ZipIterator { .. }
@@ -225,6 +228,11 @@ impl PyObject {
                 let self_ref = PyObjectRef::new(self.clone());
                 let bytes = mv_tobytes(&self_ref)?;
                 PyObject::Bytes(bytes).hash()
+            }
+            PyObject::BuiltinFunction { name, func } => {
+                let h1 = py_hash_str(name);
+                let h2 = *func as *const () as usize;
+                Ok(h1.wrapping_mul(1000003).wrapping_add(h2))
             }
             PyObject::Closure(_) => Err(PyError::type_error(format!(
                 "unhashable type: '{}'",

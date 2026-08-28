@@ -9,7 +9,7 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
         if let Some(rc) = target.upgrade() {
-            return builtin_len(&[PyObjectRef::Imm(rc)]);
+            return builtin_len(&[PyObjectRef::Mut(rc)]);
         } else {
             return Err(PyError::reference_error("weakly-referenced object no longer exists"));
         }
@@ -242,7 +242,7 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() == 1 {
         if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
             if let Some(rc) = target.upgrade() {
-                return builtin_iter(&[PyObjectRef::Imm(rc)]);
+                return builtin_iter(&[PyObjectRef::Mut(rc)]);
             } else {
                 return Err(PyError::reference_error("weakly-referenced object no longer exists"));
             }
@@ -387,10 +387,16 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             index: 0,
             start_len: data.len(),
         })),
-        PyObject::Dict(d) => Ok(PyObjectRef::new(PyObject::ListIter {
-            list: d.keys(),
-            index: 0,
-        })),
+        PyObject::Dict(d) => {
+            let keys = d.keys();
+            let version = d.version();
+            Ok(PyObjectRef::new(PyObject::DictIter {
+                dict: args[0].clone(),
+                keys,
+                index: 0,
+                expected_version: version,
+            }))
+        }
         PyObject::Globals(g) => {
             let keys: Vec<PyObjectRef> = g
                 .borrow()
@@ -452,7 +458,11 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         | PyObject::GetItemIter { .. }
         | PyObject::CallSentinelIter { .. }
         | PyObject::DequeIter { .. }
-        | PyObject::DequeRevIter { .. } => Ok(args[0].clone()),
+        | PyObject::DequeRevIter { .. }
+        | PyObject::DictIter { .. }
+        | PyObject::DictValuesIter { .. }
+        | PyObject::DictItemsIter { .. }
+        | PyObject::DictRevIter { .. } => Ok(args[0].clone()),
         // Anything else (plain functions, ints, ...) is genuinely not
         // iterable. The previous fallback (`Ok(args[0].clone())`)
         // silently treated ANY object as if it were already a valid

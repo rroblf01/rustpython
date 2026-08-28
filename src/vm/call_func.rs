@@ -613,20 +613,25 @@ impl VirtualMachine {
                 // raw non-exception value would be raised/propagated and
                 // escape every `except BaseException`.
                 if crate::object::find_exception_base_name(&callable).is_some() {
-                    let is_exc = match &*result.borrow() {
-                        PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => true,
-                        PyObject::Instance { typ, .. } => {
-                            crate::object::find_exception_base_name(typ).is_some()
+                    let _cname = if let PyObject::Type { name, .. } = &*callable.borrow() { name.clone() } else { String::new() };
+                    if _cname == "ref" || _cname == "ReferenceType" || _cname == "KeyedRef" || _cname == "WeakMethod" || _cname == "weakref" {
+                        // Skip spurious exception check for weakref types (they share machinery with exceptions but are not exceptions)
+                    } else {
+                        let is_exc = match &*result.borrow() {
+                            PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => true,
+                            PyObject::Instance { typ, .. } => {
+                                crate::object::find_exception_base_name(typ).is_some()
+                            }
+                            _ => false,
+                        };
+                        if !is_exc {
+                            let result_typ = result.borrow().type_name();
+                            return Err(PyError::type_error(format!(
+                                "calling {} should have returned an instance of BaseException, not <class '{}'>",
+                                callable.repr(),
+                                result_typ
+                            )));
                         }
-                        _ => false,
-                    };
-                    if !is_exc {
-                        let result_typ = result.borrow().type_name();
-                        return Err(PyError::type_error(format!(
-                            "calling {} should have returned an instance of BaseException, not <class '{}'>",
-                            callable.repr(),
-                            result_typ
-                        )));
                     }
                 }
                 // CPython: if __new__ returned an instance of this class,

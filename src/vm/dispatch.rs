@@ -507,8 +507,56 @@ impl VirtualMachine {
                     _ => return Err(PyError::type_error("argument after * must be an iterable")),
                 };
                 let keywords_vec: Vec<(String, PyObjectRef)> = match &*kwargs_dict.borrow() {
-                    PyObject::Dict(d) => d.items().into_iter().map(|(k, v)| (k.str(), v)).collect(),
-                    _ => Vec::new(),
+                    PyObject::Dict(d) => {
+                        let mut kv = Vec::new();
+                        for (k, v) in d.items() {
+                            let ks = match &*k.borrow() {
+                                PyObject::Str(s) => s.to_string(),
+                                _ => return Err(PyError::type_error("keywords must be strings")),
+                            };
+                            kv.push((ks, v));
+                        }
+                        kv
+                    }
+                    _ => {
+                        if let Some(native) = crate::object::native_backing_of(&kwargs_dict) {
+                            if let PyObject::Dict(d) = &*native.borrow() {
+                                let mut kv = Vec::new();
+                                for (k, v) in d.items() {
+                                    let ks = match &*k.borrow() {
+                                        PyObject::Str(s) => s.to_string(),
+                                        _ => return Err(PyError::type_error("keywords must be strings")),
+                                    };
+                                    kv.push((ks, v));
+                                }
+                                kv
+                            } else {
+                                Vec::new()
+                            }
+                        } else if kwargs_dict.borrow().get_attribute("keys").is_ok() {
+                            let keys_fn = kwargs_dict.borrow().get_attribute("keys").unwrap();
+                            let keys_obj = crate::object::call_bound_method(keys_fn, kwargs_dict.clone(), vec![])?;
+                            let it = crate::object::builtin_iter(&[keys_obj])?;
+                            let mut kv = Vec::new();
+                            loop {
+                                match crate::object::builtin_next(&[it.clone()]) {
+                                    Ok(k) => {
+                                        let ks = match &*k.borrow() {
+                                            PyObject::Str(s) => s.to_string(),
+                                            _ => return Err(PyError::type_error("keywords must be strings")),
+                                        };
+                                        let v = crate::object::py_getitem(&kwargs_dict, &k)?;
+                                        kv.push((ks, v));
+                                    }
+                                    Err(crate::object::PyError::StopIteration) => break,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            kv
+                        } else {
+                            Vec::new()
+                        }
+                    }
                 };
                 let result = self.call_function(callable, args_vec, keywords_vec)?;
                 self.frames[fi].push(result);

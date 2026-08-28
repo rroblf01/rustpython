@@ -219,12 +219,23 @@ impl PyDict {
         self.version = self.version.wrapping_add(1);
     }
     pub fn contains(&self, key: &PyObjectRef) -> PyResult<bool> {
-        let h = key.hash()?;
+        let h = Self::dict_hash(key)?;
         Ok(self.find(key, h).is_some())
     }
     pub fn get(&self, key: &PyObjectRef) -> PyResult<Option<PyObjectRef>> {
-        let h = key.hash()?;
+        let h = Self::dict_hash(key)?;
         Ok(self.get_with_hash(key, h))
+    }
+    pub(crate) fn dict_hash(key: &PyObjectRef) -> PyResult<usize> {
+        key.hash().map_err(|e| {
+            if format!("{}", e).contains("unhashable") {
+                let tn = {
+                    let b = key.borrow();
+                    if let PyObject::Instance { typ, .. } = &*b { crate::object::get_type_name_for_instance(typ) } else { b.type_name() }
+                };
+                PyError::type_error(format!("cannot use '{}' as a dict key (unhashable type: '{}')", tn, tn))
+            } else { e }
+        })
     }
     /// Same as `get`, but takes an already-computed hash — lets a caller
     /// compute `key.hash()` (which may run arbitrary Python via a custom
@@ -236,7 +247,7 @@ impl PyDict {
             .map(|i| self.entries[i].as_ref().unwrap().1.clone())
     }
     pub fn set(&mut self, key: PyObjectRef, value: PyObjectRef) -> PyResult<()> {
-        let h = key.hash()?;
+        let h = Self::dict_hash(&key)?;
         self.set_with_hash(key, value, h)
     }
     /// Same as `set`, but takes an already-computed hash. Callers that reach
@@ -324,7 +335,7 @@ impl PyDict {
         }
     }
     pub fn remove(&mut self, key: &PyObjectRef) -> PyResult<PyObjectRef> {
-        let h = key.hash()?;
+        let h = Self::dict_hash(key)?;
         self.remove_with_hash(key, h)
     }
     /// Same as `remove`, but takes an already-computed hash — see
@@ -333,7 +344,7 @@ impl PyDict {
     pub fn remove_with_hash(&mut self, key: &PyObjectRef, h: usize) -> PyResult<PyObjectRef> {
         let existing = self
             .find(key, h)
-            .ok_or_else(|| PyError::key_error(key.str()))?;
+            .ok_or_else(|| PyError::key_error_obj(key))?;
         let removed = self.entries[existing].take().unwrap().1;
         self.size -= 1;
         self.version = self.version.wrapping_add(1);
@@ -423,7 +434,7 @@ pub(crate) fn pydict_safe_set(
     key: PyObjectRef,
     value: PyObjectRef,
 ) -> PyResult<()> {
-    let h = key.hash()?;
+    let h = PyDict::dict_hash(&key)?;
     {
         let mut obj = target.borrow_mut();
         match &mut *obj {
@@ -481,7 +492,7 @@ pub(crate) fn pydict_safe_get_or_insert(
     key: PyObjectRef,
     default: PyObjectRef,
 ) -> PyResult<PyObjectRef> {
-    let h = key.hash()?;
+    let h = PyDict::dict_hash(&key)?;
     {
         let mut obj = target.borrow_mut();
         match &mut *obj {
@@ -538,8 +549,16 @@ pub fn pydict_safe_remove(
     target: &PyObjectRef,
     key: &PyObjectRef,
 ) -> PyResult<PyObjectRef> {
-    let h = key.hash()?;
-    let key_str_for_err = || key.str();
+    let h = key.hash().map_err(|e| {
+        // Wrap unhashable error for dict context
+        if format!("{}", e).contains("unhashable") {
+            let tn = {
+                let b = key.borrow();
+                if let PyObject::Instance { typ, .. } = &*b { crate::object::get_type_name_for_instance(typ) } else { b.type_name() }
+            };
+            PyError::type_error(format!("cannot use '{}' as a dict key (unhashable type: '{}')", tn, tn))
+        } else { e }
+    })?;
     {
         let mut obj = target.borrow_mut();
         match &mut *obj {
@@ -552,7 +571,7 @@ pub fn pydict_safe_remove(
                         return Ok(removed);
                     } else {
                         drop(obj);
-                        return Err(PyError::key_error(key_str_for_err()));
+                        return Err(PyError::key_error_obj(key));
                     }
                 }
             }
@@ -586,11 +605,11 @@ pub fn pydict_safe_remove(
                         return Ok(removed);
                     } else {
                         drop(obj);
-                        return Err(PyError::key_error(key_str_for_err()));
+                        return Err(PyError::key_error_obj(key));
                     }
                 } else {
                     drop(obj);
-                    return Err(PyError::key_error(key_str_for_err()));
+                    return Err(PyError::key_error_obj(key));
                 }
             }
             PyObject::Dict(_) => {

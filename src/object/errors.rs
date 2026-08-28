@@ -80,6 +80,18 @@ impl PyError {
     pub fn key_error(msg: impl Into<String>) -> Self {
         PyError::KeyError(msg.into())
     }
+    pub fn key_error_obj(key: &PyObjectRef) -> Self {
+        let obj = PyObjectRef::new(PyObject::Exception {
+            typ: "KeyError".to_string(),
+            args: vec![key.clone()],
+            cause: None,
+            suppress_context: false,
+            context: None,
+            traceback: None,
+            extra: None,
+        });
+        PyError::Exception("KeyError".to_string(), obj)
+    }
     pub fn stop_iteration() -> Self {
         PyError::StopIteration
     }

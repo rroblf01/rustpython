@@ -178,6 +178,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     "clear" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "clear".to_string(),
                         func: |args| {
+                            if args.len() != 1 {
+                                return Err(PyError::type_error(format!(
+                                    "clear() takes no arguments ({} given)",
+                                    args.len() - 1
+                                )));
+                            }
                             if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
                                 d.clear();
                                 Ok(py_none())
@@ -256,24 +262,121 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     }
                                 } else {
                                     let it = builtin_iter(&[other.clone()])?;
+                                    let mut idx: usize = 0;
                                     loop {
-                                        match builtin_next(&[it.clone()]) {
-                                            Ok(pair) => {
-                                                let (k, v) = match &*pair.borrow() {
-                                                    PyObject::Tuple(items) | PyObject::List(items) if items.len() == 2 => {
-                                                        (items[0].clone(), items[1].clone())
-                                                    }
-                                                    _ => return Err(PyError::type_error("cannot convert update sequence element to a sequence")),
-                                                };
-                                                if let PyObject::Dict(d) =
-                                                    &mut *self_obj.borrow_mut()
-                                                {
-                                                    d.set(k, v)?;
-                                                }
-                                            }
+                                        let pair = match builtin_next(&[it.clone()]) {
+                                            Ok(p) => p,
                                             Err(PyError::StopIteration) => break,
                                             Err(e) => return Err(e),
+                                        };
+                                        let attach_note = |err: PyError, idx: usize| -> PyError {
+                                            let note = format!("Cannot convert dictionary update sequence element #{} to a sequence", idx);
+                                            let (typ, msg) = match err {
+                                                PyError::TypeError(m) => ("TypeError".to_string(), m),
+                                                PyError::ValueError(m) => ("ValueError".to_string(), m),
+                                                PyError::Exception(t, o) => {
+                                                    {
+                                                        let mut b = o.borrow_mut();
+                                                        if let PyObject::Exception { extra, .. } = &mut *b {
+                                                            let map = extra.get_or_insert_with(|| std::collections::HashMap::new());
+                                                            let old = map.get("__notes__").cloned().unwrap_or_else(|| py_list(vec![]));
+                                                            let mut items = if let PyObject::List(v) = &*old.borrow() { v.clone() } else { vec![] };
+                                                            items.push(py_str(&note));
+                                                            map.insert("__notes__".to_string(), py_list(items));
+                                                        }
+                                                    }
+                                                    return PyError::Exception(t, o);
+                                                }
+                                                other => (other.type_name().to_string(), format!("{}", other)),
+                                            };
+                                            let mut extra = std::collections::HashMap::new();
+                                            extra.insert("__notes__".to_string(), py_list(vec![py_str(&note)]));
+                                            PyError::Exception(typ.clone(), PyObjectRef::new(PyObject::Exception {
+                                                typ,
+                                                args: vec![py_str(&msg)],
+                                                cause: None,
+                                                suppress_context: false,
+                                                context: None,
+                                                traceback: None,
+                                                extra: Some(extra),
+                                            }))
+                                        };
+                                        let kv = {
+                                            let b = pair.borrow();
+                                            match &*b {
+                                                PyObject::Tuple(v) | PyObject::List(v) if v.len() == 2 => Some((v[0].clone(), v[1].clone())),
+                                                PyObject::Tuple(v) | PyObject::List(v) => {
+                                                    return Err(PyError::value_error(format!(
+                                                        "dictionary update sequence element #{} has length {}; 2 is required", idx, v.len()
+                                                    )));
+                                                }
+                                                _ => None,
+                                            }
+                                        };
+                                        let (k, v) = if let Some(kv) = kv {
+                                            kv
+                                        } else {
+                                            let pair_iter = match builtin_iter(&[pair.clone()]) {
+                                                Ok(it) => it,
+                                                Err(_) => {
+                                                    let type_name = {
+                                                        let b = pair.borrow();
+                                                        if let PyObject::Instance { typ, .. } = &*b { crate::object::get_type_name_for_instance(typ) } else { b.type_name() }
+                                                    };
+                                                    let err = PyError::type_error(format!("{} is not iterable", type_name));
+                                                    return Err(attach_note(err, idx));
+                                                }
+                                            };
+                                            let mut collected: Vec<PyObjectRef> = Vec::new();
+                                            let mut pair_err: Option<PyError> = None;
+                                            loop {
+                                                match builtin_next(&[pair_iter.clone()]) {
+                                                    Ok(val) => {
+                                                        if collected.len() < 2 {
+                                                            collected.push(val);
+                                                        } else {
+                                                            let mut len = collected.len() + 1;
+                                                            while let Ok(_) = builtin_next(&[pair_iter.clone()]) {
+                                                                len += 1;
+                                                                if len > 100 { break; }
+                                                            }
+                                                            return Err(PyError::value_error(format!(
+                                                                "dictionary update sequence element #{} has length {}; 2 is required", idx, len
+                                                            )));
+                                                        }
+                                                    }
+                                                    Err(PyError::StopIteration) => break,
+                                                    Err(e) => { pair_err = Some(e); break; }
+                                                }
+                                            }
+                                            if let Some(e) = pair_err {
+                                                return Err(attach_note(e, idx));
+                                            }
+                                            if collected.len() != 2 {
+                                                return Err(PyError::value_error(format!(
+                                                    "dictionary update sequence element #{} has length {}; 2 is required", idx, collected.len()
+                                                )));
+                                            }
+                                            match builtin_next(&[pair_iter.clone()]) {
+                                                Ok(_) => {
+                                                    let mut len = 3;
+                                                    while let Ok(_) = builtin_next(&[pair_iter.clone()]) {
+                                                        len += 1;
+                                                        if len > 100 { break; }
+                                                    }
+                                                    return Err(PyError::value_error(format!(
+                                                        "dictionary update sequence element #{} has length {}; 2 is required", idx, len
+                                                    )));
+                                                }
+                                                Err(PyError::StopIteration) => {},
+                                                Err(e) => return Err(attach_note(e, idx)),
+                                            }
+                                            (collected[0].clone(), collected[1].clone())
+                                        };
+                                        if let PyObject::Dict(d) = &mut *self_obj.borrow_mut() {
+                                            d.set(k, v)?;
                                         }
+                                        idx += 1;
                                     }
                                 }
                             }
@@ -325,6 +428,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     "copy" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "copy".to_string(),
                         func: |args| {
+                            if args.len() != 1 {
+                                return Err(PyError::type_error(format!(
+                                    "copy() takes no arguments ({} given)",
+                                    args.len() - 1
+                                )));
+                            }
                             let d = args[0].borrow();
                             if let PyObject::Dict(dict) = &*d {
                                 let mut new_dict = PyDict::new();
@@ -513,20 +622,10 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     );
                                 }
                             }
-                            // Accept list/tuple of (k, v) pairs too:
-                            // `defaultdict |= [(1,'a'), ...]` is real CPython
-                            // dict.__ior__ semantics (in-place update).
-                            let other_is_pairs = matches!(
-                                &*args[other_idx].borrow(),
-                                PyObject::List(_) | PyObject::Tuple(_)
-                            );
                             let other_ok = matches!(&*args[other_idx].borrow(), PyObject::Dict(_))
-                                || args[other_idx].borrow().get_attribute("keys").is_ok()
-                                || other_is_pairs;
+                                || args[other_idx].borrow().get_attribute("keys").is_ok();
                             if !other_ok {
-                                return Err(PyError::type_error(
-                                    "__or__() argument must be a dict",
-                                ));
+                                return Ok(py_not_implemented());
                             }
                             // Build result: start from self's mapping view.
                             let self_obj_clone = args[self_idx].clone();
@@ -572,6 +671,96 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             }
                             let _ = dict_like_items; // (kept for reference)
                             Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__ior__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__ior__".to_string(),
+                        func: |args| {
+                            let (self_idx, other_idx) = if args.len() >= 3 { (1, 2) } else if args.len() == 2 { (0, 1) } else { return Err(PyError::type_error("__ior__() takes exactly one argument")); };
+                            let self_obj = args[self_idx].clone();
+                            let other = args[other_idx].clone();
+                            // handle same as update: dict, mapping, or iterable of pairs
+                            let is_dict = matches!(&*other.borrow(), PyObject::Dict(_));
+                            if is_dict {
+                                let items = if let PyObject::Dict(d) = &*other.borrow() { d.items() } else { vec![] };
+                                if let PyObject::Dict(d) = &mut *self_obj.borrow_mut() {
+                                    for (k, v) in items { d.set(k, v)?; }
+                                }
+                                return Ok(self_obj);
+                            }
+                            if let Some(native) = crate::object::native_backing_of(&other) {
+                                if let PyObject::Dict(d) = &*native.borrow() {
+                                    let items = d.items();
+                                    if let PyObject::Dict(dst) = &mut *self_obj.borrow_mut() {
+                                        for (k, v) in items { dst.set(k, v)?; }
+                                    }
+                                    return Ok(self_obj);
+                                }
+                            }
+                            let keys_fn = match &*other.borrow() {
+                                PyObject::Instance { typ, .. } => crate::object::lookup_dunder_via_mro(typ, "keys"),
+                                _ => None,
+                            };
+                            if let Some(keys_fn) = keys_fn {
+                                let keys_obj = crate::object::call_bound_method(keys_fn, other.clone(), vec![])?;
+                                let it = crate::object::builtin_iter(&[keys_obj])?;
+                                loop {
+                                    match crate::object::builtin_next(&[it.clone()]) {
+                                        Ok(k) => {
+                                            let v = crate::object::py_getitem(&other, &k)?;
+                                            if let PyObject::Dict(d) = &mut *self_obj.borrow_mut() { d.set(k, v)?; }
+                                        }
+                                        Err(crate::object::PyError::StopIteration) => break,
+                                        Err(e) => return Err(e),
+                                    }
+                                }
+                                return Ok(self_obj);
+                            }
+                            // iterable of pairs
+                            let it = crate::object::builtin_iter(&[other.clone()])?;
+                            let mut idx: usize = 0;
+                            loop {
+                                let pair = match crate::object::builtin_next(&[it.clone()]) {
+                                    Ok(p) => p,
+                                    Err(crate::object::PyError::StopIteration) => break,
+                                    Err(e) => return Err(e),
+                                };
+                                let (k, v) = {
+                                    let b = pair.borrow();
+                                    match &*b {
+                                        PyObject::Tuple(v) | PyObject::List(v) if v.len() == 2 => (v[0].clone(), v[1].clone()),
+                                        PyObject::Tuple(v) | PyObject::List(v) => {
+                                            return Err(PyError::value_error(format!("dictionary update sequence element #{} has length {}; 2 is required", idx, v.len())));
+                                        }
+                                        _ => {
+                                            drop(b);
+                                            let pit = crate::object::builtin_iter(&[pair.clone()]).map_err(|_| PyError::type_error("cannot convert dictionary update sequence element to a sequence"))?;
+                                            let mut c: Vec<PyObjectRef> = Vec::new();
+                                            loop {
+                                                match crate::object::builtin_next(&[pit.clone()]) {
+                                                    Ok(val) => c.push(val),
+                                                    Err(crate::object::PyError::StopIteration) => break,
+                                                    Err(e) => return Err(e),
+                                                }
+                                                if c.len() > 2 { break; }
+                                            }
+                                            if c.len() != 2 {
+                                                return Err(PyError::value_error(format!("dictionary update sequence element #{} has length {}; 2 is required", idx, c.len())));
+                                            }
+                                            match crate::object::builtin_next(&[pit.clone()]) {
+                                                Ok(_) => return Err(PyError::value_error(format!("dictionary update sequence element #{} has length 3; 2 is required", idx))),
+                                                Err(crate::object::PyError::StopIteration) => {},
+                                                Err(e) => return Err(e),
+                                            }
+                                            (c[0].clone(), c[1].clone())
+                                        }
+                                    }
+                                };
+                                if let PyObject::Dict(d) = &mut *self_obj.borrow_mut() { d.set(k, v)?; }
+                                idx += 1;
+                            }
+                            Ok(self_obj)
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),

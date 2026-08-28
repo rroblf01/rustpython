@@ -310,6 +310,7 @@ class PrettyPrinter:
                 pass
             try:
                 if isinstance(object, _types.MappingProxyType) or type(object).__name__ == "mappingproxy":
+                    context[objid] = 1
                     self._pprint_mappingproxy(object, stream, indent, allowance, context, level + 1)
                     del context[objid]
                     return
@@ -325,10 +326,18 @@ class PrettyPrinter:
                 pass
             try:
                 if isinstance(object, (set, frozenset)):
-                    context[objid] = 1
-                    self._pprint_set(object, stream, indent, allowance, context, level + 1)
-                    del context[objid]
-                    return
+                    typ = type(object)
+                    try:
+                        r = getattr(typ, "__repr__", None)
+                    except Exception:
+                        r = None
+                    # Only pretty-print if using default set/frozenset repr
+                    # (custom __repr__ like set_custom_repr should just use repr)
+                    if r is set.__repr__ or r is frozenset.__repr__:
+                        context[objid] = 1
+                        self._pprint_set(object, stream, indent, allowance, context, level + 1)
+                        del context[objid]
+                        return
             except Exception:
                 pass
         stream.write(rep)
@@ -558,6 +567,11 @@ class PrettyPrinter:
     try:
         _dummy_mp = _types.MappingProxyType({})
         _dispatch[getattr(type(_dummy_mp), '__repr__', None)] = _pprint_mappingproxy
+    except Exception:
+        pass
+    try:
+        _dummy_mp2 = _types.MappingProxyType({})
+        _dispatch[type(_dummy_mp2)] = _pprint_mappingproxy
     except Exception:
         pass
     try:
