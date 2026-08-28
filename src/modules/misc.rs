@@ -48,6 +48,15 @@ pub use gettext::*;
 mod email_utils;
 pub use email_utils::*;
 
+mod contextlib;
+pub use contextlib::*;
+
+mod getpass;
+pub use getpass::*;
+
+mod json_tool;
+pub use json_tool::*;
+
 
 
 // ---- logging module ----
@@ -773,38 +782,7 @@ pub fn create_uuid_dict() -> HashMap<String, PyObjectRef> {
 }
 
 
-pub fn create_contextlib_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! ctx_func {
-        ($name:expr, $func:expr) => {
-            d.insert(
-                $name.to_string(),
-                PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: $name.to_string(),
-                    func: $func,
-                }),
-            );
-        };
-    }
-    ctx_func!("contextmanager", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("contextmanager() missing argument"));
-        }
-        Ok(args[0].clone())
-    });
-    ctx_func!("nullcontext", |args| {
-        if args.is_empty() {
-            Ok(py_none())
-        } else {
-            Ok(args[0].clone())
-        }
-    });
-    ctx_func!("suppress", |_| Ok(py_none()));
-    d
-}
 
-/// ContextDecorator source — see VirtualMachine::install_source_defined_stdlib.
-pub const CONTEXTLIB_SOURCE: &str = include_str!("contextlib_extra.py");
 
 pub fn create_platform_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
@@ -1134,44 +1112,7 @@ pub fn create_getopt_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-pub fn create_getpass_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! getpass_func {
-        ($name:expr, $func:expr) => {
-            d.insert(
-                $name.to_string(),
-                PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: $name.to_string(),
-                    func: $func,
-                }),
-            );
-        };
-    }
-    getpass_func!("getuser", |_| {
-        let user = std::env::var("USER")
-            .or_else(|_| std::env::var("LOGNAME"))
-            .unwrap_or_else(|_| "unknown".to_string());
-        Ok(py_str(&user))
-    });
-    getpass_func!("getpass", |args| {
-        let prompt = if args.is_empty() {
-            "Password: ".to_string()
-        } else {
-            args[0].str()
-        };
-        // In this minimal native implementation, we echo the prompt and read a line from stdin.
-        // This is simplified — a real getpass would disable terminal echo.
-        print!("{}", prompt);
-        use std::io::Write;
-        std::io::stdout().flush().ok();
-        let mut password = String::new();
-        match std::io::stdin().read_line(&mut password) {
-            Ok(_) => Ok(py_str(password.trim_end())),
-            Err(_) => Err(PyError::runtime_error("failed to read password")),
-        }
-    });
-    d
-}
+
 
 
 // ---- pickle helper functions ----
@@ -4325,43 +4266,7 @@ pub fn create_timeit_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-pub fn create_json_tool_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! jt_func {
-        ($name:expr, $func:expr) => {
-            d.insert(
-                $name.to_string(),
-                PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: $name.to_string(),
-                    func: $func,
-                }),
-            );
-        };
-    }
 
-    jt_func!("main", |_args| {
-        // Read all of stdin
-        let mut input = String::new();
-        use std::io::Read;
-        match std::io::stdin().read_to_string(&mut input) {
-            Ok(_) => {
-                // Parse JSON
-                let parsed = json_decode(&input)?;
-                // Pretty-print with indent=2
-                let formatted = json_encode_full(&parsed, Some(2), true, 0)?;
-                // Print to stdout
-                println!("{}", formatted.str());
-                Ok(py_none())
-            }
-            Err(e) => Err(PyError::runtime_error(format!(
-                "json.tool error reading stdin: {}",
-                e
-            ))),
-        }
-    });
-
-    d
-}
 
 pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
