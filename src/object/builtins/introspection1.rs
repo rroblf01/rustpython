@@ -450,8 +450,13 @@ pub fn call_bound_method(
             self_obj: s,
             ..
         } => {
-            let mut all_args = vec![s.clone()];
-            all_args.push(self_obj);
+            let mut all_args = if matches!(&*s.borrow(), PyObject::None) {
+                let mut v = vec![s.clone()];
+                v.push(self_obj);
+                v
+            } else {
+                vec![s.clone()]
+            };
             all_args.extend(args);
             f(&all_args)
         }
