@@ -332,16 +332,43 @@ impl PyObject {
             PyObject::Cell { value: None } => "None".to_string(),
             PyObject::WeakRef { target, .. } => match target.upgrade() {
                 Some(rc) => {
-                    let (tname, tptr) = {
-                        let b = rc.borrow();
-                        // Stable identity address of the target PyObject
-                        (b.type_name(), std::ptr::from_ref::<PyObject>(&*b) as usize)
+                    let (tname, tptr, suffix) = {
+                        let rc_ref = PyObjectRef::Imm(rc.clone());
+                        let name = {
+                            if let Ok(cls) = rc_ref.borrow().get_attribute("__class__") {
+                                if let Ok(n) = cls.borrow().get_attribute("__name__") {
+                                    if let PyObject::Str(s) = &*n.borrow() {
+                                        s.to_string()
+                                    } else {
+                                        rc_ref.borrow().type_name().to_string()
+                                    }
+                                } else {
+                                    rc_ref.borrow().type_name().to_string()
+                                }
+                            } else {
+                                rc_ref.borrow().type_name().to_string()
+                            }
+                        };
+                        let ptr = std::ptr::from_ref::<PyObject>(&*rc.borrow()) as usize;
+                        let suffix = {
+                            if let Ok(n) = rc_ref.borrow().get_attribute("__name__") {
+                                if let PyObject::Str(s) = &*n.borrow() {
+                                    format!(" ({})", s)
+                                } else {
+                                    String::new()
+                                }
+                            } else {
+                                String::new()
+                            }
+                        };
+                        (name, ptr, suffix)
                     };
                     format!(
-                        "<weakref at {:#x}; to '{}' at {:#x}>",
+                        "<weakref at {:#x}; to '{}' at {:#x}{}>",
                         std::ptr::from_ref::<PyObject>(self) as usize,
                         tname,
-                        tptr
+                        tptr,
+                        suffix
                     )
                 }
                 None => format!(

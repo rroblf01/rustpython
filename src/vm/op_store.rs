@@ -125,6 +125,14 @@ impl VirtualMachine {
                 // current statement) for something this common — including
                 // every test file that deliberately checks this raises via
                 // `self.assertRaises(AttributeError, setattr, x, 'attr', v)`.
+                if let PyObject::WeakProxy { target, .. } = &*obj.borrow() {
+                    if let Some(rc) = target.upgrade() {
+                        rc.borrow_mut().set_attribute(&name, val)?;
+                        return Ok(true);
+                    } else {
+                        return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                    }
+                }
                 if !matches!(&obj, PyObjectRef::Mut(_)) {
                     return Err(PyError::attribute_error(format!(
                         "'{}' object has no attribute '{}'",
@@ -238,6 +246,14 @@ impl VirtualMachine {
                 // raise a clean `AttributeError`) previously panicked the
                 // whole process instead. Same fix shape as `builtin_setattr`
                 // already applies for `setattr()`.
+                if let PyObject::WeakProxy { target, .. } = &*obj.borrow() {
+                    if let Some(rc) = target.upgrade() {
+                        rc.borrow_mut().del_attribute(&name)?;
+                        return Ok(true);
+                    } else {
+                        return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                    }
+                }
                 if !matches!(obj, PyObjectRef::Mut(_)) {
                     return Err(PyError::attribute_error(format!(
                         "'{}' object attribute '{}' is read-only",

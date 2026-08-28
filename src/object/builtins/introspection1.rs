@@ -224,6 +224,13 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             Ok(py_list(names))
         })?;
     }
+    if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
+        if let Some(rc) = target.upgrade() {
+            return builtin_dir(&[PyObjectRef::Imm(rc)]);
+        } else {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
+    }
     let obj = args[0].borrow();
     let mut names = Vec::new();
     match &*obj {

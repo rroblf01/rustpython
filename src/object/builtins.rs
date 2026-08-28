@@ -540,6 +540,27 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         Ok(PyObjectRef::imm(PyObject::Bytes(Vec::new())))
     } else {
+        if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
+            if let Some(rc) = target.upgrade() {
+                return builtin_bytes(&[PyObjectRef::Imm(rc)]);
+            } else {
+                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            }
+        }
+        {
+            let is_instance = matches!(&*args[0].borrow(), PyObject::Instance { .. });
+            if is_instance {
+                let f = {
+                    let b = args[0].borrow();
+                    if let PyObject::Instance { typ, .. } = &*b {
+                        lookup_dunder_via_mro(typ, "__bytes__")
+                    } else { None }
+                };
+                if let Some(f) = f {
+                    return call_bound_method(f, args[0].clone(), vec![]);
+                }
+            }
+        }
         // Buffer protocol: try memoryview first (e.g. bytes(MyBuffer()) where MyBuffer defines __buffer__)
         {
             let obj = args[0].clone();

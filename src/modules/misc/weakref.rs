@@ -51,7 +51,10 @@ fn find_shared_weakref(target: usize) -> Option<PyObjectRef> {
             for e in vec.iter() {
                 if e.callback.is_none() {
                     if let Some(rc) = e.weakref.upgrade() {
-                        return Some(PyObjectRef::Imm(rc));
+                        let b = rc.borrow();
+                        if matches!(&*b, PyObject::WeakRef { .. }) {
+                            return Some(PyObjectRef::Imm(rc.clone()));
+                        }
                     }
                 }
             }
@@ -182,6 +185,16 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("ref() requires at least 1 argument"));
         }
+        if args.len() == 2 {
+            if let PyObject::Dict(d) = &*args[1].borrow() {
+                if d.contains(&py_str("callback")).unwrap_or(false) {
+                    return Err(PyError::type_error("ref() takes no keyword arguments"));
+                }
+            }
+        }
+        if args.len() > 2 {
+            return Err(PyError::type_error(format!("ref() takes at most 2 arguments ({} given)", args.len())));
+        }
         let obj = &args[0];
         if !is_weakrefable(obj) {
             return Err(PyError::type_error(format!(
@@ -202,7 +215,7 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
             PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => std::rc::Rc::downgrade(rc),
             _ => unreachable!(),
         };
-        let wr = PyObjectRef::imm(PyObject::WeakRef { target, callback: callback.clone() });
+        let wr = PyObjectRef::imm(PyObject::WeakRef { target, callback: callback.clone(), hash_cache: std::cell::RefCell::new(None) });
         register_weakref(tptr, &wr, callback);
         Ok(wr)
     });
@@ -210,6 +223,16 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
     wr_func!("proxy", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("proxy() requires at least 1 argument"));
+        }
+        if args.len() == 2 {
+            if let PyObject::Dict(d) = &*args[1].borrow() {
+                if d.contains(&py_str("callback")).unwrap_or(false) {
+                    return Err(PyError::type_error("proxy() takes no keyword arguments"));
+                }
+            }
+        }
+        if args.len() > 2 {
+            return Err(PyError::type_error(format!("proxy() takes at most 2 arguments ({} given)", args.len())));
         }
         let obj = &args[0];
         if !is_weakrefable(obj) {
@@ -351,10 +374,25 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
         }))
     });
 
-    // Type constants
-    d.insert_str("ReferenceType", py_str("weakref"));
-    d.insert_str("ProxyType", py_str("weakproxy"));
-    d.insert_str("CallableProxyType", py_str("weakcallableproxy"));
+    // Type constants - as real Type objects so type(proxy) is ProxyType etc
+    {
+        let ref_type = PyObjectRef::new(PyObject::Type { name: "weakref".to_string(), dict: Box::new(TypeDict::default()), bases: vec![], mro: vec![] });
+        if let PyObject::Type { mro, .. } = &mut *ref_type.borrow_mut() { *mro = vec![ref_type.clone()]; }
+        crate::object::seed_primitive_type_cache("weakref", ref_type.clone());
+        d.insert_str("ReferenceType", ref_type);
+    }
+    {
+        let proxy_type = PyObjectRef::new(PyObject::Type { name: "weakproxy".to_string(), dict: Box::new(TypeDict::default()), bases: vec![], mro: vec![] });
+        if let PyObject::Type { mro, .. } = &mut *proxy_type.borrow_mut() { *mro = vec![proxy_type.clone()]; }
+        crate::object::seed_primitive_type_cache("weakproxy", proxy_type.clone());
+        d.insert_str("ProxyType", proxy_type);
+    }
+    {
+        let cproxy_type = PyObjectRef::new(PyObject::Type { name: "weakcallableproxy".to_string(), dict: Box::new(TypeDict::default()), bases: vec![], mro: vec![] });
+        if let PyObject::Type { mro, .. } = &mut *cproxy_type.borrow_mut() { *mro = vec![cproxy_type.clone()]; }
+        crate::object::seed_primitive_type_cache("weakcallableproxy", cproxy_type.clone());
+        d.insert_str("CallableProxyType", cproxy_type);
+    }
 
     // Internal function used by weakrefset: _remove_dead_weakref(dict, key)
     wr_func!("_remove_dead_weakref", |args| {

@@ -73,6 +73,12 @@ pub fn dict_method_get(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 {
         return Err(PyError::type_error("get() requires at least 1 argument"));
     }
+    if args.len() > 3 {
+        return Err(PyError::type_error(format!("get expected at most 2 arguments, got {}", args.len() - 1)));
+    }
+    if args.len() > 3 {
+        return Err(PyError::type_error(format!("get expected at most 2 arguments, got {}", args.len() - 1)));
+    }
     match resolve_dict_like(&args[0]) {
         Some(d) => {
             if let PyObject::Dict(pd) = &*d.borrow() {
@@ -96,6 +102,12 @@ pub fn dict_method_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("__iter__ requires self"));
     }
+    if args.len() > 1 {
+        return Err(PyError::type_error(format!("__iter__() takes no arguments ({} given)", args.len() - 1)));
+    }
+    if args.len() > 1 {
+        return Err(PyError::type_error(format!("__iter__() takes no arguments ({} given)", args.len() - 1)));
+    }
     match resolve_dict_like(&args[0]) {
         Some(d) => {
             let keys = if let PyObject::Dict(pd) = &*d.borrow() {
@@ -118,6 +130,12 @@ pub fn dict_method_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 pub fn dict_method_items(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("items() requires self"));
+    }
+    if args.len() > 1 {
+        return Err(PyError::type_error(format!("items() takes no arguments ({} given)", args.len() - 1)));
+    }
+    if args.len() > 1 {
+        return Err(PyError::type_error(format!("items() takes no arguments ({} given)", args.len() - 1)));
     }
     // Handle native dicts directly
     if let Some(d) = resolve_dict_like(&args[0]) {
@@ -164,6 +182,12 @@ pub fn dict_method_keys(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("keys() requires self"));
     }
+    if args.len() > 1 {
+        return Err(PyError::type_error(format!("keys() takes no arguments ({} given)", args.len() - 1)));
+    }
+    if args.len() > 1 {
+        return Err(PyError::type_error(format!("keys() takes no arguments ({} given)", args.len() - 1)));
+    }
     match resolve_dict_like(&args[0]) {
         Some(d) => {
             let keys = if let PyObject::Dict(pd) = &*d.borrow() {
@@ -181,6 +205,12 @@ pub fn dict_method_keys(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 pub fn dict_method_values(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("values() requires self"));
+    }
+    if args.len() > 1 {
+        return Err(PyError::type_error(format!("values() takes no arguments ({} given)", args.len() - 1)));
+    }
+    if args.len() > 1 {
+        return Err(PyError::type_error(format!("values() takes no arguments ({} given)", args.len() - 1)));
     }
     match resolve_dict_like(&args[0]) {
         Some(d) => {

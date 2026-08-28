@@ -16,6 +16,19 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                 match name {
                     "pattern" => Ok(py_str(&pat)),
                     "flags" => Ok(py_int(fl as i64)),
+                    "groups" => {
+                        let n = re.capture_names().count().saturating_sub(1);
+                        Ok(py_int(n as i64))
+                    }
+                    "groupindex" => {
+                        let mut d = PyDict::new();
+                        for (i, name) in re.capture_names().enumerate() {
+                            if let Some(name) = name {
+                                let _ = d.set(py_str(name), py_int(i as i64));
+                            }
+                        }
+                        Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
+                    }
                     // `match`/`search`/`fullmatch` used to return a bare
                     // `(start, end, matched_text)` tuple instead of a real
                     // `Match` object — no `.group(n)`/`.groups()`/etc. at
@@ -47,14 +60,15 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             let string = args[0].str();
                             let pos =
                                 args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize;
+                            let endpos = args.get(2).and_then(|a| a.as_i64()).unwrap_or(string.len() as i64).max(0) as usize;
                             let caps = re
                                 .captures_from_pos(&string, pos.min(string.len()))
                                 .unwrap_or(None);
                             let result = match caps {
-                                Some(c) if c.get(0).map(|m| m.start()) == Some(pos) => Some(c),
+                                Some(c) if c.get(0).map(|m| m.start()) == Some(pos) && c.get(0).map(|m| m.end() <= endpos.min(string.len())).unwrap_or(false) => Some(c),
                                 _ => None,
                             };
-                            Ok(crate::modules::make_match_object(&re, result))
+                            Ok(crate::modules::make_match_object_detailed(&re, result, &string, &pat, fl, pos, endpos.min(string.len())))
                         },
                     )))),
                     "search" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(
@@ -67,10 +81,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             let string = args[0].str();
                             let pos =
                                 args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize;
+                            let endpos = args.get(2).and_then(|a| a.as_i64()).unwrap_or(string.len() as i64).max(0) as usize;
                             let caps = re
                                 .captures_from_pos(&string, pos.min(string.len()))
                                 .unwrap_or(None);
-                            Ok(crate::modules::make_match_object(&re, caps))
+                            let filtered = caps.filter(|c| c.get(0).map(|m| m.end() <= endpos.min(string.len())).unwrap_or(false));
+                            Ok(crate::modules::make_match_object_detailed(&re, filtered, &string, &pat, fl, pos, endpos.min(string.len())))
                         },
                     )))),
                     "findall" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(
@@ -100,7 +116,10 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             let matches: Vec<PyObjectRef> = re
                                 .captures_iter(&string)
                                 .filter_map(|r| r.ok())
-                                .map(|c| crate::modules::make_match_object(&re, Some(c)))
+                                .map(|c| {
+                                    let start = c.get(0).map(|m| m.start()).unwrap_or(0);
+                                    crate::modules::make_match_object_detailed(&re, Some(c), &string, &pat, fl, start, string.len())
+                                })
                                 .collect();
                             Ok(py_list(matches))
                         },
@@ -150,7 +169,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 result.push_str(&string[last_end..m_start]);
                                 if is_callable_repl {
                                     let match_obj =
-                                        crate::modules::make_match_object(&re, Some(caps));
+                                        crate::modules::make_match_object_detailed(&re, Some(caps), &string, &pat, fl, m_start, string.len());
                                     let replaced =
                                         call_bound_method(args[0].clone(), match_obj, vec![])?;
                                     result.push_str(&replaced.str());
@@ -230,7 +249,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     .map(|m| m.start() == 0 && m.end() == string.len())
                                     .unwrap_or(false)
                             });
-                            Ok(crate::modules::make_match_object(&re, caps))
+                            Ok(crate::modules::make_match_object_detailed(&re, caps, &string, &pat, fl, 0, string.len()))
                         },
                     )))),
                     "subn" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(
@@ -273,7 +292,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 result.push_str(&string[last_end..m_start]);
                                 if is_callable_repl {
                                     let match_obj =
-                                        crate::modules::make_match_object(&re, Some(caps));
+                                        crate::modules::make_match_object_detailed(&re, Some(caps), &string, &pat, fl, m_start, string.len());
                                     let replaced =
                                         call_bound_method(args[0].clone(), match_obj, vec![])?;
                                     result.push_str(&replaced.str());
@@ -331,7 +350,8 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                                     if let PyObject::Instance{ dict, .. } = &mut *self_obj.borrow_mut() {
                                                         dict.insert_str("_pos", py_int(new_pos as i64));
                                                     }
-                                                    return Ok(crate::modules::make_match_object(&re_clone, Some(caps)));
+                                                    let (pat2, fl2) = if let PyObject::CompiledRegex{ pattern, flags, .. } = &*re_v.borrow() { (pattern.clone(), *flags) } else { (String::new(), 0) };
+                                                    return Ok(crate::modules::make_match_object_detailed(&re_clone, Some(caps), &s, &pat2, fl2, m.start(), s.len()));
                                                 }
                                             }
                                         }
@@ -366,7 +386,8 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                                     if let PyObject::Instance{ dict, .. } = &mut *self_obj.borrow_mut() {
                                                         dict.insert_str("_pos", py_int(new_pos as i64));
                                                     }
-                                                    return Ok(crate::modules::make_match_object(&re_clone, Some(caps)));
+                                                    let (pat2, fl2) = if let PyObject::CompiledRegex{ pattern, flags, .. } = &*re_v.borrow() { (pattern.clone(), *flags) } else { (String::new(), 0) };
+                                                    return Ok(crate::modules::make_match_object_detailed(&re_clone, Some(caps), &s, &pat2, fl2, m.start(), s.len()));
                                                 }
                                             }
                                         }

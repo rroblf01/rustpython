@@ -11,6 +11,9 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     "keys" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "keys".to_string(),
                         func: |args| {
+                            if args.len() > 1 {
+                                return Err(PyError::type_error(format!("keys() takes no arguments ({} given)", args.len() - 1)));
+                            }
                             let d = args[0].borrow();
                             if let PyObject::Dict(dict) = &*d {
                                 return Ok(crate::object::pydict::make_dict_view(
@@ -33,6 +36,9 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     "values" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "values".to_string(),
                         func: |args| {
+                            if args.len() > 1 {
+                                return Err(PyError::type_error(format!("values() takes no arguments ({} given)", args.len() - 1)));
+                            }
                             let d = args[0].borrow();
                             if let PyObject::Dict(dict) = &*d {
                                 return Ok(crate::object::pydict::make_dict_view(
@@ -52,6 +58,9 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     "items" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "items".to_string(),
                         func: |args| {
+                            if args.len() > 1 {
+                                return Err(PyError::type_error(format!("items() takes no arguments ({} given)", args.len() - 1)));
+                            }
                             let d = args[0].borrow();
                             if let PyObject::Dict(_dict) = &*d {
                                 return Ok(crate::object::pydict::make_dict_view(
@@ -81,6 +90,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         func: |args| {
                             if args.len() < 2 {
                                 return Err(PyError::type_error("get() takes at least 1 argument"));
+                            }
+                            if args.len() > 3 {
+                                return Err(PyError::type_error(format!("get expected at most 2 arguments, got {}", args.len() - 1)));
+                            }
+                            if args.len() > 3 {
+                                return Err(PyError::type_error(format!("get expected at most 2 arguments, got {}", args.len() - 1)));
                             }
                             let dict = &*args[0].borrow();
                             if let PyObject::Dict(d) = dict {

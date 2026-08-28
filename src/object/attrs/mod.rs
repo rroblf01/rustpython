@@ -146,10 +146,53 @@ impl PyObject {
             PyObject::Complex(_, _) => return complex::get(self, name),
             PyObject::WeakProxy { target, .. } => {
                 if let Some(rc) = target.upgrade() {
-                    let t = PyObjectRef::Imm(rc);
-                    return t.borrow().get_attribute(name);
+                    return rc.borrow().get_attribute(name);
                 } else {
                     return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                }
+            }
+            PyObject::WeakRef { callback, target, .. } => {
+                match name {
+                    "__callback__" => {
+                        if target.upgrade().is_none() {
+                            return Ok(py_none());
+                        }
+                        return Ok(callback.clone().unwrap_or_else(py_none));
+                    }
+                    "__init__" => {
+                        return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                            name: "__init__".to_string(),
+                            func: |args| {
+                                if args.len() > 1 {
+                                    return Err(PyError::type_error(format!("__init__() takes at most 1 argument ({} given)", args.len() - 1)));
+                                }
+                                Ok(py_none())
+                            },
+                            self_obj: PyObjectRef::new(self.clone()),
+                        }));
+                    }
+                    "__call__" => {
+                        return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                            name: "__call__".to_string(),
+                            func: |args| {
+                                if let PyObject::WeakRef { target, .. } = &*args[0].borrow() {
+                                    return Ok(match target.upgrade() {
+                                        Some(rc) => PyObjectRef::Imm(rc),
+                                        None => {
+                                            if let Some(default) = args.get(1) {
+                                                default.clone()
+                                            } else {
+                                                py_none()
+                                            }
+                                        }
+                                    });
+                                }
+                                Err(PyError::runtime_error("__call__ on non-weakref"))
+                            },
+                            self_obj: PyObjectRef::new(self.clone()),
+                        }));
+                    }
+                    _ => return Err(PyError::attribute_error(format!("'weakref' object has no attribute '{}'", name))),
                 }
             }
             PyObject::Module { .. } => return module_obj::get(self, name),
@@ -906,10 +949,15 @@ impl ObjectAccess for PyObject {
                 // don't track those fields anywhere.
                 Ok(())
             }
+            PyObject::WeakRef { .. } => {
+                return Err(PyError::attribute_error(format!(
+                    "'weakref' object attribute '{}' is read-only",
+                    name
+                )));
+            }
             PyObject::WeakProxy { target, .. } => {
                 if let Some(rc) = target.upgrade() {
-                    let t = PyObjectRef::Imm(rc);
-                    return t.borrow_mut().set_attribute(name, value);
+                    return rc.borrow_mut().set_attribute(name, value);
                 } else {
                     return Err(PyError::reference_error("weakly-referenced object no longer exists"));
                 }
@@ -961,8 +1009,7 @@ impl ObjectAccess for PyObject {
             }
             PyObject::WeakProxy { target, .. } => {
                 if let Some(rc) = target.upgrade() {
-                    let t = PyObjectRef::Imm(rc);
-                    return t.borrow_mut().del_attribute(name);
+                    return rc.borrow_mut().del_attribute(name);
                 } else {
                     return Err(PyError::reference_error("weakly-referenced object no longer exists"));
                 }

@@ -406,9 +406,11 @@ pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // `bool(x=10)` -> TypeError (kwargs arrive as a trailing dict).
-    if let Some(last) = args.last() {
-        if matches!(&*last.borrow(), PyObject::Dict(_)) {
-            return Err(PyError::type_error("bool() takes no keyword arguments"));
+    if args.len() > 1 {
+        if let Some(last) = args.last() {
+            if matches!(&*last.borrow(), PyObject::Dict(_)) {
+                return Err(PyError::type_error("bool() takes no keyword arguments"));
+            }
         }
     }
     if args.len() > 1 {

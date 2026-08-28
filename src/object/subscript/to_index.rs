@@ -2,6 +2,13 @@
 use super::*;
 
 pub fn to_index(obj: &PyObjectRef) -> PyResult<BigInt> {
+    if let PyObject::WeakProxy { target, .. } = &*obj.borrow() {
+        if let Some(rc) = target.upgrade() {
+            return to_index(&PyObjectRef::Imm(rc));
+        } else {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
+    }
     let type_name = obj.get_type_name();
     let is_instance = matches!(&*obj.borrow(), PyObject::Instance { .. });
     if is_instance {

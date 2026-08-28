@@ -164,8 +164,7 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                 },
                 "quoting" => {
                     if let Some(n) = v.as_i64() { base.quoting = n; } else { return Err(PyError::type_error("quoting must be int")); }
-                    // Validate quotechar for non-QUOTE_NONE
-                    if base.quoting != 3 && base.quotechar.is_none() {
+                    if (base.quoting == 1 || base.quoting == 2 || base.quoting == 4 || base.quoting == 5) && base.quotechar.is_none() {
                         return Err(PyError::type_error("quotechar must be set if quoting is not QUOTE_NONE"));
                     }
                 },
@@ -185,7 +184,7 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
             if let Some(e) = base.escapechar { if e==' ' { return Err(PyError::value_error("escapechar must not be space with skipinitialspace")); } }
             if let Some(q) = base.quotechar { if q==' ' { return Err(PyError::value_error("quotechar must not be space with skipinitialspace")); } }
         }
-        if base.quoting != 3 && base.quotechar.is_none() {
+        if (base.quoting == 1 || base.quoting == 2 || base.quoting == 4 || base.quoting == 5) && base.quotechar.is_none() {
             return Err(PyError::type_error("quotechar must be set if quoting is not QUOTE_NONE"));
         }
         if base.lineterminator.contains(base.delimiter) { return Err(PyError::value_error("lineterminator must not contain delimiter")); }
@@ -1060,6 +1059,26 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
     csv_func!("writer", |args| {
         if args.is_empty() { return Err(PyError::type_error("writer() missing required argument")); }
         let fileobj = args[0].clone();
+        // Check if write is a property whose getter raises (e.g. BadWriter)
+        if let PyObject::Instance { typ, .. } = &*fileobj.borrow() {
+            if let Some(prop) = crate::object::lookup_dunder_via_mro(typ, "write") {
+                if prop.borrow().type_name() == "property" {
+                    if let Ok(fget) = prop.borrow().get_attribute("fget") {
+                        if !matches!(&*fget.borrow(), PyObject::None) {
+                            let res = crate::object::with_vm_mut(|vm| crate::object::call_function_disposable(&fget, vec![fileobj.clone()], vec![]));
+                            match res {
+                                Ok(Err(e)) => return Err(e),
+                                Err(e) => return Err(e),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if matches!(&*fileobj.borrow(), PyObject::None) {
+            return Err(PyError::type_error("argument 1 must have a \"write\" method"));
+        }
         let has_write = fileobj.borrow().get_attribute("write").is_ok();
         if !has_write {
             let has_getattr = {
@@ -1069,7 +1088,7 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                 } else { false }
             };
             if !has_getattr {
-                return Err(PyError::AttributeError("'instance' object has no attribute 'write'".to_string()));
+                return Err(PyError::type_error("argument 1 must have a \"write\" method"));
             }
         }
         let (dialect_arg, kwargs) = extract_kwargs(args, 1);
@@ -1310,9 +1329,9 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
         if lineterm_str.contains(delim_ch) { return Err(PyError::value_error("lineterminator must not contain delimiter")); }
         if let Some(q) = quote_ch_opt { if lineterm_str.contains(q) { return Err(PyError::value_error("lineterminator must not contain quotechar")); } }
         if let Some(e) = escape_ch_opt { if lineterm_str.contains(e) { return Err(PyError::value_error("lineterminator must not contain escapechar")); } }
-        // quoting requires quotechar if not QUOTE_NONE
+        // quoting requires quotechar if not QUOTE_NONE and not QUOTE_MINIMAL
         let quoting_n = quoting_val.as_i64().unwrap_or(0);
-        if quoting_n != 3 && quote_ch_opt.is_none() {
+        if (quoting_n == 1 || quoting_n == 2 || quoting_n == 4 || quoting_n == 5) && quote_ch_opt.is_none() {
             return Err(PyError::type_error("quotechar must be set if quoting is not QUOTE_NONE"));
         }
         // invalid chars for delimiter/quote/escape already handled for \n \r, but also need to handle \n \r as ValueError for those fields when set to that
@@ -1941,6 +1960,7 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
             checked += 1;
             if row.len() != columns { continue; }
             for col in 0..columns {
+                if !column_types.contains_key(&col) { continue; }
                 let val_str = row[col].str();
                 // try to determine type: attempt complex/float
                 let this_type = if val_str.parse::<f64>().is_ok() || val_str.contains('j') || val_str.contains('J') {
@@ -1948,12 +1968,13 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                 } else {
                     format!("len:{}", val_str.len())
                 };
-                let entry = column_types.get_mut(&col).unwrap();
-                if entry.is_none() {
-                    *entry = Some(this_type);
-                } else if entry.as_ref().unwrap() != &this_type {
-                    // inconsistent, remove
-                    column_types.remove(&col);
+                if let Some(entry) = column_types.get_mut(&col) {
+                    if entry.is_none() {
+                        *entry = Some(this_type);
+                    } else if entry.as_ref().unwrap() != &this_type {
+                        // inconsistent, remove
+                        column_types.remove(&col);
+                    }
                 }
             }
             // need to handle removal during iteration - we collected keys beforehand

@@ -662,11 +662,21 @@ impl PyObjectRef {
     }
 
     pub fn hash(&self) -> PyResult<usize> {
-        if let PyObject::WeakProxy { target, .. } = &*self.borrow() {
+        if let PyObject::WeakProxy { .. } = &*self.borrow() {
+            return Err(PyError::type_error("unhashable type: 'weakproxy'"));
+        }
+        if let PyObject::WeakRef { target, hash_cache, .. } = &*self.borrow() {
             if let Some(rc) = target.upgrade() {
-                return PyObjectRef::Imm(rc).hash();
+                let h = PyObjectRef::Imm(rc.clone()).hash()?;
+                if hash_cache.borrow().is_none() {
+                    *hash_cache.borrow_mut() = Some(h);
+                }
+                return Ok(h);
             } else {
-                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                if let Some(h) = *hash_cache.borrow() {
+                    return Ok(h);
+                }
+                return Err(PyError::type_error("weak object has gone away"));
             }
         }
         match self {

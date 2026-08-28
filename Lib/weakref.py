@@ -132,6 +132,12 @@ class WeakValueDictionary(_collections_abc.MutableMapping):
     def __repr__(self):
         return "<%s at %#x>" % (self.__class__.__name__, id(self))
 
+    def __bool__(self):
+        return len(self) != 0
+
+    def clear(self):
+        self.data.clear()
+
     def __setitem__(self, key, value):
         def _cb(wr, selfref=ref(self), k=key):
             self = selfref()
@@ -368,6 +374,12 @@ class WeakKeyDictionary(_collections_abc.MutableMapping):
 
     def __repr__(self):
         return "<%s at %#x>" % (self.__class__.__name__, id(self))
+
+    def __bool__(self):
+        return len(self) != 0
+
+    def clear(self):
+        self.data.clear()
 
     def __setitem__(self, key, value):
         wid = id(key)

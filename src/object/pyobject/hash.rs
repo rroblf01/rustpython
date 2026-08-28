@@ -167,12 +167,22 @@ impl PyObject {
             // object_with_only___getitem__)` (this interpreter's own
             // `GetItemIter`), and `iter(callable, sentinel)` (`
             // CallSentinelIter`).
-            PyObject::WeakProxy { target, .. } => {
+            PyObject::WeakRef { target, hash_cache, .. } => {
                 if let Some(rc) = target.upgrade() {
-                    return PyObjectRef::Imm(rc).hash();
+                    let h = PyObjectRef::Imm(rc.clone()).hash()?;
+                    if hash_cache.borrow().is_none() {
+                        *hash_cache.borrow_mut() = Some(h);
+                    }
+                    return Ok(h);
                 } else {
-                    return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                    if let Some(h) = *hash_cache.borrow() {
+                        return Ok(h);
+                    }
+                    return Err(PyError::type_error("weak object has gone away"));
                 }
+            }
+            PyObject::WeakProxy { .. } => {
+                return Err(PyError::type_error("unhashable type: 'weakproxy'"));
             }
             PyObject::Function(_)
             | PyObject::BuiltinFunction { .. }
@@ -187,8 +197,6 @@ impl PyObject {
             | PyObject::RangeIter { .. }
             | PyObject::DequeIter { .. }
             | PyObject::DequeRevIter { .. }
-            | PyObject::WeakRef { .. }
-            | PyObject::WeakProxy { .. }
             | PyObject::MapIterator { .. }
             | PyObject::FilterIterator { .. }
             | PyObject::ZipIterator { .. }

@@ -7,6 +7,13 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("len() takes exactly one argument"));
     }
+    if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
+        if let Some(rc) = target.upgrade() {
+            return builtin_len(&[PyObjectRef::Imm(rc)]);
+        } else {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
+    }
     let obj = args[0].borrow();
     match &*obj {
         PyObject::Str(s) => Ok(py_int(s.chars().count())),

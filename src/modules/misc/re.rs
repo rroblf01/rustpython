@@ -189,7 +189,144 @@ fn escape_leading_bracket_in_class(pattern: &str) -> String {
 /// extremely common idiom — e.g. Django's own `camel_case_to_spaces`:
 /// `re_camel_case.sub(r" \1", value)`) silently emits the backreference
 /// syntax itself instead of the captured text.
-pub(crate) fn translate_python_replacement(repl: &str) -> String {
+fn count_capturing_groups(pattern: &str) -> usize {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut count = 0usize;
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            i += 2;
+            continue;
+        }
+        if chars[i] == '[' {
+            i += 1;
+            while i < chars.len() && chars[i] != ']' {
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            if i < chars.len() {
+                i += 1;
+            }
+            continue;
+        }
+        if chars[i] == '(' {
+            if i + 1 < chars.len() && chars[i + 1] == '?' {
+                if i + 3 < chars.len() && chars[i + 2] == 'P' && chars[i + 3] == '<' {
+                    count += 1;
+                }
+            } else {
+                count += 1;
+            }
+        }
+        i += 1;
+    }
+    count
+}
+
+fn translate_pattern_backrefs_and_octal(pattern: &str) -> String {
+    let num_groups = count_capturing_groups(pattern);
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = String::with_capacity(pattern.len());
+    let mut i = 0;
+    let mut in_class = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            let nxt = chars[i + 1];
+            if nxt.is_ascii_digit() && !in_class {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+                let digits: String = chars[i + 1..j].iter().collect();
+                if digits.starts_with('0') {
+                    let mut k = i + 1;
+                    let mut oct_digits = String::new();
+                    let mut cnt = 0;
+                    while k < chars.len() && cnt < 3 && chars[k].is_digit(8) {
+                        oct_digits.push(chars[k]);
+                        k += 1;
+                        cnt += 1;
+                    }
+                    if !oct_digits.is_empty() {
+                        if let Ok(val) = u32::from_str_radix(&oct_digits, 8) {
+                            if val <= 0o377 {
+                                out.push_str(&format!("\\x{{{:x}}}", val));
+                                i = k;
+                                for idx in k..j {
+                                    out.push(chars[idx]);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    out.push(c);
+                    out.push(nxt);
+                    i += 2;
+                    continue;
+                }
+                if digits.len() == 3 && digits.chars().all(|ch| ch.is_digit(8)) {
+                    if let Ok(val) = u32::from_str_radix(&digits, 8) {
+                        if val <= 0o377 {
+                            out.push_str(&format!("\\x{{{:x}}}", val));
+                            i = j;
+                            continue;
+                        }
+                    }
+                }
+                let num: usize = digits.parse().unwrap_or(0);
+                if num != 0 && num <= num_groups {
+                    out.push(c);
+                    out.extend(digits.chars());
+                    i = j;
+                    continue;
+                } else if num > num_groups && num_groups > 0 {
+                    let mut found = None;
+                    for len in (1..digits.len()).rev() {
+                        if let Ok(prefix) = digits[..len].parse::<usize>() {
+                            if prefix != 0 && prefix <= num_groups {
+                                found = Some(len);
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(len) = found {
+                        out.push_str(&format!("\\g<{}>", &digits[..len]));
+                        out.extend(digits[len..].chars());
+                        i = j;
+                        continue;
+                    }
+                }
+                out.push(c);
+                out.extend(digits.chars());
+                i = j;
+                continue;
+            } else {
+                out.push(c);
+                if i + 1 < chars.len() {
+                    out.push(chars[i + 1]);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+        }
+        if !in_class && c == '[' {
+            in_class = true;
+        } else if in_class && c == ']' {
+            in_class = false;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+pub fn translate_python_replacement(repl: &str) -> String {
     let chars: Vec<char> = repl.chars().collect();
     let mut out = String::with_capacity(repl.len());
     let mut i = 0;
@@ -233,6 +370,104 @@ pub(crate) fn translate_python_replacement(repl: &str) -> String {
     out
 }
 
+fn validate_g_template(repl: &str, re: &fancy_regex::Regex) -> PyResult<()> {
+    let chars: Vec<char> = repl.chars().collect();
+    let mut i = 0;
+    let n_groups = re.capture_names().count().saturating_sub(1);
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            let nxt = chars[i + 1];
+            if nxt == 'g' {
+                if i + 2 >= chars.len() || chars[i + 2] != '<' {
+                    return Err(re_pattern_error("missing <".to_string(), Some(repl.to_string()), Some(2)));
+                }
+                let mut j = i + 3;
+                while j < chars.len() && chars[j] != '>' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    return Err(re_pattern_error("missing >, unterminated name".to_string(), Some(repl.to_string()), Some(3)));
+                }
+                let name: String = chars[i + 3..j].iter().collect();
+                if name.is_empty() {
+                    return Err(re_pattern_error("missing group name".to_string(), Some(repl.to_string()), Some(3)));
+                }
+                let mut bad = false;
+                for (idx, ch) in name.chars().enumerate() {
+                    if idx == 0 && ch.is_ascii_digit() {
+                        if let Ok(num) = name.parse::<usize>() {
+                            if num == 0 || num > n_groups {
+                                return Err(re_pattern_error(format!("invalid group reference {}", num), Some(repl.to_string()), Some(3)));
+                            }
+                        } else {
+                            bad = true;
+                        }
+                        break;
+                    }
+                    if !(ch.is_alphanumeric() || ch == '_') {
+                        bad = true;
+                        break;
+                    }
+                }
+                if name.contains(' ') || name.contains('<') || name.contains('>') {
+                    bad = true;
+                }
+                if bad {
+                    return Err(re_pattern_error(format!("bad character in group name '{}'", name), Some(repl.to_string()), Some(3)));
+                }
+                i = j + 1;
+                continue;
+            } else if nxt.is_ascii_digit() {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+                let num_str: String = chars[i + 1..j].iter().collect();
+                if num_str.starts_with('0') {
+                    i = j;
+                    continue;
+                }
+                if let Ok(num) = num_str.parse::<usize>() {
+                    if num == 0 || num > n_groups {
+                        return Err(re_pattern_error(format!("invalid group reference {}", num), Some(repl.to_string()), Some(1)));
+                    }
+                }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+fn map_regex_error(msg: &str) -> String {
+    let lower = msg.to_lowercase();
+    if lower.contains("invalid back reference") {
+        if let Some(pos) = lower.find("group") {
+            let num_part = msg[pos + 5..].trim();
+            let num: String = num_part.chars().filter(|c| c.is_ascii_digit()).collect();
+            if !num.is_empty() {
+                return format!("invalid group reference {}", num);
+            }
+        }
+        return "invalid group reference".to_string();
+    }
+    if lower.contains("unclosed character class") || lower.contains("unterminated character set") {
+        return "unterminated character set".to_string();
+    }
+    if lower.contains("unmatched") && lower.contains("parenthesis") {
+        if lower.contains("unclosed") {
+            return "missing ), unterminated subpattern".to_string();
+        }
+        return "unbalanced parenthesis".to_string();
+    }
+    if lower.contains("nothing to repeat") || lower.contains("repetition operator missing") {
+        return "nothing to repeat".to_string();
+    }
+    msg.to_string()
+}
+
 fn compile_python_regex(pattern: &str) -> Result<fancy_regex::Regex, fancy_regex::Error> {
     compile_python_regex_flags(pattern, 0)
 }
@@ -255,6 +490,7 @@ fn compile_python_regex_flags(
 ) -> Result<fancy_regex::Regex, fancy_regex::Error> {
     let pattern = escape_loose_braces(pattern);
     let pattern = escape_leading_bracket_in_class(&pattern);
+    let pattern = translate_pattern_backrefs_and_octal(&pattern);
     let mut inline = String::new();
     if flags & 2 != 0 {
         inline.push('i');
@@ -322,9 +558,21 @@ fn resolve_group_arg(obj: &PyObjectRef, arg: Option<&PyObjectRef>) -> Option<usi
 /// `html.parser`/`_markupbase`'s tokenizer, which relies on named/indexed
 /// groups throughout (`tagfind_tolerant`, `attrfind_tolerant`, etc.).
 /// Returns `py_none()` if the regex didn't match.
-pub(crate) fn make_match_object(
+pub fn make_match_object(
     re: &fancy_regex::Regex,
     caps: Option<fancy_regex::Captures<'_>>,
+) -> PyObjectRef {
+    make_match_object_detailed(re, caps, "", "", 0, 0, 0)
+}
+
+pub fn make_match_object_detailed(
+    re: &fancy_regex::Regex,
+    caps: Option<fancy_regex::Captures<'_>>,
+    original_string: &str,
+    pattern: &str,
+    flags: i32,
+    pos: usize,
+    endpos: usize,
 ) -> PyObjectRef {
     match caps {
         Some(caps) => {
@@ -604,11 +852,117 @@ pub(crate) fn make_match_object(
                 }),
             );
 
+            type_dict.insert_str(
+                "expand",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "expand".to_string(),
+                    func: |args| {
+                        if args.len() < 2 {
+                            return Err(PyError::type_error("expand() takes at least 2 arguments"));
+                        }
+                        let self_obj = &args[0];
+                        let template = args[1].str();
+                        let translated = translate_python_replacement(&template);
+                        let group_texts = self_obj
+                            .borrow()
+                            .get_attribute("_groups_text")
+                            .unwrap_or_else(|_| py_tuple(vec![]));
+                        let names = self_obj
+                            .borrow()
+                            .get_attribute("_group_names")
+                            .unwrap_or_else(|_| PyObjectRef::new(PyObject::Dict(Box::new(crate::object::PyDict::new()))));
+                        let mut result = String::new();
+                        let chars: Vec<char> = translated.chars().collect();
+                        let mut i = 0;
+                        while i < chars.len() {
+                            if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+                                let mut j = i + 2;
+                                while j < chars.len() && chars[j] != '}' {
+                                    j += 1;
+                                }
+                                let key: String = chars[i + 2..j].iter().collect();
+                                let val = if let Ok(idx) = key.parse::<usize>() {
+                                    if let PyObject::Tuple(items) = &*group_texts.borrow() {
+                                        items.get(idx).cloned().unwrap_or_else(py_none)
+                                    } else {
+                                        py_none()
+                                    }
+                                } else {
+                                    let names_b = names.borrow();
+                                    if let PyObject::Dict(d) = &*names_b {
+                                        if let Some(v) = d.get(&py_str(&key)).ok().flatten().and_then(|v| v.as_i64()) {
+                                            if let PyObject::Tuple(items) = &*group_texts.borrow() {
+                                                items.get(v as usize).cloned().unwrap_or_else(py_none)
+                                            } else {
+                                                py_none()
+                                            }
+                                        } else {
+                                            py_none()
+                                        }
+                                    } else {
+                                        py_none()
+                                    }
+                                };
+                                if !matches!(&*val.borrow(), PyObject::None) {
+                                    result.push_str(&val.str());
+                                }
+                                i = if j < chars.len() { j + 1 } else { j };
+                            } else if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '$' {
+                                result.push('$');
+                                i += 2;
+                            } else {
+                                result.push(chars[i]);
+                                i += 1;
+                            }
+                        }
+                        Ok(py_str(&result))
+                    },
+                }),
+            );
+
+            type_dict.insert_str(
+                "__repr__",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__repr__".to_string(),
+                    func: |args| {
+                        let self_obj = &args[0];
+                        let text = self_obj.borrow().get_attribute("_text").unwrap_or_else(|_| py_str("")).str();
+                        let s = self_obj.borrow().get_attribute("_start").unwrap_or_else(|_| py_int(0)).str();
+                        let e = self_obj.borrow().get_attribute("_end").unwrap_or_else(|_| py_int(0)).str();
+                        Ok(py_str(&format!("<re.Match object; span=({}, {}), match={}>", s, e, text)))
+                    },
+                }),
+            );
+
             let typ = PyObjectRef::new(PyObject::Type {
                 name: "Match".to_string(),
                 dict: Box::new(str_map_to_typedict(type_dict)),
                 bases: vec![],
                 mro: vec![],
+            });
+
+            let mut lastindex: Option<i64> = None;
+            let mut lastgroup: Option<String> = None;
+            for idx in (1..groups_text.len()).rev() {
+                if !matches!(&*groups_text[idx].borrow(), PyObject::None) {
+                    lastindex = Some(idx as i64);
+                    for (k, v) in name_to_index.iter() {
+                        if v.as_i64() == Some(idx as i64) {
+                            lastgroup = Some(k.str());
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+            let regs_items: Vec<PyObjectRef> = starts.iter().zip(ends.iter()).map(|(s, e)| py_tuple(vec![s.clone(), e.clone()])).collect();
+            let effective_pos = pos;
+            let effective_endpos = if endpos == 0 { original_string.len() } else { endpos };
+            let effective_string = if original_string.is_empty() { text.clone() } else { original_string.to_string() };
+            let re_obj = PyObjectRef::new(PyObject::CompiledRegex {
+                regex: Box::new(re.clone()),
+                pattern: pattern.to_string(),
+                flags,
             });
 
             let mut instance_dict = AttrMap::new();
@@ -619,13 +973,21 @@ pub(crate) fn make_match_object(
             // the whole match (matching real `re.Match`'s own `group(0)`/
             // `[0]` convention) — `groups()` skips index 0 when building its
             // 1..N tuple.
-            instance_dict.insert_str("_groups_text", py_tuple(groups_text));
-            instance_dict.insert_str("_starts", py_tuple(starts));
-            instance_dict.insert_str("_ends", py_tuple(ends));
+            instance_dict.insert_str("_groups_text", py_tuple(groups_text.clone()));
+            instance_dict.insert_str("_starts", py_tuple(starts.clone()));
+            instance_dict.insert_str("_ends", py_tuple(ends.clone()));
             instance_dict.insert_str(
                 "_group_names",
                 PyObjectRef::new(PyObject::Dict(Box::new(name_to_index))),
             );
+            instance_dict.insert_str("re", re_obj.clone());
+            instance_dict.insert_str("string", py_str(&effective_string));
+            instance_dict.insert_str("pos", py_int(effective_pos as i64));
+            instance_dict.insert_str("endpos", py_int(effective_endpos as i64));
+            instance_dict.insert_str("regs", py_tuple(regs_items));
+            instance_dict.insert_str("lastindex", lastindex.map(py_int).unwrap_or_else(py_none));
+            instance_dict.insert_str("lastgroup", lastgroup.map(|s| py_str(&s)).unwrap_or_else(py_none));
+            instance_dict.insert_str("_re", re_obj.clone());
 
             PyObjectRef::new(PyObject::Instance {
                 typ,
@@ -659,9 +1021,9 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         match compile_python_regex(&pattern) {
             Ok(re) => {
                 let caps = re.captures(&string).unwrap_or(None);
-                Ok(make_match_object(&re, caps))
+                Ok(make_match_object_detailed(&re, caps, &string, &pattern, 0, 0, string.len()))
             }
-            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
+            Err(e) => Err(re_pattern_error(map_regex_error(&e.to_string()), Some(pattern.clone()), None)),
         }
     });
 
@@ -679,9 +1041,9 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                     Some(c) if c.get(0).map(|m| m.start()) == Some(0) => Some(c),
                     _ => None,
                 };
-                Ok(make_match_object(&re, result))
+                Ok(make_match_object_detailed(&re, result, &string, &pattern, 0, 0, string.len()))
             }
-            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
+            Err(e) => Err(re_pattern_error(map_regex_error(&e.to_string()), Some(pattern.clone()), None)),
         }
     });
 
@@ -700,9 +1062,9 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                         .map(|m| m.start() == 0 && m.end() == string.len())
                         .unwrap_or(false)
                 });
-                Ok(make_match_object(&re, caps))
+                Ok(make_match_object_detailed(&re, caps, &string, &pattern, 0, 0, string.len()))
             }
-            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
+            Err(e) => Err(re_pattern_error(map_regex_error(&e.to_string()), Some(pattern.clone()), None)),
         }
     });
 
@@ -721,7 +1083,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                     .collect();
                 Ok(py_list(results))
             }
-            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
+            Err(e) => Err(re_pattern_error(map_regex_error(&e.to_string()), Some(pattern.clone()), None)),
         }
     });
 
@@ -770,6 +1132,37 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         };
         match compile_python_regex(&pattern) {
             Ok(re) => {
+                if !is_callable_repl {
+                    if let Err(e) = validate_g_template(&args[1].str(), &re) {
+                        return Err(e);
+                    }
+                    // Check for unknown group name like \g<ab> where ab not in pattern - should raise IndexError
+                    let repl_str = args[1].str();
+                    for cap in re.capture_names().filter_map(|n| n) {
+                        let _ = cap;
+                    }
+                    // Simple check: if repl contains \g<ab> and ab not in re's group names, raise IndexError
+                    let mut search_idx = 0;
+                    let repl_chars: Vec<char> = repl_str.chars().collect();
+                    while search_idx < repl_chars.len() {
+                        if repl_chars[search_idx] == '\\' && search_idx + 2 < repl_chars.len() && repl_chars[search_idx+1] == 'g' && repl_chars[search_idx+2] == '<' {
+                            let mut j = search_idx + 3;
+                            while j < repl_chars.len() && repl_chars[j] != '>' {
+                                j += 1;
+                            }
+                            if j < repl_chars.len() {
+                                let name: String = repl_chars[search_idx+3..j].iter().collect();
+                                if !name.is_empty() && !name.chars().next().unwrap().is_ascii_digit() && !name.chars().all(|c| c.is_ascii_digit()) {
+                                    let found = re.capture_names().any(|n| n == Some(name.as_str()));
+                                    if !found {
+                                        return Err(PyError::IndexError(format!("unknown group name '{}'", name)));
+                                    }
+                                }
+                            }
+                        }
+                        search_idx += 1;
+                    }
+                }
                 let mut result = String::new();
                 let mut last_end = 0usize;
                 let mut n = 0i64;
@@ -804,7 +1197,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                         // call simply never ran, no error, exit code 0).
                         // Matches the same pattern `sorted(key=...)` already
                         // uses for its own key-function callback.
-                        let match_obj = make_match_object(&re, Some(caps));
+                        let match_obj = make_match_object_detailed(&re, Some(caps), &string, &pattern, 0, m_start, string.len());
                         let replaced = call_bound_method(args[1].clone(), match_obj, vec![])?;
                         result.push_str(&replaced.str());
                     } else {
@@ -818,7 +1211,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 result.push_str(&string[last_end..]);
                 Ok(py_str(&result))
             }
-            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
+            Err(e) => Err(re_pattern_error(map_regex_error(&e.to_string()), Some(pattern.clone()), None)),
         }
     });
 
@@ -861,7 +1254,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             };
             let re = match compile_python_regex_flags(&pattern, flags) {
                 Ok(r) => r,
-                Err(e) => return Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
+                Err(e) => return Err(re_pattern_error(map_regex_error(&e.to_string()), Some(pattern.clone()), None)),
             };
             (re, string, maxsplit)
         };
@@ -920,7 +1313,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 pattern: pattern.to_string(),
                 flags,
             })),
-            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
+            Err(e) => Err(re_pattern_error(map_regex_error(&e.to_string()), Some(pattern.clone()), None)),
         }
     });
 
@@ -936,12 +1329,15 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 let matches: Vec<PyObjectRef> = re
                     .captures_iter(&string)
                     .filter_map(|r| r.ok())
-                    .map(|c| make_match_object(&re, Some(c)))
+                    .map(|c| {
+                        let start = c.get(0).map(|m| m.start()).unwrap_or(0);
+                        make_match_object_detailed(&re, Some(c), &string, &pattern, 0, start, string.len())
+                    })
                     .collect();
                 // Return a list that can be iterated over
                 Ok(py_list(matches))
             }
-            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
+            Err(e) => Err(re_pattern_error(map_regex_error(&e.to_string()), Some(pattern.clone()), None)),
         }
     });
 
@@ -1066,6 +1462,37 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         };
         match compile_python_regex(&pattern) {
             Ok(re) => {
+                if !is_callable_repl {
+                    if let Err(e) = validate_g_template(&args[1].str(), &re) {
+                        return Err(e);
+                    }
+                    // Check for unknown group name like \g<ab> where ab not in pattern - should raise IndexError
+                    let repl_str = args[1].str();
+                    for cap in re.capture_names().filter_map(|n| n) {
+                        let _ = cap;
+                    }
+                    // Simple check: if repl contains \g<ab> and ab not in re's group names, raise IndexError
+                    let mut search_idx = 0;
+                    let repl_chars: Vec<char> = repl_str.chars().collect();
+                    while search_idx < repl_chars.len() {
+                        if repl_chars[search_idx] == '\\' && search_idx + 2 < repl_chars.len() && repl_chars[search_idx+1] == 'g' && repl_chars[search_idx+2] == '<' {
+                            let mut j = search_idx + 3;
+                            while j < repl_chars.len() && repl_chars[j] != '>' {
+                                j += 1;
+                            }
+                            if j < repl_chars.len() {
+                                let name: String = repl_chars[search_idx+3..j].iter().collect();
+                                if !name.is_empty() && !name.chars().next().unwrap().is_ascii_digit() && !name.chars().all(|c| c.is_ascii_digit()) {
+                                    let found = re.capture_names().any(|n| n == Some(name.as_str()));
+                                    if !found {
+                                        return Err(PyError::IndexError(format!("unknown group name '{}'", name)));
+                                    }
+                                }
+                            }
+                        }
+                        search_idx += 1;
+                    }
+                }
                 let mut result = String::new();
                 let mut last_end = 0usize;
                 let mut n = 0i64;
@@ -1086,7 +1513,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                     }
                     result.push_str(&string[last_end..m_start]);
                     if is_callable_repl {
-                        let match_obj = make_match_object(&re, Some(caps));
+                        let match_obj = make_match_object_detailed(&re, Some(caps), &string, &pattern, 0, m_start, string.len());
                         let replaced = call_bound_method(args[1].clone(), match_obj, vec![])?;
                         result.push_str(&replaced.str());
                     } else {
@@ -1100,7 +1527,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 result.push_str(&string[last_end..]);
                 Ok(py_tuple(vec![py_str(&result), py_int(n)]))
             }
-            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
+            Err(e) => Err(re_pattern_error(map_regex_error(&e.to_string()), Some(pattern.clone()), None)),
         }
     });
 
@@ -1142,7 +1569,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                                     flags,
                                 }));
                             }
-                            Err(e) => return Err(re_pattern_error(format!("invalid regex: {}", e), Some(pat), None)),
+                            Err(e) => return Err(re_pattern_error(map_regex_error(&e.to_string()), Some(pat), None)),
                         }
                     }
                     let dummy_re = fancy_regex::Regex::new("").unwrap();
@@ -1219,7 +1646,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                                             let token_str = py_str(m.as_str());
                                             // set self.match for the callable to inspect
                                             let caps_clone = re.captures_from_pos(&string, i).unwrap_or(None);
-                                            let match_obj = make_match_object(&re, caps_clone);
+                                            let match_obj = make_match_object_detailed(&re, caps_clone, &string, "", 0, i, string.len());
                                             if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
                                                 dict.insert_str("match", match_obj.clone());
                                             }

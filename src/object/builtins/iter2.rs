@@ -5,6 +5,24 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 1 {
         return Err(PyError::type_error("next() takes at least 1 argument"));
     }
+    if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
+        if let Some(rc) = target.upgrade() {
+            let mut new_args = vec![PyObjectRef::Imm(rc)];
+            new_args.extend_from_slice(&args[1..]);
+            match builtin_next(&new_args) {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    let msg = format!("{}", e);
+                    if msg.contains("is not an iterator") {
+                        return Err(PyError::type_error("Weakref proxy referenced a non-iterator"));
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
+    }
     // Check for __next__ on instances
     let f = {
         let obj = args[0].borrow();
@@ -534,6 +552,13 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("reversed() takes exactly one argument"));
+    }
+    if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
+        if let Some(rc) = target.upgrade() {
+            return builtin_reversed(&[PyObjectRef::Imm(rc)]);
+        } else {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
     }
     // Check type with a short-lived borrow to avoid holding the RefCell
     // borrow while iterating (which could trigger borrow_mut conflicts).

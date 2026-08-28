@@ -208,6 +208,7 @@ pub enum PyObject {
     WeakRef {
         target: std::rc::Weak<std::cell::RefCell<PyObject>>,
         callback: Option<PyObjectRef>,
+        hash_cache: std::cell::RefCell<Option<usize>>,
     },
     WeakProxy {
         target: std::rc::Weak<std::cell::RefCell<PyObject>>,
@@ -410,7 +411,17 @@ impl PyObject {
             PyObject::Instance { .. } => "instance",
             PyObject::Cell { .. } => "cell",
             PyObject::WeakRef { .. } => "weakref",
-            PyObject::WeakProxy { .. } => "weakproxy",
+            PyObject::WeakProxy { target, .. } => {
+                if let Some(rc) = target.upgrade() {
+                    let b = rc.borrow();
+                    let is_callable = match &*b {
+                        PyObject::Instance { typ, .. } => crate::object::lookup_dunder_via_mro(typ, "__call__").is_some(),
+                        PyObject::Function(_) | PyObject::BuiltinFunction { .. } | PyObject::BuiltinMethod { .. } | PyObject::BoundMethod { .. } => true,
+                        _ => b.get_attribute("__call__").is_ok(),
+                    };
+                    if is_callable { "weakcallableproxy" } else { "weakproxy" }
+                } else { "weakproxy" }
+            },
             PyObject::Capsule { .. } => "capsule",
             PyObject::Exception { typ, .. } => typ,
             PyObject::ExceptionGroup { typ, .. } => typ,
@@ -551,6 +562,25 @@ impl PyObject {
 
 
     pub fn equals(&self, other_ref: &PyObjectRef) -> PyResult<bool> {
+        if let PyObject::WeakRef { target, .. } = self {
+            if let PyObject::WeakRef { target: other_target, .. } = &*other_ref.borrow() {
+                let self_alive = target.upgrade();
+                let other_alive = other_target.upgrade();
+                match (self_alive, other_alive) {
+                    (Some(a_rc), Some(b_rc)) => {
+                        return PyObjectRef::Imm(a_rc).equals(&PyObjectRef::Imm(b_rc));
+                    }
+                    _ => {
+                        return Ok(std::ptr::eq(self as *const PyObject, &*other_ref.borrow() as *const PyObject));
+                    }
+                }
+            } else {
+                return Ok(false);
+            }
+        }
+        if let PyObject::WeakRef { .. } = &*other_ref.borrow() {
+            return Ok(false);
+        }
         if let PyObject::WeakProxy { target, .. } = self {
             if let Some(rc) = target.upgrade() {
                 return rc.borrow().equals(other_ref);
