@@ -21,6 +21,15 @@ pub use graphlib::*;
 mod weakref;
 pub use weakref::*;
 
+mod numbers;
+pub use numbers::*;
+
+mod this;
+pub use this::*;
+
+mod queue;
+pub use queue::*;
+
 
 
 // ---- logging module ----
@@ -4460,30 +4469,6 @@ pub fn create_hashlib_extra_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-pub fn create_queue_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! q_func {
-        ($name:expr, $func:expr) => {
-            d.insert(
-                $name.to_string(),
-                PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: $name.to_string(),
-                    func: $func,
-                }),
-            );
-        };
-    }
-
-    q_func!("Queue", |_args| {
-        let inner = std::sync::Arc::new(std::sync::Mutex::new(QueueInner {
-            queue: std::collections::VecDeque::new(),
-        }));
-        Ok(PyObjectRef::new(PyObject::Queue(inner)))
-    });
-
-    d
-}
-
 pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
 
@@ -7101,20 +7086,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
-// numbers module — Number ABCs as py_str stubs
-// ---------------------------------------------------------------------------
-pub fn create_numbers_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    // Number ABCs — simple string stubs (matchable via isinstance checks later)
-    d.insert_str("Number", py_str("Number"));
-    d.insert_str("Complex", py_str("Complex"));
-    d.insert_str("Real", py_str("Real"));
-    d.insert_str("Rational", py_str("Rational"));
-    d.insert_str("Integral", py_str("Integral"));
-    d
-}
-
-// ---------------------------------------------------------------------------
 // ast module — literal_eval and basic AST node stubs
 // ---------------------------------------------------------------------------
 pub fn create_ast_dict() -> HashMap<String, PyObjectRef> {
@@ -8025,34 +7996,6 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
 
 pub fn create_xml_dict() -> HashMap<String, PyObjectRef> {
     HashMap::new()
-}
-
-// ─── this module (Zen of Python) ──────────────────────────────────────────────
-
-pub fn create_this_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    let zen = "Beautiful is better than ugly.\n\
-               Explicit is better than implicit.\n\
-               Simple is better than complex.\n\
-               Complex is better than complicated.\n\
-               Flat is better than nested.\n\
-               Sparse is better than dense.\n\
-               Readability counts.\n\
-               Special cases aren't special enough to break the rules.\n\
-               Although practicality beats purity.\n\
-               Errors should never pass silently.\n\
-               Unless explicitly silenced.\n\
-               In the face of ambiguity, refuse the temptation to guess.\n\
-               There should be one-- and preferably only one --obvious way to do it.\n\
-               Although that way may not be obvious at first unless you're Dutch.\n\
-               Now is better than never.\n\
-               Although never is often better than *right* now.\n\
-               If the implementation is hard to explain, it's a bad idea.\n\
-               If the implementation is easy to explain, it may be a good idea.\n\
-               Namespaces are one honking great idea -- let's do more of those!";
-    // Store Zen text as module data (prints on explicit import, not at startup)
-    d.insert_str("s", py_str(zen));
-    d
 }
 
 // ─── argparse module ──────────────────────────────────────────────────────────

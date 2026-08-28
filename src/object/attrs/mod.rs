@@ -20,6 +20,10 @@ mod tuple;
 mod array;
 mod frozenset;
 mod slice;
+mod complex;
+mod module_obj;
+mod exception_group;
+mod generator;
 
 thread_local! {
     // PEP 649 computed-annotation cache, keyed by each function's
@@ -747,42 +751,7 @@ impl PyObject {
             }));
         }
         match self {
-            PyObject::Complex(re, im) => match name {
-                "real" => Ok(py_float(*re)),
-                "imag" => Ok(py_float(*im)),
-                "conjugate" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
-                    name: "conjugate".to_string(),
-                    func: |args| {
-                        let obj = args[0].borrow();
-                        match &*obj {
-                            PyObject::Complex(re, im) => {
-                                Ok(PyObjectRef::imm(PyObject::Complex(*re, -im)))
-                            }
-                            _ => Err(PyError::type_error("conjugate() requires a complex self")),
-                        }
-                    },
-                    self_obj: PyObjectRef::imm(PyObject::Complex(*re, *im)),
-                })),
-                "__complex__" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
-                    name: "__complex__".to_string(),
-                    func: |args| {
-                        let obj = args[0].borrow();
-                        match &*obj {
-                            PyObject::Complex(re, im) => {
-                                Ok(PyObjectRef::imm(PyObject::Complex(*re, *im)))
-                            }
-                            _ => Err(PyError::type_error("__complex__() requires a complex self")),
-                        }
-                    },
-                    self_obj: PyObjectRef::imm(PyObject::Complex(*re, *im)),
-                })),
-                "__float__" => Err(PyError::type_error("can't convert complex to float")),
-                "__int__" => Err(PyError::type_error("can't convert complex to int")),
-                _ => Err(PyError::attribute_error(format!(
-                    "'complex' object has no attribute '{}'",
-                    name
-                ))),
-            },
+            PyObject::Complex(_, _) => return complex::get(self, name),
             PyObject::WeakProxy { target, .. } => {
                 if let Some(rc) = target.upgrade() {
                     let t = PyObjectRef::Imm(rc);
@@ -791,39 +760,7 @@ impl PyObject {
                     return Err(PyError::reference_error("weakly-referenced object no longer exists"));
                 }
             }
-            PyObject::Module {
-                dict,
-                name: mod_name,
-            } => {
-                if name == "__dict__" {
-                    // Convert module's HashMap to a PyDict
-
-                    let mut pd = PyDict::new();
-                    for (k, v) in dict.iter() {
-                        let _ = pd.set(py_str(interner::lookup_str(*k)), v.clone());
-                    }
-                    return Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
-                }
-                if name == "__name__" {
-                    return Ok(py_str(mod_name));
-                }
-                dict.get_str(&name).cloned().ok_or_else(|| {
-                    if std::env::var("RPY_DEBUG_ATTR").is_ok() {
-                        eprintln!(
-                            "MODULE_ATTR_FAIL: module={} attr={} keys={:?}",
-                            mod_name,
-                            name,
-                            {
-                                let mut ks: Vec<&str> =
-                                    dict.keys().map(|k| interner::lookup_str(*k)).collect();
-                                ks.sort();
-                                ks
-                            }
-                        );
-                    }
-                    PyError::attribute_error(format!("'module' object has no attribute '{}'", name))
-                })
-            }
+            PyObject::Module { .. } => return module_obj::get(self, name),
             PyObject::Type {
                 dict,
                 mro,
@@ -1848,54 +1785,7 @@ impl PyObject {
             // itself already supports just above. Real trigger: CPython's
             // own `test_exception_group.py` — even the most basic
             // `ExceptionGroup("msg", [...]).message` raised `AttributeError`.
-            PyObject::ExceptionGroup {
-                typ,
-                args,
-                exceptions,
-            } => match name {
-                "__name__" => Ok(py_str(typ)),
-                "args" => Ok(py_tuple(args.clone())),
-                "__str__" => {
-                    let parts: Vec<String> = args.iter().map(|a| a.str()).collect();
-                    Ok(py_str(&parts.join(", ")))
-                }
-                "__repr__" => {
-                    let parts: Vec<String> = args.iter().map(|a| a.repr()).collect();
-                    Ok(py_str(&format!("{}({})", typ, parts.join(", "))))
-                }
-                "message" => Ok(args.first().cloned().unwrap_or_else(|| py_str(""))),
-                "exceptions" => Ok(py_tuple(exceptions.clone())),
-                "__cause__" | "__context__" | "__traceback__" => Ok(py_none()),
-                "__suppress_context__" => Ok(py_bool(false)),
-                "__notes__" => Ok(py_list(vec![])),
-                "add_note" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "add_note".to_string(),
-                    func: |_args| Ok(py_none()),
-                    self_obj: PyObjectRef::new(PyObject::None),
-                })),
-                "with_traceback" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "with_traceback".to_string(),
-                    func: |args| {
-                        if args.len() < 2 {
-                            return Err(PyError::type_error(
-                                "with_traceback() takes exactly one argument",
-                            ));
-                        }
-                        // Store the traceback so `raise X().with_traceback(tb)`
-                        // yields `X.__traceback__` chaining tb (the RAISE
-                        // unwind prepends the current frame's own node).
-                        args[0]
-                            .borrow_mut()
-                            .set_attribute("__traceback__", args[1].clone())?;
-                        Ok(args[0].clone())
-                    },
-                    self_obj: PyObjectRef::new(PyObject::None),
-                })),
-                _ => Err(PyError::attribute_error(format!(
-                    "'{}' object has no attribute '{}'",
-                    typ, name
-                ))),
-            },
+            PyObject::ExceptionGroup { .. } => return exception_group::get(self, name),
             PyObject::List(_v) => return list::get(self, name),
             PyObject::Deque { data, maxlen } => return deque::get(self, name),
             PyObject::Tuple(_v) => return tuple::get(self, name),
@@ -4187,45 +4077,7 @@ impl PyObject {
                     }
                 }
             }
-            PyObject::Generator { frame: _gen_frame } => match name {
-                "__next__" | "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: name.to_string(),
-                    func: generator_next_fallback,
-                    self_obj: PyObjectRef::new(PyObject::None),
-                })),
-                "throw" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "throw".to_string(),
-                    func: generator_throw_fallback,
-                    self_obj: PyObjectRef::new(PyObject::None),
-                })),
-                "close" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "close".to_string(),
-                    func: |args| {
-                        let gen = args[0].borrow();
-                        if let PyObject::Generator { frame } = &*gen {
-                            if let Ok(mut frame_opt) = frame.try_borrow_mut() {
-                                *frame_opt = None;
-                            }
-                        }
-                        Ok(py_none())
-                    },
-                    self_obj: PyObjectRef::new(PyObject::None),
-                })),
-                "__iter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "__iter__".to_string(),
-                    func: |args| Ok(args[0].clone()),
-                    self_obj: PyObjectRef::new(PyObject::None),
-                })),
-                "__await__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "__await__".to_string(),
-                    func: |args| Ok(args[0].clone()),
-                    self_obj: PyObjectRef::new(PyObject::None),
-                })),
-                _ => Err(PyError::attribute_error(format!(
-                    "'generator' object has no attribute '{}'",
-                    name
-                ))),
-            },
+            PyObject::Generator { .. } => return generator::get(self, name),
             PyObject::Coroutine { frame: _coro_frame } => match name {
                 "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                     name: "send".to_string(),
