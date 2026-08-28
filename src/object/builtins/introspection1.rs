@@ -664,6 +664,11 @@ pub fn call_bound_method(
         PyObject::Type { name, .. } if name == "type" && args.is_empty() => {
             builtin_type_of(&[self_obj])
         }
+        PyObject::Type { .. } => {
+            let mut all = vec![self_obj.clone()];
+            all.extend(args);
+            crate::object::call_function_disposable(&func, all, vec![])
+        }
         _ => Err(PyError::type_error("object is not callable")),
     }
 }

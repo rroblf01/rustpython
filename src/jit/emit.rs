@@ -303,10 +303,11 @@ pub(crate) fn emit_part1(builder: &mut FunctionBuilder, eval_stack: &mut Vec<[Va
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     for (i, item) in items.iter().enumerate() {
-                        let offset = (ctx.i * 24) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
+                        builder.ins().store(memflags, item[2], item_addr, 16);
                     }
                     let n_val = builder.ins().iconst(types::I64, n as i64);
                     builder
@@ -339,10 +340,11 @@ pub(crate) fn emit_part1(builder: &mut FunctionBuilder, eval_stack: &mut Vec<[Va
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     for (i, item) in items.iter().enumerate() {
-                        let offset = (ctx.i * 24) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
+                        builder.ins().store(memflags, item[2], item_addr, 16);
                     }
                     let n_val = builder.ins().iconst(types::I64, n as i64);
                     builder
@@ -489,10 +491,11 @@ pub(crate) fn emit_part1(builder: &mut FunctionBuilder, eval_stack: &mut Vec<[Va
                     builder.ins().store(memflags, func[0], func_addr, 0);
                     builder.ins().store(memflags, func[1], func_addr, 8);
                     for (i, item) in args.iter().enumerate() {
-                        let offset = (ctx.i * 24) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
+                        builder.ins().store(memflags, item[2], item_addr, 16);
                     }
                     if nkw == 0 {
                         let nargs_val = builder.ins().iconst(types::I64, npos as i64);

@@ -10,7 +10,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                 pattern,
                 flags,
             } => {
-                let re = (*regex).clone();
+                let re = (**regex).clone();
                 let pat = pattern.clone();
                 let fl = *flags;
                 match name {
@@ -231,6 +231,170 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     .unwrap_or(false)
                             });
                             Ok(crate::modules::make_match_object(&re, caps))
+                        },
+                    )))),
+                    "subn" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(
+                        move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error(
+                                    "subn() takes at least 2 arguments",
+                                ));
+                            }
+                            let is_callable_repl = !matches!(&*args[0].borrow(), PyObject::Str(_));
+                            let repl_template = if is_callable_repl {
+                                String::new()
+                            } else {
+                                crate::modules::translate_python_replacement(&args[0].str())
+                            };
+                            let string = args[1].str();
+                            let count = if args.len() > 2 {
+                                args[2].as_i64().unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            let mut result = String::new();
+                            let mut last_end = 0usize;
+                            let mut n = 0i64;
+                            for caps in re.captures_iter(&string) {
+                                let caps = match caps {
+                                    Ok(c) => c,
+                                    Err(_) => break,
+                                };
+                                if count > 0 && n >= count {
+                                    break;
+                                }
+                                let (m_start, m_end) = {
+                                    let m = caps.get(0).unwrap();
+                                    (m.start(), m.end())
+                                };
+                                if m_start < last_end {
+                                    continue;
+                                }
+                                result.push_str(&string[last_end..m_start]);
+                                if is_callable_repl {
+                                    let match_obj =
+                                        crate::modules::make_match_object(&re, Some(caps));
+                                    let replaced =
+                                        call_bound_method(args[0].clone(), match_obj, vec![])?;
+                                    result.push_str(&replaced.str());
+                                } else {
+                                    let mut expanded = String::new();
+                                    caps.expand(&repl_template, &mut expanded);
+                                    result.push_str(&expanded);
+                                }
+                                last_end = m_end;
+                                n += 1;
+                            }
+                            result.push_str(&string[last_end..]);
+                            Ok(py_tuple(vec![py_str(&result), py_int(n)]))
+                        },
+                    )))),
+                    "scanner" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(
+                        move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.is_empty() {
+                                return Err(PyError::type_error("scanner() missing string argument"));
+                            }
+                            let string = args[0].str();
+                            let pos = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize;
+                            let endpos = args.get(2).and_then(|a| a.as_i64()).unwrap_or(string.len() as i64).max(0) as usize;
+                            let s = string.clone();
+                            let p = pat.clone();
+                            let fl = fl;
+                            // Build scanner type with search/match
+                            let mut scan_dict = std::collections::HashMap::new();
+                            scan_dict.insert(
+                                "search".to_string(),
+                                PyObjectRef::new(PyObject::BuiltinFunction {
+                                    name: "search".to_string(),
+                                    func: |a| {
+                                        if a.is_empty() {
+                                            return Err(PyError::type_error("search() missing self"));
+                                        }
+                                        let self_obj = &a[0];
+                                        let string_v = self_obj.borrow().get_attribute("_string").unwrap_or_else(|_| py_str(""));
+                                        let s = string_v.str();
+                                        let pos_v = self_obj.borrow().get_attribute("_pos").ok().and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+                                        let endpos_v = self_obj.borrow().get_attribute("_endpos").ok().and_then(|v| v.as_i64()).unwrap_or(s.len() as i64) as usize;
+                                        let re_v = self_obj.borrow().get_attribute("_re").unwrap_or_else(|_| py_none());
+                                        let re_clone = if let PyObject::CompiledRegex{ regex, .. } = &*re_v.borrow() {
+                                            (**regex).clone()
+                                        } else {
+                                            return Err(PyError::runtime_error("invalid scanner re"));
+                                        };
+                                        let endpos_v = endpos_v.min(s.len());
+                                        let pos_v = pos_v.min(s.len());
+                                        let caps = re_clone.captures_from_pos(&s, pos_v).unwrap_or(None);
+                                        if let Some(caps) = caps {
+                                            if let Some(m) = caps.get(0) {
+                                                if m.end() <= endpos_v {
+                                                    let new_pos = m.end();
+                                                    if let PyObject::Instance{ dict, .. } = &mut *self_obj.borrow_mut() {
+                                                        dict.insert_str("_pos", py_int(new_pos as i64));
+                                                    }
+                                                    return Ok(crate::modules::make_match_object(&re_clone, Some(caps)));
+                                                }
+                                            }
+                                        }
+                                        Ok(py_none())
+                                    },
+                                }),
+                            );
+                            scan_dict.insert(
+                                "match".to_string(),
+                                PyObjectRef::new(PyObject::BuiltinFunction {
+                                    name: "match".to_string(),
+                                    func: |a| {
+                                        if a.is_empty() {
+                                            return Err(PyError::type_error("match() missing self"));
+                                        }
+                                        let self_obj = &a[0];
+                                        let string_v = self_obj.borrow().get_attribute("_string").unwrap_or_else(|_| py_str(""));
+                                        let s = string_v.str();
+                                        let pos_v = self_obj.borrow().get_attribute("_pos").ok().and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+                                        let endpos_v = self_obj.borrow().get_attribute("_endpos").ok().and_then(|v| v.as_i64()).unwrap_or(s.len() as i64) as usize;
+                                        let re_v = self_obj.borrow().get_attribute("_re").unwrap_or_else(|_| py_none());
+                                        let re_clone = if let PyObject::CompiledRegex{ regex, .. } = &*re_v.borrow() {
+                                            (**regex).clone()
+                                        } else {
+                                            return Err(PyError::runtime_error("invalid scanner re"));
+                                        };
+                                        let caps = re_clone.captures_from_pos(&s, pos_v).unwrap_or(None);
+                                        if let Some(caps) = caps {
+                                            if let Some(m) = caps.get(0) {
+                                                if m.start() == pos_v && m.end() <= endpos_v {
+                                                    let new_pos = m.end();
+                                                    if let PyObject::Instance{ dict, .. } = &mut *self_obj.borrow_mut() {
+                                                        dict.insert_str("_pos", py_int(new_pos as i64));
+                                                    }
+                                                    return Ok(crate::modules::make_match_object(&re_clone, Some(caps)));
+                                                }
+                                            }
+                                        }
+                                        Ok(py_none())
+                                    },
+                                }),
+                            );
+                            let scan_type = PyObjectRef::new(PyObject::Type{
+                                name: "SRE_Scanner".to_string(),
+                                dict: Box::new(str_map_to_typedict(scan_dict)),
+                                bases: vec![],
+                                mro: vec![],
+                            });
+                            if let PyObject::Type{ mro, .. } = &mut *scan_type.borrow_mut(){
+                                *mro = vec![scan_type.clone()];
+                            }
+                            let re_obj = PyObjectRef::new(PyObject::CompiledRegex{
+                                regex: Box::new(re.clone()),
+                                pattern: p.clone(),
+                                flags: fl,
+                            });
+                            let mut inst_dict = AttrMap::new();
+                            inst_dict.insert_str("_re", re_obj.clone());
+                            inst_dict.insert_str("_string", py_str(&s));
+                            inst_dict.insert_str("_pos", py_int(pos as i64));
+                            inst_dict.insert_str("_endpos", py_int(endpos as i64));
+                            inst_dict.insert_str("pattern", re_obj.clone());
+                            Ok(PyObjectRef::new(PyObject::Instance{ typ: scan_type, dict: inst_dict }))
                         },
                     )))),
                     _ => Err(PyError::attribute_error(format!(

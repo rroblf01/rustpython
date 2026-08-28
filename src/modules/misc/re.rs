@@ -1,6 +1,35 @@
 use crate::object::*;
 use std::collections::HashMap;
 
+fn re_pattern_error(msg: String, pattern: Option<String>, pos: Option<i64>) -> PyError {
+    let mut extra = HashMap::new();
+    extra.insert("msg".to_string(), py_str(&msg));
+    extra.insert(
+        "pattern".to_string(),
+        match pattern {
+            Some(p) => py_str(&p),
+            None => py_none(),
+        },
+    );
+    extra.insert(
+        "pos".to_string(),
+        match pos {
+            Some(p) => py_int(p),
+            None => py_none(),
+        },
+    );
+    let exc = PyObjectRef::new(PyObject::Exception {
+        typ: "PatternError".to_string(),
+        args: vec![py_str(&msg)],
+        cause: None,
+        suppress_context: false,
+        context: None,
+        traceback: None,
+        extra: Some(extra),
+    });
+    PyError::Exception("PatternError".to_string(), exc)
+}
+
 /// Python's `re` treats a `{` that doesn't form a valid `{n}`/`{n,}`/`{n,m}`
 /// counted-repetition quantifier as a literal character; Rust's `regex`
 /// crate instead rejects it as a parse error ("repetition operator missing
@@ -632,7 +661,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 let caps = re.captures(&string).unwrap_or(None);
                 Ok(make_match_object(&re, caps))
             }
-            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
         }
     });
 
@@ -652,7 +681,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 };
                 Ok(make_match_object(&re, result))
             }
-            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
         }
     });
 
@@ -673,7 +702,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 });
                 Ok(make_match_object(&re, caps))
             }
-            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
         }
     });
 
@@ -692,7 +721,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                     .collect();
                 Ok(py_list(results))
             }
-            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
         }
     });
 
@@ -789,7 +818,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 result.push_str(&string[last_end..]);
                 Ok(py_str(&result))
             }
-            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
         }
     });
 
@@ -832,7 +861,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             };
             let re = match compile_python_regex_flags(&pattern, flags) {
                 Ok(r) => r,
-                Err(e) => return Err(PyError::ValueError(format!("invalid regex: {}", e))),
+                Err(e) => return Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
             };
             (re, string, maxsplit)
         };
@@ -891,7 +920,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 pattern: pattern.to_string(),
                 flags,
             })),
-            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
         }
     });
 
@@ -912,7 +941,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 // Return a list that can be iterated over
                 Ok(py_list(matches))
             }
-            Err(e) => Err(PyError::ValueError(format!("invalid regex: {}", e))),
+            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
         }
     });
 
@@ -931,11 +960,327 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("DOTALL", py_int(16));
     d.insert_str("MULTILINE", py_int(8));
     d.insert_str("VERBOSE", py_int(64));
+    d.insert_str("LOCALE", py_int(4));
+    d.insert_str("UNICODE", py_int(32));
+    d.insert_str("TEMPLATE", py_int(1));
+    d.insert_str("DEBUG", py_int(128));
+    d.insert_str("NOFLAG", py_int(0));
     d.insert_str("I", py_int(2));
     d.insert_str("A", py_int(256));
     d.insert_str("S", py_int(16));
     d.insert_str("M", py_int(8));
     d.insert_str("X", py_int(64));
+    d.insert_str("L", py_int(4));
+    d.insert_str("U", py_int(32));
+    d.insert_str("T", py_int(1));
+
+    // RegexFlag — IntFlag-like type with same members as module-level flags
+    {
+        let mut rf_dict = HashMap::new();
+        rf_dict.insert("NOFLAG".to_string(), py_int(0));
+        rf_dict.insert("ASCII".to_string(), py_int(256));
+        rf_dict.insert("A".to_string(), py_int(256));
+        rf_dict.insert("IGNORECASE".to_string(), py_int(2));
+        rf_dict.insert("I".to_string(), py_int(2));
+        rf_dict.insert("LOCALE".to_string(), py_int(4));
+        rf_dict.insert("L".to_string(), py_int(4));
+        rf_dict.insert("UNICODE".to_string(), py_int(32));
+        rf_dict.insert("U".to_string(), py_int(32));
+        rf_dict.insert("MULTILINE".to_string(), py_int(8));
+        rf_dict.insert("M".to_string(), py_int(8));
+        rf_dict.insert("DOTALL".to_string(), py_int(16));
+        rf_dict.insert("S".to_string(), py_int(16));
+        rf_dict.insert("VERBOSE".to_string(), py_int(64));
+        rf_dict.insert("X".to_string(), py_int(64));
+        rf_dict.insert("TEMPLATE".to_string(), py_int(1));
+        rf_dict.insert("T".to_string(), py_int(1));
+        rf_dict.insert("DEBUG".to_string(), py_int(128));
+        let rf_type = PyObjectRef::new(PyObject::Type {
+            name: "RegexFlag".to_string(),
+            dict: Box::new(str_map_to_typedict(rf_dict)),
+            bases: vec![],
+            mro: vec![],
+        });
+        if let PyObject::Type { mro, .. } = &mut *rf_type.borrow_mut() {
+            *mro = vec![rf_type.clone()];
+        }
+        d.insert_str("RegexFlag", rf_type);
+    }
+
+    // re.error / re.PatternError — alias, same object
+    {
+        let pattern_error = PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "PatternError".to_string(),
+            func: |args| {
+                let msg = args.get(0).map(|a| a.str()).unwrap_or_default();
+                let pattern = args.get(1).cloned().unwrap_or_else(py_none);
+                let pos = args.get(2).cloned().unwrap_or_else(py_none);
+                let mut extra = HashMap::new();
+                extra.insert("msg".to_string(), py_str(&msg));
+                extra.insert("pattern".to_string(), pattern);
+                extra.insert("pos".to_string(), pos);
+                Ok(PyObjectRef::new(PyObject::Exception {
+                    typ: "PatternError".to_string(),
+                    args: vec![py_str(&msg)],
+                    cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
+                    extra: Some(extra),
+                }))
+            },
+        });
+        d.insert_str("error", pattern_error.clone());
+        d.insert_str("PatternError", pattern_error);
+    }
+
+    // purge — clear cache (no-op)
+    re_func!("purge", |_| Ok(py_none()));
+
+    // subn — like sub but returns (new_string, count)
+    re_func!("subn", |args| {
+        if args.len() < 3 {
+            return Err(PyError::type_error("subn() takes at least 3 arguments"));
+        }
+        let pattern = args[0].str();
+        let is_callable_repl = !matches!(&*args[1].borrow(), PyObject::Str(_));
+        let repl_template = if is_callable_repl {
+            String::new()
+        } else {
+            translate_python_replacement(&args[1].str())
+        };
+        let string = args[2].str();
+        let count = if args.len() > 3 {
+            if let PyObject::Dict(kwargs) = &*args[3].borrow() {
+                kwargs
+                    .get(&py_str("count"))
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+            } else {
+                args[3].as_i64().unwrap_or(0)
+            }
+        } else {
+            0
+        };
+        match compile_python_regex(&pattern) {
+            Ok(re) => {
+                let mut result = String::new();
+                let mut last_end = 0usize;
+                let mut n = 0i64;
+                for caps in re.captures_iter(&string) {
+                    let caps = match caps {
+                        Ok(c) => c,
+                        Err(_) => break,
+                    };
+                    if count > 0 && n >= count {
+                        break;
+                    }
+                    let (m_start, m_end) = {
+                        let m = caps.get(0).unwrap();
+                        (m.start(), m.end())
+                    };
+                    if m_start < last_end {
+                        continue;
+                    }
+                    result.push_str(&string[last_end..m_start]);
+                    if is_callable_repl {
+                        let match_obj = make_match_object(&re, Some(caps));
+                        let replaced = call_bound_method(args[1].clone(), match_obj, vec![])?;
+                        result.push_str(&replaced.str());
+                    } else {
+                        let mut expanded = String::new();
+                        caps.expand(&repl_template, &mut expanded);
+                        result.push_str(&expanded);
+                    }
+                    last_end = m_end;
+                    n += 1;
+                }
+                result.push_str(&string[last_end..]);
+                Ok(py_tuple(vec![py_str(&result), py_int(n)]))
+            }
+            Err(e) => Err(re_pattern_error(format!("invalid regex: {}", e), Some(pattern.clone()), None)),
+        }
+    });
+
+    // Scanner — tokenizer helper
+    {
+        let mut scanner_dict = HashMap::new();
+        scanner_dict.insert(
+            "__init__".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error("Scanner.__init__ missing lexicon"));
+                    }
+                    let self_obj = &args[0];
+                    let lexicon = args[1].clone();
+                    let flags = args.get(2).and_then(|a| a.as_i64()).unwrap_or(0) as i32;
+                    let items: Vec<PyObjectRef> = if let PyObject::List(v) | PyObject::Tuple(v) = &*lexicon.borrow() {
+                        v.clone()
+                    } else {
+                        return Err(PyError::type_error("lexicon must be list/tuple"));
+                    };
+                    let mut compiled_list: Vec<PyObjectRef> = Vec::new();
+                    for item in &items {
+                        let pair: Vec<PyObjectRef> = if let PyObject::Tuple(v) | PyObject::List(v) = &*item.borrow() {
+                            v.clone()
+                        } else {
+                            continue;
+                        };
+                        if pair.len() < 2 {
+                            continue;
+                        }
+                        let pat = pair[0].str();
+                        match compile_python_regex_flags(&pat, flags) {
+                            Ok(r) => {
+                                compiled_list.push(PyObjectRef::new(PyObject::CompiledRegex {
+                                    regex: Box::new(r),
+                                    pattern: pat,
+                                    flags,
+                                }));
+                            }
+                            Err(e) => return Err(re_pattern_error(format!("invalid regex: {}", e), Some(pat), None)),
+                        }
+                    }
+                    let dummy_re = fancy_regex::Regex::new("").unwrap();
+                    let dummy = PyObjectRef::new(PyObject::CompiledRegex {
+                        regex: Box::new(dummy_re),
+                        pattern: "".to_string(),
+                        flags: 0,
+                    });
+                    if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                        dict.insert_str("lexicon", lexicon.clone());
+                        dict.insert_str("_compiled", py_list(compiled_list));
+                        dict.insert_str("scanner", dummy);
+                        dict.insert_str("match", py_none());
+                    }
+                    Ok(py_none())
+                },
+            }),
+        );
+        scanner_dict.insert(
+            "scan".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "scan".to_string(),
+                func: |args| {
+                    if args.is_empty() {
+                        return Err(PyError::type_error("scan() missing self"));
+                    }
+                    let self_obj = &args[0];
+                    let string = args.get(1).map(|a| a.str()).unwrap_or_default();
+                    let lexicon = self_obj.borrow().get_attribute("lexicon")
+                        .unwrap_or_else(|_| py_list(vec![]));
+                    let compiled = self_obj.borrow().get_attribute("_compiled")
+                        .unwrap_or_else(|_| py_list(vec![]));
+                    let lex_items: Vec<PyObjectRef> = if let PyObject::List(v) | PyObject::Tuple(v) = &*lexicon.borrow() { v.clone() } else { vec![] };
+                    let comp_items: Vec<PyObjectRef> = if let PyObject::List(v) = &*compiled.borrow() { v.clone() } else { vec![] };
+                    let mut result: Vec<PyObjectRef> = Vec::new();
+                    let mut i: usize = 0;
+                    let bytes_len = string.len();
+                    // To avoid infinite loops, track if progress is made
+                    while i < bytes_len {
+                        let mut matched = false;
+                        for (idx, comp) in comp_items.iter().enumerate() {
+                            let re = if let PyObject::CompiledRegex { regex, .. } = &*comp.borrow() {
+                                (**regex).clone()
+                            } else { continue };
+                            let caps_opt = re.captures_from_pos(&string, i).unwrap_or(None);
+                            if let Some(caps) = caps_opt {
+                                if let Some(m) = caps.get(0) {
+                                    if m.start() != i {
+                                        continue;
+                                    }
+                                    let j = m.end();
+                                    if i == j {
+                                        continue;
+                                    }
+                                    let action = lex_items.get(idx)
+                                        .and_then(|item| {
+                                            if let PyObject::Tuple(v) | PyObject::List(v) = &*item.borrow() {
+                                                v.get(1).cloned()
+                                            } else { None }
+                                        })
+                                        .unwrap_or_else(py_none);
+                                    let is_none = matches!(&*action.borrow(), PyObject::None);
+                                    let mut use_action = true;
+                                    let mut final_val: Option<PyObjectRef> = None;
+                                    if is_none {
+                                        use_action = false;
+                                    } else if !matches!(&*action.borrow(), PyObject::None) {
+                                        // Check if callable (Function, BuiltinFunction, Closure, etc.)
+                                        let is_callable = {
+                                            let b = action.borrow();
+                                            matches!(&*b, PyObject::Function(_) | PyObject::BuiltinFunction{..} | PyObject::Closure(_) | PyObject::Instance{..} | PyObject::BuiltinMethod{..})
+                                        };
+                                        if is_callable {
+                                            let token_str = py_str(m.as_str());
+                                            // set self.match for the callable to inspect
+                                            let caps_clone = re.captures_from_pos(&string, i).unwrap_or(None);
+                                            let match_obj = make_match_object(&re, caps_clone);
+                                            if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                                                dict.insert_str("match", match_obj.clone());
+                                            }
+                                            // CPython calls action(scanner, token)
+                                            match call_bound_method(action.clone(), self_obj.clone(), vec![token_str.clone()]) {
+                                                Ok(v) => {
+                                                    if matches!(&*v.borrow(), PyObject::None) {
+                                                        use_action = false;
+                                                    } else {
+                                                        final_val = Some(v);
+                                                    }
+                                                }
+                                                Err(_) => {
+                                                    // Fallback: action(token) single-arg form
+                                                    match call_bound_method(action.clone(), token_str.clone(), vec![]) {
+                                                        Ok(v2) => {
+                                                            if matches!(&*v2.borrow(), PyObject::None) {
+                                                                use_action = false;
+                                                            } else {
+                                                                final_val = Some(v2);
+                                                            }
+                                                        }
+                                                        Err(e) => return Err(e),
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            final_val = Some(action.clone());
+                                        }
+                                    }
+                                    if use_action {
+                                        if let Some(v) = final_val {
+                                            result.push(v);
+                                        }
+                                    }
+                                    i = j;
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !matched {
+                            break;
+                        }
+                    }
+                    let rest = py_str(&string[i..]);
+                    Ok(py_tuple(vec![py_list(result), rest]))
+                },
+            }),
+        );
+        let scanner_type = PyObjectRef::new(PyObject::Type {
+            name: "Scanner".to_string(),
+            dict: Box::new(str_map_to_typedict(scanner_dict)),
+            bases: vec![],
+            mro: vec![],
+        });
+        if let PyObject::Type { mro, .. } = &mut *scanner_type.borrow_mut() {
+            *mro = vec![scanner_type.clone()];
+        }
+        d.insert_str("Scanner", scanner_type);
+    }
 
     // re.Pattern and re.Match type stubs (needed by typing and type-checking code)
     let re_pattern_type = PyObjectRef::new(PyObject::Type {
@@ -953,6 +1298,17 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         mro: vec![],
     });
     d.insert_str("Match", re_match_type);
+
+    d.insert_str("__version__", py_str("2.2.1"));
+    d.insert_str("__all__", py_list(vec![
+        py_str("match"), py_str("fullmatch"), py_str("search"), py_str("sub"), py_str("subn"),
+        py_str("split"), py_str("findall"), py_str("finditer"), py_str("compile"), py_str("purge"),
+        py_str("escape"), py_str("error"), py_str("Pattern"), py_str("Match"), py_str("A"),
+        py_str("I"), py_str("L"), py_str("M"), py_str("S"), py_str("X"), py_str("U"),
+        py_str("ASCII"), py_str("IGNORECASE"), py_str("LOCALE"), py_str("MULTILINE"),
+        py_str("DOTALL"), py_str("VERBOSE"), py_str("UNICODE"), py_str("NOFLAG"),
+        py_str("RegexFlag"), py_str("PatternError"),
+    ]));
 
     d
 }

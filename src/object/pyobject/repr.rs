@@ -1,6 +1,62 @@
 // Extracted from pyobject.rs — PyObject::repr.
 use super::*;
 
+fn repr_string(s: &str) -> String {
+    let has_single = s.contains('\'');
+    let has_double = s.contains('"');
+    let quote = if has_single && !has_double {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(s.len() + 2);
+    // Use same is_printable logic as escape_string
+    fn is_printable(c: char) -> bool {
+        if c.is_ascii() {
+            return c >= ' ' && c != '\x7f';
+        }
+        if c.is_alphanumeric() || c.is_whitespace() {
+            return true;
+        }
+        let cp = c as u32;
+        matches!(cp,
+            0x00A0..=0x00FF
+            | 0x2000..=0x206F
+            | 0x2100..=0x214F
+            | 0x2190..=0x2BFF
+            | 0x2E00..=0x2E7F
+            | 0x3000..=0x303F
+            | 0xFE50..=0xFE6F
+            | 0xFF00..=0xFFEF
+        )
+    }
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(quote);
+            }
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\x00'..='\x1f' => out.push_str(&format!("\\x{:02x}", c as u8)),
+            '\x7f' => out.push_str("\\x7f"),
+            c if c.is_control() => match c as u32 {
+                code @ 0..=0xff => out.push_str(&format!("\\x{:02x}", code as u8)),
+                code @ 0x100..=0xffff => out.push_str(&format!("\\u{:04x}", code)),
+                code => out.push_str(&format!("\\U{:08x}", code)),
+            },
+            c if !is_printable(c) => match c as u32 {
+                code @ 0x100..=0xffff => out.push_str(&format!("\\u{:04x}", code)),
+                code => out.push_str(&format!("\\U{:08x}", code)),
+            },
+            c => out.push(c),
+        }
+    }
+    format!("{}{}{}", quote, out, quote)
+}
+
 impl PyObject {
     pub fn repr(&self) -> String {
         match self {
@@ -24,7 +80,7 @@ impl PyObject {
                     )
                 }
             }
-            PyObject::Str(s) => format!("'{}'", escape_string(s)),
+            PyObject::Str(s) => repr_string(s),
             PyObject::Bytes(b) => {
                 let s: String = b
                     .iter()
@@ -206,26 +262,16 @@ impl PyObject {
                             let items_str: Vec<String> =
                                 items.iter().map(|x| x.repr()).collect();
                             let inner = items_str.join(", ");
-                            if cls_name == "list" {
-                                format!("[{}]", inner)
-                            } else {
-                                format!("{}([{}])", cls_name, inner)
-                            }
+                            format!("[{}]", inner)
                         }
                         PyObject::Tuple(items) => {
                             let items_str: Vec<String> =
                                 items.iter().map(|x| x.repr()).collect();
                             let inner = items_str.join(", ");
-                            if cls_name == "tuple" {
-                                if items_str.len() == 1 {
-                                    format!("({},)", items_str[0])
-                                } else {
-                                    format!("({})", inner)
-                                }
-                            } else if items_str.len() == 1 {
-                                format!("{}(({},))", cls_name, items_str[0])
+                            if items_str.len() == 1 {
+                                format!("({},)", items_str[0])
                             } else {
-                                format!("{}(({}) )", cls_name, inner)
+                                format!("({})", inner)
                             }
                         }
                         PyObject::Dict(d) => {
@@ -235,17 +281,14 @@ impl PyObject {
                                 .map(|(k, v)| format!("{}: {}", k.repr(), v.repr()))
                                 .collect();
                             let inner = items.join(", ");
-                            if cls_name == "dict" {
-                                format!("{{{}}}", inner)
-                            } else {
-                                format!("{}({{{}}})", cls_name, inner)
-                            }
+                            format!("{{{}}}", inner)
                         }
                         PyObject::Str(s) => {
+                            let inner = repr_string(s);
                             if cls_name == "str" {
-                                format!("'{}'", escape_string(s))
+                                inner
                             } else {
-                                format!("{}('{}')", cls_name, escape_string(s))
+                                format!("{}({})", cls_name, inner)
                             }
                         }
                         _ => {

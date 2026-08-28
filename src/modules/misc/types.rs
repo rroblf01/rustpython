@@ -93,33 +93,131 @@ fn build_simple_namespace_type() -> PyObjectRef {
             }
         }),
     );
-    // Make SimpleNamespace callable and subclassable
+    // Real SimpleNamespace __init__: handles optional single positional
+    // mapping/iterable plus kwargs, matching CPython's error messages
+    // (see test_types.SimpleNamespaceTests). Instance is already created
+    // empty by handle_type_call; this populates it.
     type_dict.insert_str(
-        "__call__",
-        bf!("__call__", |args| {
-            panic!("SimpleNamespace __call__ called");
-            eprintln!("DEBUG SimpleNamespace __call__ args len {} last {}", args.len(), args.last().map(|a| a.borrow().type_name()).unwrap_or("none".to_string()));
-            let typ = args[0].clone();
-            let mut inst_dict = crate::object::AttrMap::new();
-            // args[0] is the type, args[1..] are positional, last may be kwargs dict
-            // For SimpleNamespace(a=1, b=2), args is [Type, Dict{"a":1, "b":2}]
-            // For SimpleNamespace() with no args, args is [Type] with no Dict
-            if args.len() > 1 {
-                if let Some(last) = args.last() {
-                    eprintln!("DEBUG last type {}", last.borrow().type_name());
-                    if let PyObject::Dict(items) = &*last.borrow() {
-                        eprintln!("DEBUG last is Dict with {} items", items.len());
-                        for (k, v) in items.items() {
-                            inst_dict.insert(k.str(), v.clone());
+        "__init__",
+        bf!("__init__", |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("__init__ missing self"));
+            }
+            let self_obj = &args[0];
+            // args[1..] may contain: [pos_arg?, kwargs_dict?]
+            // handle_type_call packs keywords into a trailing Dict
+            let remaining = &args[1..];
+            let mut pos_arg: Option<PyObjectRef> = None;
+            let mut kwargs_dict: Option<PyObjectRef> = None;
+            if remaining.len() == 1 {
+                let a = &remaining[0];
+                if matches!(&*a.borrow(), PyObject::Dict(_)) {
+                    kwargs_dict = Some(a.clone());
+                } else {
+                    pos_arg = Some(a.clone());
+                }
+            } else if remaining.len() == 2 {
+                // Must be pos + kwargs (second must be Dict)
+                if matches!(&*remaining[1].borrow(), PyObject::Dict(_)) {
+                    pos_arg = Some(remaining[0].clone());
+                    kwargs_dict = Some(remaining[1].clone());
+                } else {
+                    return Err(PyError::type_error(format!(
+                        "SimpleNamespace expected at most 1 positional argument, got {}",
+                        remaining.len()
+                    )));
+                }
+            } else if remaining.len() > 2 {
+                return Err(PyError::type_error(format!(
+                    "SimpleNamespace expected at most 1 positional argument, got {}",
+                    remaining.len()
+                )));
+            }
+            // Helper to insert a mapping's items into self_obj's dict
+            let mut insert_mapping = |src: &PyObjectRef| -> PyResult<()> {
+                // Try mapping path (has keys())
+                let type_name = src.borrow().type_name();
+                let is_view = matches!(type_name.as_str(), "dict_items" | "dict_keys" | "dict_values" | "KeysView" | "ItemsView" | "ValuesView" | "MappingView");
+                let keys_method = if is_view { None } else { src.borrow().get_attribute("keys").ok() };
+                if let Some(keys_raw) = keys_method {
+                    // It's a mapping: copy via keys() + __getitem__
+                    let keys_iterable = crate::object::call_bound_method(keys_raw, src.clone(), vec![])?;
+                    let it = crate::object::builtin_iter(&[keys_iterable])?;
+                    loop {
+                        match crate::object::builtin_next(&[it.clone()]) {
+                            Ok(key) => {
+                                let key_str = match &*key.borrow() {
+                                    PyObject::Str(s) => s.to_string(),
+                                    _ => return Err(PyError::type_error("SimpleNamespace keys must be strings")),
+                                };
+                                // Hashability check via hash()
+                                let _ = key.hash()?;
+                                let value = crate::object::py_getitem(src, &key)?;
+                                if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                                    dict.insert(key_str, value);
+                                }
+                            }
+                            Err(PyError::StopIteration) => break,
+                            Err(e) => return Err(e),
                         }
                     }
+                    return Ok(());
+                }
+                // Not a mapping: treat as iterable of pairs
+                let it = crate::object::builtin_iter(&[src.clone()]).map_err(|_| {
+                    PyError::type_error(format!("'{}' object is not a mapping or iterable", type_name))
+                })?;
+                loop {
+                    match crate::object::builtin_next(&[it.clone()]) {
+                        Ok(pair) => {
+                            let pair_b = pair.borrow();
+                            let items: Vec<PyObjectRef> = match &*pair_b {
+                                PyObject::Tuple(v) | PyObject::List(v) => v.clone(),
+                                _ => return Err(PyError::type_error("SimpleNamespace iterable must be mapping or iterable of pairs")),
+                            };
+                            if items.len() != 2 {
+                                return Err(PyError::value_error(format!("SimpleNamespace iterable element has length {}; 2 is required", items.len())));
+                            }
+                            drop(pair_b);
+                            let key = &items[0];
+                            let val = &items[1];
+                            let key_str = match &*key.borrow() {
+                                PyObject::Str(s) => s.to_string(),
+                                _ => return Err(PyError::type_error("SimpleNamespace keys must be strings")),
+                            };
+                            let _ = key.hash()?;
+                            if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                                dict.insert(key_str, val.clone());
+                            }
+                        }
+                        Err(PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(())
+            };
+            if let Some(pos) = pos_arg {
+                insert_mapping(&pos)?;
+            }
+            if let Some(kw) = kwargs_dict {
+                if let PyObject::Dict(d) = &*kw.borrow() {
+                    for (k, v) in d.items() {
+                        let key_str = k.str();
+                        // Validate key is string (already) but also check original key was str
+                        if !matches!(&*k.borrow(), PyObject::Str(_)) {
+                            return Err(PyError::type_error("SimpleNamespace keys must be strings"));
+                        }
+                        let _ = k.hash()?;
+                        if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                            dict.insert(key_str, v);
+                        }
+                    }
+                } else {
+                    // Should not happen: kwargs always packed as Dict
+                    return Err(PyError::type_error("kwargs must be a dict"));
                 }
             }
-            eprintln!("DEBUG inst_dict len {}", inst_dict.len());
-            Ok(PyObjectRef::new(PyObject::Instance {
-                typ,
-                dict: inst_dict,
-            }))
+            Ok(py_none())
         }),
     );
     PyObjectRef::new(PyObject::Type {
@@ -854,33 +952,8 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
                     ));
                 }
                 let src = args[0].clone();
-                let is_dict = matches!(&*src.borrow(), PyObject::Dict(_));
-                let inner: PyObjectRef = if is_dict {
-                    src.clone()
-                } else {
-                    // Non-dict mapping: materialize a snapshot dict via items().
-                    let mut items = Vec::new();
-                    if let Ok(it) = builtin_iter(&[src]) {
-                        loop {
-                            match builtin_next(&[it.clone()]) {
-                                Ok(v) => {
-                                    if let PyObject::Tuple(vals) = &*v.borrow() {
-                                        if vals.len() == 2 {
-                                            items.push((vals[0].clone(), vals[1].clone()));
-                                        }
-                                    }
-                                }
-                                Err(PyError::StopIteration) => break,
-                                Err(e) => return Err(e),
-                            }
-                        }
-                    }
-                    let mut d = crate::object::PyDict::new();
-                    for (k, v) in items {
-                        let _ = d.set(k, v);
-                    }
-                    PyObjectRef::new(PyObject::Dict(Box::new(d)))
-                };
+                // Store the original mapping directly (preserving OrderedDict type for repr)
+                let inner: PyObjectRef = src.clone();
                 let mut dict = crate::object::AttrMap::new();
                 let typ = PyObjectRef::new(PyObject::Type {
                     name: "mappingproxy".to_string(),
@@ -925,6 +998,36 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
                                                 )),
                                             }
                                         } else {
+                                            // For dict subclasses (OrderedDict) etc., delegate via attribute
+                                            let method_name = match field.as_str() {
+                                                "len" => "__len__",
+                                                "keys" => "keys",
+                                                "values" => "values",
+                                                "items" => "items",
+                                                _ => field.as_str(),
+                                            };
+                                            if let Ok(m) = inner.borrow().get_attribute(method_name) {
+                                                if let Ok(result) = crate::object::call_bound_method(m, inner.clone(), vec![]) {
+                                                    if field == "len" {
+                                                        return Ok(result);
+                                                    } else {
+                                                        // For keys/values/items, ensure list
+                                                        if matches!(&*result.borrow(), PyObject::List(_)) {
+                                                            return Ok(result);
+                                                        }
+                                                        let it = crate::object::builtin_iter(&[result])?;
+                                                        let mut items = Vec::new();
+                                                        loop {
+                                                            match crate::object::builtin_next(&[it.clone()]) {
+                                                                Ok(v) => items.push(v),
+                                                                Err(crate::object::PyError::StopIteration) => break,
+                                                                Err(e) => return Err(e),
+                                                            }
+                                                        }
+                                                        return Ok(py_list(items));
+                                                    }
+                                                }
+                                            }
                                             Err(PyError::type_error(
                                                 "mappingproxy wrapping a non-dict",
                                             ))
@@ -933,22 +1036,27 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
                                 ))),
                             );
                         }
-                        // `mappingproxy({...})` repr — a BuiltinFunction (not a
-                        // capturing Closure, which pprint's _dispatch hashing
-                        // can't key) reading the backing from the instance
-                        // (test_pprint::test_mapping_proxy).
+                        // `mappingproxy({...})` repr — use native_backing_of to get inner's repr
+                        // (preserving OrderedDict vs plain dict)
                         td.insert_str(
                             "__repr__",
                             PyObjectRef::new(PyObject::BuiltinFunction {
                                 name: "__repr__".to_string(),
                                 func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
                                     let backing = crate::object::native_backing_of(&args[0])
-                                        .ok_or_else(|| {
-                                            PyError::runtime_error("mappingproxy has no backing")
-                                        })?;
+                                        .ok_or_else(|| PyError::runtime_error("mappingproxy has no backing"))?;
                                     Ok(py_str(&format!("mappingproxy({})", backing.repr())))
                                 },
                             }),
+                        );
+                        // `mappingproxy.copy()` — used by pprint; return the underlying mapping directly
+                        // (for OrderedDict, this preserves the OrderedDict type for pprint)
+                        let inner_copy = inner.clone();
+                        td.insert_str(
+                            "copy",
+                            PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| {
+                                Ok(inner_copy.clone())
+                            }))),
                         );
                         for (name, field) in [
                             ("get", "get"),
@@ -995,9 +1103,33 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
                                                 )),
                                             }
                                         } else {
-                                            Err(PyError::type_error(
-                                                "mappingproxy wrapping a non-dict",
-                                            ))
+                                            // For OrderedDict etc., delegate via get_attribute/py_getitem
+                                            match field.as_str() {
+                                                "contains" => {
+                                                    if let Ok(contains_fn) = inner.borrow().get_attribute("__contains__") {
+                                                        if let Ok(res) = crate::object::call_bound_method(contains_fn, inner.clone(), vec![k.clone()]) {
+                                                            return Ok(res);
+                                                        }
+                                                    }
+                                                    // Fallback via try getitem
+                                                    match crate::object::py_getitem(&inner, &k) {
+                                                        Ok(_) => Ok(py_bool(true)),
+                                                        Err(_) => Ok(py_bool(false)),
+                                                    }
+                                                }
+                                                "get" => {
+                                                    let key = args.first().cloned().unwrap_or_else(|| k.clone());
+                                                    let default = args.get(1).cloned().unwrap_or_else(|| PyObjectRef::new(PyObject::None));
+                                                    match crate::object::py_getitem(&inner, &key) {
+                                                        Ok(v) => Ok(v),
+                                                        Err(_) => Ok(default),
+                                                    }
+                                                }
+                                                "getitem" => crate::object::py_getitem(&inner, &k).map_err(|_| PyError::key_error(k.repr())),
+                                                _ => Err(PyError::runtime_error(
+                                                    "unhandled mappingproxy field",
+                                                )),
+                                            }
                                         }
                                     },
                                 ))),

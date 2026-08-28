@@ -265,6 +265,8 @@ impl PyObjectRef {
             (PyObjectRef::None, PyObjectRef::None) => true,
             (PyObjectRef::Mut(a), PyObjectRef::Mut(b)) => Rc::ptr_eq(a, b),
             (PyObjectRef::Imm(a), PyObjectRef::Imm(b)) => Rc::ptr_eq(a, b),
+            (PyObjectRef::Mut(a), PyObjectRef::Imm(b)) => Rc::ptr_eq(a, b),
+            (PyObjectRef::Imm(a), PyObjectRef::Mut(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -376,9 +378,10 @@ impl PyObjectRef {
                 }
             }
         }
-        if let Some(native) = native_backing_of(self) {
-            return native.repr();
-        }
+        // Native-backed Instances (list/dict/set subclasses) are handled by
+        // PyObject::Instance's own repr (pyobject/repr.rs), which adds the
+        // subclass prefix (e.g. set2({1,2}) vs {1,2}). The previous shortcut
+        // `native.repr()` lost that prefix entirely.
         // For container types, clone elements before calling their .repr()
         // so the RefCell borrow on the container is released first. This
         // prevents RefCell panics when an element's __repr__ (via Python
@@ -482,8 +485,12 @@ impl PyObjectRef {
             PyObject::FrozenSet(s) => {
                 let items = s.to_vec();
                 drop(obj);
-                let parts: Vec<String> = items.iter().map(|x| x.repr()).collect();
-                format!("frozenset({{{}}})", parts.join(", "))
+                if items.is_empty() {
+                    "frozenset()".to_string()
+                } else {
+                    let parts: Vec<String> = items.iter().map(|x| x.repr()).collect();
+                    format!("frozenset({{{}}})", parts.join(", "))
+                }
             }
             _ => {
                 drop(obj);

@@ -365,12 +365,17 @@ def _deepcopy_fallback(x, cls, memo, d):
             memo[d]=y; _keep_alive(x,memo)
             for k,v in x.items():
                 y[k] = deepcopy(v, memo)
+            # break reference to last loop variables (prevents keeping last key alive)
+            try: del k, v
+            except: pass
             return y
         if isinstance(x, _weakref.WeakValueDictionary):
             y = cls.__new__(cls)
             memo[d]=y; _keep_alive(x,memo)
             for k,v in x.items():
                 y[deepcopy(k,memo)] = v
+            try: del k, v
+            except: pass
             return y
         y = cls.__new__(cls)
         memo[d]=y; _keep_alive(x,memo)

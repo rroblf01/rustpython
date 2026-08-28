@@ -63,10 +63,11 @@ Opcode::LOAD_ATTR => {
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     for (i, item) in items.iter().enumerate() {
-                        let offset = (ctx.i * 24) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
+                        builder.ins().store(memflags, item[2], item_addr, 16);
                     }
                     let arg_val = builder.ins().iconst(types::I64, instr.arg as i64);
                     builder
@@ -167,10 +168,11 @@ Opcode::LOAD_ATTR => {
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     for (i, item) in items.iter().enumerate() {
-                        let offset = (ctx.i * 24) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
+                        builder.ins().store(memflags, item[2], item_addr, 16);
                     }
                     let n_val = builder.ins().iconst(types::I64, n as i64);
                     builder
@@ -253,7 +255,7 @@ Opcode::LOAD_ATTR => {
                     );
                     // Push unpacked items onto stack in order
                     for i in 0..n {
-                        let offset = (ctx.i * 24) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         let ilo = builder.ins().load(types::I64, memflags, item_addr, 0);
                         let ihi = builder.ins().load(types::I64, memflags, item_addr, 8);
@@ -330,8 +332,8 @@ Opcode::LOAD_ATTR => {
                     // indexing unconditionally.
                     let len = eval_stack.len();
                     let i = instr.arg as usize;
-                    if ctx.i > 0 && ctx.i < len {
-                        eval_stack.swap(len - 1, len - 1 - ctx.i);
+                    if i > 0 && i < len {
+                        eval_stack.swap(len - 1, len - 1 - i);
                     }
                 }
                 Opcode::POP_JUMP_IF_TRUE => {
@@ -423,10 +425,11 @@ Opcode::LOAD_ATTR => {
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     for (i, item) in items.iter().enumerate() {
-                        let offset = (ctx.i * 24) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
+                        builder.ins().store(memflags, item[2], item_addr, 16);
                     }
                     let n_val = builder.ins().iconst(types::I64, n as i64);
                     builder
@@ -459,10 +462,11 @@ Opcode::LOAD_ATTR => {
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     for (i, item) in items.iter().enumerate() {
-                        let offset = (ctx.i * 24) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
+                        builder.ins().store(memflags, item[2], item_addr, 16);
                     }
                     let n_val = builder.ins().iconst(types::I64, n as i64);
                     builder
@@ -502,10 +506,11 @@ Opcode::LOAD_ATTR => {
                     let array_addr = builder.ins().stack_addr(types::I64, array_slot, 0);
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     for (i, item) in items.iter().enumerate() {
-                        let offset = (ctx.i * 24) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         builder.ins().store(memflags, item[0], item_addr, 0);
                         builder.ins().store(memflags, item[1], item_addr, 8);
+                        builder.ins().store(memflags, item[2], item_addr, 16);
                     }
                     let n_val = builder.ins().iconst(types::I64, nargs as i64);
                     builder
@@ -762,7 +767,7 @@ Opcode::LOAD_ATTR => {
                     );
                     // Push unpacked items onto stack: items before *, starred list, items after *
                     for i in 0..n_total {
-                        let offset = (ctx.i as i32 * 24) as i32;
+                        let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
                         let ilo = builder.ins().load(types::I64, memflags, item_addr, 0);
                         let ihi = builder.ins().load(types::I64, memflags, item_addr, 8);

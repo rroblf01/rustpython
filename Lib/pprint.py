@@ -245,14 +245,20 @@ class PrettyPrinter:
                     repr_func = getattr(type(object), "__repr__", None)
                 except AttributeError:
                     repr_func = None
-            p = self._dispatch.get(repr_func, None) if repr_func is not None else None
+            try:
+                p = self._dispatch.get(repr_func, None) if repr_func is not None else None
+            except TypeError:
+                p = None
             # Fallback dispatch via type identity for RustPython where type identity is broken
             if p is None:
-                p = self._dispatch.get(type(object), None)
+                try:
+                    p = self._dispatch.get(type(object), None)
+                except TypeError:
+                    p = None
                 if p is None:
                     try:
                         p = self._dispatch.get(object.__class__.__repr__, None)
-                    except AttributeError:
+                    except (AttributeError, TypeError):
                         p = None
             # Lazy import to improve module import time
             from dataclasses import is_dataclass
@@ -303,8 +309,7 @@ class PrettyPrinter:
             except Exception:
                 pass
             try:
-                if isinstance(object, _types.MappingProxyType):
-                    context[objid] = 1
+                if isinstance(object, _types.MappingProxyType) or type(object).__name__ == "mappingproxy":
                     self._pprint_mappingproxy(object, stream, indent, allowance, context, level + 1)
                     del context[objid]
                     return

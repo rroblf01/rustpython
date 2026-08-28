@@ -287,8 +287,143 @@ native_repr_fn!(builtin_int_repr);
 native_repr_fn!(builtin_float_repr);
 native_repr_fn!(builtin_complex_repr);
 native_repr_fn!(builtin_bool_repr);
-native_repr_fn!(builtin_set_repr);
-native_repr_fn!(builtin_frozenset_repr);
+pub fn builtin_set_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("__repr__ requires 1 argument"));
+    }
+    // `set.__repr__(obj)` for a subclass instance must return with subclass prefix
+    // (e.g. `set3({1,2})`), not base `"{1,2}"`, and must not recurse through the
+    // instance's own `__repr__` (which for `set3` is `return set.__repr__(self)`).
+    let typ_name = if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+        if let PyObject::Type { name, .. } = &*typ.borrow() {
+            name.clone()
+        } else {
+            args[0].borrow().type_name()
+        }
+    } else {
+        args[0].borrow().type_name()
+    };
+    if let Some(native) = crate::object::native_backing_of(&args[0]) {
+        if let PyObject::Set(s) = &*native.borrow() {
+            if s.is_empty() {
+                if typ_name == "set" {
+                    return Ok(py_str("set()"));
+                } else {
+                    return Ok(py_str(&format!("{}()", typ_name)));
+                }
+            } else {
+                let parts: Vec<String> = s.to_vec().iter().map(|x| x.repr()).collect();
+                let inner = parts.join(", ");
+                if typ_name == "set" {
+                    return Ok(py_str(&format!("{{{}}}", inner)));
+                } else {
+                    return Ok(py_str(&format!("{}({{{}}})", typ_name, inner)));
+                }
+            }
+        }
+        if let PyObject::FrozenSet(s) = &*native.borrow() {
+            if s.is_empty() {
+                if typ_name == "frozenset" {
+                    return Ok(py_str("frozenset()"));
+                } else {
+                    return Ok(py_str(&format!("{}()", typ_name)));
+                }
+            } else {
+                let parts: Vec<String> = s.to_vec().iter().map(|x| x.repr()).collect();
+                let inner = parts.join(", ");
+                if typ_name == "frozenset" {
+                    return Ok(py_str(&format!("frozenset({{{}}})", inner)));
+                } else {
+                    return Ok(py_str(&format!("{}({{{}}})", typ_name, inner)));
+                }
+            }
+        }
+    }
+    if let PyObject::Set(s) = &*args[0].borrow() {
+        if s.is_empty() {
+            return Ok(py_str("set()"));
+        } else {
+            let parts: Vec<String> = s.to_vec().iter().map(|x| x.repr()).collect();
+            return Ok(py_str(&format!("{{{}}}", parts.join(", "))));
+        }
+    }
+    if let PyObject::FrozenSet(s) = &*args[0].borrow() {
+        if s.is_empty() {
+            return Ok(py_str("frozenset()"));
+        } else {
+            let parts: Vec<String> = s.to_vec().iter().map(|x| x.repr()).collect();
+            return Ok(py_str(&format!("frozenset({{{}}})", parts.join(", "))));
+        }
+    }
+    Ok(py_str(&args[0].repr()))
+}
+pub fn builtin_frozenset_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("__repr__ requires 1 argument"));
+    }
+    let typ_name = if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+        if let PyObject::Type { name, .. } = &*typ.borrow() {
+            name.clone()
+        } else {
+            args[0].borrow().type_name()
+        }
+    } else {
+        args[0].borrow().type_name()
+    };
+    if let Some(native) = crate::object::native_backing_of(&args[0]) {
+        if let PyObject::FrozenSet(s) = &*native.borrow() {
+            if s.is_empty() {
+                if typ_name == "frozenset" {
+                    return Ok(py_str("frozenset()"));
+                } else {
+                    return Ok(py_str(&format!("{}()", typ_name)));
+                }
+            } else {
+                let parts: Vec<String> = s.to_vec().iter().map(|x| x.repr()).collect();
+                let inner = parts.join(", ");
+                if typ_name == "frozenset" {
+                    return Ok(py_str(&format!("frozenset({{{}}})", inner)));
+                } else {
+                    return Ok(py_str(&format!("{}({{{}}})", typ_name, inner)));
+                }
+            }
+        }
+        if let PyObject::Set(s) = &*native.borrow() {
+            if s.is_empty() {
+                if typ_name == "set" {
+                    return Ok(py_str("set()"));
+                } else {
+                    return Ok(py_str(&format!("{}()", typ_name)));
+                }
+            } else {
+                let parts: Vec<String> = s.to_vec().iter().map(|x| x.repr()).collect();
+                let inner = parts.join(", ");
+                if typ_name == "set" {
+                    return Ok(py_str(&format!("{{{}}}", inner)));
+                } else {
+                    return Ok(py_str(&format!("{}({{{}}})", typ_name, inner)));
+                }
+            }
+        }
+    }
+    if let PyObject::FrozenSet(s) = &*args[0].borrow() {
+        if s.is_empty() {
+            return Ok(py_str("frozenset()"));
+        } else {
+            let parts: Vec<String> = s.to_vec().iter().map(|x| x.repr()).collect();
+            return Ok(py_str(&format!("frozenset({{{}}})", parts.join(", "))));
+        }
+    }
+    if let PyObject::Set(s) = &*args[0].borrow() {
+        if s.is_empty() {
+            return Ok(py_str("set()"));
+        } else {
+            let parts: Vec<String> = s.to_vec().iter().map(|x| x.repr()).collect();
+            return Ok(py_str(&format!("{{{}}}", parts.join(", "))));
+        }
+    }
+    Ok(py_str(&args[0].repr()))
+}
 native_repr_fn!(builtin_slice_repr);
 
 

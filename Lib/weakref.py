@@ -159,6 +159,9 @@ class WeakValueDictionary(_collections_abc.MutableMapping):
             o = wr()
             if o is not None:
                 new[deepcopy(key, memo)] = o
+        try:
+            del key, wr, o
+        except: pass
         return new
 
     def get(self, key, default=None):
@@ -298,6 +301,25 @@ class WeakValueDictionary(_collections_abc.MutableMapping):
             return c
         return NotImplemented
 
+    def __eq__(self, other):
+        if isinstance(other, _collections_abc.Mapping):
+            if len(self) != len(other):
+                return False
+            for k, v in self.items():
+                try:
+                    if other[k] != v:
+                        return False
+                except KeyError:
+                    return False
+            return True
+        return NotImplemented
+
+    def __ne__(self, other):
+        r = self.__eq__(other)
+        if r is NotImplemented:
+            return r
+        return not r
+
 
 class KeyedRef(ref):
     """Specialized reference that includes a key corresponding to the value.
@@ -375,6 +397,10 @@ class WeakKeyDictionary(_collections_abc.MutableMapping):
             o = wr()
             if o is not None:
                 new[o] = deepcopy(val, memo)
+        # clear loop vars that would keep last key alive (frame locals survive until GC)
+        try:
+            del wid, wr, val, o
+        except: pass
         return new
 
     def get(self, key, default=None):
@@ -473,6 +499,26 @@ class WeakKeyDictionary(_collections_abc.MutableMapping):
             c.update(self)
             return c
         return NotImplemented
+
+    def __eq__(self, other):
+        if isinstance(other, _collections_abc.Mapping):
+            if len(self) != len(other):
+                return False
+            for k, v in self.items():
+                try:
+                    if other[k] != v:
+                        return False
+                except KeyError:
+                    return False
+            return True
+        return NotImplemented
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
 
 class finalize:
     """Class for finalization of weakrefable objects

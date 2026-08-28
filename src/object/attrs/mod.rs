@@ -165,9 +165,19 @@ impl PyObject {
             PyObject::List(_v) => return list::get(self, name),
             PyObject::Deque { data, maxlen } => return deque::get(self, name),
             PyObject::Tuple(_v) => return tuple::get(self, name),
-            PyObject::Bytes(_v) => return bytes1::get(self, name),
+            PyObject::Bytes(_v) => {
+                match bytes1::get(self, name) {
+                    Ok(v) => return Ok(v),
+                    Err(_) => return bytes2::get(self, name),
+                }
+            }
             PyObject::ByteArray(_b) => return bytearray::get(self, name),
-            PyObject::Str(_s) => return str1::get(self, name),
+            PyObject::Str(_s) => {
+                match str1::get(self, name) {
+                    Ok(v) => return Ok(v),
+                    Err(_) => return str2::get(self, name),
+                }
+            }
             // dict-protocol methods on the live `globals()` view — same
             // surface as `dict` below, but operating on the backing
             // `Rc<RefCell<HashMap<StrId, PyObjectRef>>>` so mutators
@@ -618,6 +628,7 @@ impl PyObject {
             PyObject::Thread(inner_arc) => return thread::get(self, name),
             PyObject::Lock(_) | PyObject::RLock(_) | PyObject::Event(_) | PyObject::Queue(_) => return sync::get(self, name),            PyObject::Int(_) | PyObject::Bool(_) => return int::get(self, name),
             PyObject::Float(_) => return float::get(self, name),
+            PyObject::Range { .. } | PyObject::RangeIter { .. } => return range::get(self, name),
             PyObject::CompiledRegex { .. } => return compiled_regex::get(self, name),
             PyObject::Super { cls, obj } => return super_obj::get(self, name),
             PyObject::FutureAwaitIterator {

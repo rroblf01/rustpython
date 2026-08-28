@@ -59,7 +59,6 @@ pub fn builtin_getattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_setattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    eprintln!("builtin_setattr called for {}", args[0].borrow().type_name());
     if args.len() != 3 {
         return Err(PyError::type_error("setattr() takes exactly 3 arguments"));
     }
