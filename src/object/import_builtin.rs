@@ -3,6 +3,12 @@
 // `__import__` builtin implementation.
 use super::*;
 
+mod eval_exec;
+pub use eval_exec::{builtin_eval, builtin_exec};
+
+mod iter;
+pub use iter::{builtin_filter, builtin_map, builtin_super, builtin_zip};
+
 // ---- __import__ builtin ----
 
 /// True iff `name` is present in the `sys.modules` dict (the real import
@@ -195,113 +201,6 @@ pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-pub fn builtin_eval(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() {
-        return Err(PyError::type_error("eval() requires at least 1 argument"));
-    }
-    let source = args[0].str();
-    let mut parser = crate::parser::Parser::new(&source);
-    let program = parser
-        .parse_program()
-        .map_err(|e| PyError::type_error(format!("eval parse error: {}", e)))?;
-    let mut compiler = crate::compiler::Compiler::new();
-    let code = compiler
-        .compile(&program, "<eval>")
-        .map_err(|e| PyError::type_error(format!("eval compile error: {}", e)))?;
-    let code2 = code.clone();
-    // Use current VM if available via VM_PTR so exec() shares modules, sys.path, etc.
-    match with_vm_mut(|vm| vm.run(code)) {
-        Ok(Ok(val)) => Ok(val),
-        Ok(Err(e)) => Err(PyError::type_error(format!("eval error: {}", e))),
-        Err(_) => {
-            let mut new_vm = crate::vm::VirtualMachine::new();
-            new_vm
-                .run(code2)
-                .map_err(|e| PyError::type_error(format!("eval error: {}", e)))
-        }
-    }
-}
-
-pub fn builtin_exec(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() {
-        return Err(PyError::type_error("exec() requires at least 1 argument"));
-    }
-    // Check if first arg is a code object (compile() result)
-    let code = match &*args[0].borrow() {
-        PyObject::Code(c) => (**c).clone(),
-        _ => (|| -> Result<CodeObject, String> {
-            let source = args[0].str();
-            let mut parser = crate::parser::Parser::new(&source);
-            let program = parser.parse_program()?;
-            let mut compiler = crate::compiler::Compiler::new();
-            compiler.compile(&program, "<exec>")
-        })()
-        .map_err(|e| PyError::type_error(format!("exec error: {}", e)))?,
-    };
-    // Handle globals/locals arguments
-    let (original_globals, compiled_globals) = if args.len() > 1 {
-        match &*args[1].borrow() {
-            PyObject::Dict(d) => {
-                let compiled = Rc::new(RefCell::new(
-                    d.items()
-                        .into_iter()
-                        .map(|(k, v)| (interner::intern(&k.str()), v))
-                        .collect::<HashMap<StrId, PyObjectRef>>(),
-                ));
-                (Some(args[1].clone()), Some(compiled))
-            }
-            _ => (None, None),
-        }
-    } else {
-        (None, None)
-    };
-    let code2 = code.clone();
-    // Use current VM if available via VM_PTR so exec() shares modules, sys.path, etc.
-    let result = match with_vm_mut(|vm| {
-        if let Some(ref g) = compiled_globals {
-            vm.exec_code(code, Some(g.clone()))
-        } else {
-            vm.run(code)
-        }
-    }) {
-        Ok(Ok(ref _val)) => Ok(py_none()),
-        Ok(Err(e)) => Err(PyError::type_error(format!("exec error: {}", e))),
-        Err(_) => {
-            let mut new_vm = crate::vm::VirtualMachine::new();
-            new_vm
-                .run(code2)
-                .map_err(|e| PyError::type_error(format!("exec error: {}", e)))?;
-            Ok(py_none())
-        }
-    };
-    // Copy results back to original globals dict
-    // If the original dict had __annotations__, restore it (the compiled
-    // code creates a new one which should not overwrite the existing)
-    if let Some(ref orig) = original_globals {
-        if let PyObject::Dict(orig_dict) = &mut *orig.borrow_mut() {
-            // Check if original dict had __annotations__
-            if orig_dict
-                .get(&py_str("__annotations__"))
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                // The original dict already has __annotations__ — restore it
-                // (the compiled code created a new __annotations__ which
-                // overwrites the original, but we want to preserve the original)
-                // The original dict's __annotations__ is already correct,
-                // so we just need to ensure the compiled code's __annotations__
-                // doesn't overwrite it. Since the compiled code writes to
-                // compiled_globals (a separate HashMap), the original dict
-                // should be unchanged. But if it IS modified (due to some
-                // code path), we restore the original value here.
-                // For now, the original dict should be unchanged because
-                // the compiled code uses compiled_globals, not the original dict.
-            }
-        }
-    }
-    result
-}
 
 /// PEP 263 source-encoding-cookie detection: real Python scans the first
 /// TWO lines of a `bytes` source for a `# -*- coding: <name> -*-`-shaped
@@ -711,115 +610,6 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::new(PyObject::Code(Rc::new(code))))
 }
 
-pub fn builtin_super(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    // super() with no args or super(class, instance)
-    if args.len() == 2 {
-        let cls = args[0].clone();
-        let obj = args[1].clone();
-        Ok(PyObjectRef::new(PyObject::Super { cls, obj }))
-    } else {
-        Err(PyError::type_error("super() requires 2 arguments"))
-    }
-}
-
-pub fn builtin_map(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 {
-        return Err(PyError::type_error("map() requires at least 2 arguments"));
-    }
-    let func = args[0].clone();
-    let iter = builtin_iter(&[args[1].clone()])?;
-    Ok(PyObjectRef::new(PyObject::MapIterator {
-        func,
-        iterator: Box::new(iter),
-    }))
-}
-
-pub fn builtin_filter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() != 2 {
-        return Err(PyError::type_error("filter() requires exactly 2 arguments"));
-    }
-    let func = args[0].clone();
-    let iter = builtin_iter(&[args[1].clone()])?;
-    Ok(PyObjectRef::new(PyObject::FilterIterator {
-        func,
-        iterator: Box::new(iter),
-    }))
-}
-
-pub fn builtin_zip(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() {
-        return Err(PyError::type_error("zip() requires at least 1 argument"));
-    }
-    // Keyword args (only `strict` is defined for zip()) arrive packed into a
-    // trailing dict, per the calling convention call_function uses for all
-    // BuiltinFunction calls. Without stripping it here, `zip(a, b,
-    // strict=True)` treated the kwargs dict itself as one more iterable to
-    // zip — iterating a dict yields its keys, so it silently zipped in the
-    // literal string "strict" as a bogus extra column instead of enforcing
-    // equal lengths.
-    let (iterables, strict) = {
-        let last = args.last().unwrap();
-        let last_borrowed = last.borrow();
-        if let PyObject::Dict(kwargs) = &*last_borrowed {
-            let strict = kwargs
-                .get(&py_str("strict"))
-                .ok()
-                .flatten()
-                .map(|v| v.truthy())
-                .unwrap_or(false);
-            (&args[..args.len() - 1], strict)
-        } else {
-            (args, false)
-        }
-    };
-    if iterables.is_empty() {
-        return Ok(PyObjectRef::new(PyObject::ZipIterator {
-            iterators: vec![],
-        }));
-    }
-    let iters: Vec<PyObjectRef> = iterables
-        .iter()
-        .map(|a| builtin_iter(&[a.clone()]))
-        .collect::<PyResult<Vec<_>>>()?;
-    if strict {
-        // Eagerly materialize and check equal lengths — the lazy
-        // ZipIterator has no way to distinguish "ran out because lengths
-        // differ" from "ran out because we're done" once iteration starts,
-        // so `strict` must be enforced up front.
-        let mut rows: Vec<PyObjectRef> = Vec::new();
-        loop {
-            let mut row = Vec::with_capacity(iters.len());
-            let mut stopped_indices = Vec::new();
-            for (idx, it) in iters.iter().enumerate() {
-                match builtin_next(&[it.clone()]) {
-                    Ok(v) => row.push(v),
-                    Err(e) if is_stop_iteration_error(&e) => stopped_indices.push(idx),
-                    Err(e) => return Err(e),
-                }
-            }
-            if !stopped_indices.is_empty() {
-                if stopped_indices.len() != iters.len() {
-                    let shorter_at = stopped_indices[0];
-                    let longer_at = (0..iters.len())
-                        .find(|i| !stopped_indices.contains(i))
-                        .unwrap();
-                    return Err(PyError::value_error(format!(
-                        "zip() argument {} is shorter than argument {}",
-                        shorter_at + 1,
-                        longer_at + 1,
-                    )));
-                }
-                break;
-            }
-            rows.push(py_tuple(row));
-        }
-        return Ok(PyObjectRef::new(PyObject::ListIter {
-            list: rows,
-            index: 0,
-        }));
-    }
-    Ok(PyObjectRef::new(PyObject::ZipIterator { iterators: iters }))
-}
 
 pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let f = func.clone();
