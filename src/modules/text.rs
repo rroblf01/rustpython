@@ -2,6 +2,11 @@ use crate::object::*;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
+mod string;
+pub use string::*;
+mod reprlib;
+pub use reprlib::*;
+
 pub fn create_textwrap_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! tw_func {
@@ -454,68 +459,6 @@ pub fn create_pprint_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::SmallBool(readable))
     });
 
-    d
-}
-
-pub fn create_string_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    let ascii_lowercase = "abcdefghijklmnopqrstuvwxyz";
-    let ascii_uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let ascii_letters = &format!("{}{}", ascii_lowercase, ascii_uppercase);
-    let digits = "0123456789";
-    let hexdigits = "0123456789abcdefABCDEF";
-    let octdigits = "01234567";
-    let punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
-    let whitespace = " \t\n\r\u{0b}\u{0c}";
-    let printable = &format!("{}{}{}{}", digits, ascii_letters, punctuation, whitespace);
-
-    d.insert_str("ascii_letters", py_str(ascii_letters));
-    d.insert_str("ascii_lowercase", py_str(ascii_lowercase));
-    d.insert_str("ascii_uppercase", py_str(ascii_uppercase));
-    d.insert_str("digits", py_str(digits));
-    d.insert_str("hexdigits", py_str(hexdigits));
-    d.insert_str("octdigits", py_str(octdigits));
-    d.insert_str("punctuation", py_str(punctuation));
-    d.insert_str("printable", py_str(printable));
-    d.insert_str("whitespace", py_str(whitespace));
-
-    d
-}
-
-pub fn create_reprlib_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    d.insert_str(
-        "repr",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "repr".to_string(),
-            func: |args| {
-                if args.is_empty() {
-                    return Err(PyError::type_error("repr() missing required argument"));
-                }
-                let s = if args.len() > 1 {
-                    let limit = args[1].as_i64().unwrap_or(80) as usize;
-                    let obj_repr = args[0].repr();
-                    if obj_repr.len() > limit {
-                        if limit > 3 {
-                            format!("{}...", &obj_repr[..limit - 3])
-                        } else {
-                            obj_repr[..limit].to_string()
-                        }
-                    } else {
-                        obj_repr
-                    }
-                } else {
-                    let obj_repr = args[0].repr();
-                    if obj_repr.len() > 80 {
-                        format!("{}...", &obj_repr[..77])
-                    } else {
-                        obj_repr
-                    }
-                };
-                Ok(py_str(&s))
-            },
-        }),
-    );
     d
 }
 
