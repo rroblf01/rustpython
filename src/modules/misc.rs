@@ -30,6 +30,15 @@ pub use this::*;
 mod queue;
 pub use queue::*;
 
+mod cmath;
+pub use cmath::*;
+
+mod hashlib_extra;
+pub use hashlib_extra::*;
+
+mod sysconfig;
+pub use sysconfig::*;
+
 
 
 // ---- logging module ----
@@ -4345,130 +4354,6 @@ pub fn create_json_tool_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-pub fn create_cmath_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! cm_func {
-        ($name:expr, $func:expr) => {
-            d.insert(
-                $name.to_string(),
-                PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: $name.to_string(),
-                    func: $func,
-                }),
-            );
-        };
-    }
-    cm_func!("sqrt", |args| {
-        if args.len() != 1 {
-            return Err(PyError::type_error("sqrt() takes exactly one argument"));
-        }
-        let v = args[0].borrow();
-        match &*v {
-            PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).sqrt())),
-            PyObject::Float(f) => Ok(py_float(f.sqrt())),
-            _ => Err(PyError::type_error("sqrt() argument must be a number")),
-        }
-    });
-    cm_func!("sin", |args| {
-        if args.len() != 1 {
-            return Err(PyError::type_error("sin() takes exactly one argument"));
-        }
-        let v = args[0].borrow();
-        match &*v {
-            PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).sin())),
-            PyObject::Float(f) => Ok(py_float(f.sin())),
-            _ => Err(PyError::type_error("sin() argument must be a number")),
-        }
-    });
-    cm_func!("cos", |args| {
-        if args.len() != 1 {
-            return Err(PyError::type_error("cos() takes exactly one argument"));
-        }
-        let v = args[0].borrow();
-        match &*v {
-            PyObject::Int(i) => Ok(py_float(i.to_f64().unwrap_or(0.0).cos())),
-            PyObject::Float(f) => Ok(py_float(f.cos())),
-            _ => Err(PyError::type_error("cos() argument must be a number")),
-        }
-    });
-    d
-}
-
-pub fn create_hashlib_extra_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! hle_func {
-        ($name:expr, $func:expr) => {
-            d.insert(
-                $name.to_string(),
-                PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: $name.to_string(),
-                    func: $func,
-                }),
-            );
-        };
-    }
-
-    hle_func!("md5", |args| {
-        if args.len() != 1 {
-            return Err(PyError::type_error("md5() takes exactly one argument"));
-        }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("md5() argument must be bytes or str")),
-        };
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::Hasher;
-        let mut hasher = DefaultHasher::new();
-        hasher.write(b"md5");
-        hasher.write(&bytes);
-        Ok(py_str(&format!("{:016x}", hasher.finish())))
-    });
-
-    hle_func!("sha1", |args| {
-        if args.len() != 1 {
-            return Err(PyError::type_error("sha1() takes exactly one argument"));
-        }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("sha1() argument must be bytes or str")),
-        };
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::Hasher;
-        let mut hasher = DefaultHasher::new();
-        hasher.write(b"sha1");
-        hasher.write(&bytes);
-        Ok(py_str(&format!("{:016x}", hasher.finish())))
-    });
-
-    hle_func!("sha256", |args| {
-        if args.len() != 1 {
-            return Err(PyError::type_error("sha256() takes exactly one argument"));
-        }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => {
-                return Err(PyError::type_error(
-                    "sha256() argument must be bytes or str",
-                ))
-            }
-        };
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::Hasher;
-        let mut hasher = DefaultHasher::new();
-        hasher.write(b"sha256");
-        hasher.write(&bytes);
-        Ok(py_str(&format!("{:016x}", hasher.finish())))
-    });
-
-    d
-}
-
 pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
 
@@ -5071,80 +4956,6 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("DEBUG_UNCOLLECTABLE", py_int(4));
     d.insert_str("DEBUG_SAVEALL", py_int(32));
     d.insert_str("DEBUG_LEAK", py_int(38));
-
-    d
-}
-
-pub fn create_sysconfig_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! syscfg_func {
-        ($name:expr, $func:expr) => {
-            d.insert(
-                $name.to_string(),
-                PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: $name.to_string(),
-                    func: $func,
-                }),
-            );
-        };
-    }
-
-    syscfg_func!("get_config_var", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error(
-                "get_config_var() missing required argument (name)",
-            ));
-        }
-        Ok(py_none())
-    });
-
-    syscfg_func!("get_config_vars", |_| { Ok(py_dict()) });
-
-    syscfg_func!("get_platform", |_| { Ok(py_str("linux-x86_64")) });
-
-    // sysconfig.get_path(name, ...) — returns install paths; pydoc reads
-    // get_path('stdlib') to locate module docstrings. Return the interpreter's
-    // Lib dir (sys.path[0] resolved through the live sys module).
-    syscfg_func!("get_path", |args| {
-        let name = args.first().map(|a| a.str()).unwrap_or_default();
-        let base = crate::modules::get_module("sys").and_then(|m| {
-            let b = m.borrow();
-            if let PyObject::Module { dict, .. } = &*b {
-                dict.get_str("path").cloned()
-            } else {
-                None
-            }
-        });
-        if let Some(path_list) = base {
-            let p = {
-                let pb = path_list.borrow();
-                if let PyObject::List(items) = &*pb {
-                    items.first().map(|i| i.str())
-                } else {
-                    None
-                }
-            };
-            if let Some(p) = p {
-                if !p.is_empty() {
-                    let r = match name.as_str() {
-                        "stdlib" => format!("{}/Lib", p),
-                        "platstdlib" => format!("{}/Lib", p),
-                        "purelib" | "platlib" | "include" | "platinclude" | "scripts" | "data" => {
-                            p.clone()
-                        }
-                        _ => p.clone(),
-                    };
-                    return Ok(py_str(&r));
-                }
-            }
-        }
-        Ok(py_str(""))
-    });
-
-    syscfg_func!("get_python_version", |_| { Ok(py_str("3.13")) });
-    syscfg_func!("_get_python_version_abi", |_| { Ok(py_str("3.13")) });
-
-    syscfg_func!("is_python_build", |_| { Ok(py_bool(false)) });
 
     d
 }
