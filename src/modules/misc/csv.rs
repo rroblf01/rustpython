@@ -4,6 +4,11 @@ use std::rc::Rc;
 #[allow(unused_imports)]
 use std::cell::RefCell;
 
+mod error;
+use error::dialect_error;
+mod typename;
+use typename::type_name_of;
+
 pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
     use std::cell::RefCell;
     use std::collections::HashMap as StdHashMap;
@@ -1191,13 +1196,6 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
         Ok(writer_obj)
     });
 
-    fn dialect_error(msg: String) -> PyError {
-        PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception{ typ: "Error".to_string(), args: vec![py_str(&msg)], cause: None, suppress_context: false, context: None, traceback: None, extra: None }))
-    }
-    fn type_name_of(obj: &PyObjectRef) -> String {
-        let b = obj.borrow();
-        b.type_name()
-    }
     fn validate_dialect_obj(obj: &PyObjectRef) -> PyResult<()> {
         let get = |name: &str| -> Option<PyObjectRef> { obj.borrow().get_attribute(name).ok() };
         // delimiter
