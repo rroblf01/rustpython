@@ -38,6 +38,8 @@ pub(crate) use util::{get_shared_builtins_module, opcode_hist_dump, opcode_hist_
 pub mod run;
 pub mod execute;
 pub mod call;
+pub mod disposable;
+pub mod ops;
 
 thread_local! {
     static ATTR_CACHE: std::cell::RefCell<HashMap<(String, String), crate::object::BuiltinFunc>> = std::cell::RefCell::new(HashMap::new());
@@ -48,56 +50,10 @@ thread_local! {
 }
 
 thread_local! {
-    static DISPOSABLE_VM_POOL: RefCell<Vec<VirtualMachine>> = const { RefCell::new(Vec::new()) };
     pub(crate) static SYS_MODULES_PRIORITY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl VirtualMachine {
-    /// Reset per-use mutable scratch state; returns self for chaining.
-    fn reset_disposable_state(mut self) -> VirtualMachine {
-        self.reset_disposable_state_ref();
-        self
-    }
-    fn reset_disposable_state_ref(&mut self) {
-        self.frames.clear();
-        self.last_error_line = None;
-        self.last_error_file = None;
-        self.last_traceback.clear();
-        self.exc_type = None;
-        self.exc_value = None;
-        self.exc_traceback = None;
-        self.exc_context_stack.clear();
-        self.propagating_exc = None;
-    }
-}
-
-
-impl VirtualMachine {
-    /// Take a disposable VM from the thread-local pool (or build one).
-    /// Generator/coroutine resumes used to call `VirtualMachine::new()`
-    /// per resume (~40us each, measured); pooled reuse drops that to
-    /// near-frame-cost. The VM's mutable scratch state is reset here; the
-    /// shared stdlib (builtins/modules via Rc) is untouched by design.
-    pub(crate) fn take_disposable() -> VirtualMachine {
-        let vm = DISPOSABLE_VM_POOL
-            .with(|p| p.borrow_mut().pop())
-            .unwrap_or_else(VirtualMachine::new);
-        vm.reset_disposable_state()
-    }
-
-    /// Return a disposable VM to the pool after scrubbing per-use state.
-    pub(crate) fn release_disposable(vm: VirtualMachine) {
-        let mut vm = vm.reset_disposable_state();
-        DISPOSABLE_VM_POOL.with(|p| {
-            let mut v = p.borrow_mut();
-            v.push(vm);
-            // Cap the pool so pathological nesting doesn't hoard memory.
-            while v.len() > 8 {
-                v.pop();
-            }
-        });
-    }
-
     pub fn new() -> Self {
         if std::env::var("RPY_DEBUG_VM_NEW").is_ok() {
             eprintln!("VM_NEW");
@@ -2480,310 +2436,31 @@ impl VirtualMachine {
                 self.frames[fi].push(func);
             }
 
-            Opcode::BUILD_LIST => {
-                let count = arg as usize;
-                let mut items = Vec::with_capacity(count);
-                for _ in 0..count {
-                    items.push(self.frames[fi].pop()?);
-                }
-                items.reverse();
-                self.frames[fi].push(py_list(items));
-            }
-
-            Opcode::BUILD_TUPLE => {
-                let count = arg as usize;
-                let mut items = Vec::with_capacity(count);
-                for _ in 0..count {
-                    items.push(self.frames[fi].pop()?);
-                }
-                items.reverse();
-                self.frames[fi].push(py_tuple(items));
-            }
-
-            Opcode::BUILD_MAP => {
-                self.frames[fi].push(py_dict());
-            }
-
-            Opcode::BUILD_SET => {
-                let count = arg as usize;
-                let mut items = Vec::with_capacity(count);
-                for _ in 0..count {
-                    items.push(self.frames[fi].pop()?);
-                }
-                items.reverse();
-                self.frames[fi].push(PyObjectRef::new(PyObject::Set(PySet::from_vec(items)?)));
-            }
-
-            Opcode::BUILD_STRING => {
-                let count = arg as usize;
-                let mut parts = Vec::with_capacity(count);
-                for _ in 0..count {
-                    parts.push(self.frames[fi].pop()?.str());
-                }
-                parts.reverse();
-                self.frames[fi].push(py_str(&parts.join("")));
-            }
-
-            Opcode::BUILD_SLICE => {
-                let nargs = arg as usize;
-                let step = if nargs >= 3 {
-                    Some(self.frames[fi].pop()?)
-                } else {
-                    None
-                };
-                let stop = if nargs >= 2 {
-                    Some(self.frames[fi].pop()?)
-                } else {
-                    None
-                };
-                let start = if nargs >= 1 {
-                    Some(self.frames[fi].pop()?)
-                } else {
-                    None
-                };
-                self.frames[fi].push(PyObjectRef::imm(PyObject::Slice {
-                    start: start.unwrap_or(py_none()),
-                    stop: stop.unwrap_or(py_none()),
-                    step: step.unwrap_or(py_none()),
-                }));
-            }
-
-            Opcode::BINARY_OP => {
-                // `arg >= 100` encodes the IN-PLACE variant of operator
-                // `arg - 100` (`x += y` etc. — `Stmt::AugAssign`'s codegen
-                // is the only emitter of this range). Try `__iadd__`/
-                // `__isub__`/etc. first (only meaningful for a
-                // `PyObject::Instance` with such a dunder defined — every
-                // native type falls through unchanged), then fall back to
-                // the exact same logic as the plain, non-augmented operator
-                // below. Previously `x += y` NEVER checked for `__iadd__`
-                // at all (AugAssign compiled to a bare `BINARY_OP` with the
-                // SAME arg as `x + y`) — `__iadd__`'s entire purpose (an
-                // object choosing to mutate itself and return `self`,
-                // instead of `__add__`'s always-build-a-new-object
-                // semantics) was silently unreachable for every user class
-                // in the interpreter's history. Confirmed general via
-                // CPython's own `test_augassign.py`.
-                let (op, in_place) = if arg >= 100 {
-                    (arg - 100, true)
-                } else {
-                    (arg, false)
-                };
-                let right = self.frames[fi].pop()?;
-                let left = self.frames[fi].pop()?;
-                let result = if in_place {
-                    match inplace_binary_op(&left, &right, op)? {
-                        Some(v) => v,
-                        None => plain_binary_op(&left, &right, op)?,
-                    }
-                } else {
-                    plain_binary_op(&left, &right, op)?
-                };
-                self.frames[fi].push(result);
-            }
-
-            Opcode::SUPER_FAST2_BIN => {
-                // Fused: LOAD_FAST a, LOAD_FAST b, BINARY_OP op, STORE_FAST z
-                // (`op` may be the in-place >=100 variant — `s += i`.)
-                let a = (arg & 0xFF) as usize;
-                let b = ((arg >> 8) & 0xFF) as usize;
-                let op = (arg >> 16) & 0xFF;
-                let z = (arg >> 24) as usize;
-                let f = &mut self.frames[fi];
-                let right = f.fast_locals.get(b).cloned().flatten()
-                    .ok_or_else(|| unbound_local_msg(f, b))?;
-                let left = f.fast_locals.get(a).cloned().flatten()
-                    .ok_or_else(|| unbound_local_msg(f, a))?;
-                let result = if op >= 100 {
-                    match inplace_binary_op(&left, &right, op - 100)? {
-                        Some(v) => v,
-                        None => plain_binary_op(&left, &right, op - 100)?,
-                    }
-                } else {
-                    plain_binary_op(&left, &right, op)?
-                };
-                if z < f.fast_locals.len() {
-                    f.fast_locals[z] = Some(result);
-                }
-                // Skip the three fused NOP slots (generic dispatch already
-                // advanced ip by 1 for the SUPER opcode itself).
-                f.ip += 3;
-            }
-            Opcode::SUPER_FASTC_BIN => {
-                // Fused: LOAD_FAST a, LOAD_CONST c, BINARY_OP op, STORE_FAST a
-                // (self-accumulating form only — z==a by construction, see
-                // superinstr.rs). arg = a | c<<8 | op<<24.
-                let a = (arg & 0xFF) as usize;
-                let c = ((arg >> 8) & 0xFFFF) as usize;
-                let op = (arg >> 24) as u32;
-                let f = &mut self.frames[fi];
-                let left = f.fast_locals.get(a).cloned().flatten()
-                    .ok_or_else(|| PyError::unbound_local_error(format!(
-                        "cannot access local variable '{}' where it is not associated with a value",
-                        crate::interner::lookup_str(f.code.varnames.get(a).copied().unwrap_or(crate::interner::intern("?")))
-                    )))?;
-                let cval = f.code.consts.get(c).cloned()
-                    .ok_or_else(|| PyError::runtime_error("bad const index"))?;
-                drop(f);
-                let right = eval_const_value(cval)?;
-                let result = plain_binary_op(&left, &right, op)?;
-                let f = &mut self.frames[fi];
-                if a < f.fast_locals.len() {
-                    f.fast_locals[a] = Some(result);
-                }
-                // Skip the three fused NOP slots.
-                f.ip += 3;
-            }
-            Opcode::SUPER_FAST_MOV => {
-                // Fused: LOAD_FAST a, STORE_FAST z
-                let a = (arg & 0xFFFF) as usize;
-                let z = (arg >> 16) as usize;
-                let f = &mut self.frames[fi];
-                let val = f.fast_locals.get(a).cloned().flatten()
-                    .ok_or_else(|| unbound_local_msg(f, a))?;
-                if z < f.fast_locals.len() {
-                    f.fast_locals[z] = Some(val);
-                }
-                f.ip += 1;
-            }
-
-            Opcode::COMPARE_OP => {
-                let op = arg;
-                let right = self.frames[fi].pop()?;
-                let left = self.frames[fi].pop()?;
-                let result = py_compare(&left, &right, op)?;
-                self.frames[fi].push(result);
-            }
-
-            Opcode::IS_OP => {
-                let invert = arg != 0;
-                let right = self.frames[fi].pop()?;
-                let left = self.frames[fi].pop()?;
-                let is_same = left.is(&right);
-                let result = if invert { !is_same } else { is_same };
-                self.frames[fi].push(py_bool(result));
-            }
-
-            Opcode::CONTAINS_OP => {
-                let invert = arg != 0;
-                let right = self.frames[fi].pop()?;
-                let left = self.frames[fi].pop()?;
-                let result = contains_op(&right, &left)?;
-                let result = if invert { !result } else { result };
-                self.frames[fi].push(py_bool(result));
-            }
-
-            Opcode::UNARY_NEGATIVE => {
-                let val = self.frames[fi].pop()?;
-                // Custom classes with __neg__ (e.g. Decimal) need it invoked
-                // directly — implementing this as `0 - val` only works if
-                // int.__sub__ knows how to handle an arbitrary Instance
-                // operand via reflection, which try_dunder_binop doesn't do
-                // (it only ever checks the left operand's own dunder).
-                let neg_method = if let PyObject::Instance { typ, .. } = &*val.borrow() {
-                    crate::object::lookup_dunder_via_mro(typ, "__neg__")
-                } else {
-                    None
-                };
-                let result = if let Some(f) = neg_method {
-                    call_bound_method(f, val.clone(), vec![])?
-                } else {
-                    // Direct negation, NOT `0 - val` — the latter collapses
-                    // -0.0 to +0.0 in IEEE arithmetic (0 - 0.0 == +0.0),
-                    // losing the sign bit (test_format_testfile's `%f % -f`
-                    // on a zero arg expects '-0').
-                    py_neg(&val)?
-                };
-                self.frames[fi].push(result);
-            }
-
-            Opcode::UNARY_POSITIVE => {
-                let val = self.frames[fi].pop()?;
-                let pos_method = if let PyObject::Instance { typ, .. } = &*val.borrow() {
-                    crate::object::lookup_dunder_via_mro(typ, "__pos__")
-                } else {
-                    None
-                };
-                let result = if let Some(f) = pos_method {
-                    call_bound_method(f, val.clone(), vec![])?
-                } else {
-                    py_pos(&val)?
-                };
-                self.frames[fi].push(result);
-            }
-
-            Opcode::UNARY_NOT => {
-                let val = self.frames[fi].pop()?;
-                self.frames[fi].push(py_bool(!val.truthy()));
-            }
-
-            Opcode::UNARY_INVERT => {
-                let val = self.frames[fi].pop()?;
-                let result = {
-                    let obj = val.borrow();
-                    match &*obj {
-                        PyObject::Int(i) => py_int(!i),
-                        // ~bool yields ~0/~1 = -1/-2 (a plain int); CPython
-                        // emits DeprecationWarning (test_bool::test_math).
-                        PyObject::Bool(b) => {
-                            crate::modules::warnings_emit(
-                                "Bitwise inversion '~' on bool is deprecated. \
-                                 Use 'not' instead",
-                                "DeprecationWarning",
-                            );
-                            py_int(if *b { -2i64 } else { -1i64 })
-                        }
-                        _ => return Err(PyError::type_error("bad operand type for unary ~")),
-                    }
-                };
-                self.frames[fi].push(result);
-            }
-
-            Opcode::JUMP_FORWARD | Opcode::JUMP | Opcode::JUMP_BACKWARD => {
-                let offset = arg as usize;
-                match op {
-                    Opcode::JUMP_FORWARD => {
-                        self.frames[fi].ip += offset;
-                    }
-                    Opcode::JUMP => {
-                        self.frames[fi].ip = offset;
-                    }
-                    Opcode::JUMP_BACKWARD => {
-                        let cur_ip = self.frames[fi].ip;
-                        self.frames[fi].ip = cur_ip.wrapping_sub(offset).wrapping_sub(1);
-                    }
-                    _ => unreachable!(),
-                }
-            }
-
-             Opcode::POP_JUMP_IF_FALSE => {
-                let val = self.frames[fi].pop()?;
-                if !val.try_truthy()? {
-                    self.frames[fi].ip = arg as usize;
-                }
-            }
-
-            Opcode::POP_JUMP_IF_TRUE => {
-                let val = self.frames[fi].pop()?;
-                if val.try_truthy()? {
-                    self.frames[fi].ip = arg as usize;
-                }
-            }
-
-            Opcode::POP_JUMP_IF_NONE => {
-                let val = self.frames[fi].pop()?;
-                let is_none = { matches!(&*val.borrow(), PyObject::None) };
-                if is_none {
-                    self.frames[fi].ip = arg as usize;
-                }
-            }
-
-            Opcode::POP_JUMP_IF_NOT_NONE => {
-                let val = self.frames[fi].pop()?;
-                let is_not_none = { !matches!(&*val.borrow(), PyObject::None) };
-                if is_not_none {
-                    self.frames[fi].ip = arg as usize;
-                }
+            Opcode::BUILD_LIST
+            | Opcode::BUILD_TUPLE
+            | Opcode::BUILD_MAP
+            | Opcode::BUILD_SET
+            | Opcode::BUILD_STRING
+            | Opcode::BUILD_SLICE
+            | Opcode::BINARY_OP
+            | Opcode::SUPER_FAST2_BIN
+            | Opcode::SUPER_FASTC_BIN
+            | Opcode::SUPER_FAST_MOV
+            | Opcode::COMPARE_OP
+            | Opcode::IS_OP
+            | Opcode::CONTAINS_OP
+            | Opcode::UNARY_NEGATIVE
+            | Opcode::UNARY_POSITIVE
+            | Opcode::UNARY_NOT
+            | Opcode::UNARY_INVERT
+            | Opcode::JUMP_FORWARD
+            | Opcode::JUMP
+            | Opcode::JUMP_BACKWARD
+            | Opcode::POP_JUMP_IF_FALSE
+            | Opcode::POP_JUMP_IF_TRUE
+            | Opcode::POP_JUMP_IF_NONE
+            | Opcode::POP_JUMP_IF_NOT_NONE => {
+                let _ = self.handle_build_arith_control(fi, op, arg)?;
             }
 
             Opcode::GET_ITER => {

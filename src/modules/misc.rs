@@ -39,6 +39,15 @@ pub use hashlib_extra::*;
 mod sysconfig;
 pub use sysconfig::*;
 
+mod xml;
+pub use xml::*;
+
+mod gettext;
+pub use gettext::*;
+
+mod email_utils;
+pub use email_utils::*;
+
 
 
 // ---- logging module ----
@@ -5175,16 +5184,6 @@ pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-/// `gettext` is entirely defined as Python source — see
-/// VirtualMachine::install_source_defined_stdlib and gettext_extra.py. This
-/// just provides the empty module dict it gets merged into.
-pub fn create_gettext_dict() -> HashMap<String, PyObjectRef> {
-    HashMap::new()
-}
-
-/// gettext module source — see VirtualMachine::install_source_defined_stdlib.
-pub const GETTEXT_SOURCE: &str = include_str!("gettext_extra.py");
-
 pub fn create_colorsys_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! cs_func {
@@ -6245,59 +6244,6 @@ fn unix_secs_to_ymdhms(secs: i64) -> (i64, i64, i64, i64, i64, i64) {
         m += 1;
     }
     (y, m, remaining + 1, hours, minutes, seconds)
-}
-
-pub fn create_email_utils_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! eu_func {
-        ($name:expr, $func:expr) => {
-            d.insert(
-                $name.to_string(),
-                PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: $name.to_string(),
-                    func: $func,
-                }),
-            );
-        };
-    }
-    // formatdate(timeval=None, localtime=False, usegmt=False) -> string
-    eu_func!("formatdate", |args| {
-        let secs = if !args.is_empty() && !matches!(&*args[0].borrow(), PyObject::None) {
-            args[0].as_f64().unwrap_or(0.0) as i64
-        } else {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64
-        };
-        let (y, mo, d, h, mi, s) = unix_secs_to_ymdhms(secs);
-        Ok(py_str(&rfc2822_date(y, mo, d, h, mi, s)))
-    });
-    // format_datetime(dt, usegmt=False) -> string — reads year/month/day/
-    // hour/minute/second attributes off the given datetime-like object.
-    eu_func!("format_datetime", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error(
-                "format_datetime() missing required argument",
-            ));
-        }
-        let get = |name: &str, default: i64| -> i64 {
-            args[0]
-                .borrow()
-                .get_attribute(name)
-                .ok()
-                .and_then(|v| v.as_i64())
-                .unwrap_or(default)
-        };
-        let y = get("year", 1970);
-        let mo = get("month", 1);
-        let d = get("day", 1);
-        let h = get("hour", 0);
-        let mi = get("minute", 0);
-        let s = get("second", 0);
-        Ok(py_str(&rfc2822_date(y, mo, d, h, mi, s)))
-    });
-    d
 }
 
 pub fn create_configparser_dict() -> HashMap<String, PyObjectRef> {
@@ -7801,12 +7747,6 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
     });
 
     d
-}
-
-// ─── xml module (empty package) ───────────────────────────────────────────────
-
-pub fn create_xml_dict() -> HashMap<String, PyObjectRef> {
-    HashMap::new()
 }
 
 // ─── argparse module ──────────────────────────────────────────────────────────
