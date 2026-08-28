@@ -289,11 +289,7 @@ impl PyObject {
                         }
                         PyObject::Str(s) => {
                             let inner = repr_string(s);
-                            if cls_name == "str" {
-                                inner
-                            } else {
-                                format!("{}({})", cls_name, inner)
-                            }
+                            inner
                         }
                         _ => {
                             let name = if let PyObject::Type { dict, name, .. } = &*tb {

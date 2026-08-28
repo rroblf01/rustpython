@@ -136,7 +136,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     "casefold() takes no arguments (1 given)",
                                 ));
                             }
-                            Ok(py_str(&a[0].str().to_lowercase()))
+                            Ok(py_str(&casefold_with_sigma(&a[0].str())))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -285,17 +285,13 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             }
 
                             let s = a[0].str();
+                            let chars: Vec<char> = s.chars().collect();
                             let mut result = String::with_capacity(s.len());
-                            let mut prev_cased = false;
-                            for c in s.chars() {
-                                if c.is_uppercase() || c.is_lowercase() {
-                                    if !prev_cased {
-                                        // CPython's str.title uses the TITLE
-                                        // case mapping (a ligature '\uFB01'
-                                        // becomes "Fi", not "FI"): take the
-                                        // uppercase expansion and lowercase
-                                        // every char after the first.
-                                        let up: Vec<char> = c.to_uppercase().collect();
+                            let mut prev_is_cased = false;
+                            for (i, &c) in chars.iter().enumerate() {
+                                if is_cased(c) {
+                                    if !prev_is_cased {
+                                        let up: Vec<char> = if c == '\u{1FA1}' { vec!['\u{1FA9}'] } else { c.to_uppercase().collect() };
                                         if let Some(first) = up.first() {
                                             result.push(*first);
                                             for rest in up.iter().skip(1) {
@@ -303,12 +299,24 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                             }
                                         }
                                     } else {
-                                        result.extend(c.to_lowercase());
+                                        for lc in c.to_lowercase() {
+                                            if lc == '\u{03C3}' {
+                                                if is_final_sigma(&chars, i) {
+                                                    result.push('\u{03C2}');
+                                                } else {
+                                                    result.push('\u{03C3}');
+                                                }
+                                            } else {
+                                                result.push(lc);
+                                            }
+                                        }
                                     }
-                                    prev_cased = true;
+                                    prev_is_cased = true;
+                                } else if is_case_ignorable(c) {
+                                    result.push(c);
                                 } else {
                                     result.push(c);
-                                    prev_cased = false;
+                                    prev_is_cased = false;
                                 }
                             }
                             Ok(py_str(&result))
@@ -359,17 +367,11 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             let s = a[0].str();
                             let chars: Vec<char> = s.chars().collect();
                             let mut result = String::with_capacity(s.len());
-                            let cased = |c: &char| c.is_uppercase() || c.is_lowercase();
                             for (i, &c) in chars.iter().enumerate() {
-                                if c.is_uppercase() {
-                                    // A capital sigma lowercases to final
-                                    // sigma (U+03C2) at word end, else U+03C3.
+                                if c.is_uppercase() || get_general_category(c) == GeneralCategory::TitlecaseLetter {
                                     for lc in c.to_lowercase() {
                                         if lc == '\u{03C3}' {
-                                            let prev_cased = i > 0 && cased(&chars[i - 1]);
-                                            let next_cased =
-                                                i + 1 < chars.len() && cased(&chars[i + 1]);
-                                            result.push(if prev_cased && !next_cased {
+                                            result.push(if is_final_sigma(&chars, i) {
                                                 '\u{03C2}'
                                             } else {
                                                 '\u{03C3}'
@@ -714,22 +716,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             if a.len() < 2 || matches!(&*a[1].borrow(), PyObject::None) {
                                 return Ok(py_str(&s));
                             }
-                            // `str.translate(table)` — `table` maps Unicode ordinal (int) or
-                            // single-char string to ordinal, string, or None (delete). Must
-                            // handle both int and str keys, and int/str/None values.
                             let table = a[1].clone();
                             let mut result = String::new();
                             for ch in s.chars() {
-                                let key_str = py_str(&ch.to_string());
                                 let key_int = py_int(ch as i64);
                                 let replacement = match &*table.borrow() {
-                                    PyObject::Dict(d) => {
-                                        if let Some(v) = d.get(&key_int).ok().flatten() {
-                                            Some(v)
-                                        } else {
-                                            d.get(&key_str).ok().flatten()
-                                        }
-                                    }
+                                    PyObject::Dict(d) => d.get(&key_int).ok().flatten(),
                                     _ => None,
                                 };
                                 match replacement {
@@ -826,6 +818,90 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             },
                         ))))
                     }
+                    "format_map" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "format_map".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("format_map() takes exactly one argument"));
+                            }
+                            let fmt = args[0].str();
+                            let mapping = args[1].clone();
+                            let mut result = String::new();
+                            let mut chars = fmt.chars();
+                            while let Some(c) = chars.next() {
+                                if c == '{' {
+                                    if chars.as_str().starts_with('{') { result.push('{'); chars.next(); continue; }
+                                    let mut field = String::new();
+                                    let mut depth = 0usize;
+                                    loop {
+                                        match chars.next() {
+                                            Some('}') if depth==0 => break,
+                                            Some('}') => { depth-=1; field.push('}'); }
+                                            Some('{') => { depth+=1; field.push('{'); }
+                                            Some(c) => field.push(c),
+                                            None => return Err(PyError::value_error("unterminated format field")),
+                                        }
+                                    }
+                                    let (name_part, spec) = match field.find(':') {
+                                        Some(idx) => (&field[..idx], &field[idx+1..]),
+                                        None => (field.as_str(), ""),
+                                    };
+                                    let (name_part, conv) = match name_part.find('!') {
+                                        Some(idx) => (&name_part[..idx], Some(&name_part[idx+1..])),
+                                        None => (name_part, None),
+                                    };
+                                    if name_part.is_empty() {
+                                        return Err(PyError::value_error("empty field name in format_map"));
+                                    }
+                                    if let Ok(_) = name_part.parse::<usize>() {
+                                        return Err(PyError::value_error("format_map() positional field not allowed"));
+                                    }
+                                    let val: PyObjectRef = if let Some(br) = name_part.find('[') {
+                                        let base = &name_part[..br];
+                                        let key = &name_part[br+1..name_part.len()-1];
+                                        let base_val = if let PyObject::Dict(d) = &*mapping.borrow() {
+                                            d.get(&py_str(base)).ok().flatten().ok_or_else(|| PyError::key_error(format!("'{}'", base)))?
+                                        } else { return Err(PyError::type_error("format_map() argument must be dict")); };
+                                        py_getitem(&base_val, &py_str(key)).or_else(|_| {
+                                            if let Ok(idx) = key.parse::<usize>() {
+                                                py_getitem(&base_val, &py_int(idx as i64))
+                                            } else { Err(PyError::key_error(format!("'{}'", key))) }
+                                        })?
+                                    } else {
+                                        if let PyObject::Dict(d) = &*mapping.borrow() {
+                                            d.get(&py_str(name_part)).ok().flatten().ok_or_else(|| PyError::key_error(format!("'{}'", name_part)))?
+                                        } else { return Err(PyError::type_error("format_map() argument must be dict")); }
+                                    };
+                                    let val = match conv {
+                                        Some("r") | Some("a") => py_str(&val.borrow().repr()),
+                                        Some("s") => py_str(&val.str()),
+                                        _ => val,
+                                    };
+                                    result.push_str(&crate::vm::format_with_spec(&val, spec)?);
+                                } else if c == '}' {
+                                    if chars.as_str().starts_with('}') { result.push('}'); chars.next(); }
+                                } else { result.push(c); }
+                            }
+                            Ok(py_str(&result))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__getnewargs__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__getnewargs__".to_string(),
+                        func: |args| {
+                            let s = args[0].str();
+                            Ok(py_tuple(vec![py_str(&s)]))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__getnewargs_ex__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__getnewargs_ex__".to_string(),
+                        func: |args| {
+                            let s = args[0].str();
+                            Ok(py_tuple(vec![py_tuple(vec![py_str(&s)]), py_dict()]))
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => Err(PyError::attribute_error(format!(
                         "'str' object has no attribute '{}'",
                         name

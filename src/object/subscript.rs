@@ -364,7 +364,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     Ok(py_str(&result))
                 }
                 _ => Err(PyError::type_error(format!(
-                    "string indices must be integers or slices, not {}",
+                    "string indices must be integers, not '{}'",
                     idx.type_name()
                 ))),
             }

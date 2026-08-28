@@ -181,12 +181,18 @@ pub fn str_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             };
             for (k, v) in items {
-                if k.str().chars().count() != 1 {
-                    return Err(PyError::value_error(
-                        "string keys in translate table must be of length 1",
-                    ));
-                }
-                table.set(k, v)?;
+                let ord: i64 = if let Some(i) = k.as_i64() {
+                    i
+                } else {
+                    let ks = k.str();
+                    if ks.chars().count() != 1 {
+                        return Err(PyError::value_error(
+                            "string keys in translate table must be of length 1",
+                        ));
+                    }
+                    ks.chars().next().unwrap() as i64
+                };
+                table.set(py_int(ord), v)?;
             }
         }
         2 | 3 => {
@@ -200,11 +206,11 @@ pub fn str_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 ));
             }
             for (a, b) in x_chars.iter().zip(y_chars.iter()) {
-                table.set(py_str(&a.to_string()), py_str(&b.to_string()))?;
+                table.set(py_int(*a as i64), py_str(&b.to_string()))?;
             }
             if args.len() == 3 {
                 for c in args[2].str().chars() {
-                    table.set(py_str(&c.to_string()), py_none())?;
+                    table.set(py_int(c as i64), py_none())?;
                 }
             }
         }
@@ -255,6 +261,58 @@ pub fn bytes_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 
 pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // Handle kwargs packed as trailing dict (object/encoding/errors)
+    let (positional, kwargs) = {
+        if let Some(last) = args.last() {
+            if let PyObject::Dict(d) = &*last.borrow() {
+                let is_kwargs = d.contains(&py_str("object")).unwrap_or(false) || d.contains(&py_str("encoding")).unwrap_or(false) || d.contains(&py_str("errors")).unwrap_or(false);
+                if is_kwargs {
+                    (&args[..args.len()-1], Some(last.clone()))
+                } else {
+                    (args, None)
+                }
+            } else { (args, None) }
+        } else { (args, None) }
+    };
+    let get_kw = |k: &str| -> Option<PyObjectRef> {
+        kwargs.as_ref().and_then(|d| {
+            if let PyObject::Dict(dd) = &*d.borrow() {
+                dd.get(&py_str(k)).ok().flatten()
+            } else { None }
+        })
+    };
+    let obj_arg: Option<PyObjectRef> = if let Some(v) = get_kw("object") { Some(v) } else { positional.get(0).cloned() };
+    let enc_arg: Option<PyObjectRef> = if let Some(v) = get_kw("encoding") { Some(v) } else { positional.get(1).cloned() };
+    let err_arg: Option<PyObjectRef> = if let Some(v) = get_kw("errors") { Some(v) } else { positional.get(2).cloned() };
+
+    if obj_arg.is_none() && enc_arg.is_none() && err_arg.is_none() {
+        return Ok(py_str(""));
+    }
+    if enc_arg.is_some() || err_arg.is_some() {
+        let target = obj_arg.clone().unwrap_or_else(|| py_str(""));
+        if matches!(&*target.borrow(), PyObject::Bytes(_) | PyObject::ByteArray(_)) {
+            let decode = target.borrow().get_attribute("decode")?;
+            let enc = enc_arg.clone().unwrap_or_else(|| py_str("utf-8"));
+            let err = err_arg.clone();
+            if let PyObject::BuiltinMethod { func: f, .. } = &*decode.borrow() {
+                let mut call_args = vec![target.clone()];
+                call_args.push(enc);
+                if let Some(e) = err { call_args.push(e); }
+                return f(&call_args);
+            }
+            let mut call_args = vec![enc];
+            if let Some(e) = err { call_args.push(e); }
+            return call_bound_method(decode, target.clone(), call_args);
+        }
+        if obj_arg.is_some() {
+            return Err(PyError::type_error(
+                "decoding to str: need a bytes-like object, found type object",
+            ));
+        }
+        if enc_arg.is_some() || err_arg.is_some() {
+            return Ok(py_str(""));
+        }
+    }
     if args.is_empty() {
         Ok(py_str(""))
     } else if args.len() >= 2 {
@@ -288,8 +346,10 @@ pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             "decoding to str: need a bytes-like object, found type object",
         ));
     } else {
+        let target_obj = obj_arg.clone().unwrap_or_else(|| py_str(""));
+
         // WeakProxy: str(proxy) forwards to str(target) if alive, else ReferenceError.
-        if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
+        if let PyObject::WeakProxy { target, .. } = &*target_obj.borrow() {
             if let Some(rc) = target.upgrade() {
                 let target_ref = PyObjectRef::Mut(rc);
                 return builtin_str(&[target_ref]);
@@ -298,7 +358,7 @@ pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
         }
         let f = {
-            let obj_borrowed = args[0].borrow();
+            let obj_borrowed = target_obj.borrow();
             if let PyObject::Instance { typ, .. } = &*obj_borrowed {
                 lookup_dunder_via_mro(typ, "__str__")
             } else {
@@ -306,22 +366,22 @@ pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
         };
         if let Some(f) = f {
-            return call_bound_method(f, args[0].clone(), vec![]);
+            return call_bound_method(f, target_obj.clone(), vec![]);
         }
-        let is_exc = if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+        let is_exc = if let PyObject::Instance { typ, .. } = &*target_obj.borrow() {
             is_exception_type(typ)
         } else {
             false
         };
         if is_exc {
-            return Ok(py_str(&exception_instance_str(&args[0])));
+            return Ok(py_str(&exception_instance_str(&target_obj)));
         }
         // int->str digit limit (str(10**10000) raises ValueError), also for
         // int subclass instances (whose native backing is the int).
-        if let Some(i) = int_value_or_backing(&args[0]) {
+        if let Some(i) = int_value_or_backing(&target_obj) {
             check_int_to_str_limit(&i)?;
         }
-        Ok(py_str(&args[0].str()))
+        Ok(py_str(&target_obj.str()))
     }
 }
 

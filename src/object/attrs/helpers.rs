@@ -4,27 +4,120 @@ use crate::object::*;
 use num_bigint::BigInt;
 use num_traits::Zero;
 
+/// Helper: CPython's `IsCased` (Lu ∪ Ll ∪ Lt) — Lowercase _property_
+/// (`is_lowercase`) is NOT the same: e.g. U+0345 (Mn, Lowercase=True) is
+/// NOT cased, but `is_lowercase()` returns true.
+pub(crate) fn is_cased(c: char) -> bool {
+    if c == '\u{0345}' { return false; }
+    use unicode_general_category::{get_general_category, GeneralCategory};
+    matches!(
+        get_general_category(c),
+        GeneralCategory::UppercaseLetter
+            | GeneralCategory::LowercaseLetter
+            | GeneralCategory::TitlecaseLetter
+    )
+}
+pub(crate) fn is_case_ignorable(c: char) -> bool {
+    if c == '\u{0345}' { return true; }
+    use unicode_general_category::{get_general_category, GeneralCategory};
+    matches!(
+        get_general_category(c),
+        GeneralCategory::NonspacingMark
+            | GeneralCategory::EnclosingMark
+            | GeneralCategory::Format
+            | GeneralCategory::ModifierLetter
+            | GeneralCategory::ModifierSymbol
+    )
+}
+
+/// CPython's `handle_capital_sigma`: `p{cased}\p{case-ignorable}*Σ!(\p{case-ignorable}*\p{cased})`
+/// -> final sigma ς else medial σ.  Skips Case_Ignorable run on both sides.
+pub(crate) fn is_final_sigma(chars: &[char], idx: usize) -> bool {
+    let mut j = idx as isize - 1;
+    let mut found_cased_before = false;
+    while j >= 0 {
+        let c = chars[j as usize];
+        if is_case_ignorable(c) {
+            j -= 1;
+            continue;
+        }
+        found_cased_before = is_cased(c);
+        break;
+    }
+    if !found_cased_before {
+        return false;
+    }
+    let mut j = idx + 1;
+    while j < chars.len() {
+        let c = chars[j];
+        if is_case_ignorable(c) {
+            j += 1;
+            continue;
+        }
+        return !is_cased(c);
+    }
+    true
+}
+
 /// Lowercase with CPython's GREEK FINAL SIGMA special-casing: a lowercase
 /// sigma (U+03C3) that ends a word (a cased char before, no cased char
-/// after) becomes final sigma (U+03C2). Rust's plain `to_lowercase()`
+/// after, ignoring Case_Ignorable) becomes final sigma (U+03C2). Rust's plain `to_lowercase()`
 /// always yields U+03C3, but CPython's str.lower/swapcase/title/capitalize
 /// respect the Final_Sigma context rule (`'A\u03a3'.lower() == 'a\u03c2'`).
 pub(crate) fn lower_with_final_sigma(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
     for (i, &c) in chars.iter().enumerate() {
-        let prev_cased = i > 0 && (chars[i - 1].is_uppercase() || chars[i - 1].is_lowercase());
         for lc in c.to_lowercase() {
             if lc == '\u{03C3}' {
-                let next_cased = i + 1 < chars.len()
-                    && (chars[i + 1].is_uppercase() || chars[i + 1].is_lowercase());
-                if prev_cased && !next_cased {
+                if is_final_sigma(&chars, i) {
                     out.push('\u{03C2}');
                 } else {
                     out.push('\u{03C3}');
                 }
             } else {
                 out.push(lc);
+            }
+        }
+    }
+    out
+}
+
+/// Full Unicode casefold — not just `to_lowercase`.  Handles the few
+/// multi-char expansions that CPython's `casefold()` does (ß→ss, ﬁ→fi,
+/// ﬂ→fl, etc.) plus Greek sigma final handling.  Falls back to
+/// `to_lowercase` for everything else (which already covers µ→μ via
+/// the Unicode data).
+pub(crate) fn casefold_with_sigma(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() * 2);
+    for (i, &c) in chars.iter().enumerate() {
+        match c {
+            'ß' => out.push_str("ss"),
+            'ﬁ' => out.push_str("fi"),
+            'ﬂ' => out.push_str("fl"),
+            'ﬃ' => out.push_str("ffi"),
+            'ﬄ' => out.push_str("ffl"),
+            'ﬅ' => out.push_str("st"),
+            'ﬆ' => out.push_str("st"),
+            _ => {
+                for lc in c.to_lowercase() {
+                    if lc == '\u{03C3}' {
+                        if is_final_sigma(&chars, i) {
+                            out.push('\u{03C2}');
+                        } else {
+                            out.push('\u{03C3}');
+                        }
+                    } else {
+                        out.push(lc);
+                    }
+                }
+                if c == '\u{00B5}' {
+                    if out.ends_with('\u{00B5}') {
+                        out.pop();
+                        out.push('\u{03BC}');
+                    }
+                }
             }
         }
     }
