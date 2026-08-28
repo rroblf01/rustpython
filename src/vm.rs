@@ -44,6 +44,8 @@ pub mod iter;
 pub mod op_import;
 pub mod op_coll;
 pub mod op_unpack;
+pub mod op_reg;
+pub mod op_with;
 
 thread_local! {
     static ATTR_CACHE: std::cell::RefCell<HashMap<(String, String), crate::object::BuiltinFunc>> = std::cell::RefCell::new(HashMap::new());
@@ -2045,190 +2047,16 @@ impl VirtualMachine {
                 }
             }
 
-            // ── Register-based instructions ─────────────────────────
-            Opcode::REG_MOV => {
-                // Lazily initialize registers
-                if self.frames[fi].registers.is_empty() {
-                    self.frames[fi].registers = Box::new(vec![None; 256]);
-                }
-                let dst = (arg >> 4) as usize;
-                let src = (arg & 0xF) as usize;
-                let val = self.frames[fi].registers[src]
-                    .clone()
-                    .ok_or_else(|| PyError::runtime_error("REG_MOV: source register is empty"))?;
-                if dst < self.frames[fi].registers.len() {
-                    self.frames[fi].registers[dst] = Some(val);
-                }
-            }
-            Opcode::REG_LOAD_CONST => {
-                let dst = (arg >> 4) as usize;
-                let const_idx = (arg & 0xFF) as usize;
-                let const_val = self.frames[fi]
-                    .code
-                    .consts
-                    .get(const_idx)
-                    .ok_or_else(|| PyError::runtime_error("REG_LOAD_CONST: index out of range"))?
-                    .clone();
-                let obj = match const_val {
-                    ConstValue::None => py_none(),
-                    ConstValue::Bool(b) => py_bool(b),
-                    ConstValue::Int(s) => {
-                        if let Ok(n) = s.parse::<i64>() {
-                            py_int(n)
-                        } else {
-                            let n: BigInt =
-                                s.parse().map_err(|_| PyError::value_error("invalid int"))?;
-                            PyObjectRef::imm(PyObject::Int(n))
-                        }
-                    }
-                    ConstValue::Float(s) => py_float(
-                        s.parse()
-                            .map_err(|_| PyError::value_error("invalid float"))?,
-                    ),
-                    ConstValue::String(s) => py_str(&s),
-                    ConstValue::Bytes(b) => PyObjectRef::imm(PyObject::Bytes(b)),
-                    ConstValue::Complex { real, imag } => {
-                        let re: f64 = real
-                            .parse()
-                            .map_err(|_| PyError::value_error("invalid complex literal"))?;
-                        let im: f64 = imag
-                            .parse()
-                            .map_err(|_| PyError::value_error("invalid complex literal"))?;
-                        PyObjectRef::imm(PyObject::Complex(re, im))
-                    }
-                    ConstValue::Code(code) => PyObjectRef::imm(PyObject::Code(Rc::from(code))),
-                    ConstValue::Tuple(items) => {
-                        let objs: Vec<PyObjectRef> =
-                            items.into_iter().map(|s| py_str(&s)).collect();
-                        PyObjectRef::imm(PyObject::Tuple(objs))
-                    }
-                };
-                if dst < self.frames[fi].registers.len() {
-                    self.frames[fi].registers[dst] = Some(obj);
-                }
-            }
-            Opcode::REG_LOAD_FAST => {
-                let dst = (arg >> 4) as usize;
-                let var_idx = (arg & 0xFF) as usize;
-                let val = self.frames[fi].fast_locals.get(var_idx).and_then(|v| v.clone())
-                    .ok_or_else(|| PyError::unbound_local_error(format!("cannot access local variable '{}' where it is not associated with a value",
-                        self.frames[fi].code.varnames.get(var_idx).map_or("?", |&s| crate::interner::lookup_str(s)))))?;
-                if dst < self.frames[fi].registers.len() {
-                    self.frames[fi].registers[dst] = Some(val);
-                }
-            }
-            Opcode::REG_STORE_FAST => {
-                let src = (arg >> 4) as usize;
-                let var_idx = (arg & 0xFF) as usize;
-                let val = self.frames[fi].registers[src].clone().ok_or_else(|| {
-                    PyError::runtime_error("REG_STORE_FAST: source register is empty")
-                })?;
-                if var_idx < self.frames[fi].fast_locals.len() {
-                    self.frames[fi].fast_locals[var_idx] = Some(val.clone());
-                }
-                let name = Some(crate::interner::lookup_str(
-                    self.frames[fi].code.varnames[var_idx],
-                ))
-                .ok_or_else(|| PyError::runtime_error("varname index out of range"))?
-                .clone();
-                self.frames[fi].insert_local(&name, val);
-            }
-            Opcode::REG_BINARY_OP => {
-                let dst = (arg >> 4) as usize;
-                let a_reg = ((arg >> 2) & 0x3) as usize;
-                let b_reg = (arg & 0x3) as usize;
-                let op = (arg >> 8) as u32;
-                let a = self.frames[fi].registers[a_reg]
-                    .clone()
-                    .ok_or_else(|| PyError::runtime_error("REG_BINARY_OP: a is empty"))?;
-                let b = self.frames[fi].registers[b_reg]
-                    .clone()
-                    .ok_or_else(|| PyError::runtime_error("REG_BINARY_OP: b is empty"))?;
-                let result = match op {
-                    0 => py_add(&a, &b),
-                    1 => py_sub(&a, &b),
-                    2 => py_mul(&a, &b),
-                    3 => py_div(&a, &b),
-                    4 => py_floor_div(&a, &b),
-                    5 => py_mod(&a, &b),
-                    6 => py_pow(&a, &b),
-                    7 => py_lshift(&a, &b),
-                    8 => py_rshift(&a, &b),
-                    9 => py_bit_or(&a, &b),
-                    10 => py_bit_xor(&a, &b),
-                    11 => py_bit_and(&a, &b),
-                    13 => py_getitem(&a, &b),
-                    _ => {
-                        return Err(PyError::runtime_error(format!(
-                            "unknown reg binary op: {}",
-                            op
-                        )))
-                    }
-                }?;
-                if dst < self.frames[fi].registers.len() {
-                    self.frames[fi].registers[dst] = Some(result);
-                }
-            }
-            Opcode::REG_LOAD_GLOBAL => {
-                let dst = (arg >> 4) as usize;
-                let name_idx = (arg & 0xFF) as usize;
-                let name = crate::interner::lookup_str(self.frames[fi].code.names[name_idx]);
-                // Check inline cache first
-                let instr_ip = self.frames[fi].ip - 1;
-                if let Some(cached) = self.frames[fi]
-                    .global_cache
-                    .get(instr_ip)
-                    .and_then(|c| c.clone())
-                {
-                    if dst < self.frames[fi].registers.len() {
-                        self.frames[fi].registers[dst] = Some(cached);
-                    }
-                } else {
-                    let val = self.frames[fi]
-                        .globals
-                        .borrow()
-                        .get(&interner::intern(name))
-                        .cloned()
-                        .or_else(|| {
-                            self.frames[fi]
-                                .builtins
-                                .get(&interner::intern(name))
-                                .cloned()
-                        });
-                    if let Some(v) = val {
-                        if instr_ip < self.frames[fi].global_cache.len() {
-                            self.frames[fi].global_cache[instr_ip] = Some(v.clone());
-                        }
-                        if dst < self.frames[fi].registers.len() {
-                            self.frames[fi].registers[dst] = Some(v);
-                        }
-                    } else {
-                        return Err(PyError::name_error(format!(
-                            "name '{}' is not defined",
-                            name
-                        )));
-                    }
-                }
-            }
-            Opcode::REG_RETURN => {
-                let src = (arg & 0xFF) as usize;
-                let val = self.frames[fi].registers[src]
-                    .clone()
-                    .ok_or_else(|| PyError::runtime_error("REG_RETURN: register is empty"))?;
-                return Ok(Some(val));
-            }
-            Opcode::REG_BUILD_LIST => {
-                // arg: upper 4 bits = dst, lower 4 bits = count
-                let dst = (arg >> 4) as usize;
-                let count = (arg & 0xF) as usize;
-                let mut items = Vec::with_capacity(count);
-                for i in 0..count {
-                    if let Some(val) = self.frames[fi].registers[i].clone() {
-                        items.push(val);
-                    }
-                }
-                if dst < self.frames[fi].registers.len() {
-                    self.frames[fi].registers[dst] = Some(py_list(items));
+            Opcode::REG_MOV
+            | Opcode::REG_LOAD_CONST
+            | Opcode::REG_LOAD_FAST
+            | Opcode::REG_STORE_FAST
+            | Opcode::REG_BINARY_OP
+            | Opcode::REG_LOAD_GLOBAL
+            | Opcode::REG_RETURN
+            | Opcode::REG_BUILD_LIST => {
+                if let Some(val) = self.handle_reg(fi, op, arg)? {
+                    return Ok(Some(val));
                 }
             }
 
@@ -3870,47 +3698,7 @@ impl VirtualMachine {
             }
 
             Opcode::BEFORE_ASYNC_WITH => {
-                let mgr = self.frames[fi].pop()?;
-                // Check __aexit__ first (mirroring SETUP_WITH's __exit__ check)
-                let aexit = mgr.borrow().get_attribute("__aexit__").ok();
-                if aexit.is_none() {
-                    let has_enter = mgr.borrow().get_attribute("__enter__").is_ok();
-                    let has_exit = mgr.borrow().get_attribute("__exit__").is_ok();
-                    let supports_sync = has_enter && has_exit;
-                    return Err(PyError::type_error(if supports_sync {
-                        "object does not support the asynchronous context manager protocol (missed __aexit__ method) but it supports the context manager protocol. Did you mean to use 'with'?"
-                    } else {
-                        "object does not support the asynchronous context manager protocol (missed __aexit__ method)"
-                    }));
-                }
-                let aenter_raw = mgr.borrow().get_attribute("__aenter__").ok();
-                if let Some(aenter_raw) = aenter_raw {
-                    let is_builtin = matches!(&*aenter_raw.borrow(), PyObject::BuiltinMethod { .. });
-                    let bound = if is_builtin {
-                        let b = aenter_raw.borrow();
-                        match &*b {
-                            PyObject::BuiltinMethod { name, func, .. } => {
-                                PyObjectRef::imm(PyObject::BuiltinMethod {
-                                    name: name.clone(),
-                                    func: *func,
-                                    self_obj: mgr.clone(),
-                                })
-                            }
-                            _ => unreachable!(),
-                        }
-                    } else {
-                        PyObjectRef::imm(PyObject::BoundMethod {
-                            func: aenter_raw,
-                            self_obj: mgr.clone(),
-                        })
-                    };
-                    let result = self.call_function(bound, vec![], vec![])?;
-                    self.frames[fi].push(mgr);
-                    self.frames[fi].push(result);
-                } else {
-                    return Err(PyError::type_error(
-                        "object does not support the asynchronous context manager protocol (missed __aenter__ method)",
-                    ));
+                if self.handle_with(fi, op, arg)? {
                 }
             }
 
@@ -4520,144 +4308,9 @@ impl VirtualMachine {
                 self.frames[fi].pop()?;
             }
 
-            Opcode::SETUP_WITH => {
-                // Look up __enter__ and call it, keeping manager on stack
-                let mgr = self.frames[fi].peek(0)?;
-                let exit_method = mgr.borrow().get_attribute("__exit__").ok();
-                if exit_method.is_none() {
-                    let has_aenter = mgr
-                        .borrow()
-                        .get_attribute("__aenter__")
-                        .is_ok_and(|v| !matches!(&*v.borrow(), PyObject::None));
-                    return Err(PyError::type_error(if has_aenter {
-                        "object does not support the context manager protocol (missed __exit__ method) \
-                         but it supports the asynchronous context manager protocol. \
-                         Did you mean to use 'async with'?"
-                    } else {
-                        "object does not support the context manager protocol (missed __exit__ method)"
-                    }));
+            Opcode::SETUP_WITH | Opcode::WITH_EXIT => {
+                if self.handle_with(fi, op, arg)? {
                 }
-                let enter_raw = mgr.borrow().get_attribute("__enter__").ok();
-                if let Some(enter_raw) = enter_raw {
-                    let is_builtin = matches!(&*enter_raw.borrow(), PyObject::BuiltinMethod { .. });
-                    let enter = if is_builtin {
-                        let b = enter_raw.borrow();
-                        match &*b {
-                            PyObject::BuiltinMethod { name, func, .. } => {
-                                PyObjectRef::imm(PyObject::BuiltinMethod {
-                                    name: name.clone(),
-                                    func: *func,
-                                    self_obj: mgr.clone(),
-                                })
-                            }
-                            _ => unreachable!(),
-                        }
-                    } else {
-                        PyObjectRef::imm(PyObject::BoundMethod {
-                            func: enter_raw,
-                            self_obj: mgr.clone(),
-                        })
-                    };
-                    let result = self.call_function(enter, vec![], vec![])?;
-                    self.frames[fi].push(result);
-                } else {
-                    return Err(PyError::type_error(
-                        "object does not support the context manager protocol (missed __enter__ method)",
-                    ));
-                }
-            }
-
-            Opcode::WITH_EXIT => {
-                // Stack: [..., exception_obj, manager]
-                // Call manager.__exit__(exc_type, exc_val, traceback) — exc_type
-                // and exc_val must be the real class object and exception
-                // instance (not a bare type-name string / the first ctor arg),
-                // since __exit__ implementations commonly do isinstance(value,
-                // ...), re-raise `value`, or read value.args/__traceback__.
-                let mgr = self.frames[fi].pop()?;
-                let (typ_obj, val) = {
-                    let exc = self.frames[fi].peek(0)?;
-                    let exc_borrowed = exc.borrow();
-                    match &*exc_borrowed {
-                        PyObject::Exception { typ, .. } => {
-                            let typ_obj = self.frames[fi]
-                                .builtins
-                                .get(&interner::intern(&typ))
-                                .cloned()
-                                .unwrap_or_else(|| py_str(typ));
-                            (typ_obj, exc.clone())
-                        }
-                        // A user-defined exception CLASS instance (`class
-                        // MyError(Exception): ...`, `raise MyError(...)`)
-                        // only ever matched the native `PyObject::Exception`
-                        // arm above, silently falling through to `(None,
-                        // None)` here — meaning `__exit__(exc_type,
-                        // exc_value, tb)` was ALWAYS called as if no
-                        // exception had occurred whenever the `with` body
-                        // raised a custom exception class, not just the
-                        // handful of natively-represented ones. Same root
-                        // gap as `CHECK_EXC_MATCH`/`isinstance`/`issubclass`
-                        // (already fixed elsewhere this session for their
-                        // own call sites) — this is the `with`-statement's
-                        // own, previously-unfixed instance of it. Real
-                        // trigger: `unittest`'s own `assertRaises`, whose
-                        // `_AssertRaisesBaseContext.__exit__` checks `if
-                        // exc_type is None: <fail: "X not raised">` — ANY
-                        // `assertRaises(CustomExceptionClass, ...)` call
-                        // spuriously reported the exception as never having
-                        // been raised at all, even though it genuinely was.
-                        PyObject::Instance { typ, .. } => (typ.clone(), exc.clone()),
-                        _ => (py_none(), py_none()),
-                    }
-                };
-                let exit_raw = mgr
-                    .borrow()
-                    .get_attribute("__exit__")
-                    .map_err(|_| PyError::attribute_error("context manager has no __exit__"))?;
-                // A method found directly on a native type (e.g. `lock.
-                // __exit__`, `Lock`'s attribute lookup in `attrs.rs`) comes
-                // back as a `BuiltinMethod` with a PLACEHOLDER `self_obj`
-                // (see `NATIVE_VALUE_CTOR_KEY`'s doc comment) — wrapping
-                // THAT placeholder-carrying value inside another
-                // `BoundMethod{self_obj: mgr}` (the old code here) never
-                // actually rebinds it to the real manager: `mgr` never
-                // reaches the native implementation, so e.g. `Lock.__exit__`
-                // silently no-ops instead of clearing the lock flag, and
-                // ANY subsequent `with lock:` on the SAME lock hangs forever
-                // spinning on a flag that can never become false again.
-                // Mirrors the exact unwrap-and-rebuild-with-the-real-
-                // self_obj pattern `SETUP_WITH`'s own `__enter__` handling
-                // (just above) already uses — `WITH_EXIT` needs the
-                // identical treatment, not a second, ineffective wrapping.
-                let is_builtin = matches!(&*exit_raw.borrow(), PyObject::BuiltinMethod { .. });
-                let bound = if is_builtin {
-                    let b = exit_raw.borrow();
-                    match &*b {
-                        PyObject::BuiltinMethod { name, func, .. } => {
-                            PyObjectRef::imm(PyObject::BuiltinMethod {
-                                name: name.clone(),
-                                func: *func,
-                                self_obj: mgr.clone(),
-                            })
-                        }
-                        _ => unreachable!(),
-                    }
-                } else {
-                    PyObjectRef::imm(PyObject::BoundMethod {
-                        func: exit_raw,
-                        self_obj: mgr,
-                    })
-                };
-                // Pass the exception's real __traceback__ (not py_none) —
-                // `__exit__(type, value, tb)` implementations and
-                // test_with's MockContextManager assert tb is non-None after
-                // an exception (exit_args[2] is not None).
-                let tb_arg = val
-                    .borrow()
-                    .get_attribute("__traceback__")
-                    .unwrap_or_else(|_| py_none());
-                let result = self.call_function(bound, vec![typ_obj, val, tb_arg], vec![])?;
-                self.frames[fi].push(result);
             }
 
             Opcode::YIELD_VALUE => {
@@ -6426,3 +6079,6 @@ impl VirtualMachine {
     }
 
 }
+
+
+

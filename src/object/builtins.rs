@@ -28,17 +28,25 @@ pub(crate) use numeric::{bigint_gcd, bigint_mod_inverse, round_half_even_rat};
 mod functional;
 pub use functional::{builtin_all, builtin_any, builtin_breakpoint, builtin_callable, builtin_enumerate, builtin_max, builtin_min, builtin_sorted, builtin_sum};
 
-mod iter;
-pub use iter::{builtin_iter, builtin_len, builtin_next, builtin_range, builtin_reversed, list_iter_setstate, range_iter_setstate};
-pub(crate) use iter::{iterable_length_hint, range_index_arg};
+mod iter1;
+mod iter2;
+pub use iter1::{builtin_iter, builtin_len, builtin_range, list_iter_setstate, range_iter_setstate};
+pub use iter2::{builtin_next, builtin_reversed};
+pub(crate) use iter1::{iterable_length_hint, range_index_arg};
 
-mod string;
-pub use string::{builtin_bool, builtin_complex, builtin_float, builtin_format, builtin_repr, builtin_str, bytes_maketrans_builtin, str_maketrans_builtin};
-pub(crate) use string::{bigint_to_float, check_int_to_str_limit, float_class_hex, float_fromhex, float_subclass_result, int_value_or_backing, ldexp_f64, python_bytes_repr, validate_underscores};
+mod string1;
+mod string2;
+pub use string1::builtin_float;
+pub use string2::{builtin_bool, builtin_complex, builtin_format, builtin_repr, builtin_str, bytes_maketrans_builtin, str_maketrans_builtin};
+pub(crate) use string1::{bigint_to_float, float_class_hex, float_fromhex, float_subclass_result, ldexp_f64, python_bytes_repr, validate_underscores};
+pub(crate) use string2::{check_int_to_str_limit, int_value_or_backing};
 
-mod introspection;
-pub use introspection::{builtin_dir, builtin_globals, builtin_hash, builtin_help, builtin_id, builtin_isinstance, builtin_issubclass, builtin_locals, builtin_object, builtin_open, builtin_slice, builtin_vars, call_bound_method, call_function_disposable};
-pub(crate) use introspection::{exception_instance_repr, exception_instance_str, is_exception_type, path_arg_to_string};
+mod introspection1;
+mod introspection2;
+pub use introspection1::{builtin_dir, builtin_globals, builtin_hash, builtin_id, builtin_locals, builtin_object, builtin_slice, builtin_vars, call_bound_method, call_function_disposable};
+pub use introspection2::{builtin_help, builtin_isinstance, builtin_issubclass, builtin_open};
+pub(crate) use introspection1::{exception_instance_repr, exception_instance_str, is_exception_type};
+pub(crate) use introspection2::path_arg_to_string;
 
 
 pub fn builtin_list(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
