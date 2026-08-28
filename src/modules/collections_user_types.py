@@ -237,7 +237,7 @@ class UserDict:
 
 class Counter(dict):
     def __init__(self, iterable=None, /, **kwds):
-        super().__init__()
+        # additive, not clearing
         self.update(iterable, **kwds)
 
     def __missing__(self, key):
@@ -394,7 +394,10 @@ class Counter(dict):
     def __iadd__(self, other):
         for elem, count in other.items():
             self[elem] = self.get(elem, 0) + count
-        to_del = [k for k, v in self.items() if v <= 0]
+        to_del = []
+        for k, v in list(self.items()):
+            if v <= 0:
+                to_del.append(k)
         for k in to_del:
             del self[k]
         return self
@@ -402,7 +405,10 @@ class Counter(dict):
     def __isub__(self, other):
         for elem, count in other.items():
             self[elem] = self.get(elem, 0) - count
-        to_del = [k for k, v in self.items() if v <= 0]
+        to_del = []
+        for k, v in list(self.items()):
+            if v <= 0:
+                to_del.append(k)
         for k in to_del:
             del self[k]
         return self
@@ -414,6 +420,12 @@ class Counter(dict):
                 self[elem] = newcount
             elif elem in self:
                 del self[elem]
+        to_del = []
+        for k, v in list(self.items()):
+            if v <= 0:
+                to_del.append(k)
+        for k in to_del:
+            del self[k]
         return self
 
     def __iand__(self, other):
@@ -427,6 +439,35 @@ class Counter(dict):
             else:
                 del self[elem]
         return self
+
+    def __ixor__(self, other):
+        for elem, count in list(self.items()):
+            self[elem] = abs(count - other.get(elem, 0))
+        for elem, count in other.items():
+            if elem not in self:
+                ac = abs(count)
+                if ac:
+                    self[elem] = ac
+        to_del = []
+        for k, v in list(self.items()):
+            if v <= 0:
+                to_del.append(k)
+        for k in to_del:
+            del self[k]
+        return self
+
+    def __xor__(self, other):
+        if not isinstance(other, Counter):
+            return NotImplemented
+        result = Counter()
+        for elem, count in self.items():
+            newcount = abs(count - other.get(elem, 0))
+            if newcount:
+                result[elem] = newcount
+        for elem, count in other.items():
+            if elem not in self and count:
+                result[elem] = abs(count)
+        return result
 
 
 _defaultdict_repr_guard = set()
@@ -834,25 +875,52 @@ class ChainMap:
         return False
 
     def __or__(self, other):
+        # Subclass priority: if other is a ChainMap subclass that defines its own __ror__,
+        # return NotImplemented so Python will try other.__ror__(self) which will
+        # correctly return the subclass type (test_union_operators expects
+        # ChainMap() | SubclassRor() to be SubclassRor, not ChainMap).
+        if isinstance(other, ChainMap):
+            other_type = type(other)
+            if other_type is not ChainMap:
+                # Check if other_type defines __ror__ directly (not just inherited)
+                try:
+                    if "__ror__" in other_type.__dict__:
+                        return NotImplemented
+                except Exception:
+                    pass
+                # Also check via MRO: if other_type is subclass and has __ror__ in its own dict
+                # we already handled; otherwise, for plain Subclass without __ror__, we should
+                # handle via normal path (return ChainMap type), so don't return NotImplemented
+                # for plain Subclass.
+                # To distinguish, check if other_type has __ror__ that is not ChainMap's
+                try:
+                    if hasattr(other_type, "__ror__") and other_type.__dict__.get("__ror__") is not None:
+                        # Has own __ror__, let it handle
+                        return NotImplemented
+                except Exception:
+                    pass
+        try:
+            from collections.abc import Mapping as _MappingABC
+            is_mapping = isinstance(other, _MappingABC)
+        except Exception:
+            is_mapping = hasattr(other, 'keys') and hasattr(other, '__getitem__')
         if isinstance(other, ChainMap):
             other = dict(other)
-        if isinstance(other, dict):
+            is_mapping = True
+        if is_mapping:
+            if isinstance(other, dict):
+                new_first = self.maps[0].copy()
+                for k, v in other.items():
+                    new_first[k] = v
+                return self.__class__(new_first, *self.maps[1:])
             new_first = self.maps[0].copy()
-            for k, v in other.items():
-                new_first[k] = v
+            try:
+                for k in other.keys():
+                    new_first[k] = other[k]
+            except Exception:
+                return NotImplemented
             return self.__class__(new_first, *self.maps[1:])
-        if hasattr(other, 'keys'):
-            new_first = self.maps[0].copy()
-            for k in other.keys():
-                new_first[k] = other[k]
-            return self.__class__(new_first, *self.maps[1:])
-        try:
-            new_first = self.maps[0].copy()
-            for k, v in other:
-                new_first[k] = v
-            return self.__class__(new_first, *self.maps[1:])
-        except Exception:
-            return NotImplemented
+        return NotImplemented
 
     def __ror__(self, other):
         if isinstance(other, ChainMap):

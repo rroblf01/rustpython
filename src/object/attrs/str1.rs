@@ -410,7 +410,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                             }
                                         }
                                     }
-                                    let tail = rest.trim();
+                                    let tail = rest.trim_start();
                                     if !tail.is_empty() {
                                         parts.push(tail);
                                     }
@@ -457,7 +457,8 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                         }
                                         match trimmed.rfind(char::is_whitespace) {
                                             Some(idx) => {
-                                                parts.push(&trimmed[idx + 1..]);
+                                                let token = trimmed[idx..].trim_start();
+                                                parts.push(token);
                                                 rest = &trimmed[..idx];
                                             }
                                             None => {
@@ -467,7 +468,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                             }
                                         }
                                     }
-                                    let head = rest.trim();
+                                    let head = rest.trim_end();
                                     if !head.is_empty() {
                                         parts.push(head);
                                     }

@@ -2,6 +2,7 @@
 use crate::object::*;
 use super::*;
 use crate::interner;
+use unicode_general_category::{get_general_category, GeneralCategory};
 
 pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
     match o {
@@ -12,12 +13,49 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         func: |args| {
                             if args.len() < 3 {
                                 return Err(PyError::type_error(
-                                    "replace() takes exactly 2 arguments",
+                                    "replace() takes at least 2 arguments",
                                 ));
                             }
-                            Ok(py_str(
-                                &args[0].str().replace(&args[1].str(), &args[2].str()),
-                            ))
+                            let s = args[0].str();
+                            let old = args[1].str();
+                            let new = args[2].str();
+                            let max: i64 = {
+                                if args.len() > 3 {
+                                    // check for kwargs dict containing "count"
+                                    if let PyObject::Dict(d) = &*args[args.len()-1].borrow() {
+                                        if let Some(v) = d.get(&py_str("count")).ok().flatten() {
+                                            v.as_i64().unwrap_or(-1)
+                                        } else if args.len() == 4 {
+                                            -1
+                                        } else {
+                                            args[3].as_i64().unwrap_or(-1)
+                                        }
+                                    } else {
+                                        args[3].as_i64().unwrap_or(-1)
+                                    }
+                                } else { -1 }
+                            };
+                            if max == 0 { return Ok(py_str(&s)); }
+                            let result = if old.is_empty() {
+                                if max < 0 {
+                                    let mut out = String::with_capacity(s.len() + (s.chars().count()+1)*new.len());
+                                    out.push_str(&new);
+                                    for ch in s.chars() { out.push(ch); out.push_str(&new); }
+                                    out
+                                } else {
+                                    let m = max as usize;
+                                    let total = std::cmp::min(m, s.chars().count()+1);
+                                    let mut out = String::new();
+                                    let mut inserted = 0;
+                                    if total > 0 { out.push_str(&new); inserted+=1; }
+                                    for ch in s.chars() {
+                                        out.push(ch);
+                                        if inserted < total { out.push_str(&new); inserted+=1; }
+                                    }
+                                    out
+                                }
+                            } else if max < 0 { s.replace(&old, &new) } else { s.replacen(&old, &new, max as usize) };
+                            Ok(py_str(&result))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -30,12 +68,10 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 ));
                             }
 
+                            let s = a[0].str();
                             Ok(py_bool(
-                                !a[0].str().is_empty()
-                                    && a[0]
-                                        .str()
-                                        .chars()
-                                        .all(|c| c.is_ascii_digit() && !c.is_ascii_control()),
+                                !s.is_empty()
+                                    && s.chars().all(|c| get_general_category(c) == GeneralCategory::DecimalNumber),
                             ))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -49,9 +85,10 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 ));
                             }
 
+                            let s = a[0].str();
                             Ok(py_bool(
-                                !a[0].str().is_empty()
-                                    && a[0].str().chars().any(|c| c.is_numeric()),
+                                !s.is_empty()
+                                    && s.chars().all(|c| c.is_numeric()),
                             ))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -83,10 +120,11 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 ));
                             }
 
-                            Ok(py_bool(
-                                !a[0].str().is_empty()
-                                    && a[0].str().chars().all(|c| c.is_ascii_graphic() || c == ' '),
-                            ))
+                            let s = a[0].str();
+                            Ok(py_bool(s.chars().all(|c| {
+                                let cat = get_general_category(c);
+                                !c.is_control() && !matches!(cat, GeneralCategory::Format | GeneralCategory::Surrogate | GeneralCategory::PrivateUse | GeneralCategory::Unassigned | GeneralCategory::LineSeparator | GeneralCategory::ParagraphSeparator)
+                            })))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -110,7 +148,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     "isdigit() takes no arguments (1 given)",
                                 ));
                             }
-                            Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_digit())))
+                            let s = a[0].str();
+                            Ok(py_bool(!s.is_empty() && s.chars().all(|c| {
+                                if get_general_category(c) == GeneralCategory::DecimalNumber { true }
+                                else if matches!(c as u32, 0xB2..=0xB3 | 0xB9 | 0x1369..=0x1371 | 0x19DA | 0x2070 | 0x2074..=0x2079 | 0x2080..=0x2089 | 0x2460..=0x2468 | 0x2474..=0x247C | 0x2488..=0x2490 | 0x24EA | 0x24F5..=0x24FD | 0x24FF | 0x2776..=0x277E | 0x2780..=0x2788 | 0x278A..=0x2792 | 0x10A40..=0x10A43 | 0x10E60..=0x10E68 | 0x11052..=0x1105A | 0x1F100..=0x1F10A) { true }
+                                else { false }
+                            })))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -122,7 +165,8 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     "isalpha() takes no arguments (1 given)",
                                 ));
                             }
-                            Ok(py_bool(a[0].str().chars().all(|c| c.is_ascii_alphabetic())))
+                            let s = a[0].str();
+                            Ok(py_bool(!s.is_empty() && s.chars().all(|c| c.is_alphabetic())))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -135,15 +179,8 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 ));
                             }
 
-                            if a.len() != 1 {
-                                return Err(PyError::type_error(
-                                    "isalpha() takes no arguments (1 given)",
-                                ));
-                            }
-
-                            Ok(py_bool(
-                                a[0].str().chars().all(|c| c.is_ascii_alphanumeric()),
-                            ))
+                            let s = a[0].str();
+                            Ok(py_bool(!s.is_empty() && s.chars().all(|c| c.is_alphanumeric())))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -155,7 +192,8 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     "isspace() takes no arguments (1 given)",
                                 ));
                             }
-                            Ok(py_bool(a[0].str().chars().all(|c| c.is_whitespace())))
+                            let s = a[0].str();
+                            Ok(py_bool(!s.is_empty() && s.chars().all(|c| c.is_whitespace())))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -167,7 +205,11 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     "islower() takes no arguments (1 given)",
                                 ));
                             }
-                            Ok(py_bool(a[0].str() == a[0].str().to_lowercase()))
+                            let s = a[0].str();
+                            let mut has_cased = false;
+                            let mut ok = true;
+                            for c in s.chars() { if c.is_lowercase() { has_cased = true; } else if c.is_uppercase() { ok = false; break; } }
+                            Ok(py_bool(has_cased && ok))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -179,7 +221,11 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     "isupper() takes no arguments (1 given)",
                                 ));
                             }
-                            Ok(py_bool(a[0].str() == a[0].str().to_uppercase()))
+                            let s = a[0].str();
+                            let mut has_cased = false;
+                            let mut ok = true;
+                            for c in s.chars() { if c.is_uppercase() { has_cased = true; } else if c.is_lowercase() { ok = false; break; } }
+                            Ok(py_bool(has_cased && ok))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -199,26 +245,33 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             }
 
                             let s = a[0].str();
-                            let mut prev_is_letter = false;
+                            if s.is_empty() { return Ok(py_bool(false)); }
+                            let mut prev_is_cased = false;
+                            let mut has_cased = false;
                             let mut is_title = true;
                             for c in s.chars() {
-                                if c.is_ascii_uppercase() {
-                                    if prev_is_letter {
-                                        is_title = false;
-                                        break;
-                                    }
-                                    prev_is_letter = true;
-                                } else if c.is_ascii_lowercase() {
-                                    if !prev_is_letter {
-                                        is_title = false;
-                                        break;
-                                    }
-                                    prev_is_letter = true;
+                                let cat = get_general_category(c);
+                                let is_upper = c.is_uppercase() || cat == GeneralCategory::TitlecaseLetter;
+                                let is_lower = c.is_lowercase();
+                                if is_upper {
+                                    if prev_is_cased { is_title = false; break; }
+                                    prev_is_cased = true;
+                                    has_cased = true;
+                                } else if is_lower {
+                                    if !prev_is_cased { is_title = false; break; }
+                                    prev_is_cased = true;
+                                    has_cased = true;
+                                } else if cat == GeneralCategory::UppercaseLetter || cat == GeneralCategory::LowercaseLetter || cat == GeneralCategory::TitlecaseLetter {
+                                    // other cased? treat as cased but not upper/lower? keep prev
+                                    prev_is_cased = true;
+                                    has_cased = true;
+                                } else if c.is_alphabetic() {
+                                    prev_is_cased = true;
                                 } else {
-                                    prev_is_letter = false;
+                                    prev_is_cased = false;
                                 }
                             }
-                            Ok(py_bool(is_title && !s.is_empty()))
+                            Ok(py_bool(is_title && has_cased))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -726,12 +779,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             }
                             let mut chars = s.chars();
                             let first = chars.next().unwrap();
-                            let valid = (first == '_') || first.is_ascii_alphabetic();
+                            let valid = (first == '_') || first.is_alphabetic();
                             if !valid {
                                 return Ok(py_bool(false));
                             }
                             Ok(py_bool(
-                                chars.all(|c| c == '_' || c.is_ascii_alphanumeric()),
+                                chars.all(|c| c == '_' || c.is_alphanumeric()),
                             ))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),

@@ -299,6 +299,108 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         }));
                     }
                 }
+                if matches!(type_name.as_str(), "set" | "frozenset") {
+                    let set_op: Option<BuiltinFunc> = match name {
+                        "__sub__" => Some(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.len() < 2 { return Err(PyError::type_error("__sub__ missing args")); }
+                            let a = crate::object::convert_to_set(&args[0])?;
+                            let b = crate::object::convert_to_set(&args[1])?;
+                            let mut res = crate::object::PySet::new();
+                            for item in a.to_vec() {
+                                if !b.contains(&item).unwrap_or(false) { res.add(item)?; }
+                            }
+                            Ok(PyObjectRef::new(PyObject::Set(res)))
+                        }),
+                        "__and__" => Some(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.len() < 2 { return Err(PyError::type_error("__and__ missing args")); }
+                            let a = crate::object::convert_to_set(&args[0])?;
+                            let b = crate::object::convert_to_set(&args[1])?;
+                            let mut res = crate::object::PySet::new();
+                            for item in a.to_vec() {
+                                if b.contains(&item).unwrap_or(false) { res.add(item)?; }
+                            }
+                            Ok(PyObjectRef::new(PyObject::Set(res)))
+                        }),
+                        "__or__" => Some(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.len() < 2 { return Err(PyError::type_error("__or__ missing args")); }
+                            let a = crate::object::convert_to_set(&args[0])?;
+                            let b = crate::object::convert_to_set(&args[1])?;
+                            let mut res = a.clone();
+                            for item in b.to_vec() { res.add(item)?; }
+                            Ok(PyObjectRef::new(PyObject::Set(res)))
+                        }),
+                        "__xor__" => Some(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.len() < 2 { return Err(PyError::type_error("__xor__ missing args")); }
+                            let a = crate::object::convert_to_set(&args[0])?;
+                            let b = crate::object::convert_to_set(&args[1])?;
+                            let mut res = crate::object::PySet::new();
+                            for item in a.to_vec() {
+                                if !b.contains(&item).unwrap_or(false) { res.add(item)?; }
+                            }
+                            for item in b.to_vec() {
+                                if !a.contains(&item).unwrap_or(false) { res.add(item)?; }
+                            }
+                            Ok(PyObjectRef::new(PyObject::Set(res)))
+                        }),
+                        "__le__" => Some(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.len() < 2 { return Err(PyError::type_error("__le__ missing args")); }
+                            let a = crate::object::convert_to_set(&args[0])?;
+                            let b = crate::object::convert_to_set(&args[1])?;
+                            let le = a.to_vec().iter().all(|item| b.contains(item).unwrap_or(false));
+                            Ok(py_bool(le))
+                        }),
+                        "__lt__" => Some(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.len() < 2 { return Err(PyError::type_error("__lt__ missing args")); }
+                            let a = crate::object::convert_to_set(&args[0])?;
+                            let b = crate::object::convert_to_set(&args[1])?;
+                            if a.len() >= b.len() { return Ok(py_bool(false)); }
+                            let le = a.to_vec().iter().all(|item| b.contains(item).unwrap_or(false));
+                            Ok(py_bool(le))
+                        }),
+                        "__ge__" => Some(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.len() < 2 { return Err(PyError::type_error("__ge__ missing args")); }
+                            let a = crate::object::convert_to_set(&args[0])?;
+                            let b = crate::object::convert_to_set(&args[1])?;
+                            let ge = b.to_vec().iter().all(|item| a.contains(item).unwrap_or(false));
+                            Ok(py_bool(ge))
+                        }),
+                        "__gt__" => Some(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.len() < 2 { return Err(PyError::type_error("__gt__ missing args")); }
+                            let a = crate::object::convert_to_set(&args[0])?;
+                            let b = crate::object::convert_to_set(&args[1])?;
+                            if a.len() <= b.len() { return Ok(py_bool(false)); }
+                            let ge = b.to_vec().iter().all(|item| a.contains(item).unwrap_or(false));
+                            Ok(py_bool(ge))
+                        }),
+                        "__eq__" => Some(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.len() < 2 { return Err(PyError::type_error("__eq__ missing args")); }
+                            let a = crate::object::convert_to_set(&args[0])?;
+                            let b = crate::object::convert_to_set(&args[1])?;
+                            if a.len() != b.len() { return Ok(py_bool(false)); }
+                            for item in a.to_vec() {
+                                if !b.contains(&item).unwrap_or(false) { return Ok(py_bool(false)); }
+                            }
+                            Ok(py_bool(true))
+                        }),
+                        "__ne__" => Some(|args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            if args.len() < 2 { return Err(PyError::type_error("__ne__ missing args")); }
+                            let a = crate::object::convert_to_set(&args[0])?;
+                            let b = crate::object::convert_to_set(&args[1])?;
+                            if a.len() != b.len() { return Ok(py_bool(true)); }
+                            for item in a.to_vec() {
+                                if !b.contains(&item).unwrap_or(false) { return Ok(py_bool(true)); }
+                            }
+                            Ok(py_bool(false))
+                        }),
+                        _ => None,
+                    };
+                    if let Some(func) = set_op {
+                        return Ok(PyObjectRef::new(PyObject::BuiltinFunction {
+                            name: name.to_string(),
+                            func,
+                        }));
+                    }
+                }
                 Err(PyError::attribute_error(format!(
                     "type has no attribute '{}'",
                     name
@@ -416,7 +518,13 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 }
                             }
                             // Fallback: provide common dict methods for dict-like instances
-                            if name == "__iter__" || name == "items" || name == "keys" || name == "values" {
+                            // Exclude dict view types which store mapping/kind_name
+                            if (name == "__iter__" || name == "items" || name == "keys" || name == "values")
+                                && !matches!(
+                                    get_type_name_for_instance(typ).as_str(),
+                                    "dict_items" | "dict_keys" | "dict_values"
+                                )
+                            {
                                 let dict_snapshot: Vec<(String, PyObjectRef)> = dict.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
                                 let result = instance_builtin_dict_method(name, dict_snapshot);
                                 return result;

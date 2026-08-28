@@ -884,18 +884,9 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
     if let Some(native) = native_backing_of(obj) {
         return py_delitem(&native, index);
     }
-    // Dict deletion: compute the key's hash BEFORE taking `obj`'s own
-    // mutable borrow — see `PyDict::set_with_hash`'s doc comment for why
-    // (a custom `__hash__` can run arbitrary Python that mutates this same
-    // dict, and computing the hash while already mutably borrowed would
-    // panic on re-entry).
     if matches!(&*obj.borrow(), PyObject::Dict(_)) {
-        let h = index.hash()?;
-        let mut o = obj.borrow_mut();
-        if let PyObject::Dict(d) = &mut *o {
-            d.remove_with_hash(index, h)?;
-            return Ok(());
-        }
+        crate::object::pydict_safe_remove(obj, index)?;
+        return Ok(());
     }
     if let PyObject::Globals(g) = &*obj.borrow() {
         let key = match &*index.borrow() {

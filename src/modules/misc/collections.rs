@@ -175,6 +175,46 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
                                 if cls_name == "Hashable" && matches!(type_name.as_str(), "list" | "dict" | "set" | "bytearray") {
                                     return Ok(py_bool(false));
                                 }
+                                // Early native checks for ABCs that have required methods but should still
+                                // be considered via native type name (e.g., range is Sequence, list is not Mapping).
+                                // These must run BEFORE the `required.is_empty()` branch and BEFORE the
+                                // method-presence loop, otherwise `range` would be incorrectly rejected
+                                // for `Sequence` (since it lacks a direct `__getitem__` entry) and `list`
+                                // would be incorrectly accepted for `Mapping` (since it has `__getitem__` etc.).
+                                if cls_name == "Sequence" && matches!(type_name.as_str(), "list" | "tuple" | "str" | "bytes" | "bytearray" | "range" | "memoryview" | "deque" | "array" | "OrderedDict" | "Counter") {
+                                    return Ok(py_bool(true));
+                                }
+                                if cls_name == "MutableSequence" && matches!(type_name.as_str(), "list" | "bytearray" | "deque") {
+                                    return Ok(py_bool(true));
+                                }
+                                if cls_name == "Set" && matches!(type_name.as_str(), "set" | "frozenset") {
+                                    return Ok(py_bool(true));
+                                }
+                                if cls_name == "MutableSet" && type_name == "set" {
+                                    return Ok(py_bool(true));
+                                }
+                                if cls_name == "Mapping" && matches!(type_name.as_str(), "dict" | "OrderedDict" | "Counter" | "defaultdict" | "ChainMap" | "UserDict" | "dict_keys" | "dict_values" | "dict_items") {
+                                    return Ok(py_bool(true));
+                                }
+                                if cls_name == "MutableMapping" && matches!(type_name.as_str(), "dict" | "OrderedDict" | "Counter" | "defaultdict" | "ChainMap" | "UserDict") {
+                                    return Ok(py_bool(true));
+                                }
+                                if cls_name == "ByteString" && matches!(type_name.as_str(), "bytes" | "bytearray") {
+                                    return Ok(py_bool(true));
+                                }
+                                if cls_name == "Buffer" && matches!(type_name.as_str(), "bytes" | "bytearray" | "memoryview") {
+                                    return Ok(py_bool(true));
+                                }
+                                // Explicitly reject non-mappings for Mapping/Sequence
+                                if cls_name == "Mapping" && matches!(type_name.as_str(), "list" | "tuple" | "str" | "bytes" | "bytearray" | "set" | "frozenset" | "range" | "memoryview") {
+                                    return Ok(py_bool(false));
+                                }
+                                if cls_name == "MutableMapping" && matches!(type_name.as_str(), "list" | "tuple" | "str" | "bytes" | "bytearray" | "set" | "frozenset" | "range" | "memoryview") {
+                                    return Ok(py_bool(false));
+                                }
+                                if cls_name == "Sequence" && matches!(type_name.as_str(), "dict" | "set" | "frozenset" | "dict_keys" | "dict_values" | "dict_items") {
+                                    return Ok(py_bool(false));
+                                }
                                 if required.is_empty() {
                                     if cls_name == "Callable" {
                                         return Ok(crate::object::builtin_callable(&[args[1].clone()])?);
@@ -302,6 +342,122 @@ pub fn create_collections_abc_dict() -> HashMap<String, PyObjectRef> {
                     }
                     dict.insert_str("__abstractmethods__", PyObjectRef::new(PyObject::FrozenSet(s)));
                     dict.insert_str("_abc_registry", PyObjectRef::new(PyObject::FrozenSet(crate::object::PySet::new())));
+                }
+            }
+        }
+        // Expose __subclasscheck__ for issubclass support (test_Sized etc do issubclass(dict_keys, Sized))
+        // __instancecheck__ handles instances, but issubclass needs to check the class itself.
+        // For native types like `range` which is a BuiltinFunction (not a Type) in this VM,
+        // the alias would fail because type_name is "builtin_function_or_method" not "range".
+        // So we provide a proper __subclasscheck__ that handles BuiltinFunction names.
+        for name in ["Hashable", "Iterable", "Iterator", "Generator", "Reversible", "Sized", "Container", "Callable", "Collection", "Sequence", "MutableSequence", "Set", "MutableSet", "Mapping", "MutableMapping", "MappingView", "KeysView", "ItemsView", "ValuesView", "Awaitable", "Coroutine", "AsyncIterable", "AsyncIterator", "AsyncGenerator", "Buffer", "ByteString"] {
+            if let Some(abc) = d.get(name) {
+                if let PyObject::Type { dict, .. } = &mut *abc.borrow_mut() {
+                    dict.insert_str("__subclasscheck__", PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "__subclasscheck__".to_string(),
+                        func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                            let cls_name = match &*args[0].borrow() {
+                                PyObject::Type { name, .. } => name.clone(),
+                                _ => String::new(),
+                            };
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("__subclasscheck__ requires 2 args"));
+                            }
+                            let subclass = &args[1];
+                            let subclass_name = match &*subclass.borrow() {
+                                PyObject::Type { name, .. } => name.clone(),
+                                PyObject::BuiltinFunction { name, .. } => name.clone(),
+                                PyObject::BuiltinMethod { name, .. } => name.clone(),
+                                _ => {
+                                    if let Ok(n) = subclass.borrow().get_attribute("__name__") {
+                                        n.str()
+                                    } else {
+                                        subclass.borrow().type_name()
+                                    }
+                                }
+                            };
+                            // Reuse the same native checks as __instancecheck__ but with subclass_name
+                            let type_name = subclass_name.clone();
+                            let native_sized = matches!(type_name.as_str(), "list" | "tuple" | "dict" | "set" | "frozenset" | "str" | "bytes" | "bytearray" | "range" | "memoryview" | "dict_keys" | "dict_values" | "dict_items" | "KeysView" | "ItemsView" | "ValuesView" | "MappingView" | "OrderedDict" | "Counter" | "deque");
+                            let native_reversible = matches!(type_name.as_str(), "list" | "tuple" | "str" | "bytes" | "range" | "dict" | "dict_keys" | "dict_values" | "dict_items" | "OrderedDict" | "Counter" | "deque" | "bytearray" | "memoryview");
+                            let native_iterable = matches!(type_name.as_str(), "list" | "tuple" | "dict" | "set" | "frozenset" | "str" | "bytes" | "bytearray" | "range" | "memoryview" | "dict_keys" | "dict_values" | "dict_items" | "KeysView" | "ItemsView" | "ValuesView" | "MappingView" | "OrderedDict" | "Counter" | "deque" | "list_iterator" | "tuple_iterator" | "dict_keyiterator" | "dict_valueiterator" | "dict_itemiterator" | "set_iterator" | "str_iterator" | "bytes_iterator" | "bytearray_iterator" | "range_iterator" | "zip_iterator" | "generator");
+                            let native_collection = matches!(type_name.as_str(), "list" | "tuple" | "dict" | "set" | "frozenset" | "str" | "bytes" | "bytearray" | "range" | "memoryview" | "dict_keys" | "dict_values" | "dict_items" | "OrderedDict" | "Counter");
+                            let native_container = matches!(type_name.as_str(), "list" | "tuple" | "dict" | "set" | "frozenset" | "str" | "bytes" | "bytearray" | "dict_keys" | "dict_values" | "dict_items");
+                            if cls_name == "Sized" && native_sized { return Ok(py_bool(true)); }
+                            if cls_name == "Reversible" && native_reversible { return Ok(py_bool(true)); }
+                            if cls_name == "Iterable" && native_iterable { return Ok(py_bool(true)); }
+                            if cls_name == "Collection" && native_collection { return Ok(py_bool(true)); }
+                            if cls_name == "Container" && native_container { return Ok(py_bool(true)); }
+                            let native_iterator = matches!(type_name.as_str(), "list_iterator" | "tuple_iterator" | "dict_keyiterator" | "dict_valueiterator" | "dict_itemiterator" | "set_iterator" | "str_iterator" | "bytes_iterator" | "bytearray_iterator" | "range_iterator" | "zip_iterator" | "generator" | "list_reverseiterator");
+                            if cls_name == "Iterator" && native_iterator { return Ok(py_bool(true)); }
+                            if cls_name == "Hashable" && matches!(type_name.as_str(), "int" | "str" | "tuple" | "frozenset" | "bytes" | "float" | "bool") { return Ok(py_bool(true)); }
+                            if cls_name == "Hashable" && matches!(type_name.as_str(), "list" | "dict" | "set" | "bytearray") { return Ok(py_bool(false)); }
+                            if cls_name == "Sequence" && matches!(type_name.as_str(), "list" | "tuple" | "str" | "bytes" | "bytearray" | "range" | "memoryview" | "deque" | "array" | "OrderedDict" | "Counter") { return Ok(py_bool(true)); }
+                            if cls_name == "MutableSequence" && matches!(type_name.as_str(), "list" | "bytearray" | "deque") { return Ok(py_bool(true)); }
+                            if cls_name == "Set" && matches!(type_name.as_str(), "set" | "frozenset") { return Ok(py_bool(true)); }
+                            if cls_name == "MutableSet" && type_name == "set" { return Ok(py_bool(true)); }
+                            if cls_name == "Mapping" && matches!(type_name.as_str(), "dict" | "OrderedDict" | "Counter" | "defaultdict" | "ChainMap" | "UserDict" | "dict_keys" | "dict_values" | "dict_items") { return Ok(py_bool(true)); }
+                            if cls_name == "MutableMapping" && matches!(type_name.as_str(), "dict" | "OrderedDict" | "Counter" | "defaultdict" | "ChainMap" | "UserDict") { return Ok(py_bool(true)); }
+                            if cls_name == "ByteString" && matches!(type_name.as_str(), "bytes" | "bytearray") { return Ok(py_bool(true)); }
+                            if cls_name == "Buffer" && matches!(type_name.as_str(), "bytes" | "bytearray" | "memoryview") { return Ok(py_bool(true)); }
+                            if cls_name == "Mapping" && matches!(type_name.as_str(), "list" | "tuple" | "str" | "bytes" | "bytearray" | "set" | "frozenset" | "range" | "memoryview") { return Ok(py_bool(false)); }
+                            if cls_name == "MutableMapping" && matches!(type_name.as_str(), "list" | "tuple" | "str" | "bytes" | "bytearray" | "set" | "frozenset" | "range" | "memoryview") { return Ok(py_bool(false)); }
+                            if cls_name == "Sequence" && matches!(type_name.as_str(), "dict" | "set" | "frozenset" | "dict_keys" | "dict_values" | "dict_items") { return Ok(py_bool(false)); }
+                            // For other cases, fall back to checking the class's attributes
+                            let required: &[&str] = match cls_name.as_str() {
+                                "Hashable" => &["__hash__"],
+                                "Iterable" => &["__iter__"],
+                                "Iterator" => &["__iter__", "__next__"],
+                                "Generator" => &["__iter__", "__next__", "send", "throw", "close"],
+                                "Reversible" => &["__iter__", "__reversed__"],
+                                "Sized" => &["__len__"],
+                                "Container" => &["__contains__"],
+                                "Collection" => &["__iter__", "__len__", "__contains__"],
+                                "Callable" => &[],
+                                "Awaitable" => &["__await__"],
+                                "Coroutine" => &["__await__", "send", "throw", "close"],
+                                "AsyncIterable" => &["__aiter__"],
+                                "AsyncIterator" => &["__aiter__", "__anext__"],
+                                "AsyncGenerator" => &["__aiter__", "__anext__", "asend", "athrow", "aclose"],
+                                "Sequence" => &["__getitem__", "__len__"],
+                                "MutableSequence" => &["__getitem__", "__setitem__", "__delitem__", "__len__", "insert"],
+                                "Set" => &["__contains__", "__iter__", "__len__"],
+                                "MutableSet" => &["__contains__", "__iter__", "__len__", "add", "discard"],
+                                "Mapping" => &["__getitem__", "__iter__", "__len__"],
+                                "MutableMapping" => &["__getitem__", "__setitem__", "__delitem__", "__iter__", "__len__"],
+                                "MappingView" => &["__len__"],
+                                "KeysView" => &["__len__", "__iter__", "__contains__"],
+                                "ItemsView" => &["__len__", "__iter__", "__contains__"],
+                                "ValuesView" => &["__len__", "__iter__"],
+                                "Buffer" => &["__buffer__"],
+                                "ByteString" => &["__getitem__", "__len__"],
+                                _ => &[],
+                            };
+                            if required.is_empty() {
+                                if cls_name == "Callable" {
+                                    let has_call = subclass.borrow().get_attribute("__call__").is_ok();
+                                    return Ok(py_bool(has_call));
+                                }
+                                return Ok(py_bool(false));
+                            }
+                            for m in required {
+                                let has = match subclass.borrow().get_attribute(m) {
+                                    Ok(v) => !matches!(&*v.borrow(), PyObject::None),
+                                    Err(_) => false,
+                                };
+                                if !has {
+                                    // Also check via MRO for Type
+                                    if let PyObject::Type { .. } = &*subclass.borrow() {
+                                        if crate::object::lookup_dunder_via_mro(subclass, m).is_some() {
+                                            continue;
+                                        }
+                                    }
+                                    return Ok(py_bool(false));
+                                }
+                            }
+                            Ok(py_bool(true))
+                        },
+                    }));
                 }
             }
         }

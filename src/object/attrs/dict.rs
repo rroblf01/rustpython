@@ -115,14 +115,13 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             if args.len() < 2 {
                                 return Err(PyError::type_error("pop() takes at least 1 argument"));
                             }
-                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
-                                match d.remove(&args[1]) {
-                                    Ok(val) => Ok(val),
-                                    Err(_) if args.len() > 2 => Ok(args[2].clone()),
-                                    Err(e) => Err(e),
-                                }
-                            } else {
-                                Err(PyError::runtime_error("pop on non-dict"))
+                            if !matches!(&*args[0].borrow(), PyObject::Dict(_)) {
+                                return Err(PyError::runtime_error("pop on non-dict"));
+                            }
+                            match crate::object::pydict_safe_remove(&args[0], &args[1]) {
+                                Ok(val) => Ok(val),
+                                Err(_) if args.len() > 2 => Ok(args[2].clone()),
+                                Err(e) => Err(e),
                             }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -419,12 +418,11 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     "__delitem__() takes exactly one argument",
                                 ));
                             }
-                            if let PyObject::Dict(d) = &mut *args[0].borrow_mut() {
-                                d.remove(&args[1])?;
-                                Ok(py_none())
-                            } else {
-                                Err(PyError::runtime_error("__delitem__ on non-dict"))
+                            if !matches!(&*args[0].borrow(), PyObject::Dict(_)) {
+                                return Err(PyError::runtime_error("__delitem__ on non-dict"));
                             }
+                            crate::object::pydict_safe_remove(&args[0], &args[1])?;
+                            Ok(py_none())
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),

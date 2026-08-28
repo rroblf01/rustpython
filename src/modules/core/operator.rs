@@ -498,6 +498,43 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
         }
         py_rshift(&args[0], &args[1])
     });
+    // Aliases for operator.__lt__ etc (test_collections.py's validate_comparison does getattr(operator, '__lt__'))
+    op_func!("__lt__", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("__lt__ requires 2 arguments"));
+        }
+        py_compare(&args[0], &args[1], 0)
+    });
+    op_func!("__le__", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("__le__ requires 2 arguments"));
+        }
+        py_compare(&args[0], &args[1], 1)
+    });
+    op_func!("__eq__", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("__eq__ requires 2 arguments"));
+        }
+        py_compare(&args[0], &args[1], 2)
+    });
+    op_func!("__ne__", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("__ne__ requires 2 arguments"));
+        }
+        py_compare(&args[0], &args[1], 5)
+    });
+    op_func!("__ge__", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("__ge__ requires 2 arguments"));
+        }
+        py_compare(&args[0], &args[1], 3)
+    });
+    op_func!("__gt__", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("__gt__ requires 2 arguments"));
+        }
+        py_compare(&args[0], &args[1], 4)
+    });
     op_func!("__getitem__", |args| {
         if args.len() < 2 {
             return Err(PyError::type_error("__getitem__ requires 2 arguments"));

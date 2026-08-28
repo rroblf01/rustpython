@@ -534,6 +534,74 @@ pub(crate) fn pydict_safe_get_or_insert(
         }
     }
 }
+pub fn pydict_safe_remove(
+    target: &PyObjectRef,
+    key: &PyObjectRef,
+) -> PyResult<PyObjectRef> {
+    let h = key.hash()?;
+    let key_str_for_err = || key.str();
+    {
+        let mut obj = target.borrow_mut();
+        match &mut *obj {
+            PyObject::Dict(d) => {
+                if let Ok((_, existing)) = d.probe_no_reentry_risk(key, h) {
+                    if let Some(entry_idx) = existing {
+                        let removed = d.entries[entry_idx].take().unwrap().1;
+                        d.size -= 1;
+                        d.version = d.version.wrapping_add(1);
+                        return Ok(removed);
+                    } else {
+                        drop(obj);
+                        return Err(PyError::key_error(key_str_for_err()));
+                    }
+                }
+            }
+            _ => return Err(PyError::runtime_error("delitem on non-dict")),
+        }
+    }
+    loop {
+        let snap_version = {
+            let obj = target.borrow();
+            match &*obj {
+                PyObject::Dict(d) => d.version(),
+                _ => return Err(PyError::runtime_error("delitem on non-dict")),
+            }
+        };
+        let snapshot = {
+            let obj = target.borrow();
+            match &*obj {
+                PyObject::Dict(d) => (**d).clone(),
+                _ => return Err(PyError::runtime_error("delitem on non-dict")),
+            }
+        };
+        let (_, existing) = snapshot.probe(key, h);
+        let mut obj = target.borrow_mut();
+        match &mut *obj {
+            PyObject::Dict(d) if d.version() == snap_version => {
+                if let Some(entry_idx) = existing {
+                    if d.entries.get(entry_idx).and_then(|e| e.as_ref()).is_some() {
+                        let removed = d.entries[entry_idx].take().unwrap().1;
+                        d.size -= 1;
+                        d.version = d.version.wrapping_add(1);
+                        return Ok(removed);
+                    } else {
+                        drop(obj);
+                        return Err(PyError::key_error(key_str_for_err()));
+                    }
+                } else {
+                    drop(obj);
+                    return Err(PyError::key_error(key_str_for_err()));
+                }
+            }
+            PyObject::Dict(_) => {
+                drop(obj);
+                continue;
+            }
+            _ => return Err(PyError::runtime_error("delitem on non-dict")),
+        }
+    }
+}
+
 mod views;
 pub use views::make_dict_view;
 

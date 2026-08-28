@@ -811,7 +811,12 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 "__iter__",
                 PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "__iter__".to_string(),
-                    func: |args: &[PyObjectRef]| Ok(args[0].clone()),
+                    func: |args: &[PyObjectRef]| {
+                        if args.is_empty() {
+                            return Err(PyError::type_error("__iter__() missing 1 required positional argument: 'self'"));
+                        }
+                        Ok(args[0].clone())
+                    },
                 }),
             );
             let (b, p) = (buffer.clone(), pos.clone());

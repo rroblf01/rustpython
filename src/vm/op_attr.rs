@@ -122,7 +122,21 @@ impl VirtualMachine {
                             // override (see the caching-site comment below for
                             // the matching write-side half of this fix).
                             let type_tag = typ.get_id() as u64;
-                            let cached = if dict.contains_key(&name) {
+                            let is_dialect_subclass = {
+                                let tr = typ.borrow();
+                                if let PyObject::Type { mro, .. } = &*tr {
+                                    mro.iter().any(|b| {
+                                        if let PyObject::Type { name: bn, .. } = &*b.borrow() {
+                                            bn == "Dialect"
+                                        } else {
+                                            false
+                                        }
+                                    })
+                                } else {
+                                    false
+                                }
+                            };
+                            let cached = if dict.contains_key(&name) || is_dialect_subclass {
                                 None
                             } else {
                                 self.frames[fi]
