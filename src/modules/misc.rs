@@ -57,6 +57,15 @@ pub use getpass::*;
 mod json_tool;
 pub use json_tool::*;
 
+mod logging_config;
+pub use logging_config::*;
+
+mod email_mime_text;
+pub use email_mime_text::*;
+
+mod email_header;
+pub use email_header::*;
+
 
 
 // ---- logging module ----
@@ -3244,27 +3253,6 @@ pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-pub fn create_logging_config_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    macro_rules! log_cfg_func {
-        ($name:expr, $func:expr) => {
-            d.insert(
-                $name.to_string(),
-                PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: $name.to_string(),
-                    func: $func,
-                }),
-            );
-        };
-    }
-    log_cfg_func!("dictConfig", |_args| {
-        // Simplified stub: accepts a dict but does nothing
-        // A full implementation would configure loggers, handlers, formatters from the dict
-        Ok(py_none())
-    });
-    d
-}
-
 thread_local! {
     // Each callback stores the callable plus the extra positional args
     // (and a trailing keyword dict, if any) it was registered with — real
@@ -5958,118 +5946,6 @@ pub fn create_email_dict() -> HashMap<String, PyObjectRef> {
         }))
     });
 
-    d
-}
-
-pub fn create_email_mime_text_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    d.insert_str(
-        "MIMEText",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "MIMEText".to_string(),
-            func: |args| {
-                if args.is_empty() {
-                    return Err(PyError::type_error("MIMEText() missing required argument"));
-                }
-                let body = args[0].str();
-                let subtype = if args.len() > 1 {
-                    args[1].str()
-                } else {
-                    "plain".to_string()
-                };
-
-                let mut type_dict = HashMap::new();
-                type_dict.insert_str(
-                    "as_string",
-                    PyObjectRef::new(PyObject::BuiltinFunction {
-                        name: "as_string".to_string(),
-                        func: |a| {
-                            let inst = a[0].borrow();
-                            if let PyObject::Instance { dict, .. } = &*inst {
-                                let content = dict
-                                    .get_str("_content")
-                                    .map(|v| v.str())
-                                    .unwrap_or_default();
-                                let ct = dict
-                                    .get_str("_content_type")
-                                    .map(|v| v.str())
-                                    .unwrap_or_default();
-                                let mut result = format!("Content-Type: {}\r\n", ct);
-                                result.push_str("Content-Transfer-Encoding: 7bit\r\n");
-                                result.push_str("\r\n");
-                                result.push_str(&content);
-                                Ok(py_str(&result))
-                            } else {
-                                Err(PyError::type_error("MIMEText instance required"))
-                            }
-                        },
-                    }),
-                );
-
-                let mime_type = PyObjectRef::new(PyObject::Type {
-                    name: "MIMEText".to_string(),
-                    dict: Box::new(str_map_to_typedict(type_dict)),
-                    bases: vec![],
-                    mro: vec![],
-                });
-
-                let mut instance_dict = AttrMap::new();
-                instance_dict.insert_str("_content", py_str(&body));
-                instance_dict.insert_str("_content_type", py_str(&format!("text/{}", subtype)));
-
-                Ok(PyObjectRef::new(PyObject::Instance {
-                    typ: mime_type,
-                    dict: instance_dict,
-                }))
-            },
-        }),
-    );
-    d
-}
-
-pub fn create_email_header_dict() -> HashMap<String, PyObjectRef> {
-    let mut d = HashMap::new();
-    // Header class stub — used by django.http.response
-    d.insert_str(
-        "Header",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "Header".to_string(),
-            func: |args| {
-                let text = if args.is_empty() {
-                    String::new()
-                } else {
-                    args[0].str()
-                };
-                // Return a string wrapped as an object with __str__ for compatibility
-                Ok(PyObjectRef::new(PyObject::Instance {
-                    typ: PyObjectRef::new(PyObject::Type {
-                        name: "email.header.Header".to_string(),
-                        dict: Box::new(str_map_to_typedict(HashMap::new())),
-                        bases: vec![],
-                        mro: vec![],
-                    }),
-                    dict: AttrMap::from([
-                        ("_text".to_string(), py_str(&text)),
-                        (
-                            "__str__".to_string(),
-                            PyObjectRef::new(PyObject::BuiltinFunction {
-                                name: "__str__".to_string(),
-                                func: |a| {
-                                    let inst = a[0].borrow();
-                                    if let PyObject::Instance { dict, .. } = &*inst {
-                                        if let Some(t) = dict.get_str("_text") {
-                                            return Ok(t.clone());
-                                        }
-                                    }
-                                    Ok(py_str(""))
-                                },
-                            }),
-                        ),
-                    ]),
-                }))
-            },
-        }),
-    );
     d
 }
 

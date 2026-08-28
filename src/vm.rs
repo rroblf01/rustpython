@@ -46,6 +46,8 @@ pub mod op_coll;
 pub mod op_unpack;
 pub mod op_reg;
 pub mod op_with;
+pub mod op_stack;
+pub mod op_call;
 
 thread_local! {
     static ATTR_CACHE: std::cell::RefCell<HashMap<(String, String), crate::object::BuiltinFunc>> = std::cell::RefCell::new(HashMap::new());
@@ -1930,121 +1932,23 @@ impl VirtualMachine {
                 }
             }
 
-            Opcode::POP_TOP => {
-                self.frames[fi].pop()?;
-            }
-
-            Opcode::DUP_TOP => {
-                let val = self.frames[fi].peek(0)?;
-                self.frames[fi].push(val);
-            }
-
-            Opcode::COPY => {
-                let depth = arg as usize;
-                if depth >= self.frames[fi].stack.len() {
-                    // Graceful fallback: if depth exceeds stack, treat as DUP_TOP
-                    if let Some(val) = self.frames[fi].stack.last().cloned() {
-                        self.frames[fi].push(val);
-                    } else {
-                        return Err(PyError::runtime_error("stack underflow (peek)"));
-                    }
-                } else {
-                    let val = self.frames[fi].peek(depth)?;
-                    self.frames[fi].push(val);
-                }
-            }
-
-            Opcode::SWAP => {
-                let i = arg as usize;
-                let len = self.frames[fi].stack.len();
-                if i > 0 && i < len {
-                    self.frames[fi].stack.swap(len - 1, len - 1 - i);
-                }
+            Opcode::POP_TOP
+            | Opcode::DUP_TOP
+            | Opcode::COPY
+            | Opcode::SWAP
+            | Opcode::GET_LEN
+            | Opcode::MATCH_MAPPING
+            | Opcode::MATCH_SEQUENCE
+            | Opcode::MATCH_KEYS
+            | Opcode::CALL_INTRINSIC_1
+            | Opcode::CALL_INTRINSIC_2
+            | Opcode::UNPACK_SEQUENCE_TWO_TUPLE => {
+                self.handle_stack(fi, op, arg)?;
             }
 
             Opcode::RETURN_VALUE => {
                 let val = self.frames[fi].pop()?;
                 return Ok(Some(val));
-            }
-
-            // ── Unimplemented opcode stubs ────────────────────────────
-            Opcode::GET_LEN => {
-                let obj = self.frames[fi].pop()?;
-                let len = crate::object::builtin_len(&[obj])?;
-                self.frames[fi].push(len);
-            }
-            Opcode::MATCH_MAPPING => {
-                let subject = self.frames[fi].peek(0)?;
-                let is_map = matches!(
-                    &*subject.borrow(),
-                    PyObject::Dict(_) | PyObject::Instance { .. }
-                );
-                self.frames[fi].push(py_bool(is_map));
-            }
-            Opcode::MATCH_SEQUENCE => {
-                let subject = self.frames[fi].peek(0)?;
-                let is_seq = matches!(
-                    &*subject.borrow(),
-                    PyObject::List(_)
-                        | PyObject::Tuple(_)
-                        | PyObject::Str(_)
-                        | PyObject::Bytes(_)
-                        | PyObject::ByteArray(_)
-                );
-                self.frames[fi].push(py_bool(is_seq));
-            }
-            Opcode::MATCH_KEYS => {
-                let _keys = self.frames[fi].pop()?;
-                // Simplified: always succeed for dict pattern matching
-                self.frames[fi].push(py_bool(true));
-            }
-            Opcode::CALL_INTRINSIC_1 => {
-                let intrinsic = arg;
-                match intrinsic {
-                    1 => {
-                        // INTRINSIC_1_INVALIDATION_COUNTER
-                        self.frames[fi].push(py_int(0));
-                    }
-                    2 => {
-                        // INTRINSIC_1_PRINT
-                        let val = self.frames[fi].pop()?;
-                        let _ = print!("{}", val.str());
-                        self.frames[fi].push(py_none());
-                    }
-                    _ => {
-                        self.frames[fi].push(py_none());
-                    }
-                }
-            }
-            Opcode::CALL_INTRINSIC_2 => {
-                // Intrinsics for mutable keys, etc.
-                self.frames[fi].push(py_int(0));
-            }
-            Opcode::UNPACK_SEQUENCE_TWO_TUPLE => {
-                let seq = self.frames[fi].pop()?;
-                let seq_borrowed = seq.borrow();
-                if let PyObject::Tuple(items) = &*seq_borrowed {
-                    if items.len() >= 2 {
-                        self.frames[fi].push(items[0].clone());
-                        self.frames[fi].push(items[1].clone());
-                    } else {
-                        return Err(PyError::runtime_error("not enough values to unpack"));
-                    }
-                } else if let PyObject::List(items) = &*seq_borrowed {
-                    if items.len() >= 2 {
-                        self.frames[fi].push(items[0].clone());
-                        self.frames[fi].push(items[1].clone());
-                    } else {
-                        return Err(PyError::runtime_error("not enough values to unpack"));
-                    }
-                } else {
-                    // Fall back to unpack protocol
-                    let it = crate::object::builtin_iter(&[seq.clone()])?;
-                    let v1 = crate::object::builtin_next(&[it.clone()])?;
-                    let v2 = crate::object::builtin_next(&[it.clone()])?;
-                    self.frames[fi].push(v1);
-                    self.frames[fi].push(v2);
-                }
             }
 
             Opcode::REG_MOV
@@ -2060,212 +1964,12 @@ impl VirtualMachine {
                 }
             }
 
-            Opcode::PUSH_NULL => {
-                self.frames[fi].push(py_none());
-            }
-
-            Opcode::CALL => {
-                let npos = arg as usize & 0xFF;
-                let nkw = (arg as usize >> 8) & 0xFF;
-                let stack_len = self.frames[fi].stack.len();
-
-                // FAST PATH: plain positional call -- stack is exactly
-                // [callable, a1..aN]. split_off moves everything out in one
-                // allocation; no per-item clone, no reverse, no intermediate
-                // items Vec. `tail.remove(0)` shifts at most a handful of
-                // elements for typical arities.
-                if nkw == 0 && npos + 1 <= stack_len {
-                    let split = stack_len - 1 - npos;
-                    let callable = self.frames[fi].stack.remove(split);
-                    let args: Vec<PyObjectRef> =
-                        self.frames[fi].stack.drain(split..).collect();
-
-                    // METHOD FAST PATH: bound native method with positional
-                    // args only -- invoke the fn pointer directly instead of
-                    // re-entering call_function (which would rebuild yet
-                    // another Vec and re-dispatch).
-                    {
-                        let is_special_throw = matches!(
-                            &*callable.borrow(),
-                            PyObject::BuiltinMethod { func, .. }
-                                if std::ptr::fn_addr_eq(
-                                    *func,
-                                    crate::object::generator_throw_fallback as crate::object::BuiltinFunc,
-                                )
-                        );
-                        if !is_special_throw {
-                            if let PyObject::BuiltinMethod { name, func, self_obj } =
-                                &*callable.borrow()
-                            {
-                                // Ultra-hot primitive: list.append(x) -> None
-                                if name == "append" && args.len() == 1 {
-                                    let so = self_obj.clone();
-                                    let mut b = so.borrow_mut();
-                                    if let PyObject::List(items) = &mut *b {
-                                        items.push(args[0].clone());
-                                        drop(b);
-                                        self.frames[fi].push(py_none());
-                                        return Ok(None);
-                                    }
-                                }
-                                let mut na = Vec::with_capacity(args.len() + 1);
-                                na.push(self_obj.clone());
-                                na.extend(args.iter().cloned());
-                                drop(callable.borrow());
-                                let r = func(&na)?;
-                                self.frames[fi].push(r);
-                                return Ok(None);
-                            }
-                        }
-                    }
-
-                    let result = self.call_function(callable, args, vec![])?;
-                    self.frames[fi].push(result);
-                    return Ok(None);
-                }
-
-                // General path: kwargs and/or **kwargs present. Stack shape:
-                // [callable, args..., kw_name, kw_val, ..., **kwargs_dict]
-                let total_to_pop = npos + 2 * nkw;
-                let mut items = Vec::with_capacity(total_to_pop);
-                for _ in 0..total_to_pop {
-                    if self.frames[fi].stack.len() > 1 {
-                        items.push(self.frames[fi].pop()?);
-                    } else {
-                        break;
-                    }
-                }
-                let callable = self.frames[fi].pop()?;
-                items.reverse();
-                // Separate positional args and keywords
-                let mut args = Vec::new();
-                let mut keywords = Vec::new();
-                let mut i = 0;
-                while i < npos && i < items.len() {
-                    args.push(items[i].clone());
-                    i += 1;
-                }
-                while i + 1 < items.len() {
-                    if let PyObject::Str(name) = &*items[i].borrow() {
-                        keywords.push((name.to_string(), items[i + 1].clone()));
-                        i += 2;
-                    } else {
-                        break;
-                    }
-                }
-                let result = self.call_function(callable, args, keywords)?;
-                self.frames[fi].push(result);
-            }
-            Opcode::MAKE_CELL => {
-                let idx = arg as usize;
-                let frame = &mut self.frames[fi];
-                if idx < frame.fast_locals.len() {
-                    let val = frame.fast_locals[idx].take();
-                    let cell = PyObjectRef::new(PyObject::Cell { value: val });
-                    frame.fast_locals[idx] = Some(cell);
-                }
-            }
-
-            Opcode::COPY_FREE_VARS => {
-                let nfree = arg as usize;
-                let mut cells = Vec::with_capacity(nfree);
-                for _ in 0..nfree {
-                    cells.push(self.frames[fi].pop()?);
-                }
-                // Store the closure tuple on the stack for MAKE_FUNCTION to consume
-                self.frames[fi].push(PyObjectRef::imm(PyObject::Tuple(cells)));
-            }
-
-            Opcode::MAKE_FUNCTION => {
-                let has_closure = (arg & 0x100) != 0;
-                let n_defaults = (arg & 0xFF) as usize;
-                let n_kwdefaults = ((arg >> 9) & 0xFF) as usize;
-                // Stack (bottom to top): [closure?, CODE, pos_defaults...,
-                // kwonly_defaults...] — kwonly defaults were pushed last, so
-                // pop them first. Appended after positional defaults in the
-                // final `defaults` vec (see CodeObject::kwonly_defaults_mask
-                // for how call-binding tells the two apart).
-                let mut kwdefaults = Vec::new();
-                for _ in 0..n_kwdefaults {
-                    kwdefaults.push(self.frames[fi].pop()?);
-                }
-                kwdefaults.reverse();
-                let mut defaults = Vec::new();
-                for _ in 0..n_defaults {
-                    defaults.push(self.frames[fi].pop()?);
-                }
-                defaults.reverse();
-                defaults.extend(kwdefaults);
-                let code_obj = self.frames[fi].pop()?;
-                // A cheap `Rc` clone, not a deep copy of the whole
-                // `CodeObject` (instructions, consts, ...) — this used to
-                // `.clone()` the dereferenced `CodeObject` itself here,
-                // meaning a `def`/`lambda` executed fresh on every
-                // iteration of a loop deep-cloned its entire compiled body
-                // every single time, even though (with `LOAD_CONST`'s own
-                // caching) the SAME `PyObject::Code` constant was being
-                // read repeatedly.
-                let code = match &*code_obj.borrow() {
-                    PyObject::Code(c) => c.clone(),
-                    _ => {
-                        return Err(PyError::runtime_error(
-                            "MAKE_FUNCTION: expected code object",
-                        ))
-                    }
-                };
-                let closure = if has_closure {
-                    let closure_tuple = self.frames[fi].pop()?;
-                    let items = closure_tuple.borrow();
-                    if let PyObject::Tuple(items) = &*items {
-                        items.clone()
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    Vec::new()
-                };
-                // Use module_globals when available (class body execution) so that
-                // functions defined inside a class body capture the module's globals
-                // (e.g. 'empty' from django.utils.functional) rather than the class
-                // namespace. Falls back to the frame's globals for module-level code
-                // and regular function calls.
-                let globals = self.frames[fi]
-                    .module_globals
-                    .clone()
-                    .unwrap_or_else(|| self.frames[fi].globals.clone());
-                let code_obj = code.clone();
-                let func = PyObjectRef::new(PyObject::Function(Box::new(PyFunction {
-                    code: code_obj.clone(),
-                    globals,
-                    defaults,
-                    closure,
-                    dict: HashMap::new(),
-                    jit_ptr: std::cell::Cell::new(0),
-                    jit_consts: std::cell::RefCell::new(Vec::new()),
-                })));
-                // Set __code__ and __module__ on the function
-                if let PyObject::Function(ref mut inner_f) = &mut *func.borrow_mut() {
-                    let dict = &mut inner_f.dict;
-                    dict.insert_str("__code__", PyObjectRef::imm(PyObject::Code(code_obj)));
-                }
-                let module_name_opt: Option<String> = if let Some(ref mg) = self.frames[fi].module_globals {
-                    let mg = mg.borrow();
-                    mg.get(&interner::intern("__name__")).and_then(|v| {
-                        if let PyObject::Str(s) = &*v.borrow() { Some(s.to_string()) } else { None }
-                    })
-                } else {
-                    let g = self.frames[fi].globals.borrow();
-                    g.get(&interner::intern("__name__")).and_then(|v| {
-                        if let PyObject::Str(s) = &*v.borrow() { Some(s.to_string()) } else { None }
-                    })
-                };
-                if let Some(s) = module_name_opt {
-                    if let PyObject::Function(ref mut inner_f) = &mut *func.borrow_mut() {
-                        let dict = &mut inner_f.dict;
-                        dict.insert_str("__module__", py_str(&s));
-                    }
-                }
-                self.frames[fi].push(func);
+            Opcode::PUSH_NULL
+            | Opcode::CALL
+            | Opcode::MAKE_CELL
+            | Opcode::COPY_FREE_VARS
+            | Opcode::MAKE_FUNCTION => {
+                self.handle_call(fi, op, arg)?;
             }
 
             Opcode::BUILD_LIST
