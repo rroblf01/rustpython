@@ -247,8 +247,20 @@ pub fn builtin_tuple(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// `dict.__repr__` — a per-type repr so `type(x).__repr__` differs across
 /// native container types (CPython's pprint dispatches on
 /// `type(object).__repr__`; a shared identity repr made dict and deque
-/// collide and route dicts through pprint's deque formatter).
+/// collide and route dicts through pprint's deque formatter). The
+/// `black_box` call is load-bearing, not a stray micro-opt guard: this
+/// function's body is otherwise byte-identical to `builtin_deque_repr`
+/// below (and to every `native_repr_fn!`-generated repr), which makes it
+/// fair game for LLVM's MergeFunctions/identical-code-folding pass under
+/// this project's (thin-)LTO release profile — confirmed via `cargo build`
+/// (no LTO, distinct addresses, test_pprint passes) vs `cargo build
+/// --release` (LTO folds them back into one address, test_pprint fails on
+/// pprint's `_dispatch.get(type(obj).__repr__)` finding the wrong
+/// formatter). See `native_repr_fn!`'s own doc comment for the general
+/// pattern — don't remove this on any per-type repr whose body would
+/// otherwise match another type's.
 pub fn builtin_dict_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let _: &'static str = std::hint::black_box("dict");
     if args.is_empty() {
         return Err(PyError::type_error("__repr__ requires 1 argument"));
     }
@@ -258,6 +270,7 @@ pub fn builtin_dict_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 /// `deque.__repr__` — see `builtin_dict_repr`.
 pub fn builtin_deque_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let _: &'static str = std::hint::black_box("deque");
     if args.is_empty() {
         return Err(PyError::type_error("__repr__ requires 1 argument"));
     }
@@ -270,10 +283,27 @@ pub fn builtin_deque_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 // `type(object).__repr__` (and other code compares `x.__repr__ is
 // y.__repr__`), so sharing one identity repr across all types made them
 // indistinguishable (dict routed through pprint's deque formatter, etc.).
+// `$name` (the identity these functions need) is not the only distinguishing
+// bit needed: every function this macro generates has, byte-for-byte, THE
+// SAME COMPILED BODY (same instructions, no per-type constant), which makes
+// them fair game for LLVM's MergeFunctions/identical-code-folding pass under
+// (thin-)LTO — `cargo build --release` (this project's LTO profile) silently
+// re-merges them all back into ONE function address, defeating the whole
+// point of giving each type its own `__repr__` identity (confirmed: a plain
+// `cargo build` debug binary keeps them distinct and `test_pprint` passes;
+// the LTO `release`/`release-lite`-without-`lto=false` binary folds them and
+// `test_pprint` fails on `pprint`'s `_dispatch.get(type(obj).__repr__)`
+// finding the WRONG per-type formatter). `std::hint::black_box` on a
+// distinct per-invocation literal forces a distinct constant into each
+// function body, which MergeFunctions' content hash sees as different code —
+// this is NOT a no-op micro-optimization guard, it is load-bearing for
+// correctness under LTO. Do not remove it, and give any NEW per-type
+// `__repr__` (hand-written or macro'd) its own distinct `black_box` literal
+// too if its body would otherwise be identical to another type's.
 macro_rules! native_repr_fn {
-    ($name:ident) => {
-
+    ($name:ident, $tag:expr) => {
         pub fn $name(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+            let _: &'static str = std::hint::black_box($tag);
             if args.is_empty() {
                 return Err(PyError::type_error("__repr__ requires 1 argument"));
             }
@@ -281,15 +311,15 @@ macro_rules! native_repr_fn {
         }
     };
 }
-native_repr_fn!(builtin_list_repr);
-native_repr_fn!(builtin_tuple_repr);
-native_repr_fn!(builtin_str_repr);
-native_repr_fn!(builtin_bytes_repr);
-native_repr_fn!(builtin_bytearray_repr);
-native_repr_fn!(builtin_int_repr);
-native_repr_fn!(builtin_float_repr);
-native_repr_fn!(builtin_complex_repr);
-native_repr_fn!(builtin_bool_repr);
+native_repr_fn!(builtin_list_repr, "list");
+native_repr_fn!(builtin_tuple_repr, "tuple");
+native_repr_fn!(builtin_str_repr, "str");
+native_repr_fn!(builtin_bytes_repr, "bytes");
+native_repr_fn!(builtin_bytearray_repr, "bytearray");
+native_repr_fn!(builtin_int_repr, "int");
+native_repr_fn!(builtin_float_repr, "float");
+native_repr_fn!(builtin_complex_repr, "complex");
+native_repr_fn!(builtin_bool_repr, "bool");
 pub fn builtin_set_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("__repr__ requires 1 argument"));
@@ -427,7 +457,7 @@ pub fn builtin_frozenset_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     Ok(py_str(&args[0].repr()))
 }
-native_repr_fn!(builtin_slice_repr);
+native_repr_fn!(builtin_slice_repr, "slice");
 
 
 pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
