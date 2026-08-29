@@ -154,7 +154,13 @@ pub(crate) fn is_builtin_exception_class_name(name: &str) -> bool {
         // in `src/modules/` against this list.
         "DecimalException" | "InvalidOperation" | "DivisionByZero" | "Inexact" | "Rounded" |
         "Clamped" | "Overflow" | "Underflow" | "FloatOperation" |
-        "PatternError" | "error"
+        "PatternError" | "error" |
+        // `subprocess.CalledProcessError` — same shape as the other
+        // module-specific exceptions above (a bare `PyObject::Type` with
+        // no real `Exception` base to walk), needed so the catch-all name
+        // check in `find_exception_base_name` doesn't need its own
+        // ungated `is_exception_subclass` fallback (see that function).
+        "CalledProcessError"
     )
 }
 
@@ -223,8 +229,16 @@ pub(crate) fn find_exception_base_name(typ: &PyObjectRef) -> Option<String> {
     }
     // No builtin base found – if the name itself is at least an
     // exception (catch-all), return it as fallback for native types like
-    // subprocess.CalledProcessError with empty bases.
-    if crate::vm::is_exception_subclass(&name, "BaseException") {
+    // subprocess.CalledProcessError with empty bases. Same gate as the
+    // early-return check above, for the same reason:
+    // `is_exception_subclass`'s own `_ => Some("Exception")` catch-all
+    // means an UNGATED call here returns `true`/`Some(name)` for literally
+    // any name, including plain builtins with no exception ancestry at all
+    // (`list`, `int`, `object`, `type`, ...) — confirmed via
+    // `issubclass(list, BaseException)` being `True` (test_baseexception's
+    // `test_inheritance`/`test_catch_non_BaseException`: every native
+    // builtin type falsely counted as an exception).
+    if is_builtin_exception_class_name(&name) && crate::vm::is_exception_subclass(&name, "BaseException") {
         return Some(name.clone());
     }
     None
