@@ -482,6 +482,9 @@ pub fn create_imp_dict() -> HashMap<String, PyObjectRef> {
 
 
 pub(crate) fn io_get_raw(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::attribute_error("no underlying raw object"));
+    }
     if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
         if let Some(r) = dict.get("_raw") {
             return Ok(r.clone());
@@ -490,6 +493,9 @@ pub(crate) fn io_get_raw(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Err(PyError::attribute_error("no underlying raw object"))
 }
 pub(crate) fn io_ensure_open(args: &[PyObjectRef]) -> PyResult<()> {
+    if args.is_empty() {
+        return Ok(());
+    }
     // Only buffered wrapper instances have _closed. Use try_borrow: the
     // caller may already hold a borrow (e.g. readinto called from within
     // another operation on the same object).

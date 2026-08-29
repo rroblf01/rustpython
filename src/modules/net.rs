@@ -12,6 +12,8 @@ pub use subprocess::*;
 mod http_client;
 pub use http_client::*;
 
+pub const HTTP_SOURCE: &str = "";
+
 pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sel_func {

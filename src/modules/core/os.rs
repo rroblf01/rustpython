@@ -378,17 +378,65 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         let fd = args[0]
             .as_i64()
             .ok_or_else(|| PyError::type_error("fd must be an integer"))? as i32;
-        let mode = if args.len() > 1 {
-            args[1].str()
+        let (pos_args, kwargs) = match args.last() {
+            Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => (&args[..args.len()-1], Some(last)),
+            _ => (args, None),
+        };
+        let mode = if pos_args.len() > 1 {
+            pos_args[1].str()
+        } else if let Some(kw) = kwargs {
+            if let PyObject::Dict(d) = &*kw.borrow() {
+                d.get(&py_str("mode")).ok().flatten().map(|v| v.str()).unwrap_or_else(|| "r".to_string())
+            } else { "r".to_string() }
         } else {
             "r".to_string()
         };
+        let mut encoding: Option<String> = None;
+        let mut errors: Option<String> = None;
+        if let Some(kw) = kwargs {
+            if let PyObject::Dict(d) = &*kw.borrow() {
+                if let Some(v) = d.get(&py_str("encoding")).ok().flatten() {
+                    if !matches!(&*v.borrow(), PyObject::None) {
+                        encoding = Some(v.str());
+                    }
+                }
+                if let Some(v) = d.get(&py_str("errors")).ok().flatten() {
+                    if !matches!(&*v.borrow(), PyObject::None) {
+                        errors = Some(v.str());
+                    }
+                }
+            }
+        }
+        if encoding.is_none() && pos_args.len() > 3 {
+            let v = &pos_args[3];
+            if !matches!(&*v.borrow(), PyObject::None) {
+                let s = v.str();
+                if s.parse::<i64>().is_err() {
+                    encoding = Some(s);
+                }
+            }
+        }
+        if errors.is_none() && pos_args.len() > 4 {
+            let v = &pos_args[4];
+            if !matches!(&*v.borrow(), PyObject::None) {
+                errors = Some(v.str());
+            }
+        }
+        let binary = mode.contains('b');
+        if binary {
+            if encoding.is_some() {
+                return Err(PyError::value_error("binary mode doesn't take an encoding argument"));
+            }
+            if errors.is_some() {
+                return Err(PyError::value_error("binary mode doesn't take an errors argument"));
+            }
+        }
         use std::os::unix::io::FromRawFd;
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         Ok(PyObjectRef::new(PyObject::File {
             file: std::rc::Rc::new(std::cell::RefCell::new(file)),
             name: format!("<fdopen>"),
-            binary: mode.contains('b'),
+            binary,
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             closed: false,
         }))

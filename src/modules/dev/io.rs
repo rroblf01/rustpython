@@ -10,6 +10,9 @@ use self::buffered::register_buffered_classes;
 
 pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
+    d.insert_str("SEEK_SET", py_int(0));
+    d.insert_str("SEEK_CUR", py_int(1));
+    d.insert_str("SEEK_END", py_int(2));
     macro_rules! io_func {
         ($name:expr, $func:expr) => {
             d.insert(

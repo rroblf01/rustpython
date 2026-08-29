@@ -72,7 +72,7 @@ impl VirtualMachine {
         if let Some(_dot_pos) = name.find('.') {
             let parts: Vec<&str> = name.split('.').collect();
             let mut current_name = parts[0].to_string();
-            let mut parent_path: Option<String> = None;
+            let mut parent_path: Option<Vec<String>> = None;
 
             // A multi-part dotted import (e.g. `import django.template.engine`)
             // must initialize each ancestor package in order first, matching
@@ -107,20 +107,24 @@ impl VirtualMachine {
                         continue;
                     }
 
-                    // Get the parent's __path__
+                    // Get the parent's __path__ (all entries, not just first)
                     if parent_path.is_none() {
                         if let Some(parent_mod) = self.modules.get(&current_name) {
                             let borrowed = parent_mod.borrow();
                             if let PyObject::Module { dict, .. } = &*borrowed {
                                 let p = dict.get_str("__path__").and_then(|pl| {
                                     if let PyObject::List(items) = &*pl.borrow() {
-                                        items.first().and_then(|i| {
-                                            if let PyObject::Str(s) = &*i.borrow() {
-                                                Some(s.to_string())
-                                            } else {
-                                                None
-                                            }
-                                        })
+                                        let paths: Vec<String> = items
+                                            .iter()
+                                            .filter_map(|i| {
+                                                if let PyObject::Str(s) = &*i.borrow() {
+                                                    Some(s.to_string())
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .collect();
+                                        if paths.is_empty() { None } else { Some(paths) }
                                     } else {
                                         None
                                     }
@@ -135,14 +139,15 @@ impl VirtualMachine {
                     }
 
                     // Try to find the child as a file/subpackage in parent's __path__
-                    if let Some(ref base) = parent_path {
-                        let base_trimmed = base.trim_end_matches('/');
+                    if let Some(ref bases) = parent_path {
                         let mut found_child = false;
-                        for candidate in &[
-                            format!("{}/{}.py", base_trimmed, child),
-                            format!("{}/{}/__init__.py", base_trimmed, child),
-                        ] {
-                            if let Some(source) = self.read_module_source(candidate)? {
+                        'outer: for base in bases {
+                            let base_trimmed = base.trim_end_matches('/');
+                            for candidate in &[
+                                format!("{}/{}.py", base_trimmed, child),
+                                format!("{}/{}/__init__.py", base_trimmed, child),
+                            ] {
+                                if let Some(source) = self.read_module_source(candidate)? {
                                 found_child = true;
                                 let is_pkg = candidate.ends_with("__init__.py");
                                 let empty_dict = if is_pkg {
@@ -210,9 +215,10 @@ impl VirtualMachine {
                                 }
                                 current_name = full_name;
                                 parent_path = None;
-                                break;
+                                break 'outer;
                             }
-                        }
+                            }
+                            }
                         if !found_child {
                             // Neither `child.py` nor `child/__init__.py` exists
                             // under the parent's __path__ — this dotted

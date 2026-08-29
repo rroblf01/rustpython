@@ -472,11 +472,14 @@ fn real_main() {
                 i += 2;
                 continue;
             }
-            "-I" | "-E" | "-u" => {
+            "-I" | "-E" | "-u" | "-S" | "-s" => {
                 // `-u` (unbuffered stdout/stderr) is a no-op here (Rust's
                 // stdout is flushed explicitly where it matters); `-I`/`-E`
-                // as above. `-u` comes from test.support's run_test_script
-                // ("-u" to get full output if a test hangs).
+                // as above, `-S`/`-s` (don't import site/user site) are also
+                // no-ops — this interpreter doesn't auto-import site.py anyway.
+                // `-u` comes from test.support's run_test_script
+                // ("-u" to get full output if a test hangs), `-S` from
+                // test_genericpath's test_import (assert_python_ok('-S', ...)).
                 i += 1;
                 continue;
             }

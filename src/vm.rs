@@ -188,6 +188,11 @@ impl VirtualMachine {
                 ],
             );
             vm.install_source_defined_stdlib(
+                "http",
+                crate::modules::HTTP_SOURCE,
+                &["HTTPStatus", "HTTPMethod"],
+            );
+            vm.install_source_defined_stdlib(
                 "gettext",
                 crate::modules::GETTEXT_SOURCE,
                 &[
