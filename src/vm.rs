@@ -183,6 +183,8 @@ impl VirtualMachine {
                     "IntEnum",
                     "StrEnum",
                     "unique",
+                    "_simple_enum",
+                    "_test_simple_enum",
                 ],
             );
             vm.install_source_defined_stdlib(
@@ -520,6 +522,8 @@ impl VirtualMachine {
                 "IntEnum",
                 "StrEnum",
                 "unique",
+                "_simple_enum",
+                "_test_simple_enum",
             ],
         );
         vm.install_source_defined_stdlib(
