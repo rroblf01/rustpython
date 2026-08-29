@@ -16,8 +16,8 @@ There is no single trustworthy percentage for "how done is this interpreter." Wh
 - **`make test-python`**: a small hand-written regression suite (`tests/*.py`), currently
   **18 passed / 16 failed** — kept stable as a smoke-test baseline every change must not regress.
 
-Latest full `make test-cpython` sweep (2026-08-29): **93 / 398 files pass with zero failures**
-(PASS 300 FAIL, 5 TIMEOUT), up from 22 on July 29. File-level pass/fail counts are a *harsh*
+Latest full `make test-cpython` sweep (2026-08-29): **94 / 398 files pass with zero failures**
+(299 FAIL, 5 TIMEOUT), up from 22 on July 29. File-level pass/fail counts are a *harsh*
 metric — CPython's own test files are exhaustive edge-case suites, so a "failing" file is very
 often passing 90%+ of its individual subtests and failing on a handful of specific edge cases,
 not fundamentally broken. Treat the aggregate failures+errors count as the more meaningful trend
@@ -34,6 +34,12 @@ order (see the SipHash work in git history) hitting different code paths run to 
 (re)triggered by any specific recent change, confirmed by reproducing all three outcomes against
 a build from before today's session too. Treat a TIMEOUT or panic on either of these two files as
 inconclusive on its own; rerun before attributing it to a change.
+
+Separately, `test_pprint`/`test_difflib` pass reliably (3/3) when run standalone but sometimes
+FAIL under `make test-cpython`'s 12-way parallel sweep — a second, apparently distinct flakiness
+class tied to CPU-contention/timing under parallel load rather than hash randomization. When
+verifying a fix for a timing- or docstring-heavy test, rerun it standalone a few times rather than
+trusting a single parallel-sweep result.
 
 ## What's solid
 
