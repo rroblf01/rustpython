@@ -60,6 +60,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
         | PyObject::EnumerateIter { .. }
         | PyObject::GetItemIter { .. }
         | PyObject::CallSentinelIter { .. }
+        | PyObject::DictIter { .. }
+        | PyObject::DictValuesIter { .. }
+        | PyObject::DictItemsIter { .. }
+        | PyObject::DictRevIter { .. }
+        | PyObject::DequeIter { .. }
+        | PyObject::DequeRevIter { .. }
             if name == "__next__" || name == "__iter__" =>
         {
             Ok(PyObjectRef::imm(PyObject::BuiltinMethod {

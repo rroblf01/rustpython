@@ -434,19 +434,73 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-/// int.from_bytes(bytes, byteorder, *, signed=False)
+/// int.from_bytes(bytes, byteorder='big', *, signed=False)
 pub fn builtin_int_from_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 {
+    use num_bigint::Sign;
+
+    // Extract kwargs dict if present (trailing Dict like {"signed": True})
+    let mut positional: Vec<PyObjectRef> = args.to_vec();
+    let mut kwargs_signed: Option<bool> = None;
+    let mut kwargs_byteorder: Option<String> = None;
+    let should_pop = if let Some(last) = positional.last() {
+        let borrow = last.borrow();
+        if let PyObject::Dict(d) = &*borrow {
+            let has_signed = d.get(&py_str("signed")).ok().flatten().is_some();
+            let has_byteorder = d.get(&py_str("byteorder")).ok().flatten().is_some();
+            has_signed || has_byteorder
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if should_pop {
+        let dict = positional.pop().unwrap();
+        let borrow = dict.borrow();
+        if let PyObject::Dict(kw) = &*borrow {
+            if let Some(v) = kw.get(&py_str("signed")).ok().flatten() {
+                kwargs_signed = Some(v.truthy());
+            }
+            if let Some(v) = kw.get(&py_str("byteorder")).ok().flatten() {
+                kwargs_byteorder = Some(v.str());
+            }
+        }
+    }
+
+    if positional.is_empty() {
         return Err(PyError::type_error(
-            "int.from_bytes() needs at least 2 arguments",
+            "int.from_bytes() missing required argument 'bytes' (pos 1)",
         ));
     }
-    let bytes_val = &args[0];
-    let byteorder = &args[1];
-    let order_str = byteorder.str();
+    let bytes_val = &positional[0];
+
+    // byteorder: positional[1] > kwargs > default 'big'
+    let order_str: String = if positional.len() >= 2 {
+        positional[1].str()
+    } else if let Some(s) = kwargs_byteorder.clone() {
+        s
+    } else {
+        "big".to_string()
+    };
+    if order_str != "big" && order_str != "little" {
+        return Err(PyError::value_error(
+            "byteorder must be either 'little' or 'big'",
+        ));
+    }
     let big_endian = order_str == "big";
+
+    // signed: positional[2] > kwargs > default false
+    let signed: bool = if positional.len() >= 3 {
+        positional[2].truthy()
+    } else if let Some(s) = kwargs_signed {
+        s
+    } else {
+        false
+    };
+
     let byte_data: Vec<u8> = match &*bytes_val.borrow() {
         PyObject::Bytes(b) => b.clone(),
+        PyObject::ByteArray(b) => b.clone(),
         PyObject::List(items) => items
             .iter()
             .map(|x| x.as_i64().unwrap_or(0) as u8)
@@ -461,18 +515,25 @@ pub fn builtin_int_from_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         Err(e) => return Err(e),
                     }
                 }
+            } else {
+                return Err(PyError::type_error(
+                    "int.from_bytes() argument must be bytes-like",
+                ));
             }
             v
         }
     };
-    let n = if big_endian {
-        byte_data.iter().fold(0i64, |acc, &b| (acc << 8) | b as i64)
+    let big = if big_endian {
+        if signed {
+            BigInt::from_signed_bytes_be(&byte_data)
+        } else {
+            BigInt::from_bytes_be(Sign::Plus, &byte_data)
+        }
+    } else if signed {
+        BigInt::from_signed_bytes_le(&byte_data)
     } else {
-        byte_data
-            .iter()
-            .rev()
-            .fold(0i64, |acc, &b| (acc << 8) | b as i64)
+        BigInt::from_bytes_le(Sign::Plus, &byte_data)
     };
-    Ok(py_int(n))
+    Ok(py_int(big))
 }
 
