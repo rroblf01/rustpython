@@ -125,12 +125,24 @@ pub(crate) fn call_method_rebound(
 ) -> PyResult<PyObjectRef> {
     let method = target.borrow().get_attribute(name)?;
     let bound = match &*method.borrow() {
+        // `get_attribute` may have already rebound `self_obj` to something
+        // OTHER than `target` (e.g. a native-backed instance's method
+        // resolved against its native backing, not the Instance wrapper —
+        // see instance.rs's NATIVE_BACKING_KEY delegation). Only fall back
+        // to `target` when `self_obj` is still the unbound placeholder
+        // (`PyObject::None`); otherwise keep what `get_attribute` resolved,
+        // or e.g. `OrderedDict.keys()` ends up called with the wrapper
+        // Instance instead of its backing Dict ("keys on non-dict").
         PyObject::BuiltinMethod {
-            func, name: mname, ..
+            func, name: mname, self_obj,
         } => PyObjectRef::imm(PyObject::BuiltinMethod {
             name: mname.clone(),
             func: *func,
-            self_obj: target.clone(),
+            self_obj: if matches!(&*self_obj.borrow(), PyObject::None) {
+                target.clone()
+            } else {
+                self_obj.clone()
+            },
         }),
         // A user-defined method (raw `Function` from the type dict — the
         // ObjectAccess `get_attribute` trait doesn't auto-bind, unlike
@@ -143,6 +155,21 @@ pub(crate) fn call_method_rebound(
             func: method.clone(),
             self_obj: target.clone(),
         }),
+        // A native method stored as a plain `BuiltinFunction` in a type's
+        // dict (e.g. `OrderedDict.__getitem__`) also isn't auto-bound by
+        // the `get_attribute` trait — wrap it the same way LOAD_ATTR's own
+        // auto-bind does (op_attr.rs), except for the same two excluded
+        // shapes: a builtin exception "class" reference and `open`, neither
+        // of which are real bound methods.
+        PyObject::BuiltinFunction { name: n, func }
+            if !(crate::object::is_builtin_exception_class_name(n)
+                || std::ptr::fn_addr_eq(*func, crate::object::builtin_open as crate::object::BuiltinFunc)) =>
+        {
+            PyObjectRef::new(PyObject::BoundMethod {
+                func: method.clone(),
+                self_obj: target.clone(),
+            })
+        }
         _ => method.clone(),
     };
     vm.call_function(bound, call_args, vec![])

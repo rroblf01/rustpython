@@ -106,17 +106,19 @@ impl VirtualMachine {
                             let mut out: Vec<(PyObjectRef, PyObjectRef)> = Vec::new();
                             let keys_obj =
                                 crate::object::call_method_rebound(self, &source, "keys", vec![])?;
-                            if let PyObject::List(items) = &*keys_obj.borrow() {
-                                let keys: Vec<PyObjectRef> = items.clone();
-                                for k in keys {
-                                    let v = crate::object::call_method_rebound(
-                                        self,
-                                        &source,
-                                        "__getitem__",
-                                        vec![k.clone()],
-                                    )?;
-                                    out.push((k, v));
-                                }
+                            // `keys()` on a real dict/dict-subclass returns a
+                            // `dict_keys` view object (not a plain list) —
+                            // iterate it generically instead of assuming a
+                            // concrete `PyObject::List` shape.
+                            let keys = crate::object::collect_iterable(&keys_obj)?;
+                            for k in keys {
+                                let v = crate::object::call_method_rebound(
+                                    self,
+                                    &source,
+                                    "__getitem__",
+                                    vec![k.clone()],
+                                )?;
+                                out.push((k, v));
                             }
                             out
                         }

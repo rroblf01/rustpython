@@ -465,14 +465,11 @@ pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
 
 pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    // `bool(x=10)` -> TypeError (kwargs arrive as a trailing dict).
-    if args.len() > 1 {
-        if let Some(last) = args.last() {
-            if matches!(&*last.borrow(), PyObject::Dict(_)) {
-                return Err(PyError::type_error("bool() takes no keyword arguments"));
-            }
-        }
-    }
+    // Keyword rejection (`bool(x=10)`) lives in the VM's call_function,
+    // where `keywords` is known before it gets flattened into an
+    // indistinguishable trailing positional dict — see the list/tuple
+    // handling there for why (a positional dict, e.g. `bool({})`, is
+    // legal here and must not be confused with real keywords).
     if args.len() > 1 {
         return Err(PyError::type_error("bool() takes at most 1 argument"));
     }

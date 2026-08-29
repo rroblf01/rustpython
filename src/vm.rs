@@ -628,6 +628,9 @@ impl VirtualMachine {
                 ) || std::ptr::fn_addr_eq(
                     func,
                     crate::object::builtin_tuple as crate::object::BuiltinFunc,
+                ) || std::ptr::fn_addr_eq(
+                    func,
+                    crate::object::builtin_bool as crate::object::BuiltinFunc,
                 ) {
                     return Err(PyError::type_error(format!(
                         "{}() takes no keyword arguments",
@@ -636,8 +639,13 @@ impl VirtualMachine {
                             crate::object::builtin_list as crate::object::BuiltinFunc,
                         ) {
                             "list"
-                        } else {
+                        } else if std::ptr::fn_addr_eq(
+                            func,
+                            crate::object::builtin_tuple as crate::object::BuiltinFunc,
+                        ) {
                             "tuple"
+                        } else {
+                            "bool"
                         }
                     )));
                 }
