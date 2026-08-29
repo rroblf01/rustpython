@@ -616,37 +616,25 @@ impl VirtualMachine {
                 for (k, v) in &keywords {
                     let _ = dict.set(crate::object::py_str(k), v.clone());
                 }
-                // `list(sequence=...)`/`tuple(sequence=...)` must TypeError,
-                // but a POSITIONAL dict is fine (`list({'a':1})` ->
-                // `['a']`) — the flattened trailing-dict convention can't
+                // `list(sequence=...)`/`tuple(sequence=...)`/etc. must
+                // TypeError, but a POSITIONAL dict is fine (`list({'a':1})`
+                // -> `['a']`) — the flattened trailing-dict convention can't
                 // distinguish them inside the builtins, so the keyword
                 // rejection lives HERE, where `keywords` is known (only fires
                 // when keywords exist).
-                if std::ptr::fn_addr_eq(
-                    func,
-                    crate::object::builtin_list as crate::object::BuiltinFunc,
-                ) || std::ptr::fn_addr_eq(
-                    func,
-                    crate::object::builtin_tuple as crate::object::BuiltinFunc,
-                ) || std::ptr::fn_addr_eq(
-                    func,
-                    crate::object::builtin_bool as crate::object::BuiltinFunc,
-                ) {
+                let no_kwargs_name = [
+                    (crate::object::builtin_list as crate::object::BuiltinFunc, "list"),
+                    (crate::object::builtin_tuple as crate::object::BuiltinFunc, "tuple"),
+                    (crate::object::builtin_bool as crate::object::BuiltinFunc, "bool"),
+                    (crate::object::builtin_id as crate::object::BuiltinFunc, "id"),
+                ]
+                .iter()
+                .find(|(f, _)| std::ptr::fn_addr_eq(func, *f))
+                .map(|(_, name)| *name);
+                if let Some(name) = no_kwargs_name {
                     return Err(PyError::type_error(format!(
                         "{}() takes no keyword arguments",
-                        if std::ptr::fn_addr_eq(
-                            func,
-                            crate::object::builtin_list as crate::object::BuiltinFunc,
-                        ) {
-                            "list"
-                        } else if std::ptr::fn_addr_eq(
-                            func,
-                            crate::object::builtin_tuple as crate::object::BuiltinFunc,
-                        ) {
-                            "tuple"
-                        } else {
-                            "bool"
-                        }
+                        name
                     )));
                 }
                 let mut new_args = args;

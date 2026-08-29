@@ -534,6 +534,37 @@ pub(crate) extern "C" fn jit_load_attr(
                         self_obj: obj_ref.clone(),
                     })
                 }
+                // A user-defined method (raw `Function` from the type dict)
+                // and a native module-level function stored directly in a
+                // type's dict (`PyObject::BuiltinFunction`, e.g. `Random`'s
+                // `getrandbits`) are ALSO not auto-bound by `get_attribute`
+                // — only `BuiltinMethod`/`BoundMethod` were handled above.
+                // Without this, any JIT-compiled loop calling a plain
+                // Python method or such a native method (`self.method()`)
+                // called it with `self` missing entirely (confirmed via
+                // `RPY_DEBUG_JITCALL`: `getrandbits` invoked with 1 arg
+                // instead of 2, `self.get()` with 0 instead of 1) —
+                // matching the interpreter-side `call_method_rebound` gap
+                // fixed for the same reason. Skip the same two shapes that
+                // are never real bound methods (a builtin exception "class"
+                // reference, `open`).
+                crate::object::PyObject::Function(_) => {
+                    drop(rb);
+                    crate::object::PyObjectRef::new(crate::object::PyObject::BoundMethod {
+                        func: result.clone(),
+                        self_obj: obj_ref.clone(),
+                    })
+                }
+                crate::object::PyObject::BuiltinFunction { name: n, func }
+                    if !(crate::object::is_builtin_exception_class_name(n)
+                        || std::ptr::fn_addr_eq(*func, crate::object::builtin_open as crate::object::BuiltinFunc)) =>
+                {
+                    drop(rb);
+                    crate::object::PyObjectRef::new(crate::object::PyObject::BoundMethod {
+                        func: result.clone(),
+                        self_obj: obj_ref.clone(),
+                    })
+                }
                 _ => result.clone(),
             }
         };
