@@ -160,7 +160,19 @@ pub(crate) fn is_builtin_exception_class_name(name: &str) -> bool {
         // no real `Exception` base to walk), needed so the catch-all name
         // check in `find_exception_base_name` doesn't need its own
         // ungated `is_exception_subclass` fallback (see that function).
-        "CalledProcessError"
+        "CalledProcessError" |
+        // `io.UnsupportedOperation` — same shape (bare `PyObject::Type`,
+        // empty bases/mro), and `is_exception_subclass` already has a
+        // dedicated multiple-inheritance special case for it (real
+        // CPython: `UnsupportedOperation(OSError, ValueError)`). Missing
+        // from this list meant `find_exception_base_name`'s gated
+        // fallback returned `None` for it instead of resolving through
+        // that special case, so `except OSError:` stopped catching a
+        // mocked `file.fileno()` raising `io.UnsupportedOperation`
+        // (test__colorize.py's can_colorize test — a regression from
+        // gating the catch-all in the first place; found by re-running
+        // the full suite after that fix).
+        "UnsupportedOperation"
     )
 }
 
