@@ -9,7 +9,7 @@ are still aspirational future work, not yet started unless individually noted ot
 | Phase | Component | Status | Benchmark Impact |
 |-------|-----------|--------|------------------|
 | 1 | String interning + InternedMap | ✅ `src/interner.rs` | Reduces name lookup allocs |
-| 2 | JIT extended (3→~35 ops as of 2026-07) | ✅ `src/jit.rs` | Covers most hot-path arithmetic/control-flow/call opcodes; falls back to the bytecode interpreter otherwise |
+| 2 | JIT extended (3→~35 ops as of 2026-07) | ✅ `src/jit/` (split into ~8 files 2026-08) | Covers most hot-path arithmetic/control-flow/call opcodes; falls back to the bytecode interpreter otherwise. **2026-08-29: fixed two real correctness bugs**, not perf regressions — `CALL`'s codegen only wrote 2 of the callable `PyObjectRef`'s 3 words to its stack slot (uninitialized-garbage read, `src/jit/emit.rs`), and `jit_load_attr` never auto-bound a plain `Function`/`BuiltinFunction` method to `self` (`src/jit/runtime.rs`) — together these silently broke ANY JIT-eligible (loop-containing) function calling a method via `self.method()`, returning `None`/wrong results instead of erroring loudly. Both were previously masked by `jit_call`'s failure path silently substituting `None`. Worth auditing whether that silent-`None`-on-failure fallback should instead propagate the error — it hid both bugs for a long time. |
 | 3 | Inline cache (LOAD_GLOBAL) | ✅ `src/vm.rs` | Cache global lookups per instruction offset |
 | 4 | SmallVec stack | ✅ `src/vm.rs` | ~7% faster (0.136→0.127s) |
 | 5 | Tagged pointers (SmallFloat, SmallStr) | ✅ `src/object/core.rs` (`object.rs` was split into a `src/object/` directory module, 2026-07-29) | Avoids Rc+heap for floats + short strings |

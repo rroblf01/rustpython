@@ -1,29 +1,39 @@
 # RustPython — CPython 3.14 Compatibility Gap Analysis
 
-Last updated: July 29, 2026 (previous version, dated July 13, was based on an early informal
-smoke-test pass and its "~98% compatibility" headline figure did not hold up — this rewrite is
-grounded in actually running CPython's own `Lib/test/` suite against the interpreter).
+Last updated: August 29, 2026 (previous version dated July 29 — badly stale: ~260 commits landed
+between the two, moving PASS from 22 to 93; the module-file split into `src/vm/`/`src/object/`/
+`src/modules/*/` subdirectories, the Lib/ pure-Python vendoring push, and most of the "known deep
+gaps" list below happened in that window too — see `CLAUDE.md` for the current architecture and
+the `cpython_test_suite_compat` memory topic for the full batch-by-batch history).
 
 ## How "compatibility" is actually measured here
 
 There is no single trustworthy percentage for "how done is this interpreter." What exists is:
 
 - **`make test-cpython`**: runs all 398 real CPython 3.14 stdlib test files (vendored verbatim
-  in `tests/cpython/`, see `tests/cpython/README.md`) against the debug binary. This is the
+  in `tests/cpython/`, see `tests/cpython/README.md`) against a release build. This is the
   primary, most objective signal.
 - **`make test-python`**: a small hand-written regression suite (`tests/*.py`), currently
   **18 passed / 16 failed** — kept stable as a smoke-test baseline every change must not regress.
 
-Latest full `make test-cpython` sweep (2026-07-29): **22 / 398 files pass with zero failures**,
-aggregate `failures=`+`errors=` across all files is in the low thousands, and **only 1 known
-panic remains in the whole corpus** (see "Known deep gaps" below). File-level pass/fail counts
-are a *harsh* metric — CPython's own test files are exhaustive edge-case suites, so a "failing"
-file is very often passing 90%+ of its individual subtests and failing on a handful of specific
-edge cases, not fundamentally broken. Treat the aggregate failures+errors count as the more
-meaningful trend line, and expect it to rise temporarily whenever a fix unblocks a file that
-was previously crashing/hanging early — more of the file's real, previously-unreached assertions
-get a chance to run and fail on their own separate (usually narrower) gaps. That is forward
-progress, not a regression, and has been the dominant pattern change-over-change this project.
+Latest full `make test-cpython` sweep (2026-08-29): **93 / 398 files pass with zero failures**
+(PASS 300 FAIL, 5 TIMEOUT), up from 22 on July 29. File-level pass/fail counts are a *harsh*
+metric — CPython's own test files are exhaustive edge-case suites, so a "failing" file is very
+often passing 90%+ of its individual subtests and failing on a handful of specific edge cases,
+not fundamentally broken. Treat the aggregate failures+errors count as the more meaningful trend
+line, and expect it to rise temporarily whenever a fix unblocks a file that was previously
+crashing/hanging early — more of the file's real, previously-unreached assertions get a chance to
+run and fail on their own separate (usually narrower) gaps. That is forward progress, not a
+regression, and has been the dominant pattern change-over-change this project.
+
+At least 2 files (`test_set`, `test_listcomps`) have a genuinely **non-deterministic** failure
+mode — confirmed by running the exact same unmodified binary twice and getting a fast FAIL once,
+a 120s TIMEOUT another time, and (for `test_set`) a `RefCell already borrowed on instance` panic
+a third time. Likely tied to `PYTHONHASHSEED`-randomized hashing affecting set/dict iteration
+order (see the SipHash work in git history) hitting different code paths run to run — not
+(re)triggered by any specific recent change, confirmed by reproducing all three outcomes against
+a build from before today's session too. Treat a TIMEOUT or panic on either of these two files as
+inconclusive on its own; rerun before attributing it to a change.
 
 ## What's solid
 
@@ -58,9 +68,11 @@ incremental patch:
 - **No real multi-threading safety.** The object model is `Rc<RefCell<PyObject>>`-based with no
   thread-safe interior mutability. `threading.Thread` can spawn real OS threads, but concurrent
   access to a shared object from two threads is unsound (confirmed panic:
-  `test_itertools.py::test_count_threading`, the one remaining known panic in the full corpus as
-  of this writing). Fixing this needs either a GIL-equivalent serialization point or a genuine
-  `Arc<Mutex<>>`-based redesign of at least the objects reachable from thread targets.
+  `test_itertools.py::test_count_threading`). Fixing this needs either a GIL-equivalent
+  serialization point or a genuine `Arc<Mutex<>>`-based redesign of at least the objects reachable
+  from thread targets. (`test_set` also panics intermittently with a `RefCell already borrowed`
+  message, but reproduces even single-threaded — see the non-determinism note above; not
+  confirmed to be the same root cause as this one.)
 - **No cycle-collecting GC.** `Rc<RefCell<>>` reference counting never frees reference cycles
   (very common in real Python — e.g. any doubly-linked structure, many ORM-style object graphs).
   `src/gc.rs` has an experimental generational/tracing GC design, but it is **not wired in** as
