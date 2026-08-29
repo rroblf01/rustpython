@@ -112,12 +112,25 @@ impl PyObject {
                     }));
                 }
                 _ => {
-                    return Ok(PyObjectRef::new(PyObject::Type {
-                        name: self.type_name().to_string(),
+                    // Must return the SAME object `type(x)` does
+                    // (`builtin_type_of`'s own catch-all arm) — building an
+                    // unconditional fresh placeholder here made
+                    // `x.__class__ is not type(x)` for every native
+                    // builtin (`[].__class__ is not list`, breaking any
+                    // code that dispatches on `__class__` instead of
+                    // `type()`, e.g. `pprint`'s `_dispatch` lookup).
+                    let name = self.type_name().to_string();
+                    if let Some(cached) = crate::object::get_primitive_type(&name) {
+                        return Ok(cached);
+                    }
+                    let new_type = PyObjectRef::new(PyObject::Type {
+                        name: name.clone(),
                         dict: Box::new(TypeDict::default()),
                         bases: vec![],
                         mro: vec![],
-                    }));
+                    });
+                    crate::object::seed_primitive_type_cache(&name, new_type.clone());
+                    return Ok(new_type);
                 }
             }
         }
