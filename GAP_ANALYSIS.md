@@ -16,8 +16,9 @@ There is no single trustworthy percentage for "how done is this interpreter." Wh
 - **`make test-python`**: a small hand-written regression suite (`tests/*.py`), currently
   **18 passed / 16 failed** — kept stable as a smoke-test baseline every change must not regress.
 
-Latest full `make test-cpython` sweep (2026-08-29): **94 / 398 files pass with zero failures**
-(299 FAIL, 5 TIMEOUT), up from 22 on July 29. File-level pass/fail counts are a *harsh*
+Latest full `make test-cpython` sweep (2026-08-29): **98 / 398 files pass with zero failures**
+(295 FAIL, 5 TIMEOUT), up from 22 on July 29 (82 at the start of the 2026-08-29 session, +16 that
+day). File-level pass/fail counts are a *harsh*
 metric — CPython's own test files are exhaustive edge-case suites, so a "failing" file is very
 often passing 90%+ of its individual subtests and failing on a handful of specific edge cases,
 not fundamentally broken. Treat the aggregate failures+errors count as the more meaningful trend
@@ -35,11 +36,19 @@ order (see the SipHash work in git history) hitting different code paths run to 
 a build from before today's session too. Treat a TIMEOUT or panic on either of these two files as
 inconclusive on its own; rerun before attributing it to a change.
 
-Separately, `test_pprint`/`test_difflib` pass reliably (3/3) when run standalone but sometimes
-FAIL under `make test-cpython`'s 12-way parallel sweep — a second, apparently distinct flakiness
-class tied to CPU-contention/timing under parallel load rather than hash randomization. When
-verifying a fix for a timing- or docstring-heavy test, rerun it standalone a few times rather than
-trusting a single parallel-sweep result.
+**LTO footgun, found via `test_pprint`/`test_difflib` (fixed):** these two intermittently failed
+in a way that first looked like parallel-sweep flakiness but turned out to be a real, deterministic
+`cargo build` (debug) vs `cargo build --release` (this project's `lto = "thin"` profile) behavior
+difference. Several native functions meant to have *distinct* per-type identities (the
+`native_repr_fn!`-generated `__repr__`s, so `pprint`'s `type(obj).__repr__`-keyed dispatch can tell
+types apart) had byte-identical compiled bodies, which LLVM's MergeFunctions/identical-code-folding
+pass legally re-merges into one address under LTO — silently breaking any code relying on those
+functions staying distinct, in the `release` build ONLY (`make test-cpython` always builds
+release). Fixed by forcing a distinct per-function constant via `std::hint::black_box`; see the
+comment on `native_repr_fn!` in `src/object/builtins.rs`. **General lesson**: any group of native
+Rust functions meant to be distinguishable by pointer identity (`fn_addr_eq`, used as dict keys,
+etc.) is at risk if their bodies could plausibly compile identically — verify a fix like this
+against BOTH `cargo build` and `cargo build --release` before trusting it, not just one.
 
 ## What's solid
 
