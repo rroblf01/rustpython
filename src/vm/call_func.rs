@@ -192,13 +192,29 @@ impl VirtualMachine {
                 } else {
                     0
                 };
-                let msg = if kwonly_given > 0 {
+                let msg = if kwonly_given > 0 && num_defaults == 0 {
                     // CPython 3.14: "takes X positional arguments but Y positional arguments (and Z keyword-only arguments) were given"
                     format!(
                         "{}() takes {} positional {} but {} positional {} (and {} keyword-only {}) were given",
                         fname,
                         named_params,
                         noun(named_params),
+                        npos,
+                        noun(npos),
+                        kwonly_given,
+                        noun(kwonly_given),
+                    )
+                } else if kwonly_given > 0 {
+                    // Same "(and N keyword-only arguments)" suffix, but the
+                    // base clause needs the "from X to Y" range form because
+                    // this function ALSO has positional defaults (a plain
+                    // "takes N" would be wrong when fewer than N positional
+                    // args are actually required).
+                    format!(
+                        "{}() takes from {} to {} positional arguments but {} positional {} (and {} keyword-only {}) were given",
+                        fname,
+                        min_required,
+                        named_params,
                         npos,
                         noun(npos),
                         kwonly_given,

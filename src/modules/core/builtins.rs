@@ -21,6 +21,14 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     // turn it off), used by real code as `if __debug__: assert ...`-style
     // guards and by the `assert` statement's own real-CPython semantics.
     builtins.insert_str("__debug__", py_bool(true));
+    // Real CPython's `builtins` module has `__name__ == 'builtins'` in its
+    // own `__dict__`, which is why `LOAD_NAME __name__`'s fallback to
+    // `f.builtins` never fails at module scope there. Without this, a
+    // frame whose globals lack `__name__` (e.g. a copy of a module's
+    // `__dict__` used as exec/doctest globals) raises a spurious NameError
+    // on the implicit `LOAD_NAME __name__` every `class` body prologue
+    // emits.
+    builtins.insert_str("__name__", py_str("builtins"));
     builtins.insert_str(
         "Ellipsis",
         PyObjectRef::imm(PyObject::Str(compact_str::CompactString::from("..."))),

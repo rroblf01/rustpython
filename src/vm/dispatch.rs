@@ -3,6 +3,24 @@ use crate::object::*;
 use crate::vm::frame::ExceptionHandler;
 use crate::vm::VirtualMachine;
 
+/// `f(**mapping)`'s keys must be strings, but real CPython's check
+/// (`PyUnicode_Check`) accepts `str` SUBCLASS instances too, using their
+/// raw string data as the keyword name — not just a bare `PyObject::Str`.
+/// A subclass key is a native-backed `Instance`, so fall back to its
+/// backing before rejecting (test_extcall.py's `Name(str)` keys-dict case).
+fn kwarg_key_as_str(k: &PyObjectRef) -> Option<String> {
+    match &*k.borrow() {
+        PyObject::Str(s) => return Some(s.to_string()),
+        _ => {}
+    }
+    if let Some(native) = crate::object::native_backing_of(k) {
+        if let PyObject::Str(s) = &*native.borrow() {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
 impl VirtualMachine {
     pub(crate) fn execute_instruction(&mut self) -> PyResult<Option<PyObjectRef>> {
         let fi = self.frames.len() - 1;
@@ -510,10 +528,8 @@ impl VirtualMachine {
                     PyObject::Dict(d) => {
                         let mut kv = Vec::new();
                         for (k, v) in d.items() {
-                            let ks = match &*k.borrow() {
-                                PyObject::Str(s) => s.to_string(),
-                                _ => return Err(PyError::type_error("keywords must be strings")),
-                            };
+                            let ks = kwarg_key_as_str(&k)
+                                .ok_or_else(|| PyError::type_error("keywords must be strings"))?;
                             kv.push((ks, v));
                         }
                         kv
@@ -523,10 +539,8 @@ impl VirtualMachine {
                             if let PyObject::Dict(d) = &*native.borrow() {
                                 let mut kv = Vec::new();
                                 for (k, v) in d.items() {
-                                    let ks = match &*k.borrow() {
-                                        PyObject::Str(s) => s.to_string(),
-                                        _ => return Err(PyError::type_error("keywords must be strings")),
-                                    };
+                                    let ks = kwarg_key_as_str(&k)
+                                        .ok_or_else(|| PyError::type_error("keywords must be strings"))?;
                                     kv.push((ks, v));
                                 }
                                 kv
@@ -541,10 +555,8 @@ impl VirtualMachine {
                             loop {
                                 match crate::object::builtin_next(&[it.clone()]) {
                                     Ok(k) => {
-                                        let ks = match &*k.borrow() {
-                                            PyObject::Str(s) => s.to_string(),
-                                            _ => return Err(PyError::type_error("keywords must be strings")),
-                                        };
+                                        let ks = kwarg_key_as_str(&k)
+                                            .ok_or_else(|| PyError::type_error("keywords must be strings"))?;
                                         let v = crate::object::py_getitem(&kwargs_dict, &k)?;
                                         kv.push((ks, v));
                                     }

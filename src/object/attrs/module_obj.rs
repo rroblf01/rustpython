@@ -16,6 +16,17 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     for (k, v) in dict.iter() {
                         let _ = pd.set(py_str(interner::lookup_str(*k)), v.clone());
                     }
+                    // `__name__` lives out-of-band in this variant's own
+                    // `name` field (special-cased below), not in `dict` —
+                    // `vars(module)`/`module.__dict__` must still show it
+                    // like real CPython's module `__dict__` does, or code
+                    // relying on it (e.g. a `class` statement's implicit
+                    // `LOAD_NAME __name__` prologue run with a copy of a
+                    // module's `__dict__` as its globals, as `doctest` does)
+                    // raises a spurious NameError.
+                    if !matches!(pd.get(&py_str("__name__")), Ok(Some(_))) {
+                        let _ = pd.set(py_str("__name__"), py_str(mod_name));
+                    }
                     return Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))));
                 }
                 if name == "__name__" {
