@@ -490,6 +490,16 @@ pub(crate) fn emit_part1(builder: &mut FunctionBuilder, eval_stack: &mut Vec<[Va
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, func[0], func_addr, 0);
                     builder.ins().store(memflags, func[1], func_addr, 8);
+                    // `PyObjectRef` is a 3-word (24-byte) #[repr(C)] value
+                    // (pyref.rs) — the 3rd word was never written here,
+                    // leaving the callable's stack slot partially
+                    // uninitialized before `jit_call` reinterprets it as a
+                    // real `&PyObjectRef`. Silently corrupted the callable
+                    // for any JIT-compiled function containing a method
+                    // call before a loop (`has_loop` gates JIT eligibility),
+                    // and `jit_call`'s fallback-to-`None` on failure masked
+                    // it as a wrong return value instead of a crash/error.
+                    builder.ins().store(memflags, func[2], func_addr, 16);
                     for (i, item) in args.iter().enumerate() {
                         let offset = (i * 24) as i32;
                         let item_addr = builder.ins().iadd_imm(array_addr, offset as i64);
