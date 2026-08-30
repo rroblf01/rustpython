@@ -49,10 +49,37 @@ pub fn builtin_frozenset(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 Ok(PyObjectRef::imm(PyObject::FrozenSet(set)))
             }
-            _ => Err(PyError::type_error(format!(
-                "cannot convert '{}' to frozenset",
-                obj.type_name()
-            ))),
+            _ => {
+                // Fall back to the general iterator protocol instead of a
+                // hardcoded list of concrete variants — `frozenset(x)`
+                // must accept ANY iterable (a dict view, a generator, a
+                // custom class with `__iter__`), not just the specific
+                // native shapes special-cased above (which exist only as
+                // a fast path). Confirmed real gap via
+                // `frozenset(some_dict.keys())` (a dict_keys view is a
+                // `PyObject::Instance`, matched neither above nor by the
+                // old catch-all) raising "cannot convert 'instance' to
+                // frozenset" instead of working — test_dictviews.py's
+                // `test_keys_set_operations`/`test_set_operations_with_
+                // iterator`. `list()`'s own constructor already does this
+                // same iterator fallback; frozenset()/set() didn't.
+                drop(obj);
+                let it = builtin_iter(&[args[0].clone()]).map_err(|_| {
+                    PyError::type_error(format!(
+                        "cannot convert '{}' to frozenset",
+                        args[0].borrow().type_name()
+                    ))
+                })?;
+                let mut set = PySet::new();
+                loop {
+                    match builtin_next(&[it.clone()]) {
+                        Ok(item) => set.add(item.clone())?,
+                        Err(PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(PyObjectRef::imm(PyObject::FrozenSet(set)))
+            }
         }
     }
 }

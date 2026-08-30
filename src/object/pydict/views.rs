@@ -52,18 +52,25 @@ pub fn make_dict_view(kind: &str, d: PyObjectRef) -> crate::object::PyObjectRef 
 
     fn elems_of(other: &PyObjectRef) -> Option<Vec<PyObjectRef>> {
         match &*other.borrow() {
-            PyObject::Set(s2) | PyObject::FrozenSet(s2) => Some(s2.to_vec()),
-            PyObject::List(l2) => Some(l2.clone()),
-            PyObject::Tuple(t2) => Some(t2.clone()),
-            _ => {
-                let is_view = other.borrow().get_attribute("kind_name").is_ok();
-                if is_view {
-                    Some(view_elems(other))
-                } else {
-                    None
-                }
+            PyObject::Set(s2) | PyObject::FrozenSet(s2) => return Some(s2.to_vec()),
+            PyObject::List(l2) => return Some(l2.clone()),
+            PyObject::Tuple(t2) => return Some(t2.clone()),
+            _ => {}
+        }
+        let is_view = other.borrow().get_attribute("kind_name").is_ok();
+        if is_view {
+            return Some(view_elems(other));
+        }
+        // A real `set`/`frozenset` SUBCLASS (`class CustomSet(set): ...`)
+        // is a native-backed `PyObject::Instance`, not a bare
+        // `PyObject::Set` — test_dictviews.py's own `CustomSet(set)`
+        // exercises exactly this via `d.keys() & CustomSet(...)`.
+        if let Some(backing) = crate::object::native_backing_of(other) {
+            if let PyObject::Set(s2) | PyObject::FrozenSet(s2) = &*backing.borrow() {
+                return Some(s2.to_vec());
             }
         }
+        None
     }
 
     fn lin_contains(hay: &[PyObjectRef], needle: &PyObjectRef) -> PyResult<bool> {
@@ -221,6 +228,26 @@ pub fn make_dict_view(kind: &str, d: PyObjectRef) -> crate::object::PyObjectRef 
             view_setop(args, |a, b, has| {
                 Ok(a.iter().filter(|e| has(e, b).unwrap_or(false)).cloned().collect())
             })
+        }));
+        td.insert("isdisjoint".into(), bf("isdisjoint", |args| {
+            let mine = view_elems(&args[0]);
+            let other = args.get(1).cloned().ok_or_else(|| {
+                PyError::type_error("isdisjoint() missing required argument: 'other'")
+            })?;
+            // Unlike the `&`/`|`/`^`/`-` operators (which reject a
+            // non-set-like RHS outright), real CPython's `isdisjoint`
+            // accepts ANY iterable — fall back to generic iteration for
+            // anything `elems_of` doesn't already recognize.
+            let theirs = match elems_of(&other) {
+                Some(v) => v,
+                None => crate::object::collect_iterable(&other)?,
+            };
+            for m in &mine {
+                if lin_contains(&theirs, m)? {
+                    return Ok(py_bool(false));
+                }
+            }
+            Ok(py_bool(true))
         }));
         td.insert("__sub__".into(), bf("__sub__", |args| {
             view_setop(args, |a, b, has| {
