@@ -3,6 +3,17 @@ use crate::token::Token;
 
 use super::Parser;
 
+/// True if `msg` already starts with the `L<digits>:<digits>:` position
+/// prefix — mirrors exactly what `PyError::syntax_error_with_filename`'s
+/// own prefix parser accepts, so this stays in sync with what it would
+/// actually strip back out.
+fn has_line_col_prefix(msg: &str) -> bool {
+    msg.strip_prefix('L')
+        .and_then(|rest| rest.split_once(':'))
+        .map(|(ln, rest)| ln.parse::<i64>().is_ok() && rest.split_once(':').is_some_and(|(col, _)| col.parse::<i64>().is_ok()))
+        .unwrap_or(false)
+}
+
 impl Parser {
     pub(crate) fn parse_stmt(&mut self) -> Result<Stmt, String> {
         // Lexer-detected errors (e.g. unindent does not match) surface as a
@@ -14,6 +25,16 @@ impl Parser {
             // text instead of defaulting to the generic fallback position
             // — a lexer-detected error (unterminated string, line
             // continuation at EOF, ...) was losing its position entirely.
+            // Some lexer errors (e.g. "invalid character ...") already
+            // bake their OWN `L<line>:<col>:` prefix in at the tokenizer
+            // level — double-prefixing those broke test_unicode_
+            // identifiers.py (the outer prefix's line/col got stripped by
+            // the eventual SyntaxError constructor, but the INNER one
+            // stayed embedded as literal text in the displayed message).
+            // Only add it when it's not already there.
+            if has_line_col_prefix(msg) {
+                return Err(msg.clone());
+            }
             let (line, col) = self.lexer.get_line_col();
             return Err(format!("L{}:{}: {}", line, col, msg));
         }
