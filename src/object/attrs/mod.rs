@@ -841,7 +841,37 @@ impl ObjectAccess for PyObject {
                 // overwhelmingly common `exc.name` checks work.
                 let mut extra = std::collections::HashMap::new();
                 extra.insert("name".to_string(), py_str(name));
-                extra.insert("obj".to_string(), PyObjectRef::new(self.clone()));
+                // `PyObject`'s derived `Clone` deep-clones a `Generator`/
+                // `Coroutine`'s `frame: RefCell<Option<Box<Frame>>>` field,
+                // which needs a plain `.borrow()` — but that field is held
+                // `.borrow_mut()`'d for the ENTIRE DURATION of the
+                // generator's own bytecode execution. A failed attribute
+                // lookup performed BY that generator's own currently-
+                // running frame on ITSELF (e.g. a generator object reached
+                // through a shared globals namespace it also appears in —
+                // reachable once `exec()` calls against the same dict
+                // started sharing one persistent namespace, see
+                // `exec_globals_cache`) hit exactly this: `self.clone()`
+                // panicked with "RefCell already mutably borrowed" instead
+                // of raising a normal Python `AttributeError`. Build these
+                // two variants' `exc.obj` copy manually via `try_borrow()`
+                // (falling back to an empty frame, matching an
+                // already-exhausted/never-started generator, if it's busy)
+                // instead of routing through the panicking derive.
+                let obj_copy = match self {
+                    PyObject::Generator { frame } => PyObjectRef::new(PyObject::Generator {
+                        frame: std::cell::RefCell::new(
+                            frame.try_borrow().ok().and_then(|f| f.clone()),
+                        ),
+                    }),
+                    PyObject::Coroutine { frame } => PyObjectRef::new(PyObject::Coroutine {
+                        frame: std::cell::RefCell::new(
+                            frame.try_borrow().ok().and_then(|f| f.clone()),
+                        ),
+                    }),
+                    _ => PyObjectRef::new(self.clone()),
+                };
+                extra.insert("obj".to_string(), obj_copy);
                 Err(PyError::Exception(
                     "AttributeError".to_string(),
                     PyObjectRef::new(PyObject::Exception {
