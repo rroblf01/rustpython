@@ -22,6 +22,7 @@ impl VirtualMachine {
         self.exc_traceback = None;
         self.exc_context_stack.clear();
         self.propagating_exc = None;
+        self.exec_globals_cache.clear();
     }
 
     /// Take a disposable VM from the thread-local pool (or build one).

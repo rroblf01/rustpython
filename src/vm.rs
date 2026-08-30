@@ -150,6 +150,7 @@ impl VirtualMachine {
                 exc_context_stack: Vec::new(),
                 propagating_exc: None,
                 recursion_limit: 1000,
+                exec_globals_cache: HashMap::new(),
             };
             vm.populate_type_registry();
             vm.install_source_defined_stdlib(
@@ -492,6 +493,7 @@ impl VirtualMachine {
             exc_context_stack: Vec::new(),
             propagating_exc: None,
             recursion_limit: 1000,
+            exec_globals_cache: HashMap::new(),
         };
         vm.populate_type_registry();
         vm.install_source_defined_stdlib(

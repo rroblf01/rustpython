@@ -58,4 +58,24 @@ pub struct VirtualMachine {
     /// make deliberately-infinite-recursion tests fail fast instead of
     /// grinding through hundreds of real frames first.
     pub recursion_limit: usize,
+    /// Backing `HashMap<StrId, PyObjectRef>` namespaces built for explicit
+    /// `exec(code, some_dict)`/`eval(code, some_dict)` calls, keyed by the
+    /// identity (`Rc::as_ptr`) of `some_dict`. Without this, every separate
+    /// `exec()` call against the SAME dict object rebuilt a brand-new,
+    /// disconnected namespace from a snapshot of the dict's current
+    /// contents — a function DEFINED in one `exec()` call captures that
+    /// call's namespace as its `__globals__`, so a LATER `exec()` call
+    /// reassigning a name in the (same, by identity) dict was invisible to
+    /// that function's global lookups, even though real CPython treats
+    /// repeated `exec()`s against one dict as one continuous namespace
+    /// (this is exactly what `doctest`/`code.InteractiveInterpreter`-style
+    /// tools rely on: each statement is compiled and exec'd separately but
+    /// shares one `globs` dict throughout). Reusing the same backing
+    /// `Rc<RefCell<...>>` across calls (refreshed from/flushed back to the
+    /// dict each time) keeps that single-namespace identity intact.
+    /// The dict `PyObjectRef` is retained alongside the namespace purely to
+    /// keep it alive — `get_id()`'s address-based identity could otherwise
+    /// be reused by an unrelated later dict once the original is dropped,
+    /// aliasing this cache entry onto the wrong object.
+    pub exec_globals_cache: HashMap<usize, (PyObjectRef, Rc<RefCell<HashMap<StrId, PyObjectRef>>>)>,
 }

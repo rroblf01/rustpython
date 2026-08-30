@@ -797,27 +797,62 @@ impl VirtualMachine {
                 // locals dict (reads take precedence, writes land here) into
                 // one flat namespace — this interpreter's frames don't model
                 // separate globals/locals scopes for top-level-style exec.
-                let globals_dict = args
-                    .get(1)
-                    .filter(|g| matches!(&*g.borrow(), PyObject::Dict(_)));
+                // `isinstance(globals, dict)` in real CPython — a real
+                // `dict` SUBCLASS (e.g. test_descrtut.py's `defaultdict`)
+                // is a legal `exec()`/`eval()` globals/locals argument too,
+                // not just an exact `dict`; it shows up here as a
+                // `PyObject::Instance` carrying a native dict backing
+                // (see `native_backing_of`), not a bare `PyObject::Dict`.
+                let is_dict_like =
+                    |v: &PyObjectRef| -> bool { crate::object::dict_arg_to_hashmap(v, "").is_ok() };
+                let globals_dict = args.get(1).filter(|g| is_dict_like(g));
                 let locals_dict = args
                     .get(2)
-                    .filter(|l| matches!(&*l.borrow(), PyObject::Dict(_)))
+                    .filter(|l| is_dict_like(l))
                     .or(globals_dict);
+                let distinct_locals = args
+                    .get(2)
+                    .filter(|l| is_dict_like(l))
+                    .filter(|l| globals_dict.map_or(true, |g| !l.is(g)));
                 let namespace = if let Some(g) = globals_dict {
-                    let mut hm: HashMap<StrId, PyObjectRef> = str_map_to_strid_map(
-                        crate::object::dict_arg_to_hashmap(g, "exec() globals must be a dict")?,
-                    );
-                    if let Some(l) = args
-                        .get(2)
-                        .filter(|l| matches!(&*l.borrow(), PyObject::Dict(_)))
-                    {
+                    if let Some(l) = distinct_locals {
+                        let mut hm: HashMap<StrId, PyObjectRef> = str_map_to_strid_map(
+                            crate::object::dict_arg_to_hashmap(g, "exec() globals must be a dict")?,
+                        );
                         hm.extend(str_map_to_strid_map(crate::object::dict_arg_to_hashmap(
                             l,
                             "exec() locals must be a dict",
                         )?));
+                        Some(Rc::new(RefCell::new(hm)))
+                    } else {
+                        // No separate locals dict: `g` is both the read AND
+                        // write-back target, exactly the shape `exec(code,
+                        // shared_dict)` called repeatedly against the SAME
+                        // dict relies on (doctest, `code.InteractiveConsole`,
+                        // any REPL-like tool) — reuse a persistent namespace
+                        // keyed by `g`'s identity instead of a fresh
+                        // snapshot each time (see `exec_globals_cache`'s doc
+                        // comment for why a fresh snapshot breaks closures).
+                        let key = g.get_id();
+                        let ns = match self.exec_globals_cache.get(&key) {
+                            Some((cached, ns)) if cached.is(g) => ns.clone(),
+                            _ => {
+                                let ns = Rc::new(RefCell::new(HashMap::new()));
+                                self.exec_globals_cache.insert(key, (g.clone(), ns.clone()));
+                                ns
+                            }
+                        };
+                        {
+                            let mut hm = ns.borrow_mut();
+                            hm.clear();
+                            for (k, v) in
+                                crate::object::dict_arg_to_hashmap(g, "exec() globals must be a dict")?
+                            {
+                                hm.insert(interner::intern(&k), v);
+                            }
+                        }
+                        Some(ns)
                     }
-                    Some(Rc::new(RefCell::new(hm)))
                 } else if is_eval {
                     // `eval(source)` with no globals/locals args: CPython
                     // defaults both to the CALLING frame's globals AND
@@ -854,7 +889,13 @@ impl VirtualMachine {
                 });
                 let result = self.exec_code(code, Some(globals_rc.clone()));
                 if let Some(target) = locals_dict {
-                    if let PyObject::Dict(d) = &mut *target.borrow_mut() {
+                    let real_target = if matches!(&*target.borrow(), PyObject::Dict(_)) {
+                        target.clone()
+                    } else {
+                        crate::object::native_backing_of(target).unwrap_or_else(|| target.clone())
+                    };
+                    let mut real_target_borrow = real_target.borrow_mut();
+                    if let PyObject::Dict(d) = &mut *real_target_borrow {
                         // Full mirror, not a merge: `globals_rc` started as a
                         // complete copy of `target`'s own contents (see
                         // `namespace`'s construction above), so any name
