@@ -163,7 +163,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         let h = crate::object::PyDict::dict_hash(index)?;
         let o = obj.borrow();
         if let PyObject::Dict(d) = &*o {
-            return match d.get_with_hash(index, h) {
+            return match d.get_with_hash(index, h)? {
                 Some(val) => Ok(val),
                 None => Err(PyError::key_error_obj(index)),
             };

@@ -523,6 +523,21 @@ pub fn pickle_serialize(
             buf.push(b'P');
             pickle_serialize(&py_str(&cname), buf, memo, protocol)?;
         }
+        // A dict view (`dict_keys`/`dict_items`/`dict_values`) is a
+        // `PyObject::Instance` carrying a `kind_name` marker attribute
+        // (see `make_dict_view`) -- real CPython doesn't support pickling
+        // these at all ("cannot pickle 'dict_keys' object"). Without this
+        // guard the generic Instance arm below happily "succeeded" by
+        // treating the view's internal `mapping`/`kind_name` attrs as if
+        // they were an ordinary user object's __dict__ (test_dictviews.py's
+        // test_pickle expects TypeError/PicklingError here, not success).
+        PyObject::Instance { dict, .. } if dict.get_str("kind_name").is_some() => {
+            let kind = dict
+                .get_str("kind_name")
+                .map(|v| v.str())
+                .unwrap_or_else(|| "keys".to_string());
+            return Err(PyError::type_error(format!("cannot pickle 'dict_{}' object", kind)));
+        }
         PyObject::Instance { typ, dict } => {
             // Plain user-class instance (no native backing): memoize by
             // pointer, register the CLASS for the deserializer, emit

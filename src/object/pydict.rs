@@ -84,9 +84,16 @@ impl PyDict {
     }
 
     /// Find the entry index for `key` via linear probing, or None.
-    fn find(&self, key: &PyObjectRef, h: usize) -> Option<usize> {
+    // `k.equals(key)` errors (a hash-colliding key's `__eq__` raising)
+    // must propagate, not be swallowed as "not equal" — a lookup that
+    // hits a real hash collision against a key whose `__eq__` raises
+    // needs to actually raise that exception (test_dictviews.py's
+    // test_compare_error: `d.__contains__(k2)` for a `k2` sharing k1's
+    // hash via a poisoned `__eq__`). `unwrap_or(false)` here previously
+    // made any such lookup silently report "not found" instead.
+    fn find(&self, key: &PyObjectRef, h: usize) -> PyResult<Option<usize>> {
         if self.indices.is_empty() {
-            return None;
+            return Ok(None);
         }
         let mask = self.mask();
         let start = h & mask;
@@ -94,17 +101,17 @@ impl PyDict {
         loop {
             let idx_val = self.indices[i];
             if idx_val == 0 {
-                return None;
+                return Ok(None);
             }
             let entry_idx = (idx_val - 1) as usize;
             if let Some((k, _)) = &self.entries[entry_idx] {
-                if k.is(key) || k.equals(key).unwrap_or(false) {
-                    return Some(entry_idx);
+                if k.is(key) || k.equals(key)? {
+                    return Ok(Some(entry_idx));
                 }
             }
             i = (i + 1) & mask;
             if i == start {
-                return None;
+                return Ok(None);
             }
         }
     }
@@ -220,11 +227,11 @@ impl PyDict {
     }
     pub fn contains(&self, key: &PyObjectRef) -> PyResult<bool> {
         let h = Self::dict_hash(key)?;
-        Ok(self.find(key, h).is_some())
+        Ok(self.find(key, h)?.is_some())
     }
     pub fn get(&self, key: &PyObjectRef) -> PyResult<Option<PyObjectRef>> {
         let h = Self::dict_hash(key)?;
-        Ok(self.get_with_hash(key, h))
+        self.get_with_hash(key, h)
     }
     pub(crate) fn dict_hash(key: &PyObjectRef) -> PyResult<usize> {
         key.hash().map_err(|e| {
@@ -242,9 +249,10 @@ impl PyDict {
     /// `__hash__` and can legally re-enter and mutate this very dict, see
     /// `set_with_hash`'s doc comment) BEFORE taking any borrow that would
     /// alias with that reentrant call.
-    pub fn get_with_hash(&self, key: &PyObjectRef, h: usize) -> Option<PyObjectRef> {
-        self.find(key, h)
-            .map(|i| self.entries[i].as_ref().unwrap().1.clone())
+    pub fn get_with_hash(&self, key: &PyObjectRef, h: usize) -> PyResult<Option<PyObjectRef>> {
+        Ok(self
+            .find(key, h)?
+            .map(|i| self.entries[i].as_ref().unwrap().1.clone()))
     }
     pub fn set(&mut self, key: PyObjectRef, value: PyObjectRef) -> PyResult<()> {
         let h = Self::dict_hash(&key)?;
@@ -343,7 +351,7 @@ impl PyDict {
     /// mutable borrow must compute the hash before taking it.
     pub fn remove_with_hash(&mut self, key: &PyObjectRef, h: usize) -> PyResult<PyObjectRef> {
         let existing = self
-            .find(key, h)
+            .find(key, h)?
             .ok_or_else(|| PyError::key_error_obj(key))?;
         let removed = self.entries[existing].take().unwrap().1;
         self.size -= 1;

@@ -870,7 +870,19 @@ impl VirtualMachine {
         }
         // Placeholder iterator types (range_iterator, etc.) are not directly constructible
         if let PyObject::Type { name, .. } = &*callable.borrow() {
-            if name.contains("iterator") || name == "select.poll" || name == "select.devpoll" || name == "select.epoll" || name == "select.kqueue" {
+            if name.contains("iterator")
+                || name == "select.poll"
+                || name == "select.devpoll"
+                || name == "select.epoll"
+                || name == "select.kqueue"
+                // `type({}.keys())()` and friends — these view types are
+                // only ever built internally by dict.keys()/.items()/
+                // .values(), never directly by user code (real CPython:
+                // "cannot create 'dict_keys' instances").
+                || name == "dict_keys"
+                || name == "dict_items"
+                || name == "dict_values"
+            {
                 return Err(PyError::type_error(format!(
                     "cannot create '{}' instances",
                     name

@@ -87,9 +87,20 @@ pub fn make_dict_view(kind: &str, d: PyObjectRef) -> crate::object::PyObjectRef 
         f: impl Fn(&Vec<PyObjectRef>, &Vec<PyObjectRef>, &dyn Fn(&PyObjectRef, &Vec<PyObjectRef>) -> PyResult<bool>) -> PyResult<Vec<PyObjectRef>>,
     ) -> PyResult<PyObjectRef> {
         let a = view_elems(&args[0]);
-        let b = elems_of(&args[1]).ok_or_else(|| {
-            PyError::type_error("unsupported operand type(s) for set operation with dictview")
-        })?;
+        // Unlike `__eq__`/`__le__`/`__lt__` (which only accept genuine
+        // set-like RHSs), real CPython's `&`/`|`/`^`/`-` on a dict view
+        // also accept ANY iterable (`d.keys() & iter([1,2])`,
+        // test_dictviews.py's test_set_operations_with_iterator) — so a
+        // plain iterator not already recognized by `elems_of` gets one
+        // more chance via the generic iterator protocol before rejecting
+        // (a genuinely non-iterable RHS, e.g. `{}.keys() & 1`, still fails
+        // both and correctly raises).
+        let b = match elems_of(&args[1]) {
+            Some(v) => v,
+            None => crate::object::collect_iterable(&args[1]).map_err(|_| {
+                PyError::type_error("unsupported operand type(s) for set operation with dictview")
+            })?,
+        };
         let pred = |needle: &PyObjectRef, hay: &Vec<PyObjectRef>| lin_contains(hay, needle);
         let out = f(&a, &b, &pred)?;
         let mut s = PySet::new();
@@ -228,6 +239,26 @@ pub fn make_dict_view(kind: &str, d: PyObjectRef) -> crate::object::PyObjectRef 
             view_setop(args, |a, b, has| {
                 Ok(a.iter().filter(|e| has(e, b).unwrap_or(false)).cloned().collect())
             })
+        }));
+        // Real CPython's dict views have no `__reduce__`/`__reduce_ex__`
+        // override, so `object`'s own default eventually raises
+        // TypeError for them (dict views aren't picklable/copyable) --
+        // this codebase's objects don't universally inherit a default
+        // `__reduce_ex__` the way real CPython's `object` does, so
+        // `getattr(view, '__reduce_ex__', None)` was `None` entirely
+        // instead of a callable that raises. That mattered beyond
+        // pickle.dumps() itself: Lib/copy.py's `copy.copy()` falls back to
+        // `__reduce_ex__`/`__reduce__` when neither is found at all, and
+        // reports its OWN generic `copy.Error` instead of letting the
+        // real TypeError through (test_dictviews.py's test_copy expects
+        // TypeError specifically, not copy.Error).
+        td.insert("__reduce_ex__".into(), bf("__reduce_ex__", |args| {
+            let kind = view_kind(&args[0]);
+            Err(PyError::type_error(format!("cannot pickle 'dict_{}' object", kind)))
+        }));
+        td.insert("__reduce__".into(), bf("__reduce__", |args| {
+            let kind = view_kind(&args[0]);
+            Err(PyError::type_error(format!("cannot pickle 'dict_{}' object", kind)))
         }));
         td.insert("isdisjoint".into(), bf("isdisjoint", |args| {
             let mine = view_elems(&args[0]);
