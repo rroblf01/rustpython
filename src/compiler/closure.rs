@@ -1031,8 +1031,25 @@ impl Compiler {
                     let class_local = Self::collect_assigned_names(body);
                     let body_own_refs = Self::collect_own_referenced_names(body);
                     for name in body_own_refs {
+                        // Unlike `header_refs` above (evaluated directly in
+                        // the enclosing scope's own frame via a plain
+                        // LOAD_FAST/LOAD_DEREF), names referenced from
+                        // *inside* the class body always go through
+                        // LOAD_CLASSDEREF/LOAD_DEREF, because class bodies
+                        // are their own code object. That's true even when
+                        // the name also happens to be a local of the
+                        // directly-enclosing scope (e.g. `class D(C): @C.x
+                        // def f(): ...` where `C` is a sibling class
+                        // statement's name, itself local to the function
+                        // containing both `C` and `D`) — such a name still
+                        // needs the enclosing function to expose it as a
+                        // cell so `D`'s body can close over it. So do NOT
+                        // filter this against `local_names` here (that
+                        // filtering is correct for header_refs, which are
+                        // evaluated directly, but wrong here) — only exclude
+                        // names resolvable within the class's own body, or
+                        // truly global/nonlocal in the enclosing scope.
                         if !class_local.contains(&name)
-                            && !local_names.contains(&name)
                             && !global_names.contains(&name)
                             && !nonlocal_names.contains(&name)
                         {
