@@ -846,8 +846,12 @@ impl ObjectAccess for PyObject {
                 if let Some(slots) = get_instance_slots(typ) {
                     if !slots.iter().any(|s| s == name) {
                         let type_name = get_type_name_for_instance(typ);
+                        // Real CPython's exact wording for assigning a name
+                        // outside __slots__ on a class with no __dict__ slot
+                        // (test_descrtut.py's `defaultdict2` — `__slots__ =
+                        // ['default']`, no `__dict__` among them).
                         return Err(PyError::attribute_error(format!(
-                            "'{}' object has no attribute '{}'",
+                            "'{}' object has no attribute '{}' and no __dict__ for setting new attributes",
                             type_name, name
                         )));
                     }

@@ -206,6 +206,25 @@ impl PyObject {
             {
                 format!("<class '{}'>", name)
             }
+            // Same representation gap as builtin exceptions above, for a
+            // different family: `property`/`staticmethod`/`classmethod`/
+            // `super` are real classes from Python's perspective (each is
+            // literally usable as a base class) but are likewise
+            // represented as a `BuiltinFunction` marker in this codebase,
+            // not a real `PyObject::Type` — deliberately NOT folded into
+            // `is_builtin_exception_class_name` itself, since that name is
+            // also used for exception-ancestry checks elsewhere and these
+            // are not exceptions (real trigger: test_descrtut.py's `del
+            // property # unmask the builtin` doctest, which expects
+            // `<class 'property'>` once the builtin is revealed).
+            PyObject::BuiltinFunction { name, .. }
+                if matches!(
+                    name.as_str(),
+                    "property" | "staticmethod" | "classmethod" | "super"
+                ) =>
+            {
+                format!("<class '{}'>", name)
+            }
             PyObject::BuiltinFunction { name, .. } => format!("<built-in function {}>", name),
             PyObject::BuiltinMethod { name, self_obj, .. } => {
                 // CPython: `<built-in method split of str object at 0x...>`

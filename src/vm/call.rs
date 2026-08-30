@@ -855,6 +855,20 @@ impl VirtualMachine {
                 let result = self.exec_code(code, Some(globals_rc.clone()));
                 if let Some(target) = locals_dict {
                     if let PyObject::Dict(d) = &mut *target.borrow_mut() {
+                        // Full mirror, not a merge: `globals_rc` started as a
+                        // complete copy of `target`'s own contents (see
+                        // `namespace`'s construction above), so any name
+                        // present in `target` but no longer in `globals_rc`
+                        // was `del`eted during execution and must disappear
+                        // from `target` too — previously this only ever
+                        // added/updated keys, so `del name` inside an
+                        // `exec(code, some_dict)` never actually removed
+                        // `name` from the caller's dict (test_descrtut.py's
+                        // `del property  # unmask the builtin` doctest:
+                        // `property` kept resolving to the just-deleted
+                        // local class instead of falling through to the
+                        // real builtin).
+                        d.clear();
                         for (k, v) in globals_rc.borrow().iter() {
                             let _ = d.set(py_str(interner::lookup_str(*k)), v.clone());
                         }
