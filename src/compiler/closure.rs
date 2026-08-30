@@ -206,10 +206,24 @@ impl Compiler {
     }
 
     /// Find names assigned in a body (targets of =, for, function defs, etc.)
+    ///
+    /// Deliberately does NOT count a comprehension/genexpr's own `for target
+    /// in ...` binding as making `target` local to the surrounding function
+    /// (see `collect_comprehension_targets_in_stmts`'s doc comment for why
+    /// that binding nonetheless needs promoting to a cellvar when something
+    /// nested closes over it — handled separately, in `analyze_function`,
+    /// so it doesn't ALSO shadow an unrelated later use of the same name
+    /// outside the comprehension). Blanket-including it here once regressed
+    /// `test_dictcomps.py`'s scope-isolation-from-global test: a method
+    /// with `actual = {g: None for g in range(10)}` followed later by
+    /// `self.assertEqual(g, "Global variable")` needs that second `g` to
+    /// keep resolving to the MODULE global, exactly as if the comprehension
+    /// had never run — but making `g` a blanket local of the method turned
+    /// that later reference into a `LOAD_FAST` reading the comprehension's
+    /// leftover save/restore slot instead.
     pub(crate) fn collect_assigned_names(stmts: &[Stmt]) -> HashSet<String> {
         let mut assigned = HashSet::new();
         Self::collect_assigned_inner(stmts, &mut assigned);
-        Self::collect_comprehension_targets_in_stmts(stmts, &mut assigned);
         assigned
     }
 
@@ -835,9 +849,18 @@ impl Compiler {
         // upfront pass had promised. `all_outer_refs` (below) already holds
         // every name available from further out that could need this
         // treatment.
+        // Comprehension/genexpr for-targets count as cellvar CANDIDATES of
+        // this scope (something nested — a lambda inside the same
+        // comprehension — may close over one) without being folded into
+        // `local_names` itself: that broader set also governs how a
+        // COMPLETELY UNRELATED later reference to the same name in this
+        // scope resolves, and a comprehension's own target must not shadow
+        // that (see `collect_comprehension_targets_in_stmts`'s doc comment).
+        let mut comprehension_targets = HashSet::new();
+        Self::collect_comprehension_targets_in_stmts(body, &mut comprehension_targets);
         let mut cell_vars: Vec<String> = local_names
-            .intersection(&nested_refs)
-            .filter(|n| !effective_global.contains(*n))
+            .union(&comprehension_targets)
+            .filter(|n| nested_refs.contains(*n) && !effective_global.contains(*n))
             .cloned()
             .collect();
         for name in all_outer_refs.intersection(&nested_refs) {
