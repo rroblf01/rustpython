@@ -153,8 +153,14 @@ impl PyError {
         extra.insert("lineno".to_string(), py_int(line));
         extra.insert("offset".to_string(), py_int(col));
         // `text` — the offending source line (real CPython exposes it).
+        // CPython's own `.text` always carries a trailing newline, even
+        // for the source's LAST line when the source itself has no final
+        // `\n` (test_eof.py's test_line_continuation_EOF: `exec('ä = 5\\')`
+        // needs `.text == 'ä = 5\\\n'`, not `'ä = 5\\'`) — `str::lines()`
+        // strips it from every yielded line, so it must be re-added here.
         let text = source.lines().nth((line - 1).max(0) as usize).unwrap_or("");
-        extra.insert("text".to_string(), py_str(text));
+        let text = if text.is_empty() { text.to_string() } else { format!("{}\n", text) };
+        extra.insert("text".to_string(), py_str(&text));
         // CPython: `str(SyntaxError)` is `msg (filename, line N)` where
         // filename is displayed as basename (e.g. `badsyntax_3131.py`, not
         // the full path) — this matches CPython's actual `SyntaxError`

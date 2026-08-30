@@ -730,7 +730,30 @@ impl VirtualMachine {
                 let code = match &*args[0].borrow() {
                     PyObject::Code(c) => (**c).clone(),
                     _ => {
-                        let source = args[0].str();
+                        // `exec()`/`eval()` accept a `bytes`/`bytearray`
+                        // source too (real CPython: PEP 263 coding-cookie
+                        // decoded, defaulting to UTF-8) -- `.str()` on a
+                        // Bytes object gives its Python REPR (`"b'...'"`),
+                        // not the decoded text, which silently produced
+                        // garbage source instead of decoding it properly
+                        // (test_eof.py's test_line_continuation_EOF passes
+                        // `'ä = 5\\'.encode()` and a latin-1-encoded
+                        // `# coding:latin1` source directly).
+                        let source = {
+                            let b = args[0].borrow();
+                            match &*b {
+                                PyObject::Bytes(bytes) => {
+                                    crate::object::import_builtin::decode_source_bytes(bytes)?
+                                }
+                                PyObject::ByteArray(bytes) => {
+                                    crate::object::import_builtin::decode_source_bytes(bytes)?
+                                }
+                                _ => {
+                                    drop(b);
+                                    args[0].str()
+                                }
+                            }
+                        };
                         // `eval()` compiles as a single EXPRESSION (returns
                         // its value via RETURN_VALUE) — `exec()` compiles as
                         // a statement list (returns None, matching module-
@@ -740,17 +763,34 @@ impl VirtualMachine {
                         // A real `SyntaxError` (not `TypeError`) — see
                         // `PyError::syntax_error`'s own doc comment; same
                         // fix as `builtin_compile`'s equivalent parse sites.
+                        // Use the real source text (`.text`) and correct
+                        // filename here, not the bare `syntax_error(msg)`
+                        // shorthand (which passes an EMPTY source string) —
+                        // `exec()`/`eval()`'s raised SyntaxError otherwise
+                        // always had `.text == ''` regardless of what the
+                        // actual offending line was (test_eof.py's
+                        // test_line_continuation_EOF: `exec('ä = 5\\')`
+                        // needs `.text == 'ä = 5\\\n'`). `builtin_compile`'s
+                        // own parse sites already do this correctly.
+                        // The SyntaxError's own `.filename` is "<string>"
+                        // regardless of exec-vs-eval (matches real CPython
+                        // exactly); the CODE OBJECT's filename keeps the
+                        // pre-existing "<exec>"/"<eval>" convention below,
+                        // an unrelated, separate concern not touched here.
                         let program = if is_eval {
-                            crate::parser::try_parse_as_expression(&source)
-                                .map_err(PyError::syntax_error)?
+                            crate::parser::try_parse_as_expression(&source).map_err(|e| {
+                                PyError::syntax_error_with_filename(e, "<string>", &source)
+                            })?
                         } else {
                             let mut parser = crate::parser::Parser::new(&source);
-                            parser.parse_program().map_err(PyError::syntax_error)?
+                            parser.parse_program().map_err(|e| {
+                                PyError::syntax_error_with_filename(e, "<string>", &source)
+                            })?
                         };
                         let mut compiler = crate::compiler::Compiler::new();
                         compiler
                             .compile(&program, &format!("<{}>", mode_name))
-                            .map_err(PyError::syntax_error)?
+                            .map_err(|e| PyError::syntax_error_with_filename(e, "<string>", &source))?
                     }
                 };
                 // Merge an explicit globals dict (reads) with an explicit
