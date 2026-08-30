@@ -55,6 +55,34 @@ versus real CPython's ~1172-line module, which itself depends heavily on `abc.AB
 `abc.ABCMeta` solid first, then a vendor attempt of the real `_collections_abc.py` — same
 "dedicated future session" calibre as `contextvars.Context` and `property` subclassing.
 
+**2026-08-30 session, batch 2** (pace changed per user feedback: fast per-fix checks only, full
+sweep deferred until several fixes land): four more fixes, three root-caused via parallel `Agent`
+investigations. (1) `PyDict::apply_probed_set` bumped its iterator-invalidation version counter on
+every `set()` call, including same-key value updates that don't change dict size and are legal
+during iteration in real CPython — fixed 182 of 185 errors in `test_configparser.py` alone. (2)
+`LOAD_ATTR`'s per-frame `attr_cache` is keyed by `(name, type)` with no per-instance component,
+which is safe for methods/class attributes but not for values synthesized via native-backing
+delegation (e.g. `.real`/`.imag` on a `complex`/`float` subclass, computed per-instance) — a second
+same-type instance's lookup was returning the first instance's cached value; fixed by excluding
+native-backing-delegated values from the cache. Likely affects any type with per-instance computed
+attributes via this delegation path, not just complex/float. (3) `complex()`'s constructor combined
+real/imaginary parts via plain float addition, which flushes `-0.0`'s sign under IEEE 754
+(`0.0 + -0.0 == 0.0`); fixed to only add when genuinely needed, and added support for a complex
+second argument (`complex(a+bj, c+dj)`) and a `native_backing_of` fallback for `__complex__`-less
+instances. (4) The compiler's upfront closure analysis (`collect_nested_refs_inner`'s `ClassDef`
+arm in `src/compiler/closure.rs`) filtered names referenced from *inside* a nested class's body
+against the *enclosing* scope's own locals before deciding they needed relaying as a cell — but
+class bodies are always their own code object using `LOAD_CLASSDEREF`/`LOAD_DEREF`, so a name being
+locally resolvable one scope up doesn't mean no relay is needed. Root cause of `test_abc.py`'s
+`test_descriptors_with_abstractmethod` `NameError: name 'D' is not defined` (a method nested in a
+class nested in a function building `class C(metaclass=meta): ...` then a sibling `class D(C):
+...`). Fixed by dropping that filter for body-referenced names (kept for header
+bases/keywords/decorators, which genuinely are evaluated directly in the enclosing frame). All four
+verified via `cargo test` + `make test-python` + targeted file runs + `git stash`-based A/B across
+closure-sensitive files (test_scope/test_class/test_descr/test_generators/test_listcomps/
+test_dictcomps/test_setcomps/test_functools/test_decorators/test_super/test_metaclass); full sweep
+pending per the batching change. See `cpython_test_suite_compat` memory topic, parte 7, for detail.
+
 ## How "compatibility" is actually measured here
 
 There is no single trustworthy percentage for "how done is this interpreter." What exists is:
