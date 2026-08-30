@@ -56,12 +56,6 @@ impl Parser {
                             && (matches!(&self.current, Token::Name(_))
                                 || self.at(&Token::Underscore))
                         {
-                            if seen_double_star {
-                                return Err(
-                                    "keyword argument follows keyword argument unpacking"
-                                        .to_string(),
-                                );
-                            }
                             let arg = Some(if self.eat(&Token::Underscore) {
                                 "_".to_string()
                             } else {
