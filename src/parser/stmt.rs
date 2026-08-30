@@ -8,7 +8,14 @@ impl Parser {
         // Lexer-detected errors (e.g. unindent does not match) surface as a
         // special current token; surface them as parser errors.
         if let Token::LexerError(msg) = &self.current {
-            return Err(msg.clone());
+            // Match the `L<line>:<col>: <message>` convention every other
+            // syntax error here uses (see the `unexpected indent` arm just
+            // below) so the resulting SyntaxError gets a real line/offset/
+            // text instead of defaulting to the generic fallback position
+            // — a lexer-detected error (unterminated string, line
+            // continuation at EOF, ...) was losing its position entirely.
+            let (line, col) = self.lexer.get_line_col();
+            return Err(format!("L{}:{}: {}", line, col, msg));
         }
         // An Indent token here means indentation that doesn't belong to any
         // compound-statement suite — i.e. an unexpected indent.

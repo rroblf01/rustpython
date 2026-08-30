@@ -121,8 +121,18 @@ impl Lexer {
                         continue;
                     }
                     if self.peek().is_none() {
+                        // A line-continuation backslash as the LAST
+                        // character of the source (no trailing newline at
+                        // all, not even an empty one) — real CPython's own
+                        // message for this exact bpo2180 case is
+                        // "unexpected EOF while parsing", not the
+                        // "unexpected character..." wording (which is for
+                        // a continuation followed by some OTHER stray
+                        // character, a different condition entirely).
+                        // test_eof.py's test_line_continuation_EOF /
+                        // test_eof_with_line_continuation both hit this.
                         return Token::LexerError(
-                            "unexpected character after line continuation character".to_string(),
+                            "unexpected EOF while parsing".to_string(),
                         );
                     }
                     return Token::Name("\\".to_string());
