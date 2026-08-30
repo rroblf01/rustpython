@@ -43,6 +43,21 @@ impl VirtualMachine {
                 }
             }
         }
+        // Real CPython's `__main__.__dict__` IS the running script's globals
+        // — `__name__`, `__builtins__`, and (once main.rs inserts it)
+        // `__file__` are real keys in it from the start. Here they only ever
+        // lived in `self.globals` (the frame's own globals fallback map, see
+        // `LOAD_NAME`/`LOAD_GLOBAL` in op_var.rs), never copied into
+        // `main_module`'s actual dict — so `vars(sys.modules['__main__'])`
+        // silently omitted them (only names the script itself assigned via
+        // STORE_NAME, like an `import`, ever showed up). Mirror the same
+        // bulk pre-copy `import.rs` does for every other module so
+        // `__main__`'s dict starts consistent with a real module's.
+        if let PyObject::Module { dict, .. } = &mut *main_module.borrow_mut() {
+            for (k, v) in self.globals.borrow().iter() {
+                dict.insert_str(interner::lookup_str(*k), v.clone());
+            }
+        }
         // JIT compilation disabled — using stable interpreter path only
         let mut frame = self.acquire_frame(
             Rc::new(code),
