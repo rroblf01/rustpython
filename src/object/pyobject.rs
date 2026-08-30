@@ -398,6 +398,9 @@ pub enum SocketInner {
 }
 impl PyObject {
     pub fn type_name(&self) -> String {
+        if let PyObject::Instance { typ, .. } = self {
+            return get_type_name_for_instance(typ);
+        }
         match self {
             PyObject::None => "NoneType",
             PyObject::Bool(_) => "bool",
