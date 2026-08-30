@@ -294,11 +294,21 @@ impl PyDict {
         key: PyObjectRef,
         value: PyObjectRef,
     ) {
-        self.version = self.version.wrapping_add(1);
         let val_for_instance = value.clone();
         if let Some(entry_idx) = existing {
+            // Real CPython's "dictionary changed size during iteration"
+            // guard is keyed on SIZE, not on "was anything written" -
+            // `d[existing_key] = new_value` while iterating is completely
+            // legal (a very common idiom: `for k in d: d[k] = f(d[k])`).
+            // Bumping `version` here too made every DictIter/DictValuesIter/
+            // DictItemsIter (all of which compare against a version
+            // snapshot) spuriously raise on any same-key update mid-
+            // iteration - confirmed via test_configparser.py, where
+            // `Lib/configparser.py` doing exactly this idiom turned into
+            // 182 of that file's 185 test ERRORs.
             self.entries[entry_idx].as_mut().unwrap().1 = value;
         } else {
+            self.version = self.version.wrapping_add(1);
             let entry_idx = self.entries.len();
             self.entries.push(Some((key.clone(), value)));
             self.indices[slot] = (entry_idx + 1) as u32;
