@@ -77,10 +77,23 @@ fn print_py_error(err: &PyError, fallback_file: &str) {
                         let indent = "    ";
                         let spaces = (offset - 1) as usize;
                         let trimmed = display_text.trim_end();
+                        // `offset` is a CHARACTER column (CPython's own
+                        // convention), but `str::len()` is a BYTE count —
+                        // for a line with any multi-byte UTF-8 character,
+                        // comparing/subtracting the two directly is wrong
+                        // (wrong caret length) and can underflow into a
+                        // panic when `offset` (in chars) legitimately
+                        // exceeds `trimmed.len()` in bytes is false but the
+                        // reverse miscount happens (confirmed crash:
+                        // `attempt to subtract with overflow` on a line
+                        // containing `ä`/`î`, test_eof.py's
+                        // test_EOFS_with_file). Count chars, not bytes, and
+                        // saturate defensively either way.
+                        let trimmed_chars = trimmed.chars().count();
                         let caret_len = if trimmed.is_empty() {
                             1
                         } else {
-                            std::cmp::max(1, trimmed.len() - offset as usize + 1)
+                            std::cmp::max(1, trimmed_chars.saturating_sub(offset as usize).saturating_add(1))
                         };
                         eprintln!("{}{}{}", indent, " ".repeat(spaces), "^".repeat(caret_len));
                     }
