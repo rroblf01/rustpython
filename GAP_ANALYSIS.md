@@ -16,8 +16,8 @@ There is no single trustworthy percentage for "how done is this interpreter." Wh
 - **`make test-python`**: a small hand-written regression suite (`tests/*.py`), currently
   **18 passed / 16 failed** — kept stable as a smoke-test baseline every change must not regress.
 
-Latest full `make test-cpython` sweep (2026-08-29): **98 / 398 files pass with zero failures**
-(295 FAIL, 5 TIMEOUT), up from 22 on July 29 (82 at the start of the 2026-08-29 session, +16 that
+Latest full `make test-cpython` sweep (2026-08-29): **100 / 398 files pass with zero failures**
+(293 FAIL, 5 TIMEOUT), up from 22 on July 29 (82 at the start of the 2026-08-29 session, +18 that
 day). File-level pass/fail counts are a *harsh*
 metric — CPython's own test files are exhaustive edge-case suites, so a "failing" file is very
 often passing 90%+ of its individual subtests and failing on a handful of specific edge cases,
