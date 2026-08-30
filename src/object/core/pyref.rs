@@ -12,6 +12,20 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+thread_local! {
+    /// Set by `PyObjectRef::repr()`'s depth-fallback when pathological (but
+    /// non-cyclic) nesting is truncated to `...` instead of being expanded
+    /// — see that method's doc comment. Read (and cleared) by the `repr()`
+    /// builtin so it can raise a real `RecursionError` in that case.
+    static REPR_OVERFLOWED: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+/// Check-and-clear whether the last `.repr()` call anywhere on this thread
+/// hit the pathological-nesting depth fallback (see `REPR_OVERFLOWED`).
+pub fn take_repr_recursion_overflow() -> bool {
+    REPR_OVERFLOWED.with(|c| c.replace(false))
+}
+
 #[derive(Clone)]
 #[repr(C)]
 pub enum PyObjectRef {
@@ -283,22 +297,47 @@ impl PyObjectRef {
             static REPR_STACK: std::cell::RefCell<Vec<usize>> =
                 std::cell::RefCell::new(Vec::new());
         }
-        let is_container = matches!(
+        // `dict.values()`/`.keys()`/`.items()` views are `PyObject::Instance`
+        // (native-backed, see `pydict/views.rs`), not one of the enum's own
+        // container variants, but a dict holding its own view right back
+        // (`d[42] = d.values()`) is just as real a cycle as a list holding
+        // itself — real CPython's `repr({42: d.values()})` is
+        // `{42: dict_values([...])}` (confirmed against CPython 3.14), not
+        // an error. Only these three view kinds are containers among
+        // `Instance`s for this purpose (a plain user object holding itself
+        // isn't tracked here — that's `__repr__`'s own problem).
+        let is_dict_view = matches!(
             &*self.borrow(),
-            PyObject::List(_)
-                | PyObject::Tuple(_)
-                | PyObject::Dict(_)
-                | PyObject::Set(_)
-                | PyObject::FrozenSet(_)
-                | PyObject::Deque { .. }
+            PyObject::Instance { typ, .. }
+                if matches!(get_type_name_for_instance(typ).as_str(), "dict_keys" | "dict_values" | "dict_items")
         );
+        let is_container = is_dict_view
+            || matches!(
+                &*self.borrow(),
+                PyObject::List(_)
+                    | PyObject::Tuple(_)
+                    | PyObject::Dict(_)
+                    | PyObject::Set(_)
+                    | PyObject::FrozenSet(_)
+                    | PyObject::Deque { .. }
+            );
         if is_container {
             let id = self.get_id();
             let in_stack = REPR_STACK.with(|s| s.borrow().contains(&id));
             if in_stack {
+                // The view's own `__repr__` (`pydict/views.rs`) already
+                // supplies the `dict_values([...])`-style wrapper around
+                // each element's repr, so the recursive-entry marker here
+                // must be the BARE `...` CPython uses for `Py_ReprEnter`
+                // (not a bracketed `[...]`, which would double up the
+                // brackets already coming from that wrapper).
+                if is_dict_view {
+                    return "...".to_string();
+                }
                 return match &*self.borrow() {
                     PyObject::Deque { .. } => "[...]".to_string(),
                     PyObject::Set(_) | PyObject::FrozenSet(_) => "{...}".to_string(),
+                    PyObject::Dict(_) => "{...}".to_string(),
                     _ => "[...]".to_string(),
                 };
             }
@@ -321,6 +360,19 @@ impl PyObjectRef {
                     s.borrow_mut().pop();
                 });
             }
+            // A genuinely deep (non-cyclic) nesting, not a cycle — real
+            // CPython raises RecursionError here (via its own C-stack
+            // depth check), not a silent `...` truncation. `repr()` itself
+            // returns a plain `String` with no way to propagate an
+            // exception through the many non-fallible callers of this
+            // method, so a thread-local flag is set instead; the `repr()`
+            // BUILTIN FUNCTION (the only place a raised `RecursionError` is
+            // actually observable/expected by Python code, e.g.
+            // test_dictviews.py's `test_deeply_nested_repr`) checks and
+            // clears it via `take_repr_recursion_overflow()` and raises for
+            // real. Every other caller keeps getting today's `...`
+            // fallback text, unchanged.
+            REPR_OVERFLOWED.with(|c| c.set(true));
             return "...".to_string();
         }
         let result = self.repr_inner();

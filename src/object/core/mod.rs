@@ -18,7 +18,7 @@ pub use small::{RefOrOwned, SmallStr, ALLOC_COUNT, IMM_COUNT, BuiltinFunc};
 pub(crate) mod object_id;
 
 pub mod pyref;
-pub use pyref::PyObjectRef;
+pub use pyref::{take_repr_recursion_overflow, PyObjectRef};
 
 pub mod pyref_eq;
 pub(crate) use pyref_eq::NativeDispatchRecursionGuard;

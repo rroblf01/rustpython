@@ -494,7 +494,18 @@ pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if let Some(i) = int_value_or_backing(&args[0]) {
         check_int_to_str_limit(&i)?;
     }
-    Ok(py_str(&args[0].repr()))
+    // Clear any stale flag left over from an unrelated earlier `.repr()`
+    // call elsewhere (e.g. inside `print()`/`str()` formatting a different,
+    // deeply-nested object) — only a truncation caused by THIS call should
+    // be reported as a `RecursionError` here.
+    crate::object::take_repr_recursion_overflow();
+    let s = args[0].repr();
+    if crate::object::take_repr_recursion_overflow() {
+        return Err(PyError::recursion_error(
+            "maximum recursion depth exceeded while getting the repr of an object",
+        ));
+    }
+    Ok(py_str(&s))
 }
 
 
