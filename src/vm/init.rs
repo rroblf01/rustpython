@@ -819,11 +819,16 @@ pub(crate) fn register_native_modules(
 
         modules.insert_str("inspect", create_module("inspect", create_inspect_dict()));
 
-        // Native __future__ module (needed by requests, etc.)
-        modules.insert_str(
-            "__future__",
-            create_module("__future__", create_future_dict()),
-        );
+        // __future__ is a real, complete, vendored Lib/__future__.py (a
+        // proper `_Feature` class with `.compiler_flag`/`.optional`/
+        // `.mandatory` attributes and working `getOptionalRelease()`/
+        // `getMandatoryRelease()` methods) — no native registration needed,
+        // and one used to shadow it here, representing each feature as a
+        // bare 4-tuple instead. Real code that expects an actual `_Feature`
+        // object (e.g. `Lib/codeop.py`'s `Compile.__call__`, which reads
+        // `feature.compiler_flag` for every name in `all_feature_names`)
+        // raised `AttributeError: 'tuple' object has no attribute
+        // 'compiler_flag'` against the tuple stand-in.
 
         // Native asyncio module (basic event loop)
         modules.insert_str("asyncio", create_module("asyncio", create_asyncio_dict()));
