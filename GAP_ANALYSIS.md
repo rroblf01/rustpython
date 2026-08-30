@@ -83,6 +83,18 @@ closure-sensitive files (test_scope/test_class/test_descr/test_generators/test_l
 test_dictcomps/test_setcomps/test_functools/test_decorators/test_super/test_metaclass); full sweep
 pending per the batching change. See `cpython_test_suite_compat` memory topic, parte 7, for detail.
 
+Full sweep after batch: **99 / 398 files pass** (up from 98, zero regressions). A fifth fix landed
+right after: `type(x) is property`/`classmethod`/`staticmethod`/`super` was always `False` (same
+symptom as the type-identity gaps the 12-type native-type migration fixed earlier, but these four
+wrapper/descriptor types were explicitly out of that effort's scope) — root-caused to both `type()`
+and `.__class__` falling through to a generic per-name Type-synthesis fallback that builds a
+different object than the one actually bound to `property`/`super`/etc. in `builtins`. Fixed by
+reusing the lighter, already-existing `Exception`/`ExceptionGroup` name-resolution pattern
+(`get_builtin_class()`) in both `builtin_type_of` and `get_attribute_impl`, rather than the heavier
+`NATIVE_VALUE_CTOR_KEY` machinery (unnecessary here — none of the four need a dunder-bearing type
+dict or arithmetic MRO participation). Fixes `test_super.py`'s `test_super___class__`. See
+`cpython_test_suite_compat` memory topic, parte 8, for detail.
+
 ## How "compatibility" is actually measured here
 
 There is no single trustworthy percentage for "how done is this interpreter." What exists is:
