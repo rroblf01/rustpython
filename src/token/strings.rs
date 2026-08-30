@@ -40,6 +40,10 @@ impl Lexer {
                                 }
                                 bytes.push(value as u8);
                             }
+                            Some('a') => bytes.push(0x07),
+                            Some('b') => bytes.push(0x08),
+                            Some('f') => bytes.push(0x0c),
+                            Some('v') => bytes.push(0x0b),
                             Some('x') => {
                                 let h1 = self.advance().unwrap_or('0');
                                 let h2 = self.advance().unwrap_or('0');
@@ -123,6 +127,10 @@ impl Lexer {
                                 }
                                 bytes.push(value as u8);
                             }
+                            Some('a') => bytes.push(0x07),
+                            Some('b') => bytes.push(0x08),
+                            Some('f') => bytes.push(0x0c),
+                            Some('v') => bytes.push(0x0b),
                             Some('x') => {
                                 let h1 = self.advance().unwrap_or('0');
                                 let h2 = self.advance().unwrap_or('0');
