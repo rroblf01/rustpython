@@ -444,9 +444,27 @@ impl VirtualMachine {
                                 })()
                             };
                             let attr = attr?;
+                            let found_before_native_backing = attr.is_some();
                             let attr = attr.or_else(|| {
                                 crate::vm::op_attr_helpers::try_native_backing(dict, typ, &name)
                             });
+                            // A value that only appeared once we fell through
+                            // to the native backing (e.g. `.real`/`.imag` on
+                            // a `complex`/`float` subclass, synthesized fresh
+                            // from THIS instance's own backing on every
+                            // access - see attrs/complex.rs, attrs/float.rs)
+                            // is exactly as instance-specific as a plain
+                            // instance attribute or a property's return
+                            // value, for the identical reason those are
+                            // already excluded just below: this cache has no
+                            // per-instance component, so caching it here let
+                            // a SECOND instance of the same type silently
+                            // read back the FIRST instance's value forever
+                            // (confirmed via `ComplexSubclass(1,2).real`
+                            // then `ComplexSubclass(3,4).real` in one frame
+                            // returning `1` twice — not merely a display
+                            // quirk, real numeric data corruption).
+                            let came_from_native_backing = !found_before_native_backing && attr.is_some();
                             let attr = attr.or_else(|| {
                                 crate::vm::op_attr_helpers::try_dict_methods(&obj, &name)
                             });
@@ -552,6 +570,7 @@ impl VirtualMachine {
                                     if !dict.contains_key(&name)
                                         && !is_property_result
                                         && !is_native_backing_bound
+                                        && !came_from_native_backing
                                         && name_idx < self.frames[fi].attr_cache.len()
                                     {
                                         self.frames[fi].attr_cache[name_idx] =
