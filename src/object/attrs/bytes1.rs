@@ -241,6 +241,17 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                         }
                                         // for other handlers, try generic handling below; fallback to lossy if needed
                                     }
+                                    // utf-16/utf-32 family — mirrors the
+                                    // encode-side fix (see
+                                    // `encode_utf16_utf32`'s doc comment):
+                                    // previously fell through to the
+                                    // generic-codec-lookup/lossy-UTF-8
+                                    // fallback below, silently producing
+                                    // garbage instead of a real fixed-width
+                                    // decode.
+                                    if let Some(s) = crate::object::decode_utf16_utf32(bytes, &norm) {
+                                        return Ok(py_str(&s));
+                                    }
                                     // Try generic codec lookup (e.g. testcodec)
                                     if let Some(codec_tuple) = crate::modules::lookup_codec(&encoding) {
                                         let decode_fn = {

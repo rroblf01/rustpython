@@ -315,6 +315,133 @@ pub(crate) fn deque_rich_eq(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> 
 /// single-byte encodings directly; anything else still falls back to
 /// UTF-8 (matching the previous, universal behavior) rather than raising,
 /// to avoid regressing any caller that never specifies a real encoding.
+/// Encode `s` as UTF-16 or UTF-32 if `norm` (already lowercased,
+/// `-`-separated) names one of those encodings, else `None` (fall through
+/// to whatever the caller does for an unrecognized name). `utf-16`/`utf-32`
+/// with no explicit byte order get a little-endian body with a leading
+/// byte-order-mark (matching CPython on essentially every platform it
+/// actually ships on); `-le`/`-be` variants get no BOM. UTF-16 uses real
+/// surrogate pairs for astral codepoints (`char::encode_utf16`).
+pub(crate) fn encode_utf16_utf32(s: &str, norm: &str) -> Option<Vec<u8>> {
+    match norm {
+        "utf-16" | "utf16" => {
+            let mut out = vec![0xFF, 0xFE];
+            let mut buf = [0u16; 2];
+            for c in s.chars() {
+                for unit in c.encode_utf16(&mut buf) {
+                    out.extend_from_slice(&unit.to_le_bytes());
+                }
+            }
+            Some(out)
+        }
+        "utf-16-le" | "utf16-le" | "utf_16_le" => {
+            let mut out = Vec::with_capacity(s.len() * 2);
+            let mut buf = [0u16; 2];
+            for c in s.chars() {
+                for unit in c.encode_utf16(&mut buf) {
+                    out.extend_from_slice(&unit.to_le_bytes());
+                }
+            }
+            Some(out)
+        }
+        "utf-16-be" | "utf16-be" | "utf_16_be" => {
+            let mut out = Vec::with_capacity(s.len() * 2);
+            let mut buf = [0u16; 2];
+            for c in s.chars() {
+                for unit in c.encode_utf16(&mut buf) {
+                    out.extend_from_slice(&unit.to_be_bytes());
+                }
+            }
+            Some(out)
+        }
+        "utf-32" | "utf32" => {
+            let mut out = vec![0xFF, 0xFE, 0x00, 0x00];
+            for c in s.chars() {
+                out.extend_from_slice(&(c as u32).to_le_bytes());
+            }
+            Some(out)
+        }
+        "utf-32-le" | "utf32-le" | "utf_32_le" => {
+            let mut out = Vec::with_capacity(s.len() * 4);
+            for c in s.chars() {
+                out.extend_from_slice(&(c as u32).to_le_bytes());
+            }
+            Some(out)
+        }
+        "utf-32-be" | "utf32-be" | "utf_32_be" => {
+            let mut out = Vec::with_capacity(s.len() * 4);
+            for c in s.chars() {
+                out.extend_from_slice(&(c as u32).to_be_bytes());
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// Decode `bytes` as UTF-16 or UTF-32 if `norm` names one of those
+/// encodings, else `None`. The base (no explicit byte order) names sniff a
+/// leading BOM and consume it, defaulting to little-endian if none is
+/// present — matching CPython. Lone/invalid surrogates and truncated
+/// trailing bytes are replaced with U+FFFD rather than erroring, matching
+/// this codebase's existing lenient-by-default decode style elsewhere in
+/// this same function (`errors` isn't threaded through here for the same
+/// reason the ascii/latin-1 arms above only partially honor it — no caller
+/// exercising utf-16/utf-32 in the corpus needs strict-mode fidelity yet).
+pub(crate) fn decode_utf16_utf32(bytes: &[u8], norm: &str) -> Option<String> {
+    fn units_le(bytes: &[u8]) -> impl Iterator<Item = u16> + '_ {
+        bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]))
+    }
+    fn units_be(bytes: &[u8]) -> impl Iterator<Item = u16> + '_ {
+        bytes.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]]))
+    }
+    match norm {
+        "utf-16" | "utf16" | "utf-16-le" | "utf16-le" | "utf_16_le" | "utf-16-be"
+        | "utf16-be" | "utf_16_be" => {
+            let (body, big_endian) = match norm {
+                "utf-16-be" | "utf16-be" | "utf_16_be" => (bytes, true),
+                "utf-16-le" | "utf16-le" | "utf_16_le" => (bytes, false),
+                _ => match bytes {
+                    [0xFF, 0xFE, rest @ ..] => (rest, false),
+                    [0xFE, 0xFF, rest @ ..] => (rest, true),
+                    rest => (rest, false),
+                },
+            };
+            let units: Vec<u16> = if big_endian {
+                units_be(body).collect()
+            } else {
+                units_le(body).collect()
+            };
+            Some(char::decode_utf16(units)
+                .map(|r| r.unwrap_or('\u{FFFD}'))
+                .collect())
+        }
+        "utf-32" | "utf32" | "utf-32-le" | "utf32-le" | "utf_32_le" | "utf-32-be"
+        | "utf32-be" | "utf_32_be" => {
+            let (body, big_endian) = match norm {
+                "utf-32-be" | "utf32-be" | "utf_32_be" => (bytes, true),
+                "utf-32-le" | "utf32-le" | "utf_32_le" => (bytes, false),
+                _ => match bytes {
+                    [0xFF, 0xFE, 0x00, 0x00, rest @ ..] => (rest, false),
+                    [0x00, 0x00, 0xFE, 0xFF, rest @ ..] => (rest, true),
+                    rest => (rest, false),
+                },
+            };
+            let mut out = String::with_capacity(body.len() / 4);
+            for chunk in body.chunks_exact(4) {
+                let cp = if big_endian {
+                    u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                } else {
+                    u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                };
+                out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let s = a[0].str();
     let encoding = if a.len() > 1 && !matches!(&*a[1].borrow(), PyObject::None) {
@@ -333,6 +460,16 @@ pub(crate) fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if norm == "utf-8" || norm == "utf8" || norm2 == "utf_8" || norm2 == "utf8" {
         // For utf-8 we still need to respect errors for surrogates? just return bytes
         return Ok(PyObjectRef::imm(PyObject::Bytes(s.into_bytes())));
+    }
+    // utf-16/utf-32 family — previously fell all the way through to the
+    // generic-codec-lookup/"fallback to utf-8" tail below, silently
+    // producing plain UTF-8 bytes (1 byte per ASCII char) instead of a real
+    // fixed-width encoding, since no codec was ever registered for either
+    // name. Confirmed via test_bigmem.py's test_encode_utf32: expected
+    // `4 * size + 4` bytes (4 per char + a 4-byte BOM), got `size` (as if
+    // UTF-8/ASCII had been used instead).
+    if let Some(bytes) = encode_utf16_utf32(&s, &norm) {
+        return Ok(PyObjectRef::imm(PyObject::Bytes(bytes)));
     }
     let bytes = match norm.as_str() {
         "latin-1" | "latin1" | "iso-8859-1" | "iso8859-1" | "l1" | "8859" | "cp819" => {

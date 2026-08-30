@@ -578,9 +578,11 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 if w <= b.len() {
                                     return Ok(PyObjectRef::imm(PyObject::Bytes(b.clone())));
                                 }
+                                // Real CPython gives the LARGER half to the
+                                // LEFT when the padding is odd.
                                 let pad = w - b.len();
-                                let left = pad / 2;
-                                let right = pad - left;
+                                let right = pad / 2;
+                                let left = pad - right;
                                 let mut result: Vec<u8> =
                                     std::iter::repeat(fill).take(left).collect();
                                 result.extend_from_slice(b);
