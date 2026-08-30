@@ -1,10 +1,31 @@
 # RustPython — CPython 3.14 Compatibility Gap Analysis
 
-Last updated: August 29, 2026 (previous version dated July 29 — badly stale: ~260 commits landed
-between the two, moving PASS from 22 to 93; the module-file split into `src/vm/`/`src/object/`/
-`src/modules/*/` subdirectories, the Lib/ pure-Python vendoring push, and most of the "known deep
-gaps" list below happened in that window too — see `CLAUDE.md` for the current architecture and
-the `cpython_test_suite_compat` memory topic for the full batch-by-batch history).
+Last updated: August 30, 2026 (previous version dated August 29 — see `CLAUDE.md` for the current
+architecture and the `cpython_test_suite_compat` memory topic for the full batch-by-batch history).
+
+**2026-08-30 session**: fixed a real compiler bug found via a chain of investigation starting from
+`doctest.py` never scanning a module's `__test__` dict (so any file registering doctests that way —
+`test_descrtut`, `test_setcomps`, `test_unpack`, `test_generators`, ...  — silently ran ZERO of
+them, "passing" only because nothing real ever executed). Running those doctests for real exposed
+a genuine, previously-undetected compiler bug: `compile_function`/`compile_class_body` saved and
+restored `self.labels`/`label_stack`/`loop_stack`/`pending_cleanup` when entering a nested
+function/class's scope, but never `self.label_positions` — since `new_label()` allocates an id by
+pushing to both vectors in lockstep, resetting one without the other let a nested `def`/`class`'s
+own labels silently collide with, and overwrite, an id the ENCLOSING loop had already allocated.
+Any loop containing a nested function/class definition whose own body also needed a label (an
+inner loop, a comprehension, a lambda) could jump to a corrupted target on its next iteration —
+observed as either re-running its own setup code every "iteration" or a live iterator ending up
+where a callable was expected (`TypeError: 'range_iterator' object is not callable`). This is very
+likely the real (or a major contributing) cause behind `test_generators`/`test_listcomps`'s
+120s TIMEOUTs. Fixed by saving/restoring `label_positions` in the same lockstep as `labels`. A
+second, related gap was fixed alongside it: the upfront cellvar/freevar analysis
+(`analyze_function`) only walked literal `Stmt::FunctionDef`/`Stmt::ClassDef` nodes to find what a
+nested scope needs relayed as a cell, missing a `lambda` reachable only through an expression
+(`items = {(lambda: i) for i in range(5)}`) entirely, and separately never recognized a
+comprehension's own `for x in ...` target as a real local of the enclosing function (this compiler
+inlines comprehensions rather than giving them CPython's own separate scope). See the
+`cpython_test_suite_compat` memory topic for the full chain and a note on `contextvars.Context`
+(deferred, same calibre as the `property`-subclassing gap).
 
 ## How "compatibility" is actually measured here
 
@@ -16,9 +37,14 @@ There is no single trustworthy percentage for "how done is this interpreter." Wh
 - **`make test-python`**: a small hand-written regression suite (`tests/*.py`), currently
   **18 passed / 16 failed** — kept stable as a smoke-test baseline every change must not regress.
 
-Latest full `make test-cpython` sweep (2026-08-29): **100 / 398 files pass with zero failures**
-(293 FAIL, 5 TIMEOUT), up from 22 on July 29 (82 at the start of the 2026-08-29 session, +18 that
-day). File-level pass/fail counts are a *harsh*
+Latest full `make test-cpython` sweep (2026-08-30): **98 / 398 files pass with zero failures**
+(296 FAIL, 4 TIMEOUT) — down 2 from the August 29 count of 100, but not a regression: the 2 lost
+files (`test_setcomps`, `test_unpack`) were only ever "passing" because their real doctest content
+silently never ran (the `__test__` dict bug above) — now that it does, each has exactly one
+remaining narrow gap (a genuine comprehension-scope-isolation gap for `test_setcomps`; an artifact
+of running the file standalone rather than as `test.test_unpack` — confirmed real CPython 3.14
+fails that exact same doctest run the same way — for `test_unpack`). TIMEOUT dropped from 5 to 4
+thanks to the `label_positions` fix. File-level pass/fail counts are a *harsh*
 metric — CPython's own test files are exhaustive edge-case suites, so a "failing" file is very
 often passing 90%+ of its individual subtests and failing on a handful of specific edge cases,
 not fundamentally broken. Treat the aggregate failures+errors count as the more meaningful trend
@@ -31,10 +57,13 @@ At least 2 files (`test_set`, `test_listcomps`) have a genuinely **non-determini
 mode — confirmed by running the exact same unmodified binary twice and getting a fast FAIL once,
 a 120s TIMEOUT another time, and (for `test_set`) a `RefCell already borrowed on instance` panic
 a third time. Likely tied to `PYTHONHASHSEED`-randomized hashing affecting set/dict iteration
-order (see the SipHash work in git history) hitting different code paths run to run — not
-(re)triggered by any specific recent change, confirmed by reproducing all three outcomes against
-a build from before today's session too. Treat a TIMEOUT or panic on either of these two files as
-inconclusive on its own; rerun before attributing it to a change.
+order (see the SipHash work in git history) hitting different code paths run to run. Treat a
+TIMEOUT or panic on either of these two files as inconclusive on its own; rerun before attributing
+it to a change. (2026-08-30: `test_listcomps`'s TIMEOUTs at least partly had a real, DETERMINISTIC
+cause — the same `label_positions` compiler bug described above, since it contains the identical
+conjoin/Queens/Knights backtracking-solver doctest pattern as `test_generators`, fixed by the same
+commit — but the file may still have a separate, genuinely non-deterministic failure mode on top
+of that; not fully disentangled.)
 
 **LTO footgun, found via `test_pprint`/`test_difflib` (fixed):** these two intermittently failed
 in a way that first looked like parallel-sweep flakiness but turned out to be a real, deterministic
