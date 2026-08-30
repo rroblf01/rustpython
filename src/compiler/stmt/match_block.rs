@@ -5,6 +5,25 @@ use super::super::scope::{LoopInfo, PendingCleanup, ScopeType};
 use super::super::utils::delete_error_for;
 
 impl Compiler {
+    /// Store a name captured by a `match`/`case` pattern (`case [x]:`,
+    /// `case Point(x=x):`, `case {"k": v}:`, `case [*rest]:`, ...).
+    /// Every call site here used to hardcode STORE_FAST unconditionally,
+    /// ignoring module/class-body scope and `global` declarations
+    /// entirely — same bug shape as `try_block.rs`'s `except E as name:`
+    /// (see `store_except_name`'s doc comment), just never fixed here.
+    fn emit_match_store(&mut self, name: &str) {
+        if self.scope == ScopeType::Module
+            || self.scope == ScopeType::ClassBody
+            || self.global_names.contains(name)
+        {
+            let idx = self.get_name_index(name) as u32;
+            self.emit(Opcode::STORE_NAME, idx);
+        } else {
+            let idx = self.add_varname(name) as u32;
+            self.emit(Opcode::STORE_FAST, idx);
+        }
+    }
+
     pub(crate) fn compile_match_stmt(&mut self, subject: &Expr, cases: &[MatchCase]) -> Result<(), String> {
                 self.compile_expr(subject)?;
                 let end_label = self.new_label();
@@ -29,9 +48,8 @@ impl Compiler {
                             }
                         }
                         Pattern::MatchAs { name: Some(n), .. } => {
-                            let idx = self.add_varname(n) as u32;
                             self.emit(Opcode::DUP_TOP, 0);
-                            self.emit(Opcode::STORE_FAST, idx);
+                            self.emit_match_store(n);
                             if let Some(guard) = &case.guard {
                                 self.compile_expr(guard)?;
                                 self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
@@ -99,8 +117,7 @@ impl Compiler {
                                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
                                         }
                                         Pattern::MatchAs { name: Some(n), .. } => {
-                                            let idx = self.add_varname(n) as u32;
-                                            self.emit(Opcode::STORE_FAST, idx);
+                                            self.emit_match_store(n);
                                         }
                                         Pattern::MatchAs { name: None, .. } => {
                                             self.emit(Opcode::POP_TOP, 0);
@@ -119,8 +136,7 @@ impl Compiler {
                                         }
                                         Pattern::MatchStar { name } => match name {
                                             Some(n) => {
-                                                let idx = self.add_varname(n) as u32;
-                                                self.emit(Opcode::STORE_FAST, idx);
+                                                self.emit_match_store(n);
                                             }
                                             None => {
                                                 self.emit(Opcode::POP_TOP, 0);
@@ -152,8 +168,7 @@ impl Compiler {
                                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
                                         }
                                         Pattern::MatchAs { name: Some(n), .. } => {
-                                            let idx = self.add_varname(n) as u32;
-                                            self.emit(Opcode::STORE_FAST, idx);
+                                            self.emit_match_store(n);
                                         }
                                         Pattern::MatchAs { name: None, .. } => {
                                             self.emit(Opcode::POP_TOP, 0);
@@ -213,8 +228,7 @@ impl Compiler {
                                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
                                         }
                                         Pattern::MatchAs { name: Some(n), .. } => {
-                                            let idx = self.add_varname(n) as u32;
-                                            self.emit(Opcode::STORE_FAST, idx);
+                                            self.emit_match_store(n);
                                         }
                                         Pattern::MatchAs { name: None, .. } => {
                                             self.emit(Opcode::POP_TOP, 0);
@@ -278,8 +292,7 @@ impl Compiler {
                                                         self.emit_jump(Opcode::JUMP, or_matched);
                                                     }
                                                     Pattern::MatchAs { name: Some(n), .. } => {
-                                                        let idx = self.add_varname(n) as u32;
-                                                        self.emit(Opcode::STORE_FAST, idx);
+                                                        self.emit_match_store(n);
                                                         self.emit_jump(Opcode::JUMP, or_matched);
                                                     }
                                                     _ => {
@@ -302,9 +315,8 @@ impl Compiler {
                             }
                             // Handle **rest capture
                             if let Some(rest_name) = rest {
-                                let idx = self.add_varname(rest_name) as u32;
                                 self.emit(Opcode::DUP_TOP, 0);
-                                self.emit(Opcode::STORE_FAST, idx);
+                                self.emit_match_store(rest_name);
                             }
                             if let Some(guard) = &case.guard {
                                 self.compile_expr(guard)?;
@@ -316,8 +328,7 @@ impl Compiler {
                             self.emit(Opcode::DUP_TOP, 0);
                             match name {
                                 Some(n) => {
-                                    let idx = self.add_varname(n) as u32;
-                                    self.emit(Opcode::STORE_FAST, idx);
+                                    self.emit_match_store(n);
                                 }
                                 None => {
                                     self.emit(Opcode::POP_TOP, 0);
@@ -334,8 +345,7 @@ impl Compiler {
                                 match pat {
                                     Pattern::MatchAs { name: Some(n), .. } => {
                                         self.emit(Opcode::DUP_TOP, 0);
-                                        let idx = self.add_varname(n) as u32;
-                                        self.emit(Opcode::STORE_FAST, idx);
+                                        self.emit_match_store(n);
                                         self.emit_jump(Opcode::JUMP, or_matched);
                                     }
                                     Pattern::MatchAs { name: None, .. } => {
@@ -400,8 +410,7 @@ impl Compiler {
                                                     );
                                                 }
                                                 Pattern::MatchAs { name: Some(n), .. } => {
-                                                    let idx = self.add_varname(n) as u32;
-                                                    self.emit(Opcode::STORE_FAST, idx);
+                                                    self.emit_match_store(n);
                                                 }
                                                 Pattern::MatchAs { name: None, .. } => {
                                                     self.emit(Opcode::POP_TOP, 0);
@@ -427,8 +436,7 @@ impl Compiler {
                                                     );
                                                 }
                                                 Pattern::MatchAs { name: Some(n), .. } => {
-                                                    let idx = self.add_varname(n) as u32;
-                                                    self.emit(Opcode::STORE_FAST, idx);
+                                                    self.emit_match_store(n);
                                                 }
                                                 Pattern::MatchAs { name: None, .. } => {
                                                     self.emit(Opcode::POP_TOP, 0);
@@ -491,8 +499,7 @@ impl Compiler {
                                         self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
                                     }
                                     Pattern::MatchAs { name: Some(n), .. } => {
-                                        let idx = self.add_varname(n) as u32;
-                                        self.emit(Opcode::STORE_FAST, idx);
+                                        self.emit_match_store(n);
                                     }
                                     Pattern::MatchAs { name: None, .. } => {
                                         self.emit(Opcode::POP_TOP, 0);
@@ -525,8 +532,7 @@ impl Compiler {
                                         self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_case);
                                     }
                                     Pattern::MatchAs { name: Some(n), .. } => {
-                                        let idx = self.add_varname(n) as u32;
-                                        self.emit(Opcode::STORE_FAST, idx);
+                                        self.emit_match_store(n);
                                     }
                                     Pattern::MatchAs { name: None, .. } => {
                                         self.emit(Opcode::POP_TOP, 0);

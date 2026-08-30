@@ -5,6 +5,28 @@ use super::super::scope::{LoopInfo, PendingCleanup, ScopeType};
 use super::super::utils::delete_error_for;
 
 impl Compiler {
+    /// Store the just-caught exception into `except E as name:`'s binding.
+    /// Mirrors `compile_assign_target`'s own `Expr::Name` scope logic
+    /// (STORE_NAME for module/class-body scope OR a name declared
+    /// `global`, STORE_FAST otherwise) — this file used to check ONLY
+    /// `self.scope == ScopeType::Module`, silently ignoring a `global`
+    /// declaration. `global x` followed by `except E as x:` inside a
+    /// function then stored into a throwaway local instead of the actual
+    /// global, so `globals()["x"]` never saw it (test_global.py's
+    /// `test_caught_exception`/`test_caught_exception_group`).
+    fn store_except_name(&mut self, name: &str) {
+        if self.scope == ScopeType::Module
+            || self.scope == ScopeType::ClassBody
+            || self.global_names.contains(name)
+        {
+            let name_idx = self.get_name_index(name) as u32;
+            self.emit(Opcode::STORE_NAME, name_idx);
+        } else {
+            let idx = self.add_varname(name) as u32;
+            self.emit(Opcode::STORE_FAST, idx);
+        }
+    }
+
     pub(crate) fn compile_try_stmt(&mut self, body: &[Stmt], handlers: &[ExceptHandler], handlers_star: &[ExceptStar], orelse: &[Stmt], finalbody: &[Stmt]) -> Result<(), String> {
                 if !finalbody.is_empty()
                     && handlers.is_empty()
@@ -93,13 +115,7 @@ impl Compiler {
                                 // with a stack underflow inside `cm`'s own
                                 // `__exit__` several instructions later.
                                 self.emit(Opcode::DUP_TOP, 0);
-                                if self.scope == ScopeType::Module {
-                                    let name_idx = self.get_name_index(name) as u32;
-                                    self.emit(Opcode::STORE_NAME, name_idx);
-                                } else {
-                                    let idx = self.add_varname(name) as u32;
-                                    self.emit(Opcode::STORE_FAST, idx);
-                                }
+                                self.store_except_name(name);
                             }
                             self.compile_stmts(&handler.body)?;
                             self.emit_jump(Opcode::JUMP, handler_done);
@@ -108,13 +124,7 @@ impl Compiler {
                             if let Some(name) = &handler.name {
                                 // See the identical `DUP_TOP` comment above.
                                 self.emit(Opcode::DUP_TOP, 0);
-                                if self.scope == ScopeType::Module {
-                                    let name_idx = self.get_name_index(name) as u32;
-                                    self.emit(Opcode::STORE_NAME, name_idx);
-                                } else {
-                                    let idx = self.add_varname(name) as u32;
-                                    self.emit(Opcode::STORE_FAST, idx);
-                                }
+                                self.store_except_name(name);
                             }
                             self.compile_stmts(&handler.body)?;
                             self.emit_jump(Opcode::JUMP, handler_done);
@@ -129,13 +139,7 @@ impl Compiler {
                             let next_handler = self.new_label();
                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_handler);
                             if let Some(name) = &handler.name {
-                                if self.scope == ScopeType::Module {
-                                    let name_idx = self.get_name_index(name) as u32;
-                                    self.emit(Opcode::STORE_NAME, name_idx);
-                                } else {
-                                    let idx = self.add_varname(name) as u32;
-                                    self.emit(Opcode::STORE_FAST, idx);
-                                }
+                                self.store_except_name(name);
                             } else {
                                 self.emit(Opcode::POP_TOP, 0);
                             }
@@ -144,13 +148,7 @@ impl Compiler {
                             self.fix_label(next_handler);
                         } else {
                             if let Some(name) = &handler.name {
-                                if self.scope == ScopeType::Module {
-                                    let name_idx = self.get_name_index(name) as u32;
-                                    self.emit(Opcode::STORE_NAME, name_idx);
-                                } else {
-                                    let idx = self.add_varname(name) as u32;
-                                    self.emit(Opcode::STORE_FAST, idx);
-                                }
+                                self.store_except_name(name);
                             }
                             self.compile_stmts(&handler.body)?;
                         }
@@ -231,13 +229,7 @@ impl Compiler {
                                 // with a stack underflow inside `cm`'s own
                                 // `__exit__` several instructions later.
                                 self.emit(Opcode::DUP_TOP, 0);
-                                if self.scope == ScopeType::Module {
-                                    let name_idx = self.get_name_index(name) as u32;
-                                    self.emit(Opcode::STORE_NAME, name_idx);
-                                } else {
-                                    let idx = self.add_varname(name) as u32;
-                                    self.emit(Opcode::STORE_FAST, idx);
-                                }
+                                self.store_except_name(name);
                             }
                             self.compile_stmts(&handler.body)?;
                             self.emit_jump(Opcode::JUMP, handler_done);
@@ -246,13 +238,7 @@ impl Compiler {
                             if let Some(name) = &handler.name {
                                 // See the identical `DUP_TOP` comment above.
                                 self.emit(Opcode::DUP_TOP, 0);
-                                if self.scope == ScopeType::Module {
-                                    let name_idx = self.get_name_index(name) as u32;
-                                    self.emit(Opcode::STORE_NAME, name_idx);
-                                } else {
-                                    let idx = self.add_varname(name) as u32;
-                                    self.emit(Opcode::STORE_FAST, idx);
-                                }
+                                self.store_except_name(name);
                             }
                             self.compile_stmts(&handler.body)?;
                             self.emit_jump(Opcode::JUMP, handler_done);
@@ -267,13 +253,7 @@ impl Compiler {
                             let next_handler = self.new_label();
                             self.emit_jump(Opcode::POP_JUMP_IF_FALSE, next_handler);
                             if let Some(name) = &handler.name {
-                                if self.scope == ScopeType::Module {
-                                    let name_idx = self.get_name_index(name) as u32;
-                                    self.emit(Opcode::STORE_NAME, name_idx);
-                                } else {
-                                    let idx = self.add_varname(name) as u32;
-                                    self.emit(Opcode::STORE_FAST, idx);
-                                }
+                                self.store_except_name(name);
                             } else {
                                 self.emit(Opcode::POP_TOP, 0);
                             }
@@ -282,13 +262,7 @@ impl Compiler {
                             self.fix_label(next_handler);
                         } else {
                             if let Some(name) = &handler.name {
-                                if self.scope == ScopeType::Module {
-                                    let name_idx = self.get_name_index(name) as u32;
-                                    self.emit(Opcode::STORE_NAME, name_idx);
-                                } else {
-                                    let idx = self.add_varname(name) as u32;
-                                    self.emit(Opcode::STORE_FAST, idx);
-                                }
+                                self.store_except_name(name);
                             }
                             self.compile_stmts(&handler.body)?;
                         }
