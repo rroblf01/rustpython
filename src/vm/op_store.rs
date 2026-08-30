@@ -20,34 +20,34 @@ impl VirtualMachine {
                     eprintln!("STORE_ATTR: name={} obj_kind={}", name, kind);
                 }
 
-                // Check for __setattr__ on Instance types first
+                // Check for __setattr__ on Instance types first — walks the
+                // MRO (not just the leaf type's own dict), so a `__setattr__`
+                // defined on a BASE class (e.g. `unittest.mock.NonCallableMock`,
+                // inherited by `MagicMock`/`Mock`/every other mock subclass
+                // that never redefines it) is actually found instead of
+                // silently falling through to plain instance-dict assignment.
                 {
                     let obj_borrowed = obj.borrow();
                     if let PyObject::Instance { typ, .. } = &*obj_borrowed {
-                        let typ_ref = typ.borrow();
-                        if let PyObject::Type {
-                            dict: type_dict, ..
-                        } = &*typ_ref
+                        let typ_clone = typ.clone();
+                        drop(obj_borrowed);
+                        if let Some(setattr_method) =
+                            crate::object::lookup_dunder_via_mro(&typ_clone, "__setattr__")
                         {
-                            if let Some(setattr_method) = type_dict.get_str("__setattr__").cloned()
-                            {
-                                drop(typ_ref);
-                                drop(obj_borrowed);
-                                // Call __setattr__ for side effects (validation, clearing caches)
-                                let result = self.call_function(
-                                    setattr_method,
-                                    vec![obj.clone(), py_str(&name), val.clone()],
-                                    vec![],
-                                );
-                                // Also set the attribute directly in the instance dict, since
-                                // __dict__ returns a COPY and self.__dict__[key] = value inside
-                                // __setattr__ would modify the copy, not the original.
-                                if let PyObject::Instance { dict, .. } = &mut *obj.borrow_mut() {
-                                    dict.insert_str(&name, val.clone());
-                                }
-                                result?;
-                                return Ok(true);
+                            // Call __setattr__ for side effects (validation, clearing caches)
+                            let result = self.call_function(
+                                setattr_method,
+                                vec![obj.clone(), py_str(&name), val.clone()],
+                                vec![],
+                            );
+                            // Also set the attribute directly in the instance dict, since
+                            // __dict__ returns a COPY and self.__dict__[key] = value inside
+                            // __setattr__ would modify the copy, not the original.
+                            if let PyObject::Instance { dict, .. } = &mut *obj.borrow_mut() {
+                                dict.insert_str(&name, val.clone());
                             }
+                            result?;
+                            return Ok(true);
                         }
                     }
                 }
@@ -187,26 +187,26 @@ impl VirtualMachine {
                 let name_idx = arg as usize;
                 let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let obj = self.frames[fi].pop()?;
-                // Check for __delattr__ on Instance types first
+                // Check for __delattr__ on Instance types first — walks the
+                // MRO like the matching STORE_ATTR check above, so an
+                // inherited `__delattr__` (e.g. `unittest.mock.NonCallableMock`'s,
+                // used by every mock subclass that never redefines it) is
+                // actually found instead of silently falling through to the
+                // generic instance-attribute-deletion path below.
                 {
                     let obj_borrowed = obj.borrow();
                     if let PyObject::Instance { typ, .. } = &*obj_borrowed {
-                        let typ_ref = typ.borrow();
-                        if let PyObject::Type {
-                            dict: type_dict, ..
-                        } = &*typ_ref
+                        let typ_clone = typ.clone();
+                        drop(obj_borrowed);
+                        if let Some(delattr_method) =
+                            crate::object::lookup_dunder_via_mro(&typ_clone, "__delattr__")
                         {
-                            if let Some(delattr_method) = type_dict.get_str("__delattr__").cloned()
-                            {
-                                drop(typ_ref);
-                                drop(obj_borrowed);
-                                self.call_function(
-                                    delattr_method,
-                                    vec![obj.clone(), py_str(&name)],
-                                    vec![],
-                                )?;
-                                return Ok(true);
-                            }
+                            self.call_function(
+                                delattr_method,
+                                vec![obj.clone(), py_str(&name)],
+                                vec![],
+                            )?;
+                            return Ok(true);
                         }
                     }
                 }
