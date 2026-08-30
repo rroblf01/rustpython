@@ -428,6 +428,20 @@ pub(crate) fn lookup_dunder_via_mro(typ: &PyObjectRef, name: &str) -> Option<PyO
         // every dict-subclass's mro.
         let skip_native_dunder_hatch =
             native_marker && matches!(name, "__getitem__" | "__setitem__" | "__delitem__");
+        // `object`'s own `__setattr__`/`__delattr__` (real, present in
+        // `object.__dict__`) must NEVER preempt this ancestor walk finding a
+        // GENUINE override further down — but there's no genuine override
+        // to find below `object` itself, and `object`'s own native
+        // implementation is a raw instance-dict poke with no descriptor
+        // awareness, unlike STORE_ATTR/DELETE_ATTR's own separate
+        // "check for a __set__/__delete__ descriptor" fallback (which runs
+        // only when this function returns None). Finding `object`'s default
+        // here instead of falling through to that fallback broke any
+        // `property`-based read-only attribute on a class with no
+        // `__setattr__` of its own (`xml.dom.minicompat.NodeList.length`'s
+        // setter raising `NoModificationAllowedErr`, silently replaced by a
+        // plain successful instance-dict write).
+        let skip_object_setdelattr = matches!(name, "__setattr__" | "__delattr__");
         // Always check the type's OWN dict first, regardless of whether
         // `mro` is empty. For an ordinary user-defined class this is a
         // no-op (real mro-building always puts the class itself at
@@ -455,7 +469,7 @@ pub(crate) fn lookup_dunder_via_mro(typ: &PyObjectRef, name: &str) -> Option<PyO
                 ..
             } = &*base.borrow()
             {
-                if skip_object_default && base_name == "object" {
+                if (skip_object_default || skip_object_setdelattr) && base_name == "object" {
                     continue;
                 }
                 if skip_native_dunder_hatch && base_dict.contains_key_str(NATIVE_VALUE_CTOR_KEY) {
