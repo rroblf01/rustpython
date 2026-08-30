@@ -40,6 +40,45 @@ DONT_ACCEPT_TRUE_FOR_1 = 1 << 9
 DONT_ACCEPT_BLANKLINE = 1 << 10
 FAIL_FAST = 1 << 11
 
+_OPTIONFLAGS_BY_NAME = {
+    "NORMALIZE_WHITESPACE": NORMALIZE_WHITESPACE,
+    "ELLIPSIS": ELLIPSIS,
+    "IGNORE_EXCEPTION_DETAIL": IGNORE_EXCEPTION_DETAIL,
+    "SKIP": SKIP,
+    "REPORT_UDIFF": REPORT_UDIFF,
+    "REPORT_CDIFF": REPORT_CDIFF,
+    "REPORT_NDIFF": REPORT_NDIFF,
+    "REPORT_ONLY_FIRST_FAILURE": REPORT_ONLY_FIRST_FAILURE,
+    "DONT_ACCEPT_TRUE_FOR_1": DONT_ACCEPT_TRUE_FOR_1,
+    "DONT_ACCEPT_BLANKLINE": DONT_ACCEPT_BLANKLINE,
+    "FAIL_FAST": FAIL_FAST,
+}
+_DIRECTIVE_RE = re.compile(r"#\s*doctest:\s*([+-]\w+(?:\s*,\s*[+-]\w+)*)\s*$")
+
+
+def _parse_directive(line):
+    """Parse a trailing `# doctest: +FLAG,-FLAG` comment on a source line.
+
+    Returns (set_mask, clear_mask), both 0 if there's no directive. This
+    was entirely missing, so a per-example directive like test_cmd.py's
+    `>>> mycmd.onecmd("help meaning")  # doctest: +NORMALIZE_WHITESPACE`
+    was silently ignored — the example still ran, just always with
+    whatever the SUITE's global optionflags happened to be (usually 0).
+    """
+    m = _DIRECTIVE_RE.search(line)
+    if not m:
+        return 0, 0
+    set_mask = clear_mask = 0
+    for part in m.group(1).split(","):
+        part = part.strip()
+        sign, name = part[0], part[1:]
+        flag = _OPTIONFLAGS_BY_NAME.get(name, 0)
+        if sign == "+":
+            set_mask |= flag
+        else:
+            clear_mask |= flag
+    return set_mask, clear_mask
+
 
 class DocTestFailure(AssertionError):
     pass
@@ -112,7 +151,14 @@ def _extract_examples(docstring):
                     break
                 want_lines.append(l3[indent:] if len(l3) >= indent else s3)
                 i += 1
-            examples.append(("\n".join(src_lines), "\n".join(want_lines)))
+            set_mask = clear_mask = 0
+            for src_line in src_lines:
+                s, c = _parse_directive(src_line)
+                set_mask |= s
+                clear_mask |= c
+            examples.append(
+                ("\n".join(src_lines), "\n".join(want_lines), set_mask, clear_mask)
+            )
         else:
             i += 1
     return examples
@@ -123,6 +169,18 @@ def _normalize_ws(s):
 
 
 def _compare(got, want, optionflags):
+    if not (optionflags & DONT_ACCEPT_BLANKLINE):
+        # A genuinely blank line can't appear literally in a doctest's
+        # expected-output block (it would terminate the block when the
+        # source is parsed), so doctest's own convention is to write the
+        # literal marker `<BLANKLINE>` there instead — substitute it back
+        # to a real empty line before comparing. Was entirely missing,
+        # so any doctest whose expected output contains a blank line
+        # (a very common idiom, e.g. `cmd.Cmd.do_help`'s multi-section
+        # listing) always failed even on a byte-for-byte correct match.
+        want = "\n".join(
+            "" if line == "<BLANKLINE>" else line for line in want.split("\n")
+        )
     is_exc = want.lstrip().startswith("Traceback (most recent call last):")
     if is_exc:
         want_lines = [l for l in want.splitlines() if l.strip()]
@@ -151,12 +209,34 @@ def _compare(got, want, optionflags):
     return "Expected:\n%s\nGot:\n%s" % (want, got)
 
 
-def _run_example(source, want, globs, optionflags=0):
-    """Run one example against `globs`; None on success, else a message."""
+def _run_example(source, want, globs, optionflags=0, fakeout=None):
+    """Run one example against `globs`; None on success, else a message.
+
+    `fakeout`, if given, is a SHARED `io.StringIO` that `sys.stdout` is
+    already redirected to for the whole docstring's run (real CPython's
+    doctest keeps ONE fake stdout alive across every example in a
+    docstring, not a fresh one per example) — this matters for any example
+    that stashes `sys.stdout` into a longer-lived object early on and
+    writes to it from a LATER example (`cmd.Cmd.__init__`'s `self.stdout =
+    sys.stdout`, then a subsequent `self.stdout.write(...)` from a
+    different example needs to land in the SAME buffer doctest is
+    currently checking — test_cmd.py's `samplecmdclass` doctest). A fresh
+    `io.StringIO()` per example (the previous behavior here) made that
+    write silently disappear into a buffer nothing ever inspects.
+    """
     import io
     import contextlib
 
-    buf = io.StringIO()
+    if fakeout is not None:
+        buf = fakeout
+        start = buf.tell()
+        redirect = contextlib.nullcontext()
+        # sys.stdout is assumed already redirected to `buf` by the caller
+        # for the duration of the whole docstring run.
+    else:
+        buf = io.StringIO()
+        start = 0
+        redirect = contextlib.redirect_stdout(buf)
     try:
         try:
             code = compile(source, "<doctest>", "eval")
@@ -164,7 +244,7 @@ def _run_example(source, want, globs, optionflags=0):
         except SyntaxError:
             code = compile(source, "<doctest>", "exec")
             is_eval = False
-        with contextlib.redirect_stdout(buf):
+        with redirect:
             if is_eval:
                 result = eval(code, globs)
                 # Mirrors the interactive interpreter's own auto-print of a
@@ -176,12 +256,12 @@ def _run_example(source, want, globs, optionflags=0):
             else:
                 exec(code, globs)
     except Exception as e:
-        got = buf.getvalue()
+        got = buf.getvalue()[start:]
         got += "Traceback (most recent call last):\n"
         msg = str(e)
         got += ("%s: %s" % (type(e).__name__, msg)) if msg else type(e).__name__
         return _compare(got, want, optionflags)
-    return _compare(buf.getvalue(), want, optionflags)
+    return _compare(buf.getvalue()[start:], want, optionflags)
 
 
 def _member_docstrings(module):
@@ -240,14 +320,20 @@ def _class_docstrings(cls, mod_name, prefix):
 
 def _make_case(qualname, examples, base_globs, optionflags):
     def run():
+        import io
+        import contextlib
+
         test_globs = dict(base_globs)
         failures = []
-        for source, want in examples:
-            err = _run_example(source, want, test_globs, optionflags)
-            if err is not None:
-                failures.append(err)
-                if optionflags & REPORT_ONLY_FIRST_FAILURE:
-                    break
+        fakeout = io.StringIO()
+        with contextlib.redirect_stdout(fakeout):
+            for source, want, set_mask, clear_mask in examples:
+                flags = (optionflags | set_mask) & ~clear_mask
+                err = _run_example(source, want, test_globs, flags, fakeout)
+                if err is not None:
+                    failures.append(err)
+                    if optionflags & REPORT_ONLY_FIRST_FAILURE:
+                        break
         if failures:
             raise DocTestFailure(
                 "%d of %d examples failed in docstring for %s:\n%s"
@@ -318,6 +404,9 @@ def testmod(m=None, name=None, globs=None, verbose=None, report=True,
     if extraglobs:
         base_globs.update(extraglobs)
 
+    import io
+    import contextlib
+
     failed = 0
     attempted = 0
     for qualname, doc in _member_docstrings(module):
@@ -325,17 +414,20 @@ def testmod(m=None, name=None, globs=None, verbose=None, report=True,
         if not examples:
             continue
         test_globs = dict(base_globs)
-        for source, want in examples:
-            attempted += 1
-            err = _run_example(source, want, test_globs, optionflags)
-            if err is not None:
-                failed += 1
-                if verbose:
-                    print("*" * 70)
-                    print("Failure in docstring for", qualname)
-                    print(err)
-                if raise_on_error:
-                    raise DocTestFailure(err)
+        fakeout = io.StringIO()
+        with contextlib.redirect_stdout(fakeout):
+            for source, want, set_mask, clear_mask in examples:
+                attempted += 1
+                flags = (optionflags | set_mask) & ~clear_mask
+                err = _run_example(source, want, test_globs, flags, fakeout)
+                if err is not None:
+                    failed += 1
+                    if verbose:
+                        print("*" * 70, file=sys.__stdout__)
+                        print("Failure in docstring for", qualname, file=sys.__stdout__)
+                        print(err, file=sys.__stdout__)
+                    if raise_on_error:
+                        raise DocTestFailure(err)
     if report and failed:
         print("%d items had failures" % failed)
     return TestResults(failed, attempted)
@@ -355,28 +447,40 @@ def testfile(filename, module_relative=True, name=None, package=None,
     if extraglobs:
         test_globs.update(extraglobs)
 
+    import io
+    import contextlib
+
     failed = 0
     attempted = 0
-    for source, want in _extract_examples(content):
-        attempted += 1
-        err = _run_example(source, want, test_globs, optionflags)
-        if err is not None:
-            failed += 1
-            if raise_on_error:
-                raise DocTestFailure(err)
+    fakeout = io.StringIO()
+    with contextlib.redirect_stdout(fakeout):
+        for source, want, set_mask, clear_mask in _extract_examples(content):
+            attempted += 1
+            flags = (optionflags | set_mask) & ~clear_mask
+            err = _run_example(source, want, test_globs, flags, fakeout)
+            if err is not None:
+                failed += 1
+                if raise_on_error:
+                    raise DocTestFailure(err)
     return TestResults(failed, attempted)
 
 
 def run_docstring_examples(f, globs, verbose=False, name="NoName",
                             compileflags=None, optionflags=0):
+    import io
+    import contextlib
+
     doc = getattr(f, "__doc__", None)
     if not isinstance(doc, str):
         return
     test_globs = dict(globs)
-    for source, want in _extract_examples(doc):
-        err = _run_example(source, want, test_globs, optionflags)
-        if err is not None and verbose:
-            print(err)
+    fakeout = io.StringIO()
+    with contextlib.redirect_stdout(fakeout):
+        for source, want, set_mask, clear_mask in _extract_examples(doc):
+            flags = (optionflags | set_mask) & ~clear_mask
+            err = _run_example(source, want, test_globs, flags, fakeout)
+            if err is not None and verbose:
+                print(err, file=sys.__stdout__)
 
 
 class DocTestFinder:

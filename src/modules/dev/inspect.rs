@@ -465,6 +465,63 @@ pub fn create_inspect_dict() -> HashMap<String, PyObjectRef> {
         Ok(doc.unwrap_or(py_none()))
     });
 
+    // Port of Lib/inspect.py's own `cleandoc` (this native module doesn't
+    // delegate to that pure-Python file at all — it's a SEPARATE `inspect`
+    // implementation that happens to win module-registration priority, so
+    // gaps there don't get filled by Lib/'s more complete version). Missing
+    // entirely was worse than a wrong result: `from inspect import
+    // cleandoc` raised `ModuleNotFoundError: No module named
+    // 'inspect.cleandoc'` (via the "maybe it's a submodule" import
+    // fallback) instead of `AttributeError`/actually working — real
+    // trigger: `cmd.Cmd.do_help`'s docstring-dedent step, test_cmd.py.
+    inspect_func!("cleandoc", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("cleandoc() requires 1 argument"));
+        }
+        let doc = args[0].str();
+        let expanded: String = {
+            let mut out = String::new();
+            let mut col = 0usize;
+            for c in doc.chars() {
+                if c == '\t' {
+                    let spaces = 8 - (col % 8);
+                    out.push_str(&" ".repeat(spaces));
+                    col += spaces;
+                } else if c == '\n' {
+                    out.push(c);
+                    col = 0;
+                } else {
+                    out.push(c);
+                    col += 1;
+                }
+            }
+            out
+        };
+        let mut lines: Vec<String> = expanded.split('\n').map(|s| s.to_string()).collect();
+        let mut margin = usize::MAX;
+        for line in lines.iter().skip(1) {
+            let stripped = line.trim_start_matches(' ');
+            if !stripped.is_empty() {
+                margin = margin.min(line.len() - stripped.len());
+            }
+        }
+        if let Some(first) = lines.first_mut() {
+            *first = first.trim_start_matches(' ').to_string();
+        }
+        if margin < usize::MAX {
+            for line in lines.iter_mut().skip(1) {
+                *line = line.chars().skip(margin).collect();
+            }
+        }
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        while lines.first().is_some_and(|l| l.is_empty()) {
+            lines.remove(0);
+        }
+        Ok(py_str(&lines.join("\n")))
+    });
+
     inspect_func!("getfile", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("getfile() requires 1 argument"));

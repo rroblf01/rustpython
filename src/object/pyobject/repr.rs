@@ -193,6 +193,19 @@ impl PyObject {
                 format!("slice({}, {}, {})", start.repr(), stop.repr(), step.repr())
             }
             PyObject::Function(ref f) => format!("<function {}>", f.code.name),
+            // A builtin exception "class" (`ValueError`, `OSError`, ...) is
+            // represented as a `BuiltinFunction` marker in this codebase
+            // (see `is_builtin_exception_class_name`'s own doc comments),
+            // but it IS a real class from Python's perspective — its repr
+            // must read like one (`<class 'ValueError'>`), not like an
+            // ordinary function (`<built-in function ValueError>`). Real
+            // trigger: `cmd`'s doctest printing `sys.exc_info()[0]`
+            // (test_cmd.py's CmdPrintExceptionClass).
+            PyObject::BuiltinFunction { name, .. }
+                if crate::object::is_builtin_exception_class_name(name) =>
+            {
+                format!("<class '{}'>", name)
+            }
             PyObject::BuiltinFunction { name, .. } => format!("<built-in function {}>", name),
             PyObject::BuiltinMethod { name, self_obj, .. } => {
                 // CPython: `<built-in method split of str object at 0x...>`

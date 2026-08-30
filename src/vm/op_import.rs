@@ -336,7 +336,24 @@ impl VirtualMachine {
                                 // ImportError, so a genuine bug inside an
                                 // imported submodule was indistinguishable
                                 // from the name simply not existing.
-                                if matches!(e, PyError::ImportError(_)) {
+                                // `import_module_from_file` raises
+                                // `PyError::Exception("ModuleNotFoundError",
+                                // ..)` (not the `ImportError` variant) for
+                                // "no such file" — e.g. `from inspect import
+                                // cleandoc` tries the submodule path
+                                // `inspect.cleandoc`, genuinely doesn't find
+                                // that FILE, and previously let the raw
+                                // `ModuleNotFoundError: No module named
+                                // 'inspect.cleandoc'` propagate instead of
+                                // the correct `ImportError: cannot import
+                                // name 'cleandoc' from 'inspect'` (real
+                                // CPython: a missing NAME inside an existing
+                                // module is ImportError, not
+                                // ModuleNotFoundError, which is reserved for
+                                // a missing MODULE).
+                                let is_module_not_found = matches!(&e, PyError::ImportError(_))
+                                    || matches!(&e, PyError::Exception(typ, _) if typ == "ModuleNotFoundError");
+                                if is_module_not_found {
                                     return Err(PyError::ImportError(format!(
                                         "cannot import name '{}' from '{}'",
                                         name, module_name
