@@ -457,6 +457,45 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+/// Patches `socket.error`/`socket.timeout`/`socket.gaierror`/
+/// `socket.herror` onto an already-built socket module dict, using the
+/// REAL builtin OSError/TimeoutError objects — `create_socket_dict` itself
+/// has no access to `builtins` (called with no arguments, before
+/// `set_builtins_ref`'s thread-local is even populated), so this must run
+/// from `register_native_modules`, which receives `builtins` directly as a
+/// parameter. `socket.error`/`socket.timeout` are straight aliases (PEP
+/// 3151 predates them; kept for compatibility, `socket.error is OSError`);
+/// `gaierror`/`herror` are REAL OSError subclasses (`.__base__ is
+/// OSError`), with `bases` holding the actual builtin object directly —
+/// that also makes `find_exception_base_name`'s existing base-list scan
+/// recognize their exception ancestry for free, no separate name-based
+/// registration needed.
+pub(crate) fn patch_socket_exception_aliases(
+    socket_dict: &mut HashMap<String, PyObjectRef>,
+    builtins: &HashMap<crate::interner::StrId, PyObjectRef>,
+) {
+    let real_oserror = builtins.get(&crate::interner::intern("OSError")).cloned();
+    if let Some(oserror) = real_oserror.clone() {
+        socket_dict.insert("error".to_string(), oserror);
+    }
+    if let Some(real_timeout) = builtins.get(&crate::interner::intern("TimeoutError")).cloned() {
+        socket_dict.insert("timeout".to_string(), real_timeout);
+    }
+    for name in ["gaierror", "herror"] {
+        let bases: Vec<PyObjectRef> = real_oserror.clone().into_iter().collect();
+        let typ = PyObjectRef::new(PyObject::Type {
+            name: name.to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+            bases,
+            mro: vec![],
+        });
+        if let PyObject::Type { mro, .. } = &mut *typ.borrow_mut() {
+            *mro = vec![typ.clone()];
+        }
+        socket_dict.insert(name.to_string(), typ);
+    }
+}
+
 // Moved here from object.rs (was under a "---- urllib module ----" banner
 // in the monolithic object.rs — see the file-splitting refactor's memory
 // entry for context).

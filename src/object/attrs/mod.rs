@@ -1002,6 +1002,24 @@ impl ObjectAccess for PyObject {
                     return Err(PyError::reference_error("weakly-referenced object no longer exists"));
                 }
             }
+            // `del e.some_dynamic_attr` for a per-instance attribute set
+            // via `set_attribute`'s `PyObject::Exception { extra, .. }`
+            // catch-all arm (`e.characters_written = 5`, `e.name = ...`,
+            // etc.) — this had no arm at all here, so any `del` on such an
+            // attribute always fell to the catch-all AttributeError below
+            // even immediately after a successful set (test_exception_
+            // hierarchy's BlockingIOError.characters_written round-trip).
+            PyObject::Exception { extra, typ, .. } => {
+                let removed = extra.as_mut().and_then(|map| map.remove(name)).is_some();
+                if removed {
+                    Ok(())
+                } else {
+                    Err(PyError::attribute_error(format!(
+                        "'{}' object has no attribute '{}'",
+                        typ, name
+                    )))
+                }
+            }
             _ => Err(PyError::attribute_error(format!(
                 "'{}' object has no attribute '{}'",
                 self.type_name(),

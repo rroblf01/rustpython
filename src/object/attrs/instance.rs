@@ -35,6 +35,20 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                 if name == "__bases__" {
                     return Ok(PyObjectRef::new(PyObject::Tuple(bases.clone())));
                 }
+                if name == "__base__" {
+                    // CPython: `__base__` is the first of `__bases__` (the
+                    // "best base" in multiple-inheritance cases, but for
+                    // every class this codebase constructs there's at most
+                    // one real native/exception base, so first-is-fine);
+                    // `object` itself falls back to `None`. Was missing
+                    // entirely — needed so e.g. `socket.gaierror.__base__
+                    // is OSError` can be checked at all.
+                    return Ok(bases
+                        .first()
+                        .cloned()
+                        .or_else(|| crate::object::get_primitive_type("object"))
+                        .unwrap_or_else(py_none));
+                }
                 if name == "__name__" {
                     return Ok(py_str(type_name));
                 }

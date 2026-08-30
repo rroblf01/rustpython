@@ -187,11 +187,19 @@ pub(crate) fn register_native_modules(
         let zoneinfo_dict = create_zoneinfo_dict();
         modules.insert_str("zoneinfo", create_module("zoneinfo", zoneinfo_dict));
 
-        let socket_dict = create_socket_dict();
+        let mut socket_dict = create_socket_dict();
+        crate::modules::patch_socket_exception_aliases(&mut socket_dict, builtins);
         modules.insert_str("socket", create_module("socket", socket_dict.clone()));
         modules.insert_str("_socket", create_module("_socket", socket_dict));
 
-        let select_dict = create_select_dict();
+        let mut select_dict = create_select_dict();
+        // `select.error is OSError` — same fix as socket.error just above
+        // (create_select_dict built its own synthetic "OSError"-named
+        // Type instead of using the real one; `assertIs` needs genuine
+        // object identity, not just a matching name).
+        if let Some(real_oserror) = builtins.get(&crate::interner::intern("OSError")).cloned() {
+            select_dict.insert("error".to_string(), real_oserror);
+        }
         modules.insert_str("select", create_module("select", select_dict));
 
         let re_dict = create_re_dict();

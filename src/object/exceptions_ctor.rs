@@ -309,7 +309,49 @@ make_exception_func!(
     builtin_make_exception_connectionrefusederror,
     "ConnectionRefusedError"
 );
-make_exception_func!(builtin_make_exception_blockingioerror, "BlockingIOError");
+// `BlockingIOError(errno, strerror, characters_written)` — same first two
+// positional args as OSError (`.errno`/`.strerror`), but its OWN 3rd
+// positional is `.characters_written`, not `.filename` (real CPython:
+// `BlockingIOError` adds this one extra attribute over plain `OSError`).
+// See `builtin_make_exception_oserror` for the shared errno/strerror shape.
+pub fn builtin_make_exception_blockingioerror(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if let Some(last) = args.last() {
+        if matches!(&*last.borrow(), PyObject::Dict(_)) {
+            return Err(PyError::type_error("BlockingIOError() takes no keyword arguments"));
+        }
+    }
+    let mut extra = std::collections::HashMap::new();
+    let mut clean_args: Vec<PyObjectRef> = Vec::new();
+    if let Some(a0) = args.first() {
+        clean_args.push(a0.clone());
+    }
+    if let Some(a1) = args.get(1) {
+        if let Some(a0) = args.first() {
+            extra.insert("errno".to_string(), a0.clone());
+        }
+        extra.insert("strerror".to_string(), a1.clone());
+        clean_args.push(a1.clone());
+    }
+    if let Some(a2) = args.get(2) {
+        // Real CPython only exposes `.characters_written` when the 3rd
+        // positional is actually int-like (`PyBlockingIOError_init`
+        // requires it to `PyNumber_Index` cleanly) — a non-int 3rd arg
+        // (test_exception_hierarchy's own `BlockingIOError('a','b','c')`)
+        // leaves the attribute unset entirely, not set-to-a-string.
+        if a2.as_i64().is_some() {
+            extra.insert("characters_written".to_string(), a2.clone());
+        }
+    }
+    Ok(PyObjectRef::new(PyObject::Exception {
+        typ: "BlockingIOError".to_string(),
+        args: clean_args,
+        cause: None,
+        suppress_context: false,
+        context: None,
+        traceback: None,
+        extra: if extra.is_empty() { None } else { Some(extra) },
+    }))
+}
 make_exception_func!(
     builtin_make_exception_childprocesserror,
     "ChildProcessError"
