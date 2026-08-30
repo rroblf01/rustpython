@@ -209,7 +209,291 @@ impl Compiler {
     pub(crate) fn collect_assigned_names(stmts: &[Stmt]) -> HashSet<String> {
         let mut assigned = HashSet::new();
         Self::collect_assigned_inner(stmts, &mut assigned);
+        Self::collect_comprehension_targets_in_stmts(stmts, &mut assigned);
         assigned
+    }
+
+    /// A comprehension/genexpr's `for target in ...` binds `target` — but
+    /// unlike a real nested scope (CPython proper), THIS compiler inlines
+    /// every comprehension directly into the enclosing function's own
+    /// bytecode (see `compile_comprehension`'s doc comments), so that target
+    /// really is one of the enclosing function's own locals, exactly as if
+    /// written as an ordinary `for` statement. `collect_assigned_inner`
+    /// (used to compute `local_names` in `analyze_function`) never looked
+    /// inside expressions at all, so it never saw these targets — meaning a
+    /// name bound ONLY by a comprehension's own `for` was invisible to
+    /// `local_names`, so even once `collect_nested_refs_in_expr` correctly
+    /// found that (say) an embedded `lambda: i` needed `i` as a cellvar, the
+    /// `local_names ∩ nested_refs` intersection in `analyze_function` came
+    /// up empty and `i` was never added to `cell_vars` up front. It still
+    /// became a cellvar EVENTUALLY, but only via `compile_function`'s late
+    /// "emit LOAD_CLOSURE" retrofit — too late to change the `STORE_FAST`
+    /// already emitted for the comprehension's own `for i in ...` (see
+    /// `test_setcomps.py`'s "each lambda captures a distinct per-iteration
+    /// value instead of sharing one late-bound cell" doctest failures).
+    ///
+    /// Stops at a nested `lambda`'s body: a comprehension written INSIDE a
+    /// lambda belongs to whatever scope contains THAT lambda (compiled via
+    /// its own separate `compile_function`/`analyze_function` call), not
+    /// this one.
+    pub(crate) fn collect_comprehension_targets_in_stmts(
+        stmts: &[Stmt],
+        assigned: &mut HashSet<String>,
+    ) {
+        for stmt in stmts {
+            let stmt = Self::unwrap_located(stmt);
+            match stmt {
+                Stmt::FunctionDef { .. } | Stmt::ClassDef { .. } => {
+                    // Own separate scope — handled by its own analyze_function.
+                }
+                Stmt::Expr(e) | Stmt::Return(Some(e)) => {
+                    Self::collect_comprehension_targets_in_expr(e, assigned)
+                }
+                Stmt::Delete(targets) => {
+                    for t in targets {
+                        Self::collect_comprehension_targets_in_expr(t, assigned);
+                    }
+                }
+                Stmt::Assign { targets, value } => {
+                    for t in targets {
+                        Self::collect_comprehension_targets_in_expr(t, assigned);
+                    }
+                    Self::collect_comprehension_targets_in_expr(value, assigned);
+                }
+                Stmt::AugAssign { target, value, .. } => {
+                    Self::collect_comprehension_targets_in_expr(target, assigned);
+                    Self::collect_comprehension_targets_in_expr(value, assigned);
+                }
+                Stmt::AnnAssign {
+                    target,
+                    annotation,
+                    value,
+                } => {
+                    Self::collect_comprehension_targets_in_expr(target, assigned);
+                    Self::collect_comprehension_targets_in_expr(annotation, assigned);
+                    if let Some(v) = value {
+                        Self::collect_comprehension_targets_in_expr(v, assigned);
+                    }
+                }
+                Stmt::If { test, body, orelse } => {
+                    Self::collect_comprehension_targets_in_expr(test, assigned);
+                    Self::collect_comprehension_targets_in_stmts(body, assigned);
+                    Self::collect_comprehension_targets_in_stmts(orelse, assigned);
+                }
+                Stmt::While { test, body, orelse } => {
+                    Self::collect_comprehension_targets_in_expr(test, assigned);
+                    Self::collect_comprehension_targets_in_stmts(body, assigned);
+                    Self::collect_comprehension_targets_in_stmts(orelse, assigned);
+                }
+                Stmt::For {
+                    target,
+                    iter,
+                    body,
+                    orelse,
+                    ..
+                } => {
+                    Self::collect_comprehension_targets_in_expr(target, assigned);
+                    Self::collect_comprehension_targets_in_expr(iter, assigned);
+                    Self::collect_comprehension_targets_in_stmts(body, assigned);
+                    Self::collect_comprehension_targets_in_stmts(orelse, assigned);
+                }
+                Stmt::With { items, body, .. } => {
+                    for item in items {
+                        Self::collect_comprehension_targets_in_expr(
+                            &item.context_expr,
+                            assigned,
+                        );
+                        if let Some(var) = &item.optional_vars {
+                            Self::collect_comprehension_targets_in_expr(var, assigned);
+                        }
+                    }
+                    Self::collect_comprehension_targets_in_stmts(body, assigned);
+                }
+                Stmt::Match { subject, cases } => {
+                    Self::collect_comprehension_targets_in_expr(subject, assigned);
+                    for case in cases {
+                        if let Some(guard) = &case.guard {
+                            Self::collect_comprehension_targets_in_expr(guard, assigned);
+                        }
+                        Self::collect_comprehension_targets_in_stmts(&case.body, assigned);
+                    }
+                }
+                Stmt::Raise { exc, cause } => {
+                    if let Some(e) = exc {
+                        Self::collect_comprehension_targets_in_expr(e, assigned);
+                    }
+                    if let Some(c) = cause {
+                        Self::collect_comprehension_targets_in_expr(c, assigned);
+                    }
+                }
+                Stmt::Try {
+                    body,
+                    handlers,
+                    handlers_star,
+                    orelse,
+                    finalbody,
+                } => {
+                    Self::collect_comprehension_targets_in_stmts(body, assigned);
+                    for h in handlers {
+                        if let Some(t) = &h.typ {
+                            Self::collect_comprehension_targets_in_expr(t, assigned);
+                        }
+                        Self::collect_comprehension_targets_in_stmts(&h.body, assigned);
+                    }
+                    for h in handlers_star {
+                        if let Some(t) = &h.typ {
+                            Self::collect_comprehension_targets_in_expr(t, assigned);
+                        }
+                        Self::collect_comprehension_targets_in_stmts(&h.body, assigned);
+                    }
+                    Self::collect_comprehension_targets_in_stmts(orelse, assigned);
+                    Self::collect_comprehension_targets_in_stmts(finalbody, assigned);
+                }
+                Stmt::Assert { test, msg } => {
+                    Self::collect_comprehension_targets_in_expr(test, assigned);
+                    if let Some(m) = msg {
+                        Self::collect_comprehension_targets_in_expr(m, assigned);
+                    }
+                }
+                Stmt::TypeAlias { value, .. } => {
+                    Self::collect_comprehension_targets_in_expr(value, assigned)
+                }
+                Stmt::Return(None)
+                | Stmt::Pass
+                | Stmt::Break
+                | Stmt::Continue
+                | Stmt::Import(_)
+                | Stmt::ImportFrom { .. }
+                | Stmt::Global(_)
+                | Stmt::Nonlocal(_) => {}
+                Stmt::Located(..) => unreachable!("stmt already unwrapped via unwrap_located"),
+            }
+        }
+    }
+
+    pub(crate) fn collect_comprehension_targets_in_expr(expr: &Expr, assigned: &mut HashSet<String>) {
+        match expr {
+            Expr::Lambda { .. } => {
+                // Own separate scope.
+            }
+            Expr::Name(_) | Expr::Constant(_) | Expr::Yield(None) => {}
+            Expr::BoolOp { values, .. } => {
+                for v in values {
+                    Self::collect_comprehension_targets_in_expr(v, assigned);
+                }
+            }
+            Expr::NamedExpr { target, value } => {
+                Self::collect_comprehension_targets_in_expr(target, assigned);
+                Self::collect_comprehension_targets_in_expr(value, assigned);
+            }
+            Expr::BinOp { left, right, .. } => {
+                Self::collect_comprehension_targets_in_expr(left, assigned);
+                Self::collect_comprehension_targets_in_expr(right, assigned);
+            }
+            Expr::UnaryOp { operand, .. }
+            | Expr::Starred(operand)
+            | Expr::Await(operand)
+            | Expr::YieldFrom(operand) => {
+                Self::collect_comprehension_targets_in_expr(operand, assigned);
+            }
+            Expr::Yield(Some(e)) => Self::collect_comprehension_targets_in_expr(e, assigned),
+            Expr::IfExp { test, body, orelse } => {
+                for e in [test, body, orelse] {
+                    Self::collect_comprehension_targets_in_expr(e, assigned);
+                }
+            }
+            Expr::Compare {
+                left, comparators, ..
+            } => {
+                Self::collect_comprehension_targets_in_expr(left, assigned);
+                for c in comparators {
+                    Self::collect_comprehension_targets_in_expr(c, assigned);
+                }
+            }
+            Expr::Call {
+                func,
+                args,
+                keywords,
+            } => {
+                Self::collect_comprehension_targets_in_expr(func, assigned);
+                for a in args {
+                    Self::collect_comprehension_targets_in_expr(a, assigned);
+                }
+                for kw in keywords {
+                    Self::collect_comprehension_targets_in_expr(&kw.value, assigned);
+                }
+            }
+            Expr::Attribute { value, .. } => {
+                Self::collect_comprehension_targets_in_expr(value, assigned)
+            }
+            Expr::Subscript { value, slice } => {
+                Self::collect_comprehension_targets_in_expr(value, assigned);
+                Self::collect_comprehension_targets_in_expr(slice, assigned);
+            }
+            Expr::List(elts) | Expr::Tuple(elts) | Expr::Set(elts) => {
+                for e in elts {
+                    Self::collect_comprehension_targets_in_expr(e, assigned);
+                }
+            }
+            Expr::Dict { keys, values } => {
+                for k in keys.iter().flatten() {
+                    Self::collect_comprehension_targets_in_expr(k, assigned);
+                }
+                for v in values {
+                    Self::collect_comprehension_targets_in_expr(v, assigned);
+                }
+            }
+            Expr::Slice { lower, upper, step } => {
+                for s in [lower, upper, step].iter().filter_map(|s| s.as_ref()) {
+                    Self::collect_comprehension_targets_in_expr(s, assigned);
+                }
+            }
+            Expr::FString(parts) => {
+                for part in parts {
+                    if let FStringPart::Expr {
+                        expr, format_spec, ..
+                    } = part
+                    {
+                        Self::collect_comprehension_targets_in_expr(expr, assigned);
+                        if let Some(fs) = format_spec {
+                            Self::collect_comprehension_targets_in_expr(fs, assigned);
+                        }
+                    }
+                }
+            }
+            Expr::JoinedStr(parts) => {
+                for part in parts {
+                    Self::collect_comprehension_targets_in_expr(part, assigned);
+                }
+            }
+            Expr::ListComp { elt, generators }
+            | Expr::SetComp { elt, generators }
+            | Expr::GeneratorExp { elt, generators } => {
+                for gen in generators {
+                    Self::collect_assign_target_names(&gen.target, assigned);
+                    Self::collect_comprehension_targets_in_expr(&gen.iter, assigned);
+                    for if_cond in &gen.ifs {
+                        Self::collect_comprehension_targets_in_expr(if_cond, assigned);
+                    }
+                }
+                Self::collect_comprehension_targets_in_expr(elt, assigned);
+            }
+            Expr::DictComp {
+                key,
+                value,
+                generators,
+            } => {
+                for gen in generators {
+                    Self::collect_assign_target_names(&gen.target, assigned);
+                    Self::collect_comprehension_targets_in_expr(&gen.iter, assigned);
+                    for if_cond in &gen.ifs {
+                        Self::collect_comprehension_targets_in_expr(if_cond, assigned);
+                    }
+                }
+                Self::collect_comprehension_targets_in_expr(key, assigned);
+                Self::collect_comprehension_targets_in_expr(value, assigned);
+            }
+        }
     }
 
     pub(crate) fn collect_assigned_inner(stmts: &[Stmt], assigned: &mut HashSet<String>) {
@@ -765,7 +1049,14 @@ impl Compiler {
                 // repro where an `if <closed-over free var>:` branch always
                 // took the same path regardless of the free var's real
                 // value, because index 0 pointed at a *cell* var instead.)
-                Stmt::If { body, orelse, .. } => {
+                Stmt::If { test, body, orelse } => {
+                    Self::collect_nested_refs_in_expr(
+                        test,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
                     Self::collect_nested_refs_inner(
                         body,
                         local_names,
@@ -781,7 +1072,14 @@ impl Compiler {
                         refs,
                     );
                 }
-                Stmt::While { body, orelse, .. } => {
+                Stmt::While { test, body, orelse } => {
+                    Self::collect_nested_refs_in_expr(
+                        test,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
                     Self::collect_nested_refs_inner(
                         body,
                         local_names,
@@ -797,7 +1095,27 @@ impl Compiler {
                         refs,
                     );
                 }
-                Stmt::For { body, orelse, .. } => {
+                Stmt::For {
+                    target,
+                    iter,
+                    body,
+                    orelse,
+                    ..
+                } => {
+                    Self::collect_nested_refs_in_expr(
+                        target,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                    Self::collect_nested_refs_in_expr(
+                        iter,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
                     Self::collect_nested_refs_inner(
                         body,
                         local_names,
@@ -813,7 +1131,25 @@ impl Compiler {
                         refs,
                     );
                 }
-                Stmt::With { body, .. } => {
+                Stmt::With { items, body, .. } => {
+                    for item in items {
+                        Self::collect_nested_refs_in_expr(
+                            &item.context_expr,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
+                        if let Some(var) = &item.optional_vars {
+                            Self::collect_nested_refs_in_expr(
+                                var,
+                                local_names,
+                                global_names,
+                                nonlocal_names,
+                                refs,
+                            );
+                        }
+                    }
                     Self::collect_nested_refs_inner(
                         body,
                         local_names,
@@ -869,7 +1205,554 @@ impl Compiler {
                         refs,
                     );
                 }
-                _ => {}
+                // Every remaining statement kind carries no nested statement
+                // BODY of its own — but its expression(s) can still hide a
+                // `lambda`/comprehension referencing one of our locals (see
+                // `collect_nested_refs_in_expr`'s doc comment), so scan them
+                // the same way.
+                Stmt::Expr(e) | Stmt::Return(Some(e)) => {
+                    Self::collect_nested_refs_in_expr(
+                        e,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+                Stmt::Delete(targets) => {
+                    for t in targets {
+                        Self::collect_nested_refs_in_expr(
+                            t,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
+                    }
+                }
+                Stmt::Assign { targets, value } => {
+                    for t in targets {
+                        Self::collect_nested_refs_in_expr(
+                            t,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
+                    }
+                    Self::collect_nested_refs_in_expr(
+                        value,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+                Stmt::AugAssign { target, value, .. } => {
+                    Self::collect_nested_refs_in_expr(
+                        target,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                    Self::collect_nested_refs_in_expr(
+                        value,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+                Stmt::AnnAssign {
+                    target,
+                    annotation,
+                    value,
+                } => {
+                    Self::collect_nested_refs_in_expr(
+                        target,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                    Self::collect_nested_refs_in_expr(
+                        annotation,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                    if let Some(v) = value {
+                        Self::collect_nested_refs_in_expr(
+                            v,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
+                    }
+                }
+                Stmt::Raise { exc, cause } => {
+                    if let Some(e) = exc {
+                        Self::collect_nested_refs_in_expr(
+                            e,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
+                    }
+                    if let Some(c) = cause {
+                        Self::collect_nested_refs_in_expr(
+                            c,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
+                    }
+                }
+                Stmt::Assert { test, msg } => {
+                    Self::collect_nested_refs_in_expr(
+                        test,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                    if let Some(m) = msg {
+                        Self::collect_nested_refs_in_expr(
+                            m,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
+                    }
+                }
+                Stmt::Match { subject, cases } => {
+                    Self::collect_nested_refs_in_expr(
+                        subject,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                    for case in cases {
+                        if let Some(guard) = &case.guard {
+                            Self::collect_nested_refs_in_expr(
+                                guard,
+                                local_names,
+                                global_names,
+                                nonlocal_names,
+                                refs,
+                            );
+                        }
+                        Self::collect_nested_refs_inner(
+                            &case.body,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
+                    }
+                }
+                Stmt::TypeAlias { value, .. } => {
+                    Self::collect_nested_refs_in_expr(
+                        value,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+                Stmt::Return(None)
+                | Stmt::Pass
+                | Stmt::Break
+                | Stmt::Continue
+                | Stmt::Import(_)
+                | Stmt::ImportFrom { .. }
+                | Stmt::Global(_)
+                | Stmt::Nonlocal(_) => {}
+                Stmt::Located(..) => unreachable!("stmt already unwrapped via unwrap_located"),
+            }
+        }
+    }
+
+    /// Find names a `lambda` embedded ANYWHERE inside an expression (a
+    /// comprehension's `elt`, a call argument, a dict value, ...) references
+    /// from an enclosing scope — the expression-level equivalent of
+    /// `collect_nested_refs_inner`'s `Stmt::FunctionDef` case. Real
+    /// CPython's list/set/dict comprehensions and genexprs compile to their
+    /// own nested code object, so a `lambda` inside one is nested two scopes
+    /// deep from the function that contains the comprehension; THIS
+    /// compiler instead inlines comprehensions directly into the enclosing
+    /// function's own bytecode (see `compile_comprehension`), so a `lambda`
+    /// inside a comprehension is really nested just ONE scope deep — inside
+    /// the very function whose `analyze_function` upfront pass is running.
+    ///
+    /// Before this existed, `collect_nested_refs_inner` only walked
+    /// `Stmt::FunctionDef`/`Stmt::ClassDef` (plus transparent control-flow
+    /// containers) — a `lambda` reachable only through an *expression*
+    /// (`items = {(lambda: i) for i in range(5)}`, a `Stmt::Assign` whose
+    /// value is a `SetComp` containing the `Lambda`) was invisible to it
+    /// entirely. That meant a variable like `i`, referenced ONLY by such a
+    /// lambda, never made it into the enclosing function's upfront
+    /// `cell_vars` list — so `compile_function`'s single `MAKE_CELL` pass at
+    /// function entry never ran for it, and every earlier use of `i` in the
+    /// function's own body (the comprehension's own loop) was already
+    /// compiled as a plain `STORE_FAST`/`LOAD_FAST` by the time the lambda's
+    /// closure-wiring code (compile_function's late "emit LOAD_CLOSURE for
+    /// each free var" step) tried to retroactively push `i` onto
+    /// `self.code.cellvars` — too late to rewrite bytecode already emitted,
+    /// and computing `LOAD_CLOSURE`'s operand as a position *within*
+    /// `cellvars` (a small, freshly-grown list) rather than `i`'s real
+    /// varnames slot, so it silently addressed a WRONG, unrelated local
+    /// slot instead (confirmed via `def outer(n): rangen = range(n)\n for i
+    /// in rangen:\n  def f():\n   for j in rangen: yield j` — corrupting
+    /// `rangen`'s own slot with the for-loop's iterator, later observed as
+    /// `TypeError: 'range_iterator' object is not callable`; also the root
+    /// cause of `test_setcomps.py`'s "each lambda captures a distinct
+    /// per-iteration value" doctest failures instead of correctly sharing
+    /// one late-bound cell).
+    pub(crate) fn collect_nested_refs_in_expr(
+        expr: &Expr,
+        local_names: &HashSet<String>,
+        global_names: &HashSet<String>,
+        nonlocal_names: &HashSet<String>,
+        refs: &mut HashSet<String>,
+    ) {
+        match expr {
+            Expr::Lambda { args, body } => {
+                let inner_local: HashSet<String> = args.iter().map(|a| a.arg.clone()).collect();
+                for arg in args {
+                    if let Some(d) = &arg.default {
+                        Self::collect_nested_refs_in_expr(
+                            d,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
+                    }
+                    if let Some(a) = &arg.annotation {
+                        Self::collect_nested_refs_in_expr(
+                            a,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
+                    }
+                }
+                let mut own_refs = HashSet::new();
+                Self::collect_names_expr(body, &mut own_refs);
+                for name in &own_refs {
+                    if !inner_local.contains(name) && !global_names.contains(name) {
+                        refs.insert(name.clone());
+                    }
+                }
+                // A lambda nested even deeper inside this one's body needs
+                // the same treatment.
+                Self::collect_nested_refs_in_expr(
+                    body,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
+            }
+            Expr::Name(_) | Expr::Constant(_) | Expr::Yield(None) => {}
+            Expr::BoolOp { values, .. } => {
+                for v in values {
+                    Self::collect_nested_refs_in_expr(
+                        v,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+            }
+            Expr::NamedExpr { target, value } => {
+                Self::collect_nested_refs_in_expr(
+                    target,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
+                Self::collect_nested_refs_in_expr(
+                    value,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
+            }
+            Expr::BinOp { left, right, .. } => {
+                Self::collect_nested_refs_in_expr(
+                    left,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
+                Self::collect_nested_refs_in_expr(
+                    right,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
+            }
+            Expr::UnaryOp { operand, .. }
+            | Expr::Starred(operand)
+            | Expr::Await(operand)
+            | Expr::YieldFrom(operand) => {
+                Self::collect_nested_refs_in_expr(
+                    operand,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
+            }
+            Expr::Yield(Some(e)) => {
+                Self::collect_nested_refs_in_expr(e, local_names, global_names, nonlocal_names, refs);
+            }
+            Expr::IfExp { test, body, orelse } => {
+                for e in [test, body, orelse] {
+                    Self::collect_nested_refs_in_expr(
+                        e,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+            }
+            Expr::Compare {
+                left, comparators, ..
+            } => {
+                Self::collect_nested_refs_in_expr(
+                    left,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
+                for c in comparators {
+                    Self::collect_nested_refs_in_expr(
+                        c,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+            }
+            Expr::Call {
+                func,
+                args,
+                keywords,
+            } => {
+                Self::collect_nested_refs_in_expr(
+                    func,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
+                for a in args {
+                    Self::collect_nested_refs_in_expr(
+                        a,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+                for kw in keywords {
+                    Self::collect_nested_refs_in_expr(
+                        &kw.value,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+            }
+            Expr::Attribute { value, .. } => {
+                Self::collect_nested_refs_in_expr(
+                    value,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
+            }
+            Expr::Subscript { value, slice } => {
+                Self::collect_nested_refs_in_expr(
+                    value,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
+                Self::collect_nested_refs_in_expr(
+                    slice,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
+            }
+            Expr::List(elts) | Expr::Tuple(elts) | Expr::Set(elts) => {
+                for e in elts {
+                    Self::collect_nested_refs_in_expr(
+                        e,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+            }
+            Expr::Dict { keys, values } => {
+                for k in keys.iter().flatten() {
+                    Self::collect_nested_refs_in_expr(
+                        k,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+                for v in values {
+                    Self::collect_nested_refs_in_expr(
+                        v,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+            }
+            Expr::Slice { lower, upper, step } => {
+                for s in [lower, upper, step].iter().filter_map(|s| s.as_ref()) {
+                    Self::collect_nested_refs_in_expr(
+                        s,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+            }
+            Expr::FString(parts) => {
+                for part in parts {
+                    if let FStringPart::Expr {
+                        expr, format_spec, ..
+                    } = part
+                    {
+                        Self::collect_nested_refs_in_expr(
+                            expr,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
+                        if let Some(fs) = format_spec {
+                            Self::collect_nested_refs_in_expr(
+                                fs,
+                                local_names,
+                                global_names,
+                                nonlocal_names,
+                                refs,
+                            );
+                        }
+                    }
+                }
+            }
+            Expr::JoinedStr(parts) => {
+                for part in parts {
+                    Self::collect_nested_refs_in_expr(
+                        part,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+            }
+            Expr::ListComp { elt, generators }
+            | Expr::SetComp { elt, generators }
+            | Expr::GeneratorExp { elt, generators } => {
+                for gen in generators {
+                    Self::collect_nested_refs_in_expr(
+                        &gen.iter,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                    for if_cond in &gen.ifs {
+                        Self::collect_nested_refs_in_expr(
+                            if_cond,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
+                    }
+                }
+                Self::collect_nested_refs_in_expr(
+                    elt,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
+            }
+            Expr::DictComp {
+                key,
+                value,
+                generators,
+            } => {
+                for gen in generators {
+                    Self::collect_nested_refs_in_expr(
+                        &gen.iter,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                    for if_cond in &gen.ifs {
+                        Self::collect_nested_refs_in_expr(
+                            if_cond,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
+                    }
+                }
+                Self::collect_nested_refs_in_expr(
+                    key,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
+                Self::collect_nested_refs_in_expr(
+                    value,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
             }
         }
     }
