@@ -531,11 +531,16 @@ impl Compiler {
                             self.emit(Opcode::MAP_ADD, 1);
                         }
                         None => {
-                            // Dict unpacking: {**expr}
+                            // Dict unpacking: {**expr} — DICT_UPDATE (not
+                            // DICT_MERGE), since a dict DISPLAY legitimately
+                            // overrides on a duplicate key
+                            // (`{**{'x':1}, **{'x':2}}` == `{'x':2}`),
+                            // unlike a call's `f(**a, **b)` keyword
+                            // unpacking, which must raise on collision.
                             self.emit(Opcode::DUP_TOP, 0);
                             dup_count += 1;
                             self.compile_expr(value)?;
-                            self.emit(Opcode::DICT_MERGE, 1);
+                            self.emit(Opcode::DICT_UPDATE, 1);
                         }
                     }
                 }

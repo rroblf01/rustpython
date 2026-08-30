@@ -167,6 +167,7 @@ impl VirtualMachine {
             | Opcode::SET_UPDATE
             | Opcode::MAP_ADD
             | Opcode::DICT_MERGE
+            | Opcode::DICT_UPDATE
             | Opcode::LIST_TO_TUPLE => {
                 if self.handle_collections(fi, op, arg)? {
                 }
