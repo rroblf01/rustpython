@@ -704,9 +704,27 @@ impl Lexer {
                                     }
                                 }
                                 Some('{') => {
-                                    if state == 0 {
-                                        depth += 1;
-                                    }
+                                    // `depth` must track brace nesting
+                                    // uniformly across BOTH the expression
+                                    // and the format-spec (`state == 2`)
+                                    // portions, not just the expression —
+                                    // a nested field inside the spec
+                                    // (`f'{value:{bad_format_spec}}'`) also
+                                    // opens a brace that its own matching
+                                    // `}` must close before the OUTER `}`
+                                    // is allowed to end the whole
+                                    // `{expr:spec}` construct. Previously
+                                    // only incrementing on `state == 0`
+                                    // left the spec's nested `{` untracked,
+                                    // so its own `}` was consumed as the
+                                    // outer terminator instead — truncating
+                                    // the captured spec text one character
+                                    // short of its real closing brace
+                                    // (`test_format.py`'s
+                                    // `test_better_error_message_format`:
+                                    // the spec came out as `{bad_format_spec`
+                                    // instead of evaluating to `%M`).
+                                    depth += 1;
                                     if depth > 1 || state > 0 {
                                         if state == 2 {
                                             format_spec.push('{');
