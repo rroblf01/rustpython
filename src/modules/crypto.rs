@@ -727,6 +727,199 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
             .map_err(binascii_error)
     });
 
+    // `base64.a85encode`/`a85decode`/`b85encode`/`b85decode` (Ascii85 and
+    // Base85/RFC1924-ish "b85" encodings) were missing entirely — real
+    // CPython implements both in pure Python in terms of a single shared
+    // `_85encode` helper (4 input bytes -> one big-endian u32 "word" -> 5
+    // base-85 digits), differing only in alphabet and (for Ascii85 only) a
+    // 'z'/'y' shorthand for an all-zero/all-space word. Ported directly
+    // (see /usr/lib/python3.14/base64.py's `_85encode`/`a85decode`/
+    // `b85decode` for the reference algorithm this mirrors).
+    const B85_ALPHABET: &[u8] =
+        b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
+
+    fn encode85_words(data: &[u8], alphabet: &[u8], fold_zero: Option<u8>) -> Vec<Vec<u8>> {
+        let padding = (4 - data.len() % 4) % 4;
+        let mut padded = data.to_vec();
+        padded.extend(std::iter::repeat(0u8).take(padding));
+        let nwords = padded.len() / 4;
+        let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(nwords);
+        for i in 0..nwords {
+            let word = u32::from_be_bytes([
+                padded[i * 4],
+                padded[i * 4 + 1],
+                padded[i * 4 + 2],
+                padded[i * 4 + 3],
+            ]);
+            if let Some(fold_char) = fold_zero {
+                if word == 0 {
+                    chunks.push(vec![fold_char]);
+                    continue;
+                }
+            }
+            let mut chunk = [0u8; 5];
+            let mut w = word;
+            for j in (0..5).rev() {
+                chunk[j] = alphabet[(w % 85) as usize];
+                w /= 85;
+            }
+            chunks.push(chunk.to_vec());
+        }
+        if padding > 0 {
+            if let Some(last) = chunks.last_mut() {
+                if fold_zero.is_some() && last.len() == 1 {
+                    // A folded all-zero final chunk can't be partially
+                    // truncated — expand back to the full 5-digit form
+                    // first (CPython: `chunks[-1] = chars[0] * 5`).
+                    *last = vec![alphabet[0]; 5];
+                }
+                let newlen = last.len() - padding;
+                last.truncate(newlen);
+            }
+        }
+        chunks
+    }
+
+    fn a85_encode(data: &[u8], pad: bool) -> Vec<u8> {
+        const A85_ALPHABET: &[u8] = b"!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstu";
+        let chunks = if pad {
+            encode85_words(data, A85_ALPHABET, None)
+        } else {
+            encode85_words(data, A85_ALPHABET, Some(b'z'))
+        };
+        chunks.concat()
+    }
+
+    fn a85_decode(data: &[u8], foldspaces: bool) -> Result<Vec<u8>, String> {
+        let mut input = data.to_vec();
+        input.extend_from_slice(b"uuuu");
+        let mut decoded: Vec<u8> = Vec::new();
+        let mut curr: Vec<u8> = Vec::new();
+        for &x in &input {
+            if (b'!'..=b'u').contains(&x) {
+                curr.push(x);
+                if curr.len() == 5 {
+                    let mut acc: u64 = 0;
+                    for &c in &curr {
+                        acc = 85 * acc + (c as u64 - 33);
+                    }
+                    if acc > u32::MAX as u64 {
+                        return Err("Ascii85 overflow".to_string());
+                    }
+                    decoded.extend_from_slice(&(acc as u32).to_be_bytes());
+                    curr.clear();
+                }
+            } else if x == b'z' {
+                if !curr.is_empty() {
+                    return Err("z inside Ascii85 5-tuple".to_string());
+                }
+                decoded.extend_from_slice(&[0, 0, 0, 0]);
+            } else if foldspaces && x == b'y' {
+                if !curr.is_empty() {
+                    return Err("y inside Ascii85 5-tuple".to_string());
+                }
+                decoded.extend_from_slice(&[0x20, 0x20, 0x20, 0x20]);
+            } else if matches!(x, b' ' | b'\t' | b'\n' | b'\r' | 0x0b) {
+                continue;
+            } else {
+                return Err(format!("Non-Ascii85 digit found: {}", x as char));
+            }
+        }
+        let padding = 4usize.saturating_sub(curr.len());
+        if padding > 0 && padding < 4 {
+            let newlen = decoded.len().saturating_sub(padding);
+            decoded.truncate(newlen);
+        }
+        Ok(decoded)
+    }
+
+    fn b85_encode(data: &[u8]) -> Vec<u8> {
+        encode85_words(data, B85_ALPHABET, None).concat()
+    }
+
+    fn b85_decode(data: &[u8]) -> Result<Vec<u8>, String> {
+        let mut rev = [255u8; 256];
+        for (i, &c) in B85_ALPHABET.iter().enumerate() {
+            rev[c as usize] = i as u8;
+        }
+        let padding = (5 - data.len() % 5) % 5;
+        let mut padded = data.to_vec();
+        padded.extend(std::iter::repeat(b'~').take(padding));
+        let mut out = Vec::new();
+        for (i, chunk) in padded.chunks(5).enumerate() {
+            let mut acc: u64 = 0;
+            for (j, &c) in chunk.iter().enumerate() {
+                let v = rev[c as usize];
+                if v == 255 {
+                    return Err(format!("bad base85 character at position {}", i * 5 + j));
+                }
+                acc = acc * 85 + v as u64;
+            }
+            if acc > u32::MAX as u64 {
+                return Err(format!("base85 overflow in hunk starting at byte {}", i * 5));
+            }
+            out.extend_from_slice(&(acc as u32).to_be_bytes());
+        }
+        if padding > 0 {
+            let newlen = out.len().saturating_sub(padding);
+            out.truncate(newlen);
+        }
+        Ok(out)
+    }
+
+    b64_func!("a85encode", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("a85encode() takes at least one argument"));
+        }
+        let data = arg_bytes(&args[0])
+            .ok_or_else(|| PyError::type_error("a85encode() argument must be bytes"))?;
+        Ok(PyObjectRef::imm(PyObject::Bytes(a85_encode(&data, false))))
+    });
+    b64_func!("a85decode", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("a85decode() takes at least one argument"));
+        }
+        let data = match &*args[0].borrow() {
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::ByteArray(b) => b.clone(),
+            _ => {
+                return Err(PyError::type_error(
+                    "a85decode() argument must be a string or bytes",
+                ))
+            }
+        };
+        a85_decode(&data, false)
+            .map(|b| PyObjectRef::imm(PyObject::Bytes(b)))
+            .map_err(PyError::value_error)
+    });
+    b64_func!("b85encode", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("b85encode() takes at least one argument"));
+        }
+        let data = arg_bytes(&args[0])
+            .ok_or_else(|| PyError::type_error("b85encode() argument must be bytes"))?;
+        Ok(PyObjectRef::imm(PyObject::Bytes(b85_encode(&data))))
+    });
+    b64_func!("b85decode", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("b85decode() takes at least one argument"));
+        }
+        let data = match &*args[0].borrow() {
+            PyObject::Str(s) => s.as_bytes().to_vec(),
+            PyObject::Bytes(b) => b.clone(),
+            PyObject::ByteArray(b) => b.clone(),
+            _ => {
+                return Err(PyError::type_error(
+                    "b85decode() argument must be a string or bytes",
+                ))
+            }
+        };
+        b85_decode(&data)
+            .map(|b| PyObjectRef::imm(PyObject::Bytes(b)))
+            .map_err(PyError::value_error)
+    });
+
     d
 }
 
