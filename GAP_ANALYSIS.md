@@ -27,6 +27,23 @@ inlines comprehensions rather than giving them CPython's own separate scope). Se
 `cpython_test_suite_compat` memory topic for the full chain and a note on `contextvars.Context`
 (deferred, same calibre as the `property`-subclassing gap).
 
+Same session, after the compiler fix: a further ~10-commit batch of smaller, individually-verified
+fixes — `str`/`bytes.strip()`/`center()` bugs (wrong identity/wrong padding side), `utf-16`/`utf-32`
+codecs (previously entirely unimplemented — silently fell back to raw UTF-8 bytes), `STORE_ATTR`/
+`DELETE_ATTR` not walking the MRO for `__setattr__`/`__delattr__` (broke `unittest.mock`'s
+`del`/set — then, once fixed, had to explicitly re-exclude `object`'s own default `__setattr__`/
+`__delattr__` from that same MRO walk, since finding it was preempting `property` setters), a
+native `__future__` module shadowing the real, complete vendored `Lib/__future__.py`, `exec(code,
+dict)` never removing a name `del`eted during execution, and several `csv` reader/writer
+escapechar/quoting bugs. All verified via independent full `make test-cpython` sweeps with zero net
+regressions. Also identified (not attempted): `collections.abc`'s ABC mixin methods (e.g.
+`MutableSequence.append()`) don't exist — both the native `collections.abc` module and the vendored
+`Lib/_collections_abc.py` are far-reduced stubs versus real CPython's ~1172-line module, which
+itself depends heavily on `abc.ABCMeta`/`abstractmethod` machinery that has its own significant
+gaps (`test_abc.py`). A real fix needs `abc.ABCMeta` solid first, then a vendor attempt of the real
+`_collections_abc.py` — same "dedicated future session" calibre as `contextvars.Context` and
+`property` subclassing.
+
 ## How "compatibility" is actually measured here
 
 There is no single trustworthy percentage for "how done is this interpreter." What exists is:
