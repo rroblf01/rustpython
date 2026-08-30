@@ -27,22 +27,33 @@ inlines comprehensions rather than giving them CPython's own separate scope). Se
 `cpython_test_suite_compat` memory topic for the full chain and a note on `contextvars.Context`
 (deferred, same calibre as the `property`-subclassing gap).
 
-Same session, after the compiler fix: a further ~10-commit batch of smaller, individually-verified
+Same session, after the compiler fix: a further ~15-commit batch of smaller, individually-verified
 fixes — `str`/`bytes.strip()`/`center()` bugs (wrong identity/wrong padding side), `utf-16`/`utf-32`
 codecs (previously entirely unimplemented — silently fell back to raw UTF-8 bytes), `STORE_ATTR`/
 `DELETE_ATTR` not walking the MRO for `__setattr__`/`__delattr__` (broke `unittest.mock`'s
 `del`/set — then, once fixed, had to explicitly re-exclude `object`'s own default `__setattr__`/
 `__delattr__` from that same MRO walk, since finding it was preempting `property` setters), a
 native `__future__` module shadowing the real, complete vendored `Lib/__future__.py`, `exec(code,
-dict)` never removing a name `del`eted during execution, and several `csv` reader/writer
-escapechar/quoting bugs. All verified via independent full `make test-cpython` sweeps with zero net
-regressions. Also identified (not attempted): `collections.abc`'s ABC mixin methods (e.g.
-`MutableSequence.append()`) don't exist — both the native `collections.abc` module and the vendored
-`Lib/_collections_abc.py` are far-reduced stubs versus real CPython's ~1172-line module, which
-itself depends heavily on `abc.ABCMeta`/`abstractmethod` machinery that has its own significant
-gaps (`test_abc.py`). A real fix needs `abc.ABCMeta` solid first, then a vendor attempt of the real
-`_collections_abc.py` — same "dedicated future session" calibre as `contextvars.Context` and
-`property` subclassing.
+dict)` never removing a name `del`eted during execution, several `csv` reader/writer
+escapechar/quoting bugs, `base64`'s a85/b85/z85 encodings (didn't exist at all — added, verified
+byte-for-byte against real CPython 3.14), `binascii`'s dozen `*2b_*`/`b2a_*` functions rejecting
+`array.array`/`memoryview` (plus `crc_hqx`/`a2b_hex`/`b2a_hex` missing outright), a general parser
+bug where bytes literals never handled `\a`/`\b`/`\f`/`\v` escapes (str literals did), and a real
+infinite-hang bug in `PyObjectRef::str()`: any native string method (`encode()`, `.hex()`, ...)
+called from inside a custom `__str__` re-entered `.str()` on the same object, which detected the
+override again and called `__str__` again, forever — never touching the VM's frame stack, so it
+hung instead of raising `RecursionError`. Fixed with a reentrancy guard mirroring the existing
+`REPR_STACK`/`REPR_DEPTH` cycle detector in the same file (which only covered container types). A
+narrower, deeper bug remains where the resulting *value* is still wrong for this exact pattern
+(the object's backing value appears to get overwritten by its own first `__str__` result) — no
+longer a hang, so lower priority; not attempted. All fixes verified via independent full
+`make test-cpython` sweeps with zero net regressions each. Also identified (not attempted):
+`collections.abc`'s ABC mixin methods (e.g. `MutableSequence.append()`) don't exist — both the
+native `collections.abc` module and the vendored `Lib/_collections_abc.py` are far-reduced stubs
+versus real CPython's ~1172-line module, which itself depends heavily on `abc.ABCMeta`/
+`abstractmethod` machinery that has its own significant gaps (`test_abc.py`). A real fix needs
+`abc.ABCMeta` solid first, then a vendor attempt of the real `_collections_abc.py` — same
+"dedicated future session" calibre as `contextvars.Context` and `property` subclassing.
 
 ## How "compatibility" is actually measured here
 
