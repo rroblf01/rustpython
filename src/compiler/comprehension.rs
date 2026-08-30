@@ -28,28 +28,7 @@ impl Compiler {
         let comp_id = self.comprehension_depth;
         self.comprehension_depth += 1;
 
-        let mut saved_indices: Vec<(String, u32)> = Vec::new();
-        if !target_names.is_empty() {
-            for name in &target_names {
-                let tmp_name = format!("_comp_save_{}_{}", comp_id, name);
-                let idx = self.add_varname(&tmp_name) as u32;
-                saved_indices.push((name.clone(), idx));
-                let handler = self.new_label();
-                let end = self.new_label();
-                self.emit_jump(Opcode::SETUP_FINALLY, handler);
-                self.emit_load_name(name);
-                self.emit(Opcode::STORE_FAST, idx);
-                self.emit(Opcode::POP_BLOCK, 0);
-                self.emit_jump(Opcode::JUMP, end);
-                self.fix_label(handler);
-                self.emit(Opcode::PUSH_EXC_INFO, 0);
-                let none_idx = self.get_const_index(ConstValue::None) as u32;
-                self.emit(Opcode::LOAD_CONST, none_idx);
-                self.emit(Opcode::STORE_FAST, idx);
-                self.emit(Opcode::POP_EXCEPT, 1);
-                self.fix_label(end);
-            }
-        }
+        let saved_indices = self.compile_comprehension_save(comp_id, &target_names);
 
         if is_set {
             self.emit(Opcode::BUILD_SET, 0);
@@ -120,19 +99,7 @@ impl Compiler {
         self.fix_label(end_label);
         self.emit(Opcode::POP_ITER, 0);
 
-        if !saved_indices.is_empty() {
-            let none_idx = self.get_const_index(ConstValue::None) as u32;
-            for (name, save_idx) in &saved_indices {
-                let skip_restore = self.new_label();
-                self.emit(Opcode::LOAD_FAST, *save_idx);
-                self.emit(Opcode::LOAD_CONST, none_idx);
-                self.emit(Opcode::IS_OP, 1);
-                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, skip_restore);
-                self.emit(Opcode::LOAD_FAST, *save_idx);
-                self.emit_store_name(name);
-                self.fix_label(skip_restore);
-            }
-        }
+        self.compile_comprehension_restore(&saved_indices);
 
         Ok(())
     }
@@ -161,28 +128,7 @@ impl Compiler {
         let comp_id = self.comprehension_depth;
         self.comprehension_depth += 1;
 
-        let mut saved_indices: Vec<(String, u32)> = Vec::new();
-        if !target_names.is_empty() {
-            for name in &target_names {
-                let tmp_name = format!("_comp_save_{}_{}", comp_id, name);
-                let idx = self.add_varname(&tmp_name) as u32;
-                saved_indices.push((name.clone(), idx));
-                let handler = self.new_label();
-                let end = self.new_label();
-                self.emit_jump(Opcode::SETUP_FINALLY, handler);
-                self.emit_load_name(name);
-                self.emit(Opcode::STORE_FAST, idx);
-                self.emit(Opcode::POP_BLOCK, 0);
-                self.emit_jump(Opcode::JUMP, end);
-                self.fix_label(handler);
-                self.emit(Opcode::PUSH_EXC_INFO, 0);
-                let none_idx = self.get_const_index(ConstValue::None) as u32;
-                self.emit(Opcode::LOAD_CONST, none_idx);
-                self.emit(Opcode::STORE_FAST, idx);
-                self.emit(Opcode::POP_EXCEPT, 1);
-                self.fix_label(end);
-            }
-        }
+        let saved_indices = self.compile_comprehension_save(comp_id, &target_names);
 
         self.emit(Opcode::BUILD_MAP, 0);
 
@@ -230,20 +176,124 @@ impl Compiler {
         self.fix_label(end_label);
         self.emit(Opcode::POP_ITER, 0);
 
-        if !saved_indices.is_empty() {
-            let none_idx = self.get_const_index(ConstValue::None) as u32;
-            for (name, save_idx) in &saved_indices {
-                let skip_restore = self.new_label();
-                self.emit(Opcode::LOAD_FAST, *save_idx);
-                self.emit(Opcode::LOAD_CONST, none_idx);
-                self.emit(Opcode::IS_OP, 1);
-                self.emit_jump(Opcode::POP_JUMP_IF_FALSE, skip_restore);
-                self.emit(Opcode::LOAD_FAST, *save_idx);
-                self.emit_store_name(name);
-                self.fix_label(skip_restore);
-            }
-        }
+        self.compile_comprehension_restore(&saved_indices);
 
         Ok(())
     }
+
+    /// Save-phase strategy for one comprehension target name, decided once
+    /// at compile time based on how `name` resolves in the enclosing scope.
+    fn compile_comprehension_save(
+        &mut self,
+        comp_id: usize,
+        target_names: &[String],
+    ) -> Vec<(String, u32, CompSaveKind)> {
+        let mut saved_indices = Vec::new();
+        for name in target_names {
+            let tmp_name = format!("_comp_save_{}_{}", comp_id, name);
+            let idx = self.add_varname(&tmp_name) as u32;
+            if self.is_plain_local_name(name) {
+                // `had_idx` records (as a plain bool, no exceptions
+                // involved at restore time) whether `name` had a prior
+                // binding, so restore can tell "never existed" apart from
+                // "existed and was `None`" precisely.
+                let had_name = format!("_comp_had_{}_{}", comp_id, name);
+                let had_idx = self.add_varname(&had_name) as u32;
+                let handler = self.new_label();
+                let end = self.new_label();
+                self.emit_jump(Opcode::SETUP_FINALLY, handler);
+                self.emit_load_name(name);
+                self.emit(Opcode::STORE_FAST, idx);
+                let true_idx = self.get_const_index(ConstValue::Bool(true)) as u32;
+                self.emit(Opcode::LOAD_CONST, true_idx);
+                self.emit(Opcode::STORE_FAST, had_idx);
+                self.emit(Opcode::POP_BLOCK, 0);
+                self.emit_jump(Opcode::JUMP, end);
+                self.fix_label(handler);
+                self.emit(Opcode::PUSH_EXC_INFO, 0);
+                let false_idx = self.get_const_index(ConstValue::Bool(false)) as u32;
+                self.emit(Opcode::LOAD_CONST, false_idx);
+                self.emit(Opcode::STORE_FAST, had_idx);
+                self.emit(Opcode::POP_EXCEPT, 1);
+                self.fix_label(end);
+                saved_indices.push((name.clone(), idx, CompSaveKind::Plain { had_idx }));
+            } else {
+                let handler = self.new_label();
+                let end = self.new_label();
+                self.emit_jump(Opcode::SETUP_FINALLY, handler);
+                self.emit_load_name(name);
+                self.emit(Opcode::STORE_FAST, idx);
+                self.emit(Opcode::POP_BLOCK, 0);
+                self.emit_jump(Opcode::JUMP, end);
+                self.fix_label(handler);
+                self.emit(Opcode::PUSH_EXC_INFO, 0);
+                let none_idx = self.get_const_index(ConstValue::None) as u32;
+                self.emit(Opcode::LOAD_CONST, none_idx);
+                self.emit(Opcode::STORE_FAST, idx);
+                self.emit(Opcode::POP_EXCEPT, 1);
+                self.fix_label(end);
+                saved_indices.push((name.clone(), idx, CompSaveKind::Legacy));
+            }
+        }
+        saved_indices
+    }
+
+    fn compile_comprehension_restore(&mut self, saved_indices: &[(String, u32, CompSaveKind)]) {
+        for (name, save_idx, kind) in saved_indices {
+            match *kind {
+                CompSaveKind::Plain { had_idx } => {
+                    // Was `name` bound before this comprehension ran? If
+                    // not, unbind it again instead of leaving it holding the
+                    // comprehension's last iterated value forever
+                    // (previously left `name` invisible to `dir()` yet
+                    // still readable via plain `name`, pinning whatever
+                    // object it last held — root cause of test_weakset's
+                    // intersection/union undercounting after gc.collect(),
+                    // traced to `[x for x in items]` never releasing the
+                    // final `x`). No exceptions here (unlike the save phase)
+                    // — this runs on every comprehension execution, not
+                    // just the rare pre-existing-name case.
+                    let no_restore = self.new_label();
+                    let end = self.new_label();
+                    self.emit(Opcode::LOAD_FAST, had_idx);
+                    self.emit_jump(Opcode::POP_JUMP_IF_FALSE, no_restore);
+                    self.emit(Opcode::LOAD_FAST, *save_idx);
+                    self.emit_store_name(name);
+                    self.emit_jump(Opcode::JUMP, end);
+                    self.fix_label(no_restore);
+                    self.emit_delete_name(name);
+                    self.fix_label(end);
+                }
+                CompSaveKind::Legacy => {
+                    let none_idx = self.get_const_index(ConstValue::None) as u32;
+                    let skip_restore = self.new_label();
+                    self.emit(Opcode::LOAD_FAST, *save_idx);
+                    self.emit(Opcode::LOAD_CONST, none_idx);
+                    self.emit(Opcode::IS_OP, 1);
+                    self.emit_jump(Opcode::POP_JUMP_IF_FALSE, skip_restore);
+                    self.emit(Opcode::LOAD_FAST, *save_idx);
+                    self.emit_store_name(name);
+                    self.fix_label(skip_restore);
+                }
+            }
+        }
+    }
+}
+
+/// See `Compiler::compile_comprehension_save`/`compile_comprehension_restore`.
+enum CompSaveKind {
+    /// A plain function-local: restore knows for certain whether `name`
+    /// existed before (via `had_idx`), so it can properly unbind it when it
+    /// didn't rather than leaving a stale value dangling.
+    Plain { had_idx: u32 },
+    /// A module/class-body name, or a cellvar/freevar shared with a nested
+    /// closure defined inside the comprehension body: fall back to the
+    /// original sentinel-based restore, which never unbinds — only restores
+    /// when the saved value isn't the `None` sentinel. Unbinding/rebinding
+    /// these broke closures capturing the comprehension's loop variable
+    /// (`test_listcomps.py`'s `test_lambda_in_iter` et al.) — real CPython
+    /// avoids this entirely by giving comprehensions their own scope; this
+    /// codebase inlines them into the enclosing scope instead (a known gap,
+    /// see `GAP_ANALYSIS.md`).
+    Legacy,
 }

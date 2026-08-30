@@ -263,6 +263,50 @@ impl Compiler {
         }
     }
 
+    /// True for a name that resolves to a plain function-local `STORE_FAST`
+    /// slot (not a module/class-body name, not a cellvar/freevar shared with
+    /// a nested closure). Comprehension compilation only applies its
+    /// unbind-on-restore fix (see `compile_comprehension`) to this case —
+    /// deleting/rebinding a cellvar that a lambda defined inside the
+    /// comprehension body has already captured breaks that closure's view
+    /// of the variable, which is exactly the kind of comprehension-own-scope
+    /// gap this codebase defers (see `GAP_ANALYSIS.md`).
+    fn is_plain_local_name(&self, name: &str) -> bool {
+        self.scope == ScopeType::Function
+            && !self.global_names.contains(name)
+            && !self.code.cellvars.contains(&name.to_string())
+            && !self.code.freevars.contains(&name.to_string())
+    }
+
+    /// Unbind `name` in whatever scope it resolves to. Used by comprehension
+    /// compilation to restore a target name back to "never existed" after
+    /// the comprehension finishes, rather than leaving it dangling — see
+    /// `compile_comprehension`'s restore phase.
+    fn emit_delete_name(&mut self, name: &str) {
+        if self.scope == ScopeType::Module
+            || self.scope == ScopeType::ClassBody
+            || self.global_names.contains(name)
+        {
+            let idx = self.get_name_index(name) as u32;
+            self.emit(Opcode::DELETE_NAME, idx);
+        } else if self.scope == ScopeType::Function
+            && (self.code.cellvars.contains(&name.to_string())
+                || self.code.freevars.contains(&name.to_string()))
+        {
+            // No DELETE_DEREF opcode exists; storing `None` is the closest
+            // approximation available for a cell/free variable.
+            let none_idx = self.get_const_index(ConstValue::None) as u32;
+            self.emit(Opcode::LOAD_CONST, none_idx);
+            self.emit_store_name(name);
+        } else if self.scope == ScopeType::Function {
+            let idx = self.add_varname(name) as u32;
+            self.emit(Opcode::DELETE_FAST, idx);
+        } else {
+            let idx = self.get_name_index(name) as u32;
+            self.emit(Opcode::DELETE_NAME, idx);
+        }
+    }
+
     fn get_const_index(&mut self, c: ConstValue) -> usize {
         if let Some(idx) = self.code.consts.iter().position(|x| match (x, &c) {
             (ConstValue::None, ConstValue::None) => true,
