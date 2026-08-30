@@ -74,6 +74,42 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 });
                 Ok(new_type)
             }
+            // `type(x)` for `property`/`classmethod`/`staticmethod`/`super`
+            // instances previously fell straight through to the generic
+            // name-based synthetic-Type path below, which builds a brand
+            // new placeholder `PyObject::Type` per name (cached, so at
+            // least stable across calls) that is a DIFFERENT object from
+            // whatever `property`/`classmethod`/`staticmethod`/`super` is
+            // actually bound to in `builtins` (a plain `BuiltinFunction`
+            // constructor, same shape as `TypeError`/`object` etc. below).
+            // Real CPython: `type(prop) is property` etc. is `True`. Mirror
+            // the `Exception`/`ExceptionGroup` arm above: resolve the SAME
+            // canonical object bound in `builtins` by name, so identity and
+            // `==` match, instead of synthesizing a lookalike.
+            PyObject::Property(_)
+            | PyObject::StaticMethod { .. }
+            | PyObject::ClassMethod { .. }
+            | PyObject::Super { .. } => {
+                let name = borrowed.type_name();
+                drop(borrowed);
+                if let Some(cls) = crate::modules::get_builtin_class(&name) {
+                    return Ok(cls);
+                }
+                if let Some(cached) = PRIMITIVE_TYPE_CACHE.with(|c| c.borrow().get(&name).cloned())
+                {
+                    return Ok(cached);
+                }
+                let new_type = PyObjectRef::new(PyObject::Type {
+                    name: name.clone(),
+                    dict: Box::new(TypeDict::default()),
+                    bases: vec![],
+                    mro: vec![],
+                });
+                PRIMITIVE_TYPE_CACHE.with(|c| {
+                    c.borrow_mut().insert(name, new_type.clone());
+                });
+                Ok(new_type)
+            }
             _ => {
                 let name = borrowed.type_name();
                 drop(borrowed);

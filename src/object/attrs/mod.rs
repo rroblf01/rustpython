@@ -111,6 +111,33 @@ impl PyObject {
                         mro: vec![],
                     }));
                 }
+                // Mirrors `builtin_type_of`'s dedicated arm: `.__class__` on
+                // a property/classmethod/staticmethod/super instance must
+                // resolve to the SAME object bound to that name in
+                // `builtins`, not a freshly-synthesized lookalike `Type` —
+                // otherwise `x.__class__ is property` (etc.) diverges from
+                // `type(x) is property`, which real CPython treats as
+                // equivalent.
+                PyObject::Property(_)
+                | PyObject::StaticMethod { .. }
+                | PyObject::ClassMethod { .. }
+                | PyObject::Super { .. } => {
+                    let name = self.type_name().to_string();
+                    if let Some(cls) = crate::modules::get_builtin_class(&name) {
+                        return Ok(cls);
+                    }
+                    if let Some(cached) = crate::object::get_primitive_type(&name) {
+                        return Ok(cached);
+                    }
+                    let new_type = PyObjectRef::new(PyObject::Type {
+                        name: name.clone(),
+                        dict: Box::new(TypeDict::default()),
+                        bases: vec![],
+                        mro: vec![],
+                    });
+                    crate::object::seed_primitive_type_cache(&name, new_type.clone());
+                    return Ok(new_type);
+                }
                 _ => {
                     // Must return the SAME object `type(x)` does
                     // (`builtin_type_of`'s own catch-all arm) — building an
