@@ -40,6 +40,23 @@ impl Compiler {
         new_code.filename = self.code.filename.clone();
         let old_code = std::mem::replace(&mut self.code, new_code);
         let old_labels = std::mem::replace(&mut self.labels, Vec::new());
+        // `new_label()` allocates ids by pushing to BOTH `self.labels` and
+        // `self.label_positions` (compiler.rs), so resetting one without the
+        // other lets a nested function's own labels collide with the
+        // enclosing function's already-allocated ids: `self.labels` restarts
+        // at length 0 here, but `label_positions` (if left alone) keeps
+        // growing from wherever the enclosing scope left off — so id 0
+        // means something different in each vector. A nested function's
+        // `mark_label(0)` then silently overwrote the ENCLOSING loop's
+        // `start_label` position with the nested function's own (much
+        // smaller) instruction index, corrupting `emit_backward_jump`'s
+        // computed offset the next time the enclosing loop wrapped around
+        // (confirmed via `def outer(n):\n for i in range(n):\n  def f():\n
+        // for j in range(2): yield j` — the loop jumped into the middle of
+        // its OWN setup code instead of back to FOR_ITER, surfacing as
+        // `TypeError: 'range_iterator' object is not callable` since a live
+        // iterator ended up sitting where a callable was expected).
+        let old_label_positions = std::mem::replace(&mut self.label_positions, Vec::new());
         let old_label_stack = std::mem::replace(&mut self.label_stack, Vec::new());
         let old_loop_stack = std::mem::replace(&mut self.loop_stack, Vec::new());
         let old_with_stack = std::mem::replace(&mut self.pending_cleanup, Vec::new());
@@ -230,6 +247,7 @@ impl Compiler {
 
         let func_code = std::mem::replace(&mut self.code, old_code);
         self.labels = old_labels;
+        self.label_positions = old_label_positions;
         self.label_stack = old_label_stack;
         self.loop_stack = old_loop_stack;
         self.pending_cleanup = old_with_stack;
@@ -426,6 +444,11 @@ impl Compiler {
             .push(Self::enclosing_snapshot(&old_code));
 
         let old_labels = std::mem::replace(&mut self.labels, Vec::new());
+        // See the matching comment in `compile_function` — `label_positions`
+        // must be reset/restored in lockstep with `labels`, or a class body
+        // compiled inside an enclosing loop can corrupt that loop's jump
+        // targets the same way a nested `def` can.
+        let old_label_positions = std::mem::replace(&mut self.label_positions, Vec::new());
         let old_label_stack = std::mem::replace(&mut self.label_stack, Vec::new());
         let old_loop_stack = std::mem::replace(&mut self.loop_stack, Vec::new());
         let old_with_stack = std::mem::replace(&mut self.pending_cleanup, Vec::new());
@@ -520,6 +543,7 @@ impl Compiler {
 
         let func_code = std::mem::replace(&mut self.code, old_code);
         self.labels = old_labels;
+        self.label_positions = old_label_positions;
         self.label_stack = old_label_stack;
         self.loop_stack = old_loop_stack;
         self.pending_cleanup = old_with_stack;
