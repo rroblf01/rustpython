@@ -40,11 +40,13 @@ pub(crate) fn parse_csv_lines(lines: Vec<String>, dialect: &CsvDialect) -> PyRes
             while let Some(c) = chars.next() {
                 if in_quotes {
                     if Some(c) == escapechar {
+                        // Nothing left on this line to escape - real CPython
+                        // keeps the escapechar itself as a literal character
+                        // rather than fabricating a newline (see the
+                        // matching fix/comment in the non-quoted branch
+                        // below).
                         if let Some(nxt) = chars.next() { cur_field.push(nxt); } else {
-                            // escape at end of line -> treat as newline? but we are within quoted field spanning lines
-                            // This should be handled as newline continuation
-                            // peek next line existence
-                            cur_field.push('\n');
+                            cur_field.push(c);
                         }
                     } else if Some(c) == quotechar {
                         if dialect.doublequote && chars.peek() == Some(&c) {
@@ -64,11 +66,16 @@ pub(crate) fn parse_csv_lines(lines: Vec<String>, dialect: &CsvDialect) -> PyRes
                     }
                 } else {
                     if Some(c) == escapechar {
+                        // An escapechar with nothing after it on this line
+                        // has nothing to escape - real CPython keeps it as a
+                        // literal character (test_csv.py's test_read_escape:
+                        // `'a,"b,c"\\'` with escapechar='\\' and no further
+                        // input yields field `b,c\`, not `b,c\n`).
                         if let Some(nxt) = chars.next() { cur_field.push(nxt); } else {
                             if dialect.strict {
                                 return Err(PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception{ typ: "Error".to_string(), args: vec![py_str("unexpected end of data")], cause: None, suppress_context: false, context: None, traceback: None, extra: None })));
                             } else {
-                                cur_field.push('\n');
+                                cur_field.push(c);
                             }
                         }
                     } else if Some(c) == quotechar {
@@ -207,17 +214,36 @@ pub(crate) fn format_csv_field(field: &str, dialect: &CsvDialect, is_none: bool)
                     if doublequote { out.push(quotechar); out.push(quotechar); }
                     else if let Some(ec) = escapechar { out.push(ec); out.push(ch); }
                     else { return Err(PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception{ typ: "Error".to_string(), args: vec![py_str("need to escape, but no escapechar set")], cause: None, suppress_context: false, context: None, traceback: None, extra: None }))); }
+                } else if Some(ch) == escapechar {
+                    // A literal escapechar occurrence needs self-escaping
+                    // even inside quotes (test_write_escape: `['\\', 'a']`
+                    // under QUOTE_ALL writes `"\\","a"`, not `"\","a"`).
+                    out.push(ch);
+                    out.push(ch);
                 } else { out.push(ch); }
             }
             out.push(quotechar);
             Ok(out)
         } else {
-            // not quoted, but may need to escape quotechar if doublequote false
-            if field.contains(quotechar) && !doublequote {
+            // Not quoted (the field didn't need it), but a literal
+            // occurrence of the escapechar itself must still be
+            // self-escaped whenever one is set — otherwise it would
+            // misparse as the start of an escape sequence on read-back
+            // (test_csv.py's test_write_escape: `['\\', 'a']` with
+            // escapechar='\\' under QUOTE_MINIMAL writes `\\\\,a`, escaping
+            // the lone backslash field even though nothing forced quoting).
+            // Separately, quotechar also needs escaping here when
+            // doublequote is off.
+            let needs_quotechar_escape = field.contains(quotechar) && !doublequote;
+            let needs_escapechar_escape = escapechar.is_some_and(|ec| field.contains(ec));
+            if needs_quotechar_escape || needs_escapechar_escape {
                 if let Some(ec) = escapechar {
                     let mut esc = String::new();
                     for ch in field.chars() {
-                        if ch == quotechar { esc.push(ec); esc.push(ch); } else { esc.push(ch); }
+                        if ch == ec || (ch == quotechar && !doublequote) {
+                            esc.push(ec);
+                        }
+                        esc.push(ch);
                     }
                     return Ok(esc);
                 } else {
@@ -308,14 +334,23 @@ pub(crate) fn format_csv_row(cells: Vec<PyObjectRef>, dialect: &CsvDialect) -> P
                             return Err(PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception{ typ: "Error".to_string(), args: vec![py_str("need to escape, but no escapechar set")], cause: None, suppress_context: false, context: None, traceback: None, extra: None })));
                         }
                         parts.push("".to_string());
+                    } else if dialect.delimiter == ' ' && dialect.skipinitialspace {
+                        parts.push("\"\"".to_string());
                     } else {
-                        // for minimal etc, empty string is '' (empty) not '""' when in multi? Check test: ['', ''] with delimiter ',' skip false -> ',' (two empty fields -> ',')
-                        // So empty should be "" not '""' for multi
-                        if dialect.delimiter == ' ' && dialect.skipinitialspace {
-                            parts.push("\"\"".to_string());
-                        } else {
-                            parts.push("".to_string());
-                        }
+                        // An empty STRING (unlike None) is still a real
+                        // string value — QUOTE_ALL/NONNUMERIC/STRINGS/
+                        // NOTNULL must quote it (`""`) same as any other
+                        // string; only QUOTE_MINIMAL leaves it bare, since
+                        // an empty field never needs quoting to round-trip.
+                        // Route through the same format_csv_field() every
+                        // other non-empty field uses instead of
+                        // unconditionally treating it as bare — it already
+                        // has the correct per-quoting-mode `needs_quote`
+                        // logic (test_write_quoting: `['a','',None,1]`
+                        // under QUOTE_STRINGS writes `"a","",,1` — the
+                        // empty string field IS quoted, unlike the None one).
+                        let f = format_csv_field(&s, dialect, false)?;
+                        parts.push(f);
                     }
                 } else {
                     let f = format_csv_field(&s, dialect, false)?;

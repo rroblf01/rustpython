@@ -308,8 +308,19 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                         while let Some(c) = chars.next() {
                             if in_quotes {
                                 if Some(c) == escapechar {
+                                    // An escapechar with nothing after it (the
+                                    // rest of the line, already stripped of
+                                    // its terminator, was truly exhausted)
+                                    // has nothing to escape - real CPython
+                                    // keeps the escapechar itself as a
+                                    // literal character in the field rather
+                                    // than fabricating an escaped newline
+                                    // (test_csv.py's test_read_escape:
+                                    // `'a,"b,c"\\'` with escapechar='\\' and
+                                    // no further input yields field `b,c\`,
+                                    // not `b,c\n`).
                                     if let Some(nxt) = chars.next() { field.push(nxt); } else {
-                                        if dialect.strict { return Err(PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception{ typ: "Error".to_string(), args: vec![py_str("unexpected end of data")], cause: None, suppress_context: false, context: None, traceback: None, extra: None }))); } else { field.push('\n'); }
+                                        if dialect.strict { return Err(PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception{ typ: "Error".to_string(), args: vec![py_str("unexpected end of data")], cause: None, suppress_context: false, context: None, traceback: None, extra: None }))); } else { field.push(c); }
                                     }
                                 } else if Some(c) == quotechar {
                                     if dialect.doublequote && chars.peek() == Some(&c) { chars.next(); field.push(c); } else {
@@ -321,8 +332,19 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                                 } else { field.push(c); }
                             } else {
                                 if Some(c) == escapechar {
+                                    // An escapechar with nothing after it (the
+                                    // rest of the line, already stripped of
+                                    // its terminator, was truly exhausted)
+                                    // has nothing to escape - real CPython
+                                    // keeps the escapechar itself as a
+                                    // literal character in the field rather
+                                    // than fabricating an escaped newline
+                                    // (test_csv.py's test_read_escape:
+                                    // `'a,"b,c"\\'` with escapechar='\\' and
+                                    // no further input yields field `b,c\`,
+                                    // not `b,c\n`).
                                     if let Some(nxt) = chars.next() { field.push(nxt); } else {
-                                        if dialect.strict { return Err(PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception{ typ: "Error".to_string(), args: vec![py_str("unexpected end of data")], cause: None, suppress_context: false, context: None, traceback: None, extra: None }))); } else { field.push('\n'); }
+                                        if dialect.strict { return Err(PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception{ typ: "Error".to_string(), args: vec![py_str("unexpected end of data")], cause: None, suppress_context: false, context: None, traceback: None, extra: None }))); } else { field.push(c); }
                                     }
                                 } else if Some(c) == quotechar {
                                     if field.is_empty() { in_quotes = true; } else {
