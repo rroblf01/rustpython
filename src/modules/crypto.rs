@@ -277,7 +277,16 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         for (i, &c) in alphabet.iter().enumerate() {
             rev[c as usize] = i as u8;
         }
-        let bytes = s.as_bytes();
+        // Real `base64.b64decode` (via `binascii.a2b_base64`) ignores
+        // embedded whitespace/newlines rather than treating them as
+        // invalid-length/invalid-character input — a base64 blob wrapped
+        // across multiple lines (test_base64.py's own multi-line test
+        // fixture) must still decode.
+        let filtered: Vec<u8> = s
+            .bytes()
+            .filter(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
+            .collect();
+        let bytes = filtered.as_slice();
         if bytes.len() % 4 != 0 {
             return Err("Invalid base64 input length".to_string());
         }
@@ -387,16 +396,18 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
                 "b64decode() takes exactly one argument",
             ));
         }
-        let data = args[0].borrow();
-        let s = match &*data {
-            PyObject::Str(s) => s.to_string(),
-            PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
-            PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
-            _ => {
-                return Err(PyError::type_error(
-                    "b64decode() argument must be a string or bytes",
-                ))
-            }
+        // `bytearray`/`memoryview`/`array.array('B', ...)` are all valid
+        // bytes-like inputs here too (test_base64.py's check_other_types) —
+        // arg_bytes already knows how to pull raw bytes out of any of
+        // those, same helper the a85/b85 encoders use.
+        let s = if let PyObject::Str(s) = &*args[0].borrow() {
+            s.to_string()
+        } else if let Some(b) = arg_bytes(&args[0]) {
+            String::from_utf8_lossy(&b).to_string()
+        } else {
+            return Err(PyError::type_error(
+                "b64decode() argument must be a string or bytes",
+            ));
         };
         match b64_decode(&s) {
             Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
@@ -559,14 +570,14 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
                 "b32decode() takes exactly one argument",
             ));
         }
-        let s = match &*args[0].borrow() {
-            PyObject::Str(s) => s.to_string(),
-            PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
-            _ => {
-                return Err(PyError::type_error(
-                    "b32decode() argument must be a string or bytes",
-                ))
-            }
+        let s = if let PyObject::Str(s) = &*args[0].borrow() {
+            s.to_string()
+        } else if let Some(b) = arg_bytes(&args[0]) {
+            String::from_utf8_lossy(&b).to_string()
+        } else {
+            return Err(PyError::type_error(
+                "b32decode() argument must be a string or bytes",
+            ));
         };
         match b32_decode(&s) {
             Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
@@ -599,15 +610,14 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
                 "standard_b64decode() takes exactly one argument",
             ));
         }
-        let s = match &*args[0].borrow() {
-            PyObject::Str(s) => s.to_string(),
-            PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
-            PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
-            _ => {
-                return Err(PyError::type_error(
-                    "standard_b64decode() argument must be a string or bytes",
-                ))
-            }
+        let s = if let PyObject::Str(s) = &*args[0].borrow() {
+            s.to_string()
+        } else if let Some(b) = arg_bytes(&args[0]) {
+            String::from_utf8_lossy(&b).to_string()
+        } else {
+            return Err(PyError::type_error(
+                "standard_b64decode() argument must be a string or bytes",
+            ));
         };
         b64_decode(&s)
             .map(|b| PyObjectRef::imm(PyObject::Bytes(b)))
@@ -630,15 +640,14 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
                 "urlsafe_b64decode() takes exactly one argument",
             ));
         }
-        let s = match &*args[0].borrow() {
-            PyObject::Str(s) => s.to_string(),
-            PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
-            PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
-            _ => {
-                return Err(PyError::type_error(
-                    "urlsafe_b64decode() argument must be a string or bytes",
-                ))
-            }
+        let s = if let PyObject::Str(s) = &*args[0].borrow() {
+            s.to_string()
+        } else if let Some(b) = arg_bytes(&args[0]) {
+            String::from_utf8_lossy(&b).to_string()
+        } else {
+            return Err(PyError::type_error(
+                "urlsafe_b64decode() argument must be a string or bytes",
+            ));
         };
         let s = s.replace('-', "+").replace('_', "/");
         b64_decode(&s)
@@ -665,15 +674,14 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
                 "b16decode() takes at least one argument",
             ));
         }
-        let s = match &*args[0].borrow() {
-            PyObject::Str(s) => s.to_string(),
-            PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
-            PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
-            _ => {
-                return Err(PyError::type_error(
-                    "b16decode() argument must be a string or bytes",
-                ))
-            }
+        let s = if let PyObject::Str(s) = &*args[0].borrow() {
+            s.to_string()
+        } else if let Some(b) = arg_bytes(&args[0]) {
+            String::from_utf8_lossy(&b).to_string()
+        } else {
+            return Err(PyError::type_error(
+                "b16decode() argument must be a string or bytes",
+            ));
         };
         let casefold = args.get(1).map(|v| v.truthy()).unwrap_or(false);
         let s = if casefold { s.to_uppercase() } else { s };
@@ -712,15 +720,14 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
                 "b32hexdecode() takes at least one argument",
             ));
         }
-        let s = match &*args[0].borrow() {
-            PyObject::Str(s) => s.to_string(),
-            PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
-            PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
-            _ => {
-                return Err(PyError::type_error(
-                    "b32hexdecode() argument must be a string or bytes",
-                ))
-            }
+        let s = if let PyObject::Str(s) = &*args[0].borrow() {
+            s.to_string()
+        } else if let Some(b) = arg_bytes(&args[0]) {
+            String::from_utf8_lossy(&b).to_string()
+        } else {
+            return Err(PyError::type_error(
+                "b32hexdecode() argument must be a string or bytes",
+            ));
         };
         b32_decode_with(&s, B32HEX_ALPHABET)
             .map(|b| PyObjectRef::imm(PyObject::Bytes(b)))
@@ -738,7 +745,14 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     const B85_ALPHABET: &[u8] =
         b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
 
-    fn encode85_words(data: &[u8], alphabet: &[u8], fold_zero: Option<u8>) -> Vec<Vec<u8>> {
+    // `fold_zero` (real CPython's `foldnuls`) and `pad` are independent:
+    // the former controls whether an all-zero word gets the 1-char 'z'
+    // shorthand (Ascii85 only, always on for a85encode - NOT related to
+    // padding at all); the latter controls whether the LAST chunk gets
+    // truncated back down when the input needed zero-byte padding to reach
+    // a multiple of 4 (real CPython's `pad=True` keeps the full 5-byte
+    // chunk instead, producing exact-multiple-of-5 output).
+    fn encode85_words(data: &[u8], alphabet: &[u8], fold_zero: Option<u8>, pad: bool) -> Vec<Vec<u8>> {
         let padding = (4 - data.len() % 4) % 4;
         let mut padded = data.to_vec();
         padded.extend(std::iter::repeat(0u8).take(padding));
@@ -765,7 +779,7 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
             }
             chunks.push(chunk.to_vec());
         }
-        if padding > 0 {
+        if padding > 0 && !pad {
             if let Some(last) = chunks.last_mut() {
                 if fold_zero.is_some() && last.len() == 1 {
                     // A folded all-zero final chunk can't be partially
@@ -782,12 +796,7 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
 
     fn a85_encode(data: &[u8], pad: bool) -> Vec<u8> {
         const A85_ALPHABET: &[u8] = b"!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstu";
-        let chunks = if pad {
-            encode85_words(data, A85_ALPHABET, None)
-        } else {
-            encode85_words(data, A85_ALPHABET, Some(b'z'))
-        };
-        chunks.concat()
+        encode85_words(data, A85_ALPHABET, Some(b'z'), pad).concat()
     }
 
     fn a85_decode(data: &[u8], foldspaces: bool) -> Result<Vec<u8>, String> {
@@ -833,8 +842,8 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         Ok(decoded)
     }
 
-    fn b85_encode(data: &[u8]) -> Vec<u8> {
-        encode85_words(data, B85_ALPHABET, None).concat()
+    fn b85_encode(data: &[u8], pad: bool) -> Vec<u8> {
+        encode85_words(data, B85_ALPHABET, None, pad).concat()
     }
 
     fn b85_decode(data: &[u8]) -> Result<Vec<u8>, String> {
@@ -867,29 +876,86 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         Ok(out)
     }
 
+    // Keyword arguments (`pad=`/`adobe=`/etc.) arrive packed into a trailing
+    // dict positional arg (see call_function's "pack keyword arguments"
+    // step) — this pulls one boolean keyword out of that dict, defaulting
+    // to false when absent (matches every keyword-only param a85/b85
+    // encode/decode take: `pad`, `adobe`, `foldspaces`).
+    fn kwarg_bool(args: &[PyObjectRef], name: &str) -> bool {
+        if let Some(last) = args.last() {
+            if let PyObject::Dict(d) = &*last.borrow() {
+                if let Ok(Some(v)) = d.get(&py_str(name)) {
+                    return v.truthy();
+                }
+            }
+        }
+        false
+    }
+
+    fn kwarg_int(args: &[PyObjectRef], name: &str) -> Option<i64> {
+        if let Some(last) = args.last() {
+            if let PyObject::Dict(d) = &*last.borrow() {
+                if let Ok(Some(v)) = d.get(&py_str(name)) {
+                    return v.as_i64();
+                }
+            }
+        }
+        None
+    }
+
     b64_func!("a85encode", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("a85encode() takes at least one argument"));
         }
         let data = arg_bytes(&args[0])
             .ok_or_else(|| PyError::type_error("a85encode() argument must be bytes"))?;
-        Ok(PyObjectRef::imm(PyObject::Bytes(a85_encode(&data, false))))
+        let pad = kwarg_bool(args, "pad");
+        let adobe = kwarg_bool(args, "adobe");
+        let mut result = a85_encode(&data, pad);
+        if adobe {
+            let mut framed = b"<~".to_vec();
+            framed.extend_from_slice(&result);
+            result = framed;
+        }
+        if let Some(wrapcol) = kwarg_int(args, "wrapcol").filter(|&w| w > 0) {
+            let wrapcol = wrapcol.max(if adobe { 2 } else { 1 }) as usize;
+            let mut chunks: Vec<&[u8]> = result.chunks(wrapcol).collect();
+            if adobe && chunks.last().map_or(0, |c| c.len()) + 2 > wrapcol {
+                chunks.push(&[]);
+            }
+            result = chunks.join(&b"\n"[..]);
+        }
+        if adobe {
+            result.extend_from_slice(b"~>");
+        }
+        Ok(PyObjectRef::imm(PyObject::Bytes(result)))
     });
     b64_func!("a85decode", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("a85decode() takes at least one argument"));
         }
-        let data = match &*args[0].borrow() {
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            _ => {
-                return Err(PyError::type_error(
-                    "a85decode() argument must be a string or bytes",
-                ))
-            }
+        let mut data = if let PyObject::Str(s) = &*args[0].borrow() {
+            s.as_bytes().to_vec()
+        } else if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else {
+            return Err(PyError::type_error(
+                "a85decode() argument must be a string or bytes",
+            ));
         };
-        a85_decode(&data, false)
+        let foldspaces = kwarg_bool(args, "foldspaces");
+        if kwarg_bool(args, "adobe") {
+            if !data.ends_with(b"~>") {
+                return Err(PyError::value_error(
+                    "Ascii85 encoded byte sequences must end with b'~>'",
+                ));
+            }
+            data.truncate(data.len() - 2);
+            if data.starts_with(b"<~") {
+                data.drain(0..2);
+            }
+        }
+        a85_decode(&data, foldspaces)
             .map(|b| PyObjectRef::imm(PyObject::Bytes(b)))
             .map_err(PyError::value_error)
     });
@@ -899,23 +965,84 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
         }
         let data = arg_bytes(&args[0])
             .ok_or_else(|| PyError::type_error("b85encode() argument must be bytes"))?;
-        Ok(PyObjectRef::imm(PyObject::Bytes(b85_encode(&data))))
+        let pad = kwarg_bool(args, "pad");
+        Ok(PyObjectRef::imm(PyObject::Bytes(b85_encode(&data, pad))))
     });
     b64_func!("b85decode", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("b85decode() takes at least one argument"));
         }
-        let data = match &*args[0].borrow() {
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            _ => {
-                return Err(PyError::type_error(
-                    "b85decode() argument must be a string or bytes",
-                ))
-            }
+        let data = if let PyObject::Str(s) = &*args[0].borrow() {
+            s.as_bytes().to_vec()
+        } else if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else {
+            return Err(PyError::type_error(
+                "b85decode() argument must be a string or bytes",
+            ));
         };
         b85_decode(&data)
+            .map(|b| PyObjectRef::imm(PyObject::Bytes(b)))
+            .map_err(PyError::value_error)
+    });
+
+    // `z85encode`/`z85decode` (ZeroMQ's Z85, RFC-ish variant of base64's own
+    // "b85") are just b85encode/b85decode through a character
+    // transliteration — same 85-symbol alphabet, different character
+    // assignment. Ported directly from CPython's own `base64.py` (which
+    // itself just wraps b85encode/b85decode with `bytes.translate`).
+    const Z85_ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
+
+    fn z85_encode(data: &[u8]) -> Vec<u8> {
+        b85_encode(data, false)
+            .into_iter()
+            .map(|c| {
+                let idx = B85_ALPHABET.iter().position(|&a| a == c).unwrap();
+                Z85_ALPHABET[idx]
+            })
+            .collect()
+    }
+
+    fn z85_decode(data: &[u8]) -> Result<Vec<u8>, String> {
+        let translated: Vec<u8> = data
+            .iter()
+            .map(|&c| {
+                Z85_ALPHABET
+                    .iter()
+                    .position(|&a| a == c)
+                    .map(|idx| B85_ALPHABET[idx])
+                    // A byte valid in b85 but not in z85 (or any other
+                    // unknown byte) must not silently decode as *some*
+                    // b85 digit — map it to something b85_decode is
+                    // guaranteed to reject instead.
+                    .unwrap_or(0)
+            })
+            .collect();
+        b85_decode(&translated).map_err(|e| e.replace("base85", "z85"))
+    }
+
+    b64_func!("z85encode", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("z85encode() takes at least one argument"));
+        }
+        let data = arg_bytes(&args[0])
+            .ok_or_else(|| PyError::type_error("z85encode() argument must be bytes"))?;
+        Ok(PyObjectRef::imm(PyObject::Bytes(z85_encode(&data))))
+    });
+    b64_func!("z85decode", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("z85decode() takes at least one argument"));
+        }
+        let data = if let PyObject::Str(s) = &*args[0].borrow() {
+            s.as_bytes().to_vec()
+        } else if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else {
+            return Err(PyError::type_error(
+                "z85decode() argument must be a string or bytes",
+            ));
+        };
+        z85_decode(&data)
             .map(|b| PyObjectRef::imm(PyObject::Bytes(b)))
             .map_err(PyError::value_error)
     });
