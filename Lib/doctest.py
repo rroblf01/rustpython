@@ -290,6 +290,19 @@ def _member_docstrings(module):
             doc = getattr(val, "__doc__", None)
             if isinstance(doc, str):
                 results.append(("%s.%s" % (mod_name, name), doc))
+
+    testdict = getattr(module, "__test__", None)
+    if isinstance(testdict, dict):
+        for valname, val in testdict.items():
+            qualname = "%s.__test__.%s" % (mod_name, valname)
+            if isinstance(val, str):
+                results.append((qualname, val))
+            elif isinstance(val, type):
+                results.extend(_class_docstrings(val, mod_name, qualname))
+            elif callable(val):
+                doc = getattr(val, "__doc__", None)
+                if isinstance(doc, str):
+                    results.append((qualname, doc))
     return results
 
 

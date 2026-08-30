@@ -226,7 +226,15 @@ impl PyObject {
                 }
             }
             PyObject::Module { name, .. } => format!("<module '{}'>", name),
-            PyObject::Type { name, .. } => format!("<class '{}'>", name),
+            PyObject::Type { name, dict, .. } => {
+                // Real CPython: `<class 'module.Name'>` unless the module is
+                // `builtins` (or unset), which prints the bare name instead.
+                let module = dict.get_str("__module__").map(|m| m.str());
+                match module.as_deref() {
+                    Some("builtins") | None => format!("<class '{}'>", name),
+                    Some(m) => format!("<class '{}.{}'>", m, name),
+                }
+            }
             PyObject::Instance { typ, dict } => {
                 // For native-base subclasses (e.g. class Foo(set): ...), the instance
                 // has a native backing (PyObject::Set/List/Dict etc) stored under
