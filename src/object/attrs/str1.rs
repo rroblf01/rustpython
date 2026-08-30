@@ -599,9 +599,17 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             } else {
                                 " \t\n\r\x0b\x0c".to_string()
                             };
-                            Ok(py_str(
-                                args[0].str().trim_matches(|c: char| chars.contains(c)),
-                            ))
+                            let original = args[0].str();
+                            let trimmed = original.trim_matches(|c: char| chars.contains(c));
+                            // Real CPython returns the SAME object when
+                            // nothing was actually stripped (str/bytes-
+                            // specific optimization — test_bigmem.py's
+                            // test_strip asserts `is` identity on this).
+                            if trimmed.len() == original.len() {
+                                Ok(args[0].clone())
+                            } else {
+                                Ok(py_str(trimmed))
+                            }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -619,11 +627,13 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             } else {
                                 " \t\n\r\x0b\x0c".to_string()
                             };
-                            Ok(py_str(
-                                args[0]
-                                    .str()
-                                    .trim_start_matches(|c: char| chars.contains(c)),
-                            ))
+                            let original = args[0].str();
+                            let trimmed = original.trim_start_matches(|c: char| chars.contains(c));
+                            if trimmed.len() == original.len() {
+                                Ok(args[0].clone())
+                            } else {
+                                Ok(py_str(trimmed))
+                            }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
@@ -641,9 +651,13 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             } else {
                                 " \t\n\r\x0b\x0c".to_string()
                             };
-                            Ok(py_str(
-                                args[0].str().trim_end_matches(|c: char| chars.contains(c)),
-                            ))
+                            let original = args[0].str();
+                            let trimmed = original.trim_end_matches(|c: char| chars.contains(c));
+                            if trimmed.len() == original.len() {
+                                Ok(args[0].clone())
+                            } else {
+                                Ok(py_str(trimmed))
+                            }
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
