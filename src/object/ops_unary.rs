@@ -312,8 +312,8 @@ pub fn py_neg(val: &PyObjectRef) -> PyResult<PyObjectRef> {
     }
 }
 
-pub fn py_not(val: &PyObjectRef) -> PyObjectRef {
-    py_bool(!val.truthy())
+pub fn py_not(val: &PyObjectRef) -> PyResult<PyObjectRef> {
+    Ok(py_bool(!val.try_truthy()?))
 }
 
 pub fn py_pos(val: &PyObjectRef) -> PyResult<PyObjectRef> {

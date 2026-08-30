@@ -313,7 +313,10 @@ pub(crate) extern "C" fn jit_neg(val: *const PyObjectRef, out: *mut PyObjectRef)
 }
 pub(crate) extern "C" fn jit_not(val: *const PyObjectRef, out: *mut PyObjectRef) {
     unsafe {
-        std::ptr::write(out, crate::object::py_not(&*val));
+        std::ptr::write(
+            out,
+            crate::object::py_not(&*val).unwrap_or_else(|_| crate::object::py_none()),
+        );
     }
 }
 pub(crate) extern "C" fn jit_build_list(n: i64, items: *const PyObjectRef, out: *mut PyObjectRef) {

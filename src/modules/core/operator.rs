@@ -259,7 +259,7 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("operator.not_ requires 1 argument"));
         }
-        Ok(py_not(&args[0]))
+        py_not(&args[0])
     });
     op_func!("getitem", |args| {
         if args.len() < 2 {

@@ -175,7 +175,7 @@ impl VirtualMachine {
             }
             Opcode::UNARY_NOT => {
                 let val = self.frames[fi].pop()?;
-                self.frames[fi].push(py_bool(!val.truthy()));
+                self.frames[fi].push(py_bool(!val.try_truthy()?));
             }
             Opcode::UNARY_INVERT => {
                 let val = self.frames[fi].pop()?;
