@@ -60,20 +60,21 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Ok(PyObjectRef::imm(PyObject::Complex(0.0, 0.0)));
     }
-    let (re, im) = {
+    let (re, im, first_was_complex) = {
         let obj = args[0].borrow();
         match &*obj {
-            PyObject::Complex(re, im) => (*re, *im),
-            PyObject::Int(i) => (i.to_f64().unwrap_or(0.0), 0.0),
-            PyObject::Float(f) => (*f, 0.0),
-            PyObject::Bool(b) => (if *b { 1.0 } else { 0.0 }, 0.0),
+            PyObject::Complex(re, im) => (*re, *im, true),
+            PyObject::Int(i) => (i.to_f64().unwrap_or(0.0), 0.0, false),
+            PyObject::Float(f) => (*f, 0.0, false),
+            PyObject::Bool(b) => (if *b { 1.0 } else { 0.0 }, 0.0, false),
             PyObject::Str(s) => {
                 if args.len() > 1 {
                     return Err(PyError::type_error(
                         "complex() can't take second arg if first is a string",
                     ));
                 }
-                parse_complex_str(s)?
+                let (re, im) = parse_complex_str(s)?;
+                (re, im, false)
             }
             // Custom `__complex__` was never consulted at all — same class
             // of gap just fixed for `divmod()`/`__divmod__` above. Real
@@ -89,16 +90,36 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     let result = call_bound_method(f, self_obj, vec![])?;
                     let result_borrow = result.borrow();
                     match &*result_borrow {
-                        PyObject::Complex(re, im) => (*re, *im),
+                        PyObject::Complex(re, im) => (*re, *im, true),
                         _ => return Err(PyError::type_error("__complex__ returned non-complex")),
                     }
                 }
-                None => {
-                    return Err(PyError::type_error(format!(
-                        "complex() argument must be a string or a number, not '{}'",
-                        get_type_name_for_instance(typ)
-                    )))
-                }
+                // A real `class ComplexSubclass(complex): ...` instance
+                // (complex is one of the native types migrated to real
+                // `PyObject::Type` subclassing) has no `__complex__` dunder
+                // of its own to find via MRO - its actual value lives in
+                // its native backing instead. Missing this made
+                // `complex(some_complex_subclass_instance)` raise
+                // TypeError even though `.real`/`.imag` worked fine on the
+                // very same instance (test_complex.py's
+                // test_constructor_special_numbers).
+                None => match native_backing_of(&args[0]) {
+                    Some(native) => match &*native.borrow() {
+                        PyObject::Complex(re, im) => (*re, *im, true),
+                        _ => {
+                            return Err(PyError::type_error(format!(
+                                "complex() argument must be a string or a number, not '{}'",
+                                get_type_name_for_instance(typ)
+                            )))
+                        }
+                    },
+                    None => {
+                        return Err(PyError::type_error(format!(
+                            "complex() argument must be a string or a number, not '{}'",
+                            get_type_name_for_instance(typ)
+                        )))
+                    }
+                },
             },
             _ => {
                 return Err(PyError::type_error(format!(
@@ -109,18 +130,19 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
     };
     if args.len() > 1 {
-        let imag_extra: f64 = {
+        // (extra_re, extra_im): the second argument's own real/imaginary
+        // parts. A plain number's "imaginary part" is 0.0 — real CPython
+        // still supports (with a deprecation warning) the second arg
+        // itself being complex (`complex(1, 2j)` -> `(-1+0j)`,
+        // `complex(3+4j, 1+2j)` -> `(1+5j)`), combining via
+        // `real = a.real - b.imag`, `imag = a.imag + b.real`.
+        let (extra_re, extra_im): (f64, f64) = {
             let obj = args[1].borrow();
             match &*obj {
-                PyObject::Int(i) => i.to_f64().unwrap_or(0.0),
-                PyObject::Float(f) => *f,
-                PyObject::Bool(b) => {
-                    if *b {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                }
+                PyObject::Complex(re, im) => (*re, *im),
+                PyObject::Int(i) => (i.to_f64().unwrap_or(0.0), 0.0),
+                PyObject::Float(f) => (*f, 0.0),
+                PyObject::Bool(b) => (if *b { 1.0 } else { 0.0 }, 0.0),
                 PyObject::Instance { typ, .. } => match lookup_dunder_via_mro(typ, "__complex__") {
                     Some(f) => {
                         let f = f.clone();
@@ -129,12 +151,7 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         let result = call_bound_method(f, self_obj, vec![])?;
                         let result_borrow = result.borrow();
                         match &*result_borrow {
-                            PyObject::Complex(re, im) => {
-                                if *im != 0.0 {
-                                    return Err(PyError::type_error("complex() can't take second arg if first is a complex number with a nonzero imaginary part"));
-                                }
-                                *re
-                            }
+                            PyObject::Complex(re, im) => (*re, *im),
                             _ => {
                                 return Err(PyError::type_error("__complex__ returned non-complex"))
                             }
@@ -155,7 +172,24 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             }
         };
-        return Ok(PyObjectRef::imm(PyObject::Complex(re, im + imag_extra)));
+        // Only actually ADD when the first argument was itself complex
+        // (or the second argument's own imaginary/real parts are
+        // genuinely nonzero) - `im`/`extra_im`/`extra_re` are exactly
+        // 0.0 in the overwhelmingly common `complex(x, y)` case with two
+        // plain reals, and IEEE-754 `0.0 + (-0.0)` rounds to `+0.0`,
+        // silently flushing a negative-zero `imag` argument's sign
+        // (test_complex.py's test_constructor_special_numbers, exercised
+        // via a `complex` subclass so it can't just be a display-only
+        // quirk). Computing the final real part the same way (only
+        // subtracting when there's something nonzero to subtract) keeps
+        // a lone `-0.0` real part intact too.
+        let new_im = if first_was_complex || extra_re != 0.0 {
+            im + extra_re
+        } else {
+            extra_re
+        };
+        let new_re = if extra_im != 0.0 { re - extra_im } else { re };
+        return Ok(PyObjectRef::imm(PyObject::Complex(new_re, new_im)));
     }
     Ok(PyObjectRef::imm(PyObject::Complex(re, im)))
 }
