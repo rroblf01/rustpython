@@ -499,8 +499,30 @@ impl PyObjectRef {
         }
     }
     pub fn str(&self) -> String {
+        // Reentrancy guard: a native-backed subclass instance whose own
+        // `__str__` calls back into a native string method on `self` (e.g.
+        // `self.encode(...)`) would otherwise recurse forever — that native
+        // method's own implementation typically calls `args[0].str()` to
+        // get "the string to work on", which (without this guard) detects
+        // the SAME `__str__` override and re-invokes it, calling
+        // `self.encode(...)` again, forever (never touching the VM's frame
+        // stack, so it hangs instead of raising `RecursionError`). Real
+        // trigger: `class S(str): def __str__(self): return
+        // self.encode('ascii').hex()` — `test_descr.py`'s own
+        // `test_str_of_str_subclass` (via `binascii.b2a_hex`), confirmed
+        // pre-existing (identical hang on a build from before this fix).
+        // Once already inside this object's own `__str__`/`__repr__` call,
+        // any further `.str()` on the SAME object falls through to its
+        // native backing value instead of re-entering the override.
+        thread_local! {
+            static STR_STACK: std::cell::RefCell<Vec<usize>> = std::cell::RefCell::new(Vec::new());
+        }
+        let id = self.get_id();
+        let reentrant = STR_STACK.with(|s| s.borrow().contains(&id));
         // Check for __str__ on Instance types (user-defined objects)
-        let str_func = {
+        let str_func = if reentrant {
+            None
+        } else {
             let obj = self.borrow();
             match &*obj {
                 PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__str__")
@@ -510,7 +532,12 @@ impl PyObjectRef {
         };
         if let Some(f) = str_func {
             if !is_per_type_repr(&f) {
-                if let Ok(result) = call_bound_method(f, self.clone(), vec![]) {
+                STR_STACK.with(|s| s.borrow_mut().push(id));
+                let result = call_bound_method(f, self.clone(), vec![]);
+                STR_STACK.with(|s| {
+                    s.borrow_mut().pop();
+                });
+                if let Ok(result) = result {
                     return result.str();
                 }
             }
