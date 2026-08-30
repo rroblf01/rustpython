@@ -38,7 +38,12 @@ try:
     _real_atomic_extra.add(type); _real_copy_extra.add(type)
     try: _real_atomic_extra.add(_rt(range(0,10))); _real_copy_extra.add(_rt(range(0,10)))
     except: pass
-    try: _real_atomic_extra.add(_rt(slice(1,2))); _real_copy_extra.add(_rt(slice(1,2)))
+    # slice is atomic for shallow `copy.copy` but NOT for `copy.deepcopy` —
+    # real CPython deep-copies each of start/stop/step independently since
+    # they can be arbitrary mutable objects (test_slice.py::test_deepcopy's
+    # "corner case for mutable indices"), so only register it as a
+    # shallow-copy atomic type here.
+    try: _real_copy_extra.add(_rt(slice(1,2)))
     except: pass
     try: _real_atomic_extra.add(_rt(property())); _real_copy_extra.add(_rt(property()))
     except: pass
