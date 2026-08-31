@@ -1,9 +1,6 @@
 use crate::object::*;
 use std::collections::HashMap;
 
-mod collections;
-pub use collections::*;
-
 mod types;
 pub use types::*;
 

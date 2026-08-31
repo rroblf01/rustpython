@@ -1,4 +1,3 @@
-use crate::modules::create_collections_abc_dict;
 use crate::object::*;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -822,11 +821,15 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
         Ok(typ)
     });
 
-    // collections.abc submodule (Iterable, Hashable, etc.)
-    d.insert_str(
-        "abc",
-        create_module("collections.abc", create_collections_abc_dict()),
-    );
+    // collections.abc submodule: NOT set here — wired up post-construction by
+    // `VirtualMachine::install_collections_abc_alias` (see vm.rs) against the
+    // real, vendored `Lib/_collections_abc.py` (built through real
+    // `abc.ABCMeta`), mirroring real CPython's own
+    // `collections/__init__.py`: `import _collections_abc; abc =
+    // _collections_abc; sys.modules['collections.abc'] = _collections_abc`.
+    // A native, hand-rolled `collections.abc` dict used to be built here
+    // instead (see git history / `src/modules/misc/collections.rs`), but
+    // that shadowed the real ABCMeta-based classes and their mixin methods.
 
     d
 }

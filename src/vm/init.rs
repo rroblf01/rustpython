@@ -267,16 +267,14 @@ pub(crate) fn register_native_modules(
         let weakref_dict = create_weakref_dict();
         modules.insert_str("_weakref", create_module("_weakref", weakref_dict.clone()));
 
-        let collections_abc_dict = create_collections_abc_dict();
-        modules.insert_str(
-            "_collections_abc",
-            create_module("_collections_abc", collections_abc_dict.clone()),
-        );
-        // Pre-register collections.abc so the import chain walker finds it without needing __path__
-        modules.insert_str(
-            "collections.abc",
-            create_module("collections.abc", collections_abc_dict),
-        );
+        // `_collections_abc`/`collections.abc`: NOT pre-registered here.
+        // These now resolve to the real, vendored `Lib/_collections_abc.py`
+        // (built through real `abc.ABCMeta`) via normal file-based import,
+        // wired up post-construction by
+        // `VirtualMachine::install_collections_abc_alias` (see vm.rs) the
+        // same way real CPython's `collections/__init__.py` aliases it.
+        // Pre-registering a native dict here (as this used to do) would
+        // shadow that real module and its ABCMeta-derived mixin methods.
 
         // Native weakref module DISABLED: use Lib/weakref.py (needs only _weakref primitives)
         // let mut weakref_mod_dict = weakref_dict; // Start from _weakref

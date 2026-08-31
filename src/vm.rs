@@ -165,6 +165,7 @@ impl VirtualMachine {
                     "ChainMap",
                 ],
             );
+            vm.install_collections_abc_alias();
             vm.install_source_defined_stdlib(
                 "functools",
                 crate::modules::FUNCTOOLS_EXTRA_SOURCE,
@@ -463,7 +464,16 @@ impl VirtualMachine {
         // return the real ZeroDivisionError & co., not a synthetic Type —
         // test_atexit's `type(exc_value) == ZeroDivisionError`).
         crate::modules::set_builtins_ref(Rc::clone(&builtins));
-        crate::modules::register_collections_abc_builtins();
+        // NOTE: `register_collections_abc_builtins()` used to run here to
+        // hand-register builtin types (dict/list/set/...) as virtual
+        // subclasses of the NATIVE `collections.abc` ABCs. That's no longer
+        // needed (and would actively corrupt state if called): the real,
+        // vendored `Lib/_collections_abc.py` (wired up below via
+        // `install_collections_abc_alias`) already performs the equivalent
+        // `MutableMapping.register(dict)`-style calls itself through real
+        // `abc.ABCMeta`, whose `_abc_registry` is a `WeakSet` mutated via
+        // `.add()` — overwriting it with a freshly-built `FrozenSet` (what
+        // the old native helper did) would wipe out those real registrations.
 
         // Populate the disposable-VM fast path's cache (see the doc
         // comment at the top of this function) — safe to do BEFORE the
@@ -509,6 +519,7 @@ impl VirtualMachine {
                 "_count_elements",
             ],
         );
+        vm.install_collections_abc_alias();
         // contextlib no longer native — real Lib/contextlib.py already defines ContextDecorator
         vm.install_source_defined_stdlib(
             "functools",

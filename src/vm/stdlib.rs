@@ -124,4 +124,111 @@ impl VirtualMachine {
             }
         }
     }
+
+    /// Wire up `collections.abc` against the real, vendored
+    /// `Lib/_collections_abc.py` (built through real `abc.ABCMeta`),
+    /// mirroring what real CPython's `collections/__init__.py` does at
+    /// import time:
+    /// ```python
+    /// import _collections_abc
+    /// sys.modules['collections.abc'] = _collections_abc
+    /// abc = _collections_abc
+    /// ```
+    /// The native `collections` module here has no Python source of its own
+    /// to run that in, and — unlike a plain dotted submodule — `collections`
+    /// has no `__path__` for the normal dotted-import walker to find a
+    /// `collections/abc.py` under (real CPython doesn't have one either as
+    /// of 3.14: this alias is the only way `collections.abc` resolves).
+    ///
+    /// Only actually IMPORTS `_collections_abc` (parsing + compiling +
+    /// running ~1200 lines of real stdlib source, including `abc.ABCMeta`
+    /// class-creation machinery) once per process/thread: the resulting
+    /// module object is cached and Rc-shared into every subsequent
+    /// `VirtualMachine::new()` call, the same "process-wide stdlib
+    /// singleton" pattern `install_source_defined_stdlib`'s own
+    /// `EXECUTED_STDLIB_CACHE` and `VM_STATE_CACHE` already use — without
+    /// this, every one of the (potentially thousands of) disposable VMs
+    /// spun up for nested Python-level calls would re-run the whole module
+    /// from scratch.
+    pub(crate) fn install_collections_abc_alias(&mut self) {
+        thread_local! {
+            static CACHED_ABC_MODULE: RefCell<Option<PyObjectRef>> = RefCell::new(None);
+            // Re-entrancy guard — see the long comment below for why this
+            // is load-bearing, not defensive: without it, this hangs on
+            // EVERY invocation of the interpreter.
+            static IMPORTING: std::cell::Cell<bool> = std::cell::Cell::new(false);
+        }
+        if self.modules.contains_key("collections.abc") {
+            return;
+        }
+        let abc_mod = if let Some(cached) = CACHED_ABC_MODULE.with(|c| c.borrow().clone()) {
+            cached
+        } else {
+            // Importing `_collections_abc` for the very first time compiles
+            // and executes ~1200 lines of real stdlib source — class bodies
+            // (`class Mapping(Collection, metaclass=ABCMeta): ...`),
+            // `abc.ABCMeta.__new__` machinery, `async def`/generator
+            // bootstrapping, etc. Some of that machinery, along the way,
+            // constructs its OWN nested disposable `VirtualMachine`s (the
+            // same "many *disposable* VMs spun up for nested Python-level
+            // calls from Rust builtin code" pattern documented on
+            // `install_source_defined_stdlib`) — and every
+            // `VirtualMachine::new()`, including those nested ones, reaches
+            // this exact method (from `vm.rs`'s "fast path" branch, since
+            // by then `VM_STATE_CACHE` is already populated). Without this
+            // guard, each such nested call — landing here BEFORE the
+            // outer, still-in-progress import has had a chance to populate
+            // `CACHED_ABC_MODULE` — saw an empty cache and kicked off its
+            // OWN full re-import, which spun up more nested VMs, which did
+            // the same, unboundedly: confirmed as a hang on literally
+            // every `-c` invocation (even `print('hello')`, since
+            // `VirtualMachine::new()` runs unconditionally) once this
+            // method's fast-path call site was enabled. Skipping the
+            // import on a re-entrant call is safe: that inner disposable
+            // VM simply proceeds without `collections.abc` pre-wired
+          // (falling back to whatever a real `import collections.abc`
+            // statement inside its own code would do, same as any other
+            // not-yet-cached stdlib extra), and the ONE outer, non-
+            // re-entrant call completes normally and populates the cache
+            // for every VM constructed after it returns.
+            if IMPORTING.with(|f| f.get()) {
+                return;
+            }
+            IMPORTING.with(|f| f.set(true));
+            let result = self.import_module_from_file("_collections_abc");
+            IMPORTING.with(|f| f.set(false));
+            match result {
+                Ok(m) => {
+                    CACHED_ABC_MODULE.with(|c| *c.borrow_mut() = Some(m.clone()));
+                    m
+                }
+                Err(_) => return,
+            }
+        };
+        self.modules
+            .insert("_collections_abc".to_string(), abc_mod.clone());
+        self.modules
+            .insert("collections.abc".to_string(), abc_mod.clone());
+        if let Some(collections_mod) = self.modules.get("collections").cloned() {
+            if let PyObject::Module { dict, .. } = &mut *collections_mod.borrow_mut() {
+                dict.insert_str("abc", abc_mod.clone());
+            }
+        }
+        if let Some(sys_mod) = self.modules.get("sys") {
+            let mod_dict = {
+                let b = sys_mod.borrow();
+                if let PyObject::Module { dict, .. } = &*b {
+                    dict.get_str("modules").cloned()
+                } else {
+                    None
+                }
+            };
+            if let Some(mod_dict) = mod_dict {
+                if let PyObject::Dict(ref mut d) = &mut *mod_dict.borrow_mut() {
+                    let _ = d.set(py_str("_collections_abc"), abc_mod.clone());
+                    let _ = d.set(py_str("collections.abc"), abc_mod.clone());
+                }
+            }
+        }
+    }
 }
