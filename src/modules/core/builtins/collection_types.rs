@@ -29,6 +29,22 @@ pub fn register_collection_types(builtins: &mut HashMap<String, PyObjectRef>, ob
             func: crate::object::builtin_list_repr as BuiltinFunc,
         }),
     );
+    // `list.__hash__ = None` (real CPython's own convention for every
+    // mutable builtin: `list`/`dict`/`set`/`bytearray`) — the actual
+    // unhashability ENFORCEMENT already happens elsewhere (`hash()`
+    // dispatches on the runtime value's own `PyObject` variant, not this
+    // dict entry, so this doesn't change `hash([])`'s behavior at all: it
+    // already correctly raised `TypeError: unhashable type: 'list'`).
+    // What this DOES fix is every INTROSPECTION-based consumer of the
+    // `__hash__ is None` idiom real CPython uses to mean "not hashable" —
+    // real `Lib/_collections_abc.py`'s own `Hashable.__subclasshook__`
+    // (`_check_methods`: "if B.__dict__[method] is None: return
+    // NotImplemented") being the concrete trigger
+    // (`test_collections.py`'s `TestOneTrickPonyABCs.test_Hashable`
+    // asserted `bytearray(b'')` is NOT `isinstance(x, Hashable)` — without
+    // a real `None` here, `_check_methods` found `__hash__` inherited from
+    // `object` and concluded it MUST be hashable).
+    list_dict.insert_str("__hash__", py_none());
     let list_type = PyObjectRef::new(PyObject::Type {
         name: "list".to_string(),
         dict: Box::new(str_map_to_typedict(list_dict)),
@@ -104,6 +120,8 @@ pub fn register_collection_types(builtins: &mut HashMap<String, PyObjectRef>, ob
             func: crate::object::builtin_dict_repr as BuiltinFunc,
         }),
     );
+    // See `list_dict`'s matching `__hash__ = None` for why.
+    dict_dict.insert_str("__hash__", py_none());
     let dict_type = PyObjectRef::new(PyObject::Type {
         name: "dict".to_string(),
         dict: Box::new(str_map_to_typedict(dict_dict)),
@@ -232,6 +250,8 @@ pub fn register_collection_types(builtins: &mut HashMap<String, PyObjectRef>, ob
             func: crate::object::builtin_set_repr as BuiltinFunc,
         }),
     );
+    // See `list_dict`'s matching `__hash__ = None` for why.
+    set_dict.insert_str("__hash__", py_none());
     let set_type = PyObjectRef::new(PyObject::Type {
         name: "set".to_string(),
         dict: Box::new(str_map_to_typedict(set_dict)),
@@ -318,6 +338,8 @@ pub fn register_collection_types(builtins: &mut HashMap<String, PyObjectRef>, ob
             func: crate::object::builtin_bytearray_repr as BuiltinFunc,
         }),
     );
+    // See `list_dict`'s matching `__hash__ = None` for why.
+    bytearray_dict.insert_str("__hash__", py_none());
     let bytearray_type = PyObjectRef::new(PyObject::Type {
         name: "bytearray".to_string(),
         dict: Box::new(str_map_to_typedict(bytearray_dict)),
@@ -364,4 +386,42 @@ pub fn register_collection_types(builtins: &mut HashMap<String, PyObjectRef>, ob
     }
     builtins.insert_str("frozenset", frozenset_type.clone());
     crate::object::seed_primitive_type_cache("frozenset", frozenset_type);
+
+    // `NoneType` (`type(None)`) — NOT inserted into `builtins` (real
+    // CPython doesn't expose a bare `NoneType` name either; it's reachable
+    // as `types.NoneType`), just pre-seeded into the same
+    // `PRIMITIVE_TYPE_CACHE` the OTHER types above register into, so
+    // `type(None)` returns this real, `object`-derived Type instead of
+    // falling through to `builtin_type_of`'s generic "empty placeholder
+    // Type built by name" catch-all (which gives an empty `dict`/`mro` —
+    // exposing NO dunders at all, `__hash__` included). Real CPython:
+    // `None` IS hashable (`NoneType.__hash__` is a real, constant-
+    // returning function) — real trigger: `test_collections.py`'s
+    // `TestOneTrickPonyABCs.test_Hashable` asserts
+    // `issubclass(type(None), Hashable)`, which needs `_check_methods` to
+    // find a real (non-`None`, non-missing) `__hash__` somewhere in
+    // `type(None).__mro__`.
+    let mut none_type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    none_type_dict.insert_str(
+        "__hash__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__hash__".to_string(),
+            func: |args: &[PyObjectRef]| {
+                let v = args
+                    .first()
+                    .ok_or_else(|| PyError::type_error("__hash__() missing self"))?;
+                Ok(py_int(v.hash()? as i64))
+            },
+        }),
+    );
+    let none_type = PyObjectRef::new(PyObject::Type {
+        name: "NoneType".to_string(),
+        dict: Box::new(str_map_to_typedict(none_type_dict)),
+        bases: vec![object_type.clone()],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *none_type.borrow_mut() {
+        *mro = vec![none_type.clone(), object_type.clone()];
+    }
+    crate::object::seed_primitive_type_cache("NoneType", none_type);
 }
