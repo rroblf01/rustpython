@@ -41,6 +41,33 @@ pub fn builtin_property(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     ))))
 }
 
+/// Return a new Property with the given getter (used by @x.getter)
+pub fn property_getter(prop: &PyObjectRef, new_getter: PyObjectRef) -> PyObjectRef {
+    let (setter, deleter, doc) = {
+        let b = prop.borrow();
+        match &*b {
+            PyObject::Property(ref d) => (d.setter.clone(), d.deleter.clone(), d.doc.clone()),
+            _ => return prop.clone(),
+        }
+    };
+    PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+        getter: Some(new_getter),
+        setter,
+        deleter,
+        doc,
+    })))
+}
+
+/// Builtin for property.getter(func) — returns new Property with getter
+pub fn builtin_property_getter_fn(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error(
+            "getter() requires at least the getter function",
+        ));
+    }
+    Ok(property_getter(&args[0], args[1].clone()))
+}
+
 /// Return a new Property with the given setter (used by @x.setter)
 pub fn property_setter(prop: &PyObjectRef, new_setter: PyObjectRef) -> PyObjectRef {
     let (getter, deleter, doc) = {

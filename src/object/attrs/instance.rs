@@ -130,28 +130,46 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         },
                     }));
                 }
-                // `ABCMeta.register(subclass)` — real CPython's `abc.py`
-                // wraps a native `_abc_register` primitive that this
-                // project already implements (`modules/core.rs`) but never
-                // actually wires up: `class Foo(metaclass=ABCMeta): ...`
-                // doesn't go through a real `class ABCMeta(type):` (this
-                // project's own `ABCMeta` is a plain `BuiltinFunction`, not
-                // a `type` subclass — real per-metaclass method lookup
-                // falling back from `SomeClass.register` to `type
-                // (SomeClass).register` is a deeper, unimplemented
-                // architecture piece), so `SomeClass.register` never
-                // resolved to anything at all. Providing `.register` as a
-                // generic fallback on EVERY class (not gated on "was this
-                // built via ABCMeta") is pragmatic rather than fully
-                // correct — but calling `.register()` on a non-ABC class
-                // isn't something real code does unintentionally, so
-                // there's no real-world downside. Records the virtual
-                // subclass in a `_abc_registry` frozenset attribute on the
-                // class; `isinstance`/`issubclass` consult it (see
-                // `builtin_isinstance`/`builtin_issubclass`). Real trigger:
-                // `numbers.Number.register(Decimal)` — needed by real
-                // CPython's own (vendored) `_pydecimal.py`.
-                if name == "register" && !dict.contains_key_str("register") {
+                // `.register(subclass)` pragmatic fallback for classes with
+                // NO real custom metaclass — records the virtual subclass
+                // in a `_abc_registry` frozenset attribute on the class;
+                // `isinstance`/`issubclass` consult it via
+                // `own_abc_registry`/`abc_registry_matches_in_subtree` (see
+                // `builtin_isinstance`/`builtin_issubclass`). This dates
+                // from when `abc.ABCMeta` was itself a native stub (a plain
+                // `BuiltinFunction`, not a real `type` subclass), so real
+                // per-metaclass method lookup (falling back from
+                // `SomeClass.register` to `type(SomeClass).register`) didn't
+                // exist yet and `SomeClass.register` never resolved to
+                // anything real at all — `numbers.Number.register(Decimal)`
+                // (needed by the vendored `_pydecimal.py`) was the original
+                // trigger, even though `numbers.Number` itself is built with
+                // `metaclass=ABCMeta`.
+                //
+                // Now that `abc.ABCMeta`/`_py_abc.ABCMeta` are real Python
+                // metaclasses (`Lib/abc.py`/`Lib/_py_abc.py`, vendored from
+                // CPython) whose own `register()` method does real
+                // `isinstance`/`issubclass`/cycle-detection validation and
+                // stores the registry in a `WeakSet` INSTANCE (not a
+                // `FrozenSet`), this generic fallback must NOT fire for a
+                // class that has a real custom metaclass (`METATYPE_KEY`
+                // set) — doing so would (a) silently skip all of ABCMeta's
+                // own validation (`test_register_non_class`,
+                // `test_registration_edge_cases` expect `TypeError`/
+                // `RuntimeError` from bad `.register()` calls) and (b)
+                // clobber the real `WeakSet`-backed `_abc_registry` with a
+                // bogus fresh `FrozenSet` (this exact `dict.get_str
+                // ("_abc_registry")` pattern-matches only `FrozenSet`,
+                // silently treating a `WeakSet` instance as "no existing
+                // registry" and overwriting it). Skipping here (returning
+                // `Err` by falling through, same as any other unresolved
+                // name) lets the caller's own metaclass-MRO fallback (see
+                // `op_attr.rs`'s `LOAD_ATTR` handler) find the real
+                // `ABCMeta.register` instead.
+                if name == "register"
+                    && !dict.contains_key_str("register")
+                    && !dict.contains_key_str(METATYPE_KEY)
+                {
                     return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "register".to_string(),
                         func: |args| {
@@ -689,7 +707,21 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         }
                     }
                     "setter" | "deleter" | "getter" => {
-                        let is_setter = name == "setter";
+                        // BUG (fixed): this used to only distinguish
+                        // "setter" from "everything else", silently routing
+                        // `@some_prop.getter` through `builtin_property_
+                        // deleter_fn` — the new getter function landed in
+                        // the DELETER slot instead, leaving the OLD
+                        // (possibly `@abstractmethod`-marked) getter in
+                        // place. Real trigger: `abc.py`'s own idiom
+                        // `@C.foo.getter def foo(self): ...` to override an
+                        // abstract property's getter in a subclass — the
+                        // resulting property kept reporting
+                        // `__isabstractmethod__ == True` (computed from the
+                        // untouched original getter), so the subclass
+                        // stayed permanently "abstract" and could never be
+                        // instantiated (`test_abc.py`'s
+                        // `test_abstractproperty_basics`).
                         let prop_obj = PyObjectRef::new(match o {
                             PyObject::Property(ref d) => {
                                 PyObject::Property(Box::new(PropertyData {
@@ -701,13 +733,14 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             }
                             _ => unreachable!(),
                         });
+                        let func = match name {
+                            "setter" => builtin_property_setter_fn,
+                            "getter" => builtin_property_getter_fn,
+                            _ => builtin_property_deleter_fn,
+                        };
                         Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                             name: name.to_string(),
-                            func: if is_setter {
-                                builtin_property_setter_fn
-                            } else {
-                                builtin_property_deleter_fn
-                            },
+                            func,
                             self_obj: prop_obj,
                         }))
                     }
