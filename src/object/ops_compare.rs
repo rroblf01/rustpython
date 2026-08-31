@@ -332,8 +332,29 @@ fn try_rich_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<Optio
                     other_ref: &PyObjectRef,
                     method: &str|
      -> PyResult<Option<PyObjectRef>> {
-        if let PyObject::Instance { typ, .. } = &*self_ref.borrow() {
-            if let Some(f) = lookup_dunder_via_mro(typ, method) {
+        // Extract (clone) `typ` and drop the borrow BEFORE calling
+        // `call_bound_method` — `typ` used to stay borrowed from
+        // `self_ref` for the whole `if let` block (a `&*self_ref.borrow()`
+        // temporary lives as long as the binding it produced), which is
+        // still live while the found dunder method's body actually runs.
+        // A method that mutates `self` (any ordinary `self.attr = ...`,
+        // e.g. `test_collections.py`'s own comparison-mixin test helper:
+        // `class Other: def __eq__(self, other): self.right_side = True;
+        // return True`, aliased as `__lt__`/`__gt__`/etc. too) then hit a
+        // STORE_ATTR needing `self_ref.borrow_mut()` while THIS closure
+        // still held an outstanding `.borrow()` on the very same object —
+        // a guaranteed double-borrow panic. Real trigger: real
+        // `Lib/_collections_abc.py`'s `Mapping.__eq__` finally being a
+        // genuine Python method (the old native `collections.abc` stub's
+        // comparisons never exercised this path the same way) made
+        // `test_collections.py`'s `TestCollectionABCs.test_Mapping` reach
+        // this reflected-operator dispatch for the first time.
+        let typ = match &*self_ref.borrow() {
+            PyObject::Instance { typ, .. } => Some(typ.clone()),
+            _ => None,
+        };
+        if let Some(typ) = typ {
+            if let Some(f) = lookup_dunder_via_mro(&typ, method) {
                 let result = call_bound_method(f, self_ref.clone(), vec![other_ref.clone()])?;
                 if !is_not_implemented(&result) {
                     // Return the RAW dunder result — real CPython's rich
@@ -353,13 +374,20 @@ fn try_rich_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<Optio
     // side, never to its own `__eq__`).
     let try_ne_side =
         |self_ref: &PyObjectRef, other_ref: &PyObjectRef| -> PyResult<Option<PyObjectRef>> {
-            if let PyObject::Instance { typ, .. } = &*self_ref.borrow() {
-                if let Some(f) = lookup_dunder_via_mro(typ, "__ne__") {
+            // See `try_side`'s doc comment just above for why `typ` must be
+            // cloned and the borrow dropped before calling into Python —
+            // same fix, same reason, for both dunders this tries.
+            let typ = match &*self_ref.borrow() {
+                PyObject::Instance { typ, .. } => Some(typ.clone()),
+                _ => None,
+            };
+            if let Some(typ) = typ {
+                if let Some(f) = lookup_dunder_via_mro(&typ, "__ne__") {
                     let result = call_bound_method(f, self_ref.clone(), vec![other_ref.clone()])?;
                     if !is_not_implemented(&result) {
                         return Ok(Some(result));
                     }
-                } else if let Some(f) = lookup_dunder_via_mro(typ, "__eq__") {
+                } else if let Some(f) = lookup_dunder_via_mro(&typ, "__eq__") {
                     let result = call_bound_method(f, self_ref.clone(), vec![other_ref.clone()])?;
                     if !is_not_implemented(&result) {
                         return Ok(Some(py_bool(!result.truthy())));
