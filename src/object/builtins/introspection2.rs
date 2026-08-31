@@ -227,7 +227,8 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // raise `TypeError: assertRaises() arg 1 must be an exception type
         // or tuple of exception types` instead of actually working.
         (PyObject::BuiltinFunction { name, .. }, PyObject::Type { name: cname, .. })
-            if is_builtin_exception_class_name(name) =>
+            if is_builtin_exception_class_name(name)
+                || is_pseudo_type_builtin_function_name(name) =>
         {
             Ok(py_bool(cname == "type" || cname == "object"))
         }
@@ -546,9 +547,28 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             if args[0].is(&args[1]) {
                 return Ok(py_bool(true));
             }
-            let base_tn = base.type_name();
+            // Identity, NOT name — two unrelated classes that merely happen
+            // to share a `__name__` (e.g. a test helper that does `C =
+            // type('C', (Base,), {...})` twice, once with each shape, an
+            // extremely common real-world pattern — "C"/"Foo"/"Base" are
+            // popular throwaway names) are NOT subclasses of each other.
+            // This used to compare `c.borrow().type_name() == base_tn`
+            // (a bare string match), so `issubclass(C2, C1)` was `True` for
+            // ANY two same-named classes regardless of actual ancestry —
+            // real trigger: real `Lib/_collections_abc.py`'s `ABCMeta.
+            // __subclasscheck__`'s own `for scls in cls.__subclasses__():
+            // if issubclass(subclass, scls): ...` fallback, walking EVERY
+            // known subclass of an ABC and issubclass-testing each — the
+            // moment ANY real subclass of an ABC existed (from an earlier,
+            // unrelated test) with the same popular name as a later,
+            // deliberately-UNRELATED throwaway class, that later class was
+            // wrongly reported as a subclass too
+            // (`test_collections.py`'s `TestOneTrickPonyABCs.
+            // validate_isinstance`, which does exactly this: two separate
+            // `type('C', ...)` calls, one meant to match an ABC and one
+            // deliberately NOT supposed to).
             for c in cls_mro {
-                if c.borrow().type_name() == base_tn {
+                if c.is(&args[1]) {
                     return Ok(py_bool(true));
                 }
             }
@@ -605,7 +625,9 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // ANY BuiltinFunction name (abs, print, ...) to Exception, so
         // `issubclass(abs, BaseException)` returned True.
         (PyObject::BuiltinFunction { name: cls_name, .. }, _) => {
-            if !is_builtin_exception_class_name(cls_name) {
+            if !is_builtin_exception_class_name(cls_name)
+                && !is_pseudo_type_builtin_function_name(cls_name)
+            {
                 return Err(PyError::type_error("issubclass() arg 1 must be a class"));
             }
             let base_name = match &*base {

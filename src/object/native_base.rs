@@ -202,6 +202,29 @@ pub(crate) fn is_builtin_exception_class_name(name: &str) -> bool {
     )
 }
 
+/// True iff `name` is a builtin constructor that real CPython exposes as a
+/// genuine class (`type(memoryview) is type`, `isinstance(memoryview,
+/// type)` is `True`, etc.) but that this codebase still represents as a
+/// plain `PyObject::BuiltinFunction` rather than a real `PyObject::Type` —
+/// the same representational gap the completed "native types as real
+/// types" migration fixed for int/str/list/dict/tuple/bytes/set/float/
+/// complex/bytearray/frozenset/bool, just not yet extended to these.
+/// `builtin_type_of` already resolves `type(x)` for INSTANCES of
+/// `property`/`classmethod`/`staticmethod`/`super` back to these same
+/// canonical objects (see its own doc comment) — this covers the
+/// complementary direction, `isinstance(memoryview, type)`/
+/// `issubclass(memoryview, type)` on the constructor itself, needed for
+/// real CPython's own `Lib/_collections_abc.py` to import at all
+/// (`Sequence.register(memoryview)`/`Sequence.register(range)` — real
+/// `abc.ABCMeta.register()` starts with `if not isinstance(subclass,
+/// type): raise TypeError("Can only register classes")`).
+pub(crate) fn is_pseudo_type_builtin_function_name(name: &str) -> bool {
+    matches!(
+        name,
+        "property" | "classmethod" | "staticmethod" | "super" | "memoryview" | "range" | "slice"
+    )
+}
+
 /// Name of the builtin type (list/dict/str) a class transparently
 /// subclasses, if any — checked on the class's own dict only (the marker is
 /// propagated down into every subclass's own dict at class-creation time,
