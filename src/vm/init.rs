@@ -532,25 +532,21 @@ pub(crate) fn register_native_modules(
             create_module("warnings", create_warnings_dict()),
         );
 
-        // Native abc module
-        modules.insert_str("abc", create_module("abc", create_abc_dict()));
-
-        // `_py_abc` — real CPython's separate pure-Python reference
-        // implementation of `ABCMeta` (used by `test_abc.py`'s own
-        // `test_factory(abc.ABCMeta, ...)` / `test_factory(_py_abc.ABCMeta,
-        // ...)` pattern to run its whole suite against both the C and
-        // Python implementations). This codebase has only ONE `ABCMeta`
-        // implementation (native Rust, no separate "C vs Python" split at
-        // all), so `_py_abc` was missing entirely — `import _py_abc`
-        // failed outright, crashing `test_abc.py` at collection before a
-        // single test ran. Aliased to the exact same dict as `abc` itself:
-        // not a literal from-scratch Python reimplementation, but an
-        // honest match for this codebase's actual architecture — it
-        // unblocks the import and lets both `test_factory` calls exercise
-        // real, working `ABCMeta` functionality (just the same
-        // implementation twice under two names, rather than two distinct
-        // ones).
-        modules.insert_str("_py_abc", create_module("_py_abc", create_abc_dict()));
+        // `abc` and `_py_abc` are NOT registered as native modules — both now
+        // load from `Lib/abc.py` and `Lib/_py_abc.py` (real CPython 3.14
+        // sources, vendored verbatim) via the normal import machinery.
+        // `Lib/abc.py` tries `from _abc import (...)` (the C accelerator)
+        // first; since this codebase has no working native `_abc` module,
+        // that import genuinely fails and it falls back to `from _py_abc
+        // import ABCMeta, get_cache_token` — exactly real CPython's own
+        // fallback path when built without the C extension. Previously both
+        // names were aliased to the same broken native Rust stub
+        // (`create_abc_dict`, since removed) whose `ABCMeta` was a
+        // `BuiltinFunction` returning a bare `Type` with no real metaclass
+        // behavior (`__instancecheck__`/`__subclasscheck__`/`.register()`
+        // were unreachable, since `type(x) is abc.ABCMeta` was never true
+        // and RustPython's generic custom-metaclass class-creation path
+        // never ran for it).
 
         // Native typing module (type annotation stubs)
         // Comment out native typing - use Lib/typing.py instead

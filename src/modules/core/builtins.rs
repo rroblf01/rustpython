@@ -4,7 +4,6 @@ use std::sync::atomic::AtomicI64;
 use num_traits::{Signed, ToPrimitive};
 use std::rc::Rc;
 
-use super::abc::create_abc_builtins_dict;
 use super::codecs::create_codecs_dict;
 use super::math::create_math_dict;
 
@@ -361,12 +360,14 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     });
     builtins.insert_str("_codecs", codecs_module.clone());
 
-    // ── _abc (needed by abc.py for ABCMeta, used by io/__init__.py) ────────
-    let abc_module = PyObjectRef::new(PyObject::Module {
-        name: "_abc".to_string(),
-        dict: Box::new(str_map_to_typedict(create_abc_builtins_dict())),
-    });
-    builtins.insert_str("_abc", abc_module.clone());
+    // Note: no native `_abc` module here. It used to be inserted into
+    // `builtins` (not `modules`), which meant `import _abc` never actually
+    // found it anyway (`IMPORT_NAME` only consults `self.modules` plus the
+    // filesystem, never `self.builtins`) — genuinely dead code, confirmed
+    // via `import _abc` raising `ImportError` both before and after removing
+    // it. `Lib/abc.py`'s own `try: from _abc import (...)` is meant to fail
+    // here (no C accelerator) and fall back to `_py_abc`, so leaving `_abc`
+    // unimportable is the correct behavior, not a gap.
 
     // Create a proper object TYPE with basic dunder methods.
     // This is used as the implicit base class for all classes without explicit bases.
@@ -674,6 +675,32 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
                 }
                 Ok(py_none())
             },
+        }),
+    );
+    // __subclasshook__(cls, subclass): real CPython's default implementation
+    // (an implicit classmethod on `object`) always returns `NotImplemented`,
+    // deferring to the normal MRO-based `issubclass()` check — ABCMeta's own
+    // `__subclasscheck__` (`Lib/_py_abc.py`) calls `cls.__subclasshook__
+    // (subclass)` unconditionally and only falls back to its own MRO/
+    // registry-walk logic when the result IS `NotImplemented`. Missing
+    // entirely before (`AttributeError: '<cls>' object has no attribute
+    // '__subclasshook__'`), since nothing in this codebase's `object`
+    // dict defined it — real trigger: any `issubclass()`/`isinstance()`
+    // check against a class that doesn't override `__subclasshook__`
+    // itself (the overwhelming majority of ABCs). Modeled as a real
+    // `PyObject::ClassMethod` (not a bare `BuiltinFunction`, unlike
+    // `__init_subclass__` above, which is only ever invoked directly by
+    // Rust-side class-creation code with `cls` passed explicitly) since
+    // Python code accesses it via ordinary attribute lookup
+    // (`cls.__subclasshook__(x)`) and needs the descriptor protocol to
+    // auto-bind `cls` as the first argument.
+    object_dict.insert_str(
+        "__subclasshook__",
+        PyObjectRef::new(PyObject::ClassMethod {
+            func: PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__subclasshook__".to_string(),
+                func: |_args| Ok(py_not_implemented()),
+            }),
         }),
     );
     // __class_getitem__(cls, item): for generic types like List[int] (PEP 560)

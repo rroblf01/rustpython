@@ -4,7 +4,6 @@ use std::sync::atomic::AtomicI64;
 use num_traits::{Signed, ToPrimitive};
 use std::rc::Rc;
 
-mod abc;
 mod codecs;
 mod math;
 mod sys;
@@ -14,7 +13,6 @@ mod operator;
 mod extra;
 mod builtins;
 
-pub use abc::*;
 pub use codecs::*;
 pub use math::*;
 pub use sys::*;
