@@ -238,44 +238,94 @@ impl VirtualMachine {
         }
         crate::object::register_class(&class);
 
-        // Compute __abstractmethods__ for ABC support
+        // NOTE: this used to unconditionally compute and set
+        // `__abstractmethods__` (and a bogus empty `_abc_registry`
+        // `FrozenSet`) on EVERY class built here, regardless of whether it
+        // has anything to do with `abc.ABC`/`ABCMeta` at all — a workaround
+        // from when this codebase's `abc.ABCMeta` was a native stub whose
+        // own class-creation logic never computed this itself. Real CPython
+        // does NOT do this: `hasattr(cls, '__abstractmethods__')` is
+        // `False` for a plain `class Foo: pass` (confirmed against a local
+        // CPython 3.14 install) — only a class actually built through
+        // `ABCMeta.__new__` gets the attribute at all. Since `abc.ABCMeta`/
+        // `_py_abc.ABCMeta` are now real Python metaclasses
+        // (`Lib/abc.py`/`Lib/_py_abc.py`) whose own `__new__` computes
+        // `__abstractmethods__` itself (via `build_class_with_metaclass`'s
+        // generic custom-metaclass dispatch — this function only runs for
+        // it a SECOND time via the `super().__new__()` chain, harmlessly
+        // superseded by ABCMeta's own subsequent assignment), this
+        // unconditional block is now not just redundant but actively wrong
+        // for ordinary classes: `abc.update_abstractmethods(cls)` on a
+        // plain class checks `hasattr(cls, '__abstractmethods__')` and
+        // no-ops if absent (matching real CPython) — with this attribute
+        // wrongly pre-seeded to an empty frozenset here, that check instead
+        // proceeded to WRONGLY compute and attach real `__abstractmethods__`
+        // to a plain class after the fact (`test_abc.py`'s
+        // `test_update_non_abc`: assigning an `@abstractmethod`-decorated
+        // function onto a plain class and calling `update_abstractmethods`
+        // on it should be a no-op, not retroactively turn the class
+        // abstract).
+        //
+        // It is, however, still needed in one specific, narrower shape: this
+        // codebase's NATIVE `collections.abc`/`_collections_abc` module
+        // (`src/modules/misc/collections.rs`) builds `Mapping`/
+        // `MutableMapping`/etc. as bare `PyObject::Type`s with a hardcoded
+        // `__abstractmethods__`, NOT through real `ABCMeta` (unlike real
+        // CPython, where `_collections_abc.py`'s classes genuinely are
+        // `metaclass=ABCMeta`, so a subclass inherits that metaclass and
+        // gets its `__abstractmethods__` recomputed by `ABCMeta.__new__`
+        // automatically) — so a plain-metaclass subclass of one of these
+        // (e.g. `weakref.WeakKeyDictionary(_collections_abc.MutableMapping)`,
+        // which implements every method `MutableMapping` marks abstract)
+        // needs SOMETHING to recompute its own `__abstractmethods__` down to
+        // empty, or the unmodified, inherited-via-mro-walk non-empty set
+        // from `MutableMapping` wrongly blocks instantiation entirely.
+        // Restoring the recomputation is safe as long as it's gated on "at
+        // least one base ALREADY carries `__abstractmethods__`" (checked
+        // before computing anything) — real CPython's plain `type.__new__`
+        // never introduces the attribute from nothing (an ordinary class
+        // marking its own methods `@abstractmethod` with no ABC ancestry at
+        // all stays fully instantiable, matching the `test_update_non_abc`
+        // fix above), it only ever narrows what's already there.
         {
             use std::collections::HashSet;
-            let mut abstracts: HashSet<String> = HashSet::new();
-            for base in &bases_vec {
-                if let Ok(am) = base.borrow().get_attribute("__abstractmethods__") {
-                    match &*am.borrow() {
-                        PyObject::FrozenSet(s) => {
-                            for v in s.iter() { abstracts.insert(v.str()); }
+            let any_base_has_abstracts = bases_vec
+                .iter()
+                .any(|base| base.borrow().get_attribute("__abstractmethods__").is_ok());
+            if any_base_has_abstracts {
+                let mut abstracts: HashSet<String> = HashSet::new();
+                for base in &bases_vec {
+                    if let Ok(am) = base.borrow().get_attribute("__abstractmethods__") {
+                        match &*am.borrow() {
+                            PyObject::FrozenSet(s) => {
+                                for v in s.iter() { abstracts.insert(v.str()); }
+                            }
+                            PyObject::Set(s) => {
+                                for v in s.iter() { abstracts.insert(v.str()); }
+                            }
+                            _ => {}
                         }
-                        PyObject::Set(s) => {
-                            for v in s.iter() { abstracts.insert(v.str()); }
-                        }
-                        _ => {}
                     }
                 }
-            }
-            let mut to_remove = Vec::new();
-            for name in abstracts.iter() {
-                if let Some(v) = namespace_dict.get(name) {
-                    let is_abs = v.borrow().get_attribute("__isabstractmethod__").map(|b| b.truthy()).unwrap_or(false);
-                    if !is_abs && !matches!(&*v.borrow(), PyObject::None) {
-                        to_remove.push(name.clone());
+                let mut to_remove = Vec::new();
+                for name in abstracts.iter() {
+                    if let Some(v) = namespace_dict.get(name) {
+                        let is_abs = v.borrow().get_attribute("__isabstractmethod__").map(|b| b.truthy()).unwrap_or(false);
+                        if !is_abs && !matches!(&*v.borrow(), PyObject::None) {
+                            to_remove.push(name.clone());
+                        }
                     }
                 }
-            }
-            for n in to_remove { abstracts.remove(&n); }
-            for (k, v) in &namespace_dict {
-                if v.borrow().get_attribute("__isabstractmethod__").map(|b| b.truthy()).unwrap_or(false) {
-                    abstracts.insert(k.clone());
+                for n in to_remove { abstracts.remove(&n); }
+                for (k, v) in &namespace_dict {
+                    if v.borrow().get_attribute("__isabstractmethod__").map(|b| b.truthy()).unwrap_or(false) {
+                        abstracts.insert(k.clone());
+                    }
                 }
-            }
-            let mut set = crate::object::PySet::new();
-            for n in abstracts.iter() { let _ = set.add(py_str(n)); }
-            if let PyObject::Type { dict, .. } = &mut *class.borrow_mut() {
-                dict.insert_str("__abstractmethods__", PyObjectRef::new(PyObject::FrozenSet(set)));
-                if !dict.contains_key_str("_abc_registry") {
-                    dict.insert_str("_abc_registry", PyObjectRef::new(PyObject::FrozenSet(crate::object::PySet::new())));
+                let mut set = crate::object::PySet::new();
+                for n in abstracts.iter() { let _ = set.add(py_str(n)); }
+                if let PyObject::Type { dict, .. } = &mut *class.borrow_mut() {
+                    dict.insert_str("__abstractmethods__", PyObjectRef::new(PyObject::FrozenSet(set)));
                 }
             }
         }
