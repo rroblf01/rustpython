@@ -96,17 +96,47 @@ including two things caught only by manually verifying the agent's work rather t
 100 → 97. One (`test_baseexception`: the pseudo-type bypass above let `range`/`memoryview`/etc. reach
 `is_exception_subclass`'s own catch-all, which treats any unrecognized name as a direct `Exception`
 subclass — `issubclass(range, BaseException)` wrongly returned `True`) was found and fixed immediately.
-The other two — `test_dbm` and `test_dbm_dumb` — resisted multiple hours of investigation with no
-conclusive root cause: both trace back to `import collections.abc` executed from *within* another
-module's own top-level execution (only reproducible via `unittest`'s test runner or
-`import_helper.import_fresh_module`, never in a standalone reduced repro), manifesting as either a
-module silently stopping execution right after that import line (`dbm.dumb`) or a mislabeled
-`ImportError: cannot import name 'runner' from 'unittest'` while a *different* module's `from
-collections.abc import ...` is what's actually failing (`test_dbm_dumb`). Kept the collections.abc
-change anyway — the net effect (aggregate failures/errors across the corpus, not just whole-file
-pass/fail count) is clearly positive — but these 2 regressions are a known, accepted, NOT understood
-trade-off, worth a dedicated future investigation. Net PASS after the `test_baseexception` fix: **98**.
+The other two — `test_dbm` and `test_dbm_dumb` — resisted several hours of direct investigation with
+no conclusive root cause, both tracing back to `import collections.abc` executed from *within*
+another module's own top-level execution (only reproducible via `unittest`'s test runner or
+`import_helper.import_fresh_module`, never in a standalone reduced repro). **Resolved same day** by a
+fresh-perspective agent: `take_disposable()` (the pooled disposable-VM cache) could return a VM built
+*during* `collections.abc`'s own one-time reentrant import — that VM's `self.modules` permanently
+lacks the `collections.abc` alias (the reentrancy guard correctly skips installing it for a VM built
+mid-import, which is fine for a one-off use, but wrong once that same instance is later pooled and
+reused). `dbm/__init__.py`'s lazy backend-loading generator was the trigger: a pooled VM missing the
+alias hit `dbm/dumb.py`'s own `import collections.abc` with nothing wired up, silently caught by
+`dbm`'s own `except ImportError`, leaving a half-executed module cached in `sys.modules` forever
+after. Fixed by calling `install_collections_abc_alias()` (a cheap no-op once cached) on every
+`take_disposable()`, not just at full `VirtualMachine::new()` construction — verified deterministic
+(3/3 repeated runs) where it previously failed 100% of the time. Net PASS after both fixes: **100**
+(back to the abc.ABCMeta checkpoint, now with collections.abc real too, zero known regressions).
 See `cpython_test_suite_compat` memory topic for the full diagnostic trail.
+
+**Same-day follow-up: `contextvars.Context` implemented for real** — the last of this session's three
+big deferred architectural gaps, now unblocked (needs `collections.abc.Mapping` for real inheritance).
+Unlike `abc`/`collections.abc`, real CPython's own `contextvars.py` wraps a C extension
+(`_contextvars`) with no pure-Python reference implementation to vendor — genuine native
+implementation work. `_ContextRaw` (native `__getitem__`/`__iter__`/`__len__`/`run`/`copy` over a
+`PyDict` keyed by `ContextVar` object identity) + `class Context(_ContextRaw,
+collections.abc.Mapping): pass` (built via a tiny `install_source_defined_stdlib` snippet) gives
+every other Mapping method (`get`/`keys`/`values`/`items`/`__contains__`/`__eq__`/`__ne__`) for free
+via real multiple inheritance — observably equivalent to real CPython's own
+`_collections_abc.Mapping.register(Context)` virtual registration, just via real inheritance instead
+(something only possible because we control `Context`'s construction from Rust, unlike a C type).
+Real `Token` semantics (a `MISSING` sentinel, single-use invalidation, wrong-ContextVar/wrong-Context
+detection, `__enter__`/`__exit__` context-manager support) verified message-for-message against a
+local CPython 3.14 install. Two more general (non-contextvars-specific) bugs found and fixed along
+the way: `Opcode::CALL`'s no-keyword-arguments fast path invoked a found `BuiltinMethod`'s function
+pointer directly, bypassing `try_handle_special_builtin` entirely (already worked around once for
+`generator_throw_fallback`, needed the identical exclusion for `Context.run`); `STORE_ATTR` let a
+read-only `@property` (confirmed general — reproduces with any plain Python property lacking a
+setter, not contextvars-specific) be silently overwritten via plain instance-dict assignment instead
+of raising `AttributeError`, since a property with `fset=None` is still a real data descriptor in
+real CPython (its own `__set__` exists unconditionally and raises itself). `test_context.py`: 3
+failures/30 errors (of 56) → 1 failure (a pre-existing, general
+`concurrent.futures.ThreadPoolExecutor` gap, confirmed unrelated via a trivial non-contextvars
+`ThreadPoolExecutor.map()` repro also returning empty results — not attempted).
 
 **2026-08-30 session, batch 2** (pace changed per user feedback: fast per-fix checks only, full
 sweep deferred until several fixes land): four more fixes, three root-caused via parallel `Agent`
@@ -253,8 +283,9 @@ incremental patch:
   `cProfile`, a real `tokenize` (the current one is a hand-rolled simplified reimplementation
   with known bugs — see `cpython_test_suite_compat` memory notes on why vendoring real
   CPython's `tokenize.py` doesn't work directly for 3.12+), `ast` (only `literal_eval`),
-  `compileall`/`py_compile`, `contextvars.Context` (isolated per-context storage; the current
-  `ContextVar` uses one global thread-local stack), a real event-loop-backed `asyncio`,
+  `compileall`/`py_compile`, a real event-loop-backed `asyncio`
+  (`contextvars.Context`/`ContextVar`/`Token` — real per-Context isolated storage — implemented
+  2026-08-31, see above),
   **`selectors`** (`Lib/selectors.py` is explicitly a no-op stub — `register`/`select`/etc. do
   nothing; needs a real `select()`/`poll()`-backed implementation), and **`io.BufferedReader`/
   `BufferedWriter`/`BufferedRandom`** (empty classes inheriting from `BufferedIOBase` with no
