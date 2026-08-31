@@ -279,17 +279,23 @@ incremental patch:
 - **`asyncio` has no real event loop** — `async def`/`await`/`async for`/`async with` all parse
   and the `coroutine` type exists, but there's nothing actually driving concurrent tasks.
 - **Several stdlib modules are stubs or entirely missing**: `multiprocessing`, `ctypes`,
-  `unittest.mock`, `venv`, `ensurepip`, `zipimport`, `pkgutil`, most of `pdb`/`profile`/
-  `cProfile`, a real `tokenize` (the current one is a hand-rolled simplified reimplementation
-  with known bugs — see `cpython_test_suite_compat` memory notes on why vendoring real
-  CPython's `tokenize.py` doesn't work directly for 3.12+), `ast` (only `literal_eval`),
-  `compileall`/`py_compile`, a real event-loop-backed `asyncio`
-  (`contextvars.Context`/`ContextVar`/`Token` — real per-Context isolated storage — implemented
-  2026-08-31, see above),
+  `ensurepip`, `pkgutil` (99 lines vs real CPython's 474 — genuinely reduced), most of
+  `pdb`/`profile`/`cProfile`, a real `tokenize` (the current one is a hand-rolled simplified
+  reimplementation with known bugs — see `cpython_test_suite_compat` memory notes on why
+  vendoring real CPython's `tokenize.py` doesn't work directly for 3.12+), `ast` (247 lines vs
+  real CPython's 680 — more than just `literal_eval` at this point but still meaningfully
+  reduced; a full vendor is complicated by real CPython's `ast.py` doing `from _ast import *` to
+  get its node classes from the C parser, which this interpreter's own from-scratch AST doesn't
+  have an equivalent bridge for), a real event-loop-backed `asyncio`.
+  **Corrected 2026-08-31** (this list had gone stale): `unittest.mock` (3211 lines, 19-line diff
+  from real CPython — one deliberate interpreter-specific patch, otherwise fully vendored),
+  `venv`, `zipimport`, `compileall`/`py_compile` are actually already fully/near-fully vendored,
+  not stubs — verified via direct line-count/diff against a real CPython 3.14 install.
   **`selectors`** (`Lib/selectors.py` is explicitly a no-op stub — `register`/`select`/etc. do
   nothing; needs a real `select()`/`poll()`-backed implementation), and **`io.BufferedReader`/
   `BufferedWriter`/`BufferedRandom`** (empty classes inheriting from `BufferedIOBase` with no
-  actual buffering/read/write logic at all). Found 2026-07-29 chasing `test_selectors.py`.
+  actual buffering/read/write logic at all) remain real gaps. Found 2026-07-29 chasing
+  `test_selectors.py`.
 - **`range()`'s internal representation (`PyObject::Range { start, stop, step }`) uses plain
   `i64`, not arbitrary precision.** Real CPython's `range` supports bignum-scale bounds (even
   though iterating that many times is impractical); `test_range.py` deliberately exercises
