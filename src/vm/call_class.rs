@@ -37,6 +37,55 @@ impl VirtualMachine {
         } else {
             vec![bases.clone()]
         };
+        // PEP 560: resolve non-class bases via `__mro_entries__` before
+        // actual class creation runs — real trigger: `class ThemeSection
+        // (Mapping[str, str]): ...` (real CPython's own
+        // `Lib/_colorize.py`, pulled in transitively by `unittest` once
+        // `collections.abc` stopped being a hand-rolled native module and
+        // became the real, vendored `Lib/_collections_abc.py`).
+        // `Mapping[str, str]` is a `types.GenericAlias` INSTANCE (built by
+        // `Mapping.__class_getitem__`), not a class — used directly as a
+        // base it previously fell straight through to ordinary class
+        // creation, which requires each base to be an actual class,
+        // raising a confusing `AttributeError: 'super' object has no
+        // attribute '__new__'` from deep inside the metaclass chain rather
+        // than ever substituting the real origin class. Mirrors real
+        // CPython's own `types.resolve_bases`: a base that ISN'T a class
+        // but a defines `__mro_entries__` gets replaced (possibly with
+        // MULTIPLE entries) by the result of calling it with the full
+        // original bases tuple; anything else (an ordinary class, or a
+        // base with no such hook) passes through unchanged.
+        let bases_vec: Vec<PyObjectRef> = {
+            let mut resolved = Vec::with_capacity(bases_vec.len());
+            for base in &bases_vec {
+                let is_class_like = matches!(
+                    &*base.borrow(),
+                    PyObject::Type { .. } | PyObject::BuiltinFunction { .. }
+                );
+                if is_class_like {
+                    resolved.push(base.clone());
+                    continue;
+                }
+                let mro_entries_fn = base.borrow().get_attribute("__mro_entries__").ok();
+                match mro_entries_fn {
+                    Some(f) => {
+                        let result =
+                            crate::object::call_bound_method(f, base.clone(), vec![bases.clone()])?;
+                        let entries = match &*result.borrow() {
+                            PyObject::Tuple(items) => items.clone(),
+                            _ => {
+                                return Err(PyError::type_error(
+                                    "__mro_entries__ must return a tuple",
+                                ));
+                            }
+                        };
+                        resolved.extend(entries);
+                    }
+                    None => resolved.push(base.clone()),
+                }
+            }
+            resolved
+        };
         let bases_vec = if bases_vec.is_empty() {
             let object_type = self
                 .builtins
