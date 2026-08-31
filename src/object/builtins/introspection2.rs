@@ -642,7 +642,20 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             if base_name == "object" {
                 return Ok(py_bool(true));
             }
-            if crate::vm::is_exception_subclass(cls_name, &base_name) {
+            // `is_exception_subclass`'s own catch-all treats any name it
+            // doesn't recognize as a direct `Exception` subclass (a
+            // separate, legitimate need — see its own comment — for
+            // module-scoped exceptions reached only by name via
+            // `WITH_EXIT`'s lookup). `range`/`memoryview`/`property`/etc.
+            // are real (non-exception) pseudo-types allowed past the guard
+            // above for the `object`/abc-registry checks only; routing
+            // them into that catch-all wrongly reported
+            // `issubclass(range, BaseException)` as `True`
+            // (test_baseexception.py's `test_inheritance`, which walks
+            // every value in `builtins.__dict__` checking exactly this).
+            if is_builtin_exception_class_name(cls_name)
+                && crate::vm::is_exception_subclass(cls_name, &base_name)
+            {
                 return Ok(py_bool(true));
             }
             // See `builtin_isinstance`'s `_abc_registry` fallback — this
