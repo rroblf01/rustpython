@@ -261,6 +261,74 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                                     ));
                                                     break;
                                                 }
+                                                // A Python subclass of `classmethod`/
+                                                // `staticmethod`/`property` (e.g. `Lib/abc.py`'s
+                                                // deprecated `abstractclassmethod`/
+                                                // `abstractstaticmethod`/`abstractproperty`
+                                                // aliases) is represented as a plain
+                                                // `PyObject::Instance` carrying its real
+                                                // ClassMethod/StaticMethod/Property payload
+                                                // under `NATIVE_BACKING_KEY` (see
+                                                // `native_base.rs`'s doc comment on why these
+                                                // three aren't full `PyObject::Type`s like
+                                                // int/str/list) — invisible to the arms just
+                                                // above, which only match the LITERAL native
+                                                // variant. Without this, `super().foo()` where
+                                                // `foo` on the parent class is such a wrapped
+                                                // descriptor returned the raw Instance
+                                                // unchanged, "'abstractclassmethod' object is
+                                                // not callable" (`test_abc.py`'s
+                                                // `test_abstractclassmethod_basics`/
+                                                // `test_abstractstaticmethod_basics`).
+                                                PyObject::Instance { typ, dict } => {
+                                                    let kind = native_base_of_type(typ);
+                                                    let backing =
+                                                        dict.get(NATIVE_BACKING_KEY).cloned();
+                                                    match (kind.as_deref(), backing) {
+                                                        (Some("classmethod"), Some(b)) => {
+                                                            if let PyObject::ClassMethod { func } =
+                                                                &*b.borrow()
+                                                            {
+                                                                found = Some(PyObjectRef::new(
+                                                                    PyObject::BoundMethod {
+                                                                        func: func.clone(),
+                                                                        self_obj: obj.clone(),
+                                                                    },
+                                                                ));
+                                                                break;
+                                                            }
+                                                        }
+                                                        (Some("staticmethod"), Some(b)) => {
+                                                            if let PyObject::StaticMethod {
+                                                                func,
+                                                            } = &*b.borrow()
+                                                            {
+                                                                found = Some(func.clone());
+                                                                break;
+                                                            }
+                                                        }
+                                                        (Some("property"), Some(b)) => {
+                                                            let getter = if let PyObject::Property(
+                                                                d,
+                                                            ) = &*b.borrow()
+                                                            {
+                                                                d.getter.clone()
+                                                            } else {
+                                                                None
+                                                            };
+                                                            if let Some(g) = getter {
+                                                                found = Some(
+                                                                    builtin_call(&g, &[obj.clone()])
+                                                                        .unwrap_or_else(|_| val.clone()),
+                                                                );
+                                                                break;
+                                                            }
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                    found = Some(val.clone());
+                                                    break;
+                                                }
                                                 _ => {
                                                     found = Some(val.clone());
                                                     break;

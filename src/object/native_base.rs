@@ -80,6 +80,32 @@ pub(crate) fn is_recognized_native_base_name(name: &str) -> bool {
             | "deque"
             | "SimpleNamespace"
             | "types.SimpleNamespace"
+            // `classmethod`/`staticmethod`/`property` are, like the above,
+            // `PyObject::BuiltinFunction` constructors rather than real
+            // `PyObject::Type`s — not part of the completed
+            // native-types-as-real-types migration (deliberately: unlike
+            // int/str/list/etc., making these fully real `Type`s so
+            // subclass INSTANCES also behave as genuine descriptors
+            // — auto-binding on `SomeClass.attr` access exactly like the
+            // native `PyObject::ClassMethod`/`StaticMethod`/`Property`
+            // variants do — is a separate, larger piece of work). Recognized
+            // here only far enough to make `super().__init__(...)` inside a
+            // Python subclass's own `__init__` resolve to something real
+            // instead of crashing (`AttributeError: 'super' object has no
+            // attribute '__init__'`) — real trigger: `Lib/abc.py`'s own
+            // deprecated `abstractclassmethod(classmethod)`/
+            // `abstractstaticmethod(staticmethod)` legacy aliases, whose
+            // `__init__` unconditionally calls `super().__init__(callable)`
+            // (`test_abc.py`'s `TestLegacyAPI` and the classmethod/
+            // staticmethod arms of `test_abstractmethod_integration`, none
+            // of which actually need the wrapped result to behave as a
+            // live descriptor — they only check `__isabstractmethod__`
+            // propagation and abstract-instantiation blocking, both of
+            // which work via ordinary class-attribute inheritance
+            // independent of this).
+            | "classmethod"
+            | "staticmethod"
+            | "property"
     )
 }
 
@@ -292,6 +318,14 @@ pub(crate) fn make_native_backing(kind: &str) -> PyObjectRef {
         "bytearray" => PyObjectRef::new(PyObject::ByteArray(Vec::new())),
         "frozenset" => PyObjectRef::imm(PyObject::FrozenSet(PySet::new())),
         "deque" => py_deque(std::collections::VecDeque::new(), None),
+        "classmethod" => PyObjectRef::new(PyObject::ClassMethod { func: py_none() }),
+        "staticmethod" => PyObjectRef::new(PyObject::StaticMethod { func: py_none() }),
+        "property" => PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+            getter: None,
+            setter: None,
+            deleter: None,
+            doc: None,
+        }))),
         _ => py_none(),
     }
 }
@@ -381,6 +415,9 @@ pub(crate) fn synthesize_native_init(
             }
             builtin_deque(&combined)
         }
+        "classmethod" => builtin_classmethod(args),
+        "staticmethod" => builtin_staticmethod(args),
+        "property" => builtin_property(args),
         _ => Ok(py_none()),
     }
 }
