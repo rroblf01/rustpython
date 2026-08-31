@@ -55,6 +55,25 @@ versus real CPython's ~1172-line module, which itself depends heavily on `abc.AB
 `abc.ABCMeta` solid first, then a vendor attempt of the real `_collections_abc.py` — same
 "dedicated future session" calibre as `contextvars.Context` and `property` subclassing.
 
+**2026-08-31: `abc.ABCMeta` fixed for real** (dedicated effort, not opportunistic bug-hunting —
+prioritized after evaluating that narrow bug-hunting had diminishing returns). `Lib/_py_abc.py`
+(CPython's own pure-Python `ABCMeta` reference implementation) was already vendored, byte-identical
+to real CPython 3.14, but completely unused — a native Rust module registered as both `abc` and
+`_py_abc` shadowed it entirely (same shape as the earlier `__future__` bug). `Lib/abc.py` didn't
+exist in this repo at all. Vendored it (byte-identical to CPython 3.14), removed the native
+`abc`/`_py_abc` registrations and ~500 lines of now-dead native code, and fixed 6 further bugs this
+surfaced (all general, not ABC-specific): `object` had no `__subclasshook__`; a generic `.register()`
+fallback clobbered real `ABCMeta.register()` once a class had a genuine custom metaclass;
+`property.getter()` was wired to the deleter implementation; `super().foo()` didn't resolve for
+classmethod/staticmethod/property subclass instances; `issubclass()` with a bogus second argument
+returned `False` instead of raising `TypeError`; `__abstractmethods__` was computed unconditionally
+on every class instead of only classes with real ABC ancestry. `tests/cpython/test_abc.py`: 38
+failures/6 errors (of 72) → full pass. Full sweep: **99 → 100** files passing, zero regressions
+(wide `make test-one` sweep across test_descr/test_property/test_isinstance/test_collections/
+test_super/test_metaclass/test_weakref — two files even gained a sub-test each, one pre-existing
+`test_weakref` hang confirmed via `git stash` A/B to predate this change). See
+`cpython_test_suite_compat` memory topic for the full commit-by-commit writeup.
+
 **2026-08-30 session, batch 2** (pace changed per user feedback: fast per-fix checks only, full
 sweep deferred until several fixes land): four more fixes, three root-caused via parallel `Agent`
 investigations. (1) `PyDict::apply_probed_set` bumped its iterator-invalidation version counter on
