@@ -24,6 +24,17 @@ impl VirtualMachine {
                         self.frames[fi].stack.drain(split..).collect();
 
                     {
+                        // `Context.run(callable, *args)` (this specific
+                        // shape — no keyword args — falls into this exact
+                        // fast path) needs live `&mut VirtualMachine`
+                        // access to push/pop the context stack and forward
+                        // `args` to `callable`, handled in
+                        // `try_handle_special_builtin` (`vm/call.rs`) —
+                        // calling `context_run_fallback` directly here
+                        // (this fast path's normal behavior for any other
+                        // `BuiltinMethod`) always raises, matching
+                        // `generator_throw_fallback`'s existing exclusion
+                        // for the identical reason.
                         let is_special_throw = matches!(
                             &*callable.borrow(),
                             PyObject::BuiltinMethod { func, .. }
@@ -32,7 +43,15 @@ impl VirtualMachine {
                                     crate::object::generator_throw_fallback as crate::object::BuiltinFunc,
                                 )
                         );
-                        if !is_special_throw {
+                        let is_context_run = matches!(
+                            &*callable.borrow(),
+                            PyObject::BuiltinMethod { func, .. }
+                                if std::ptr::fn_addr_eq(
+                                    *func,
+                                    crate::modules::context_run_fallback as crate::object::BuiltinFunc,
+                                )
+                        );
+                        if !is_special_throw && !is_context_run {
                             if let PyObject::BuiltinMethod { name, func, self_obj } =
                                 &*callable.borrow()
                             {

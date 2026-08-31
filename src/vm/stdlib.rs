@@ -231,4 +231,29 @@ impl VirtualMachine {
             }
         }
     }
+
+    /// Marks `module_name.class_name`'s own type dict with
+    /// `NO_SUBCLASS_KEY`, rejecting `class X(that_class): ...` the same way
+    /// `bool` is rejected — used for classes built via a small
+    /// `install_source_defined_stdlib` snippet (e.g. `contextvars.Context`,
+    /// which is real CPython's own — and this codebase's — disallowed
+    /// subclassing case) where the marker can't be set directly on the
+    /// native type at construction time, since the snippet's OWN class
+    /// statement needs to subclass a related native base first.
+    pub(crate) fn stamp_no_subclass(
+        &mut self,
+        module_name: &str,
+        class_name: &str,
+    ) -> Option<PyObjectRef> {
+        let module = self.modules.get(module_name)?;
+        let cls = if let PyObject::Module { dict, .. } = &*module.borrow() {
+            dict.get_str(class_name).cloned()
+        } else {
+            None
+        }?;
+        if let PyObject::Type { dict, .. } = &mut *cls.borrow_mut() {
+            dict.insert_str(crate::object::NO_SUBCLASS_KEY, py_bool(true));
+        }
+        Some(cls)
+    }
 }

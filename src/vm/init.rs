@@ -830,11 +830,18 @@ pub(crate) fn register_native_modules(
         // Native atexit module (register/unregister exit callbacks)
         modules.insert_str("atexit", create_module("atexit", create_atexit_dict()));
 
-        // Native contextvars module (ContextVar with thread-local storage)
-        modules.insert_str(
-            "contextvars",
-            create_module("contextvars", create_contextvars_dict()),
-        );
+        // Native contextvars module (ContextVar/Context/Token, real
+        // per-Context isolation — see its own module doc comment).
+        {
+            let object_type = builtins
+                .get(&interner::intern("object"))
+                .cloned()
+                .expect("object type must already be registered in builtins");
+            modules.insert_str(
+                "contextvars",
+                create_module("contextvars", create_contextvars_dict(object_type)),
+            );
+        }
 
         // Native unicodedata module (basic Unicode category/normalize)
         modules.insert_str(

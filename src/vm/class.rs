@@ -176,6 +176,19 @@ impl VirtualMachine {
             }
         }
 
+        // Generic version of the same restriction, for native types marked
+        // via `NO_SUBCLASS_KEY` (currently `contextvars.ContextVar`/
+        // `Context`/`Token`) rather than another one-off identity check —
+        // see that constant's own doc comment.
+        for base in &bases_vec {
+            if let Some(name) = crate::object::no_subclass_type_name(base) {
+                return Err(PyError::type_error(format!(
+                    "type '{}' is not an acceptable base type",
+                    name
+                )));
+            }
+        }
+
         // Detect `class Foo(list): ...` / `(dict)` / `(str)` / `(int)` —
         // either a direct native base, or inherited transitively through a
         // base that already carries the marker (propagated down so every

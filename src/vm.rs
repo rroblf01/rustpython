@@ -166,6 +166,22 @@ impl VirtualMachine {
                 ],
             );
             vm.install_collections_abc_alias();
+            // `contextvars.Context`: `_ContextRaw` (native `__getitem__`/
+            // `__iter__`/`__len__`/`run`/`copy`) + real `collections.abc.
+            // Mapping` inheritance via ordinary multiple inheritance —
+            // gives every other Mapping method (`get`/`keys`/`values`/
+            // `items`/`__contains__`/`__eq__`/`__ne__`) for free from
+            // `_collections_abc.py`'s real mixins, through the
+            // already-working general class-creation/MRO machinery. See
+            // `src/modules/misc/contextvars.rs`'s own module doc comment.
+            vm.install_source_defined_stdlib(
+                "contextvars",
+                "import collections.abc\nfrom contextvars import _ContextRaw\nclass Context(_ContextRaw, collections.abc.Mapping):\n    pass\n",
+                &["Context"],
+            );
+            if let Some(ctx_cls) = vm.stamp_no_subclass("contextvars", "Context") {
+                crate::modules::set_public_context_type(ctx_cls);
+            }
             vm.install_source_defined_stdlib(
                 "functools",
                 crate::modules::FUNCTOOLS_EXTRA_SOURCE,
@@ -520,6 +536,14 @@ impl VirtualMachine {
             ],
         );
         vm.install_collections_abc_alias();
+        vm.install_source_defined_stdlib(
+            "contextvars",
+            "import collections.abc\nfrom contextvars import _ContextRaw\nclass Context(_ContextRaw, collections.abc.Mapping):\n    pass\n",
+            &["Context"],
+        );
+        if let Some(ctx_cls) = vm.stamp_no_subclass("contextvars", "Context") {
+            crate::modules::set_public_context_type(ctx_cls);
+        }
         // contextlib no longer native — real Lib/contextlib.py already defines ContextDecorator
         vm.install_source_defined_stdlib(
             "functools",

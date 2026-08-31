@@ -371,6 +371,23 @@ impl VirtualMachine {
             return crate::object::print_with_vm(self, args, keywords).map(Some);
         }
 
+        // `contextvars.Context.run(callable, *args, **kwargs)` — needs the
+        // live VM to call `callable` with its OWN real positional/keyword
+        // arguments forwarded, not this project's usual "pack kwargs into a
+        // trailing dict ARGUMENT" convention (which is ambiguous here: a
+        // genuinely positional dict passed to the wrapped callable would be
+        // indistinguishable from keyword arguments meant for it). Bound as
+        // `PyObject::BuiltinMethod` (found via `ctx.run`'s attribute
+        // lookup), unlike `print`'s bare-function case just above.
+        if let PyObject::BuiltinMethod { func, self_obj, .. } = &*callable.borrow() {
+            if std::ptr::fn_addr_eq(*func, crate::modules::context_run_fallback as crate::object::BuiltinFunc)
+            {
+                let self_obj = self_obj.clone();
+                return crate::modules::context_run_with_vm(self, self_obj, args, keywords)
+                    .map(Some);
+            }
+        }
+
         // `globals()`/`locals()` — same `with_vm_mut`-is-unconditional-UB
         // class of bug (confirmed via a general repro: `def f(): locals()`
         // — not a segfault this time, but `vm.frames` reading back empty

@@ -566,3 +566,28 @@ pub(crate) fn get_type_name_for_instance(typ: &PyObjectRef) -> String {
         "object".to_string()
     }
 }
+
+/// Marks a native `PyObject::Type` as NOT a valid base for user subclassing
+/// — mirrors the special-cased, identity-based `bool` check in
+/// `default_build_class` (`vm/class.rs`), but as a reusable dict marker
+/// instead of another one-off identity comparison, since more than one
+/// native type needs this restriction (real CPython disallows subclassing
+/// `contextvars.ContextVar`/`Context`/`Token`: `TypeError: type '...' is
+/// not an acceptable base type` — confirmed via `test_context.py`'s
+/// `test_context_subclassing_1`). A previous session started, then
+/// deliberately reverted, a general-purpose version of this mechanism for
+/// lack of a concrete consumer at the time; contextvars is that consumer.
+pub(crate) const NO_SUBCLASS_KEY: &str = "__no_subclass__";
+
+/// Returns the type's own name if it's marked via `NO_SUBCLASS_KEY`, so
+/// `default_build_class` can reject it as a base with the real type name in
+/// the error message (checked only on the base's OWN dict, not inherited —
+/// same treatment as `METATYPE_KEY`/`native_base_of_type`).
+pub(crate) fn no_subclass_type_name(typ: &PyObjectRef) -> Option<String> {
+    if let PyObject::Type { name, dict, .. } = &*typ.borrow() {
+        if dict.contains_key_str(NO_SUBCLASS_KEY) {
+            return Some(name.clone());
+        }
+    }
+    None
+}
