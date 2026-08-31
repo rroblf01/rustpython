@@ -486,6 +486,40 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
         }
     }
+    // A genuinely bogus second argument (not a class, tuple of classes, or
+    // union, and with no custom `__subclasscheck__`/metaclass override —
+    // already ruled out just above) must raise `TypeError`, matching real
+    // CPython, rather than silently falling through to the name-based
+    // matching below and returning `False`. Real trigger: `test_abc.py`'s
+    // `test_issubclass_bad_arguments` (bpo-34441) — `issubclass(int, S)`
+    // where `S.__subclasses__` is overridden to return a list containing a
+    // non-class (`42`); `_py_abc.py`'s own `__subclasscheck__` then calls
+    // `issubclass(subclass, 42)` while walking that list, which must raise
+    // `TypeError` for the whole check to propagate correctly (previously it
+    // returned `False`, so `_py_abc.py` just kept walking instead of
+    // erroring, and `assertRaises(TypeError, ...)` failed).
+    {
+        let base_b = args[1].borrow();
+        let is_bogus = !matches!(
+            &*base_b,
+            PyObject::Type { .. }
+                | PyObject::BuiltinFunction { .. }
+                | PyObject::Tuple(_)
+                // A bare `Str` is accepted here too — this codebase's own
+                // internal fallback (see the `(PyObject::Str(cls_name), _)`
+                // arm below, `WITH_EXIT`'s module-exception-by-name lookup)
+                // can legitimately pass a plain string as EITHER argument
+                // when a module-scoped exception has no real `Type`/
+                // `BuiltinFunction` representation reachable from the
+                // current frame's builtins.
+                | PyObject::Str(_)
+        );
+        if is_bogus {
+            return Err(PyError::type_error(
+                "issubclass() arg 2 must be a class, a tuple of classes, or a union",
+            ));
+        }
+    }
     // Handle tuple of types: issubclass(cls, (type1, type2, ...))
     let base = args[1].borrow();
     if let PyObject::Tuple(types) = &*base {
