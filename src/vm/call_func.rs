@@ -707,11 +707,17 @@ impl VirtualMachine {
                     };
                     let mut sorted = names;
                     sorted.sort();
+                    // Real CPython 3.14 wording (changed from older
+                    // releases' "Can't instantiate abstract class X with
+                    // abstract methods Y, Z" — confirmed against a local
+                    // CPython 3.14 install): quoted, comma-joined names.
+                    let quoted: Vec<String> =
+                        sorted.iter().map(|n| format!("'{}'", n)).collect();
                     return Err(PyError::type_error(format!(
-                        "Can't instantiate abstract class {} with abstract method{} {}",
+                        "Can't instantiate abstract class {} without an implementation for abstract method{} {}",
                         callable.borrow().type_name(),
-                        if sorted.len() == 1 { "" } else { "s" },
-                        sorted.join(", ")
+                        if quoted.len() == 1 { "" } else { "s" },
+                        quoted.join(", ")
                     )));
                 }
             }
