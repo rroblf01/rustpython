@@ -38,9 +38,17 @@ pub fn builtin_filter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_zip(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() {
-        return Err(PyError::type_error("zip() requires at least 1 argument"));
-    }
+    // Real CPython's `zip()` accepts zero positional iterables and returns
+    // an empty iterator (`list(zip()) == []`) — it's only `map()` that
+    // requires at least one. This used to reject `zip()` outright with a
+    // TypeError, which broke real `Lib/_collections_abc.py`'s own
+    // `zip_iterator = type(iter(zip()))` at module import time (the
+    // `iterables.is_empty()` case a few lines below already builds the
+    // correct empty `ZipIterator`, so this is just a spurious early
+    // rejection prevented it from ever being reached with 0 args, though
+    // it's also reachable with 1+ args that are all `strict=`/`strict`
+    // kwargs-only, hence checking after kwargs are stripped rather than
+    // moving the check there).
     // Keyword args (only `strict` is defined for zip()) arrive packed into a
     // trailing dict, per the calling convention call_function uses for all
     // BuiltinFunction calls. Without stripping it here, `zip(a, b,
@@ -48,20 +56,22 @@ pub fn builtin_zip(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // zip — iterating a dict yields its keys, so it silently zipped in the
     // literal string "strict" as a bogus extra column instead of enforcing
     // equal lengths.
-    let (iterables, strict) = {
-        let last = args.last().unwrap();
-        let last_borrowed = last.borrow();
-        if let PyObject::Dict(kwargs) = &*last_borrowed {
-            let strict = kwargs
-                .get(&py_str("strict"))
-                .ok()
-                .flatten()
-                .map(|v| v.truthy())
-                .unwrap_or(false);
-            (&args[..args.len() - 1], strict)
-        } else {
-            (args, false)
+    let (iterables, strict) = match args.last() {
+        Some(last) => {
+            let last_borrowed = last.borrow();
+            if let PyObject::Dict(kwargs) = &*last_borrowed {
+                let strict = kwargs
+                    .get(&py_str("strict"))
+                    .ok()
+                    .flatten()
+                    .map(|v| v.truthy())
+                    .unwrap_or(false);
+                (&args[..args.len() - 1], strict)
+            } else {
+                (args, false)
+            }
         }
+        None => (args, false),
     };
     if iterables.is_empty() {
         return Ok(PyObjectRef::new(PyObject::ZipIterator {

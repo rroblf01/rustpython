@@ -420,6 +420,20 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
         }
         PyObject::ZipIterator { iterators } => {
+            // `zip()` with zero iterables (`iterators` empty) must raise
+            // StopIteration on the very first `next()` call, matching real
+            // CPython's `list(zip()) == []` — the loop below never runs for
+            // an empty `iterators`, so without this check `results` stays
+            // an empty Vec and every call returns `Ok(())` (an empty
+            // tuple) forever, never signaling exhaustion: `list(zip())`
+            // hung permanently instead of returning `[]`.
+            if iterators.is_empty() {
+                return if args.len() >= 2 {
+                    Ok(args[1].clone())
+                } else {
+                    Err(PyError::stop_iteration())
+                };
+            }
             let mut results = Vec::with_capacity(iterators.len());
             for it in iterators.iter() {
                 match builtin_next(&[it.clone()]) {
