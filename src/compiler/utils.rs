@@ -109,7 +109,24 @@ pub fn contains_yield_in_expr(expr: &Expr) -> bool {
                 || contains_yield_in_expr(body)
                 || contains_yield_in_expr(orelse)
         }
-        Expr::Lambda { body, .. } => contains_yield_in_expr(body),
+        // A `lambda` starts its own independent scope, exactly like a
+        // nested `def`/`async def` (see the `Stmt::FunctionDef |
+        // Stmt::ClassDef => false` arm in `contains_yield_in_stmts` above,
+        // which this mirrors): whether ITS body contains `yield` says
+        // nothing about whether the *enclosing* function/module is a
+        // generator. This used to recurse into the lambda's body, so e.g.
+        // real CPython's own `Lib/_collections_abc.py` — `generator =
+        // type((lambda: (yield))())` at module level — wrongly marked the
+        // entire enclosing MODULE as a generator, emitting a stray
+        // `RETURN_GENERATOR` as the module code object's first instruction;
+        // running the module then just produced an inert generator object
+        // instead of executing any of its statements (silently: no
+        // exception, exit code 0, nothing bound). The lambda's own
+        // generator-ness is independently and correctly detected when its
+        // body is compiled as a synthetic `return <expr>` statement (see
+        // `Expr::Lambda`'s codegen), which goes through
+        // `contains_yield_in_stmts`'s `Stmt::Return` arm on its own scope.
+        Expr::Lambda { .. } => false,
         Expr::Call {
             func,
             args,
