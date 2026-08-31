@@ -657,6 +657,37 @@ pub fn call_bound_method(
             all_args.extend(args);
             call_bound_method(func.clone(), self_obj, all_args)
         }
+        // `classmethod(some_callable)` reached through this disposable
+        // dispatch path — e.g. PEP 560's `__class_getitem__ =
+        // classmethod(GenericAlias)` (real `Lib/_collections_abc.py`:
+        // every ABC there ends with that exact line), triggered by
+        // `SomeClass[int]`'s subscript machinery calling `py_getitem` ->
+        // `call_bound_method` on the found `__class_getitem__` value. This
+        // arm used to be missing entirely, so ANY `classmethod`-wrapped
+        // value reached via `call_bound_method` (not just
+        // `__class_getitem__` — any instance attribute access on a
+        // classmethod that falls through this path) fell to the generic
+        // `_ => Err("object is not callable")` catch-all below — real
+        // trigger: `Mapping[str, str]`-style generic subscripting on ANY
+        // real `_collections_abc.py` ABC raised `TypeError: object is not
+        // callable` instead of building a `GenericAlias`, which in turn
+        // broke every module (`Lib/_colorize.py`'s `class ThemeSection
+        // (Mapping[str, str])`, `typing.py`, ...) that subscripts one at
+        // class-definition time. A classmethod descriptor's whole job is
+        // binding the CLASS (not an instance) as the first argument to the
+        // wrapped callable — resolve `self_obj` to its class if it's an
+        // instance (ordinary `obj.some_classmethod()` access), or use it
+        // directly if it's already a class (the `__class_getitem__` case,
+        // where `self_obj` here IS the class being subscripted), then
+        // dispatch exactly like the other "prepend self_obj, call `func`"
+        // arms above.
+        PyObject::ClassMethod { func } => {
+            let cls = match &*self_obj.borrow() {
+                PyObject::Instance { typ, .. } => typ.clone(),
+                _ => self_obj.clone(),
+            };
+            call_bound_method(func.clone(), cls, args)
+        }
         // The single-argument form of the `type` builtin itself (`type(x)`
         // — get x's real type) reaching this path as a plain callable
         // value, e.g. passed as a `key=` function to a native higher-order
