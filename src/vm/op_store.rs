@@ -86,13 +86,39 @@ impl VirtualMachine {
                     let property_setter = {
                         let d = descriptor.borrow();
                         if let PyObject::Property(ref data) = &*d {
-                            data.setter.clone()
+                            Some(data.setter.clone())
                         } else {
                             None
                         }
                     };
                     if let Some(setter_fn) = property_setter {
-                        self.call_function(setter_fn, vec![obj.clone(), val.clone()], vec![])?;
+                        // A `property` is ALWAYS a real data descriptor,
+                        // even with `fset=None` — real CPython's own
+                        // `property.__set__` exists unconditionally and
+                        // raises `AttributeError` itself when there's no
+                        // setter, rather than not existing at all (which
+                        // would make it a non-data descriptor, permitting
+                        // instance-dict fallback below). Previously a
+                        // read-only property (no explicit `@x.setter`) fell
+                        // through all the way to plain instance-dict
+                        // assignment, silently letting `obj.x = v` succeed
+                        // and desync from the property's own getter.
+                        match setter_fn {
+                            Some(setter_fn) => {
+                                self.call_function(
+                                    setter_fn,
+                                    vec![obj.clone(), val.clone()],
+                                    vec![],
+                                )?;
+                            }
+                            None => {
+                                return Err(PyError::attribute_error(format!(
+                                    "property '{}' of '{}' object has no setter",
+                                    name,
+                                    obj.borrow().type_name()
+                                )));
+                            }
+                        }
                         return Ok(true);
                     }
                     let setter_method = { descriptor.borrow().get_attribute("__set__").ok() };
