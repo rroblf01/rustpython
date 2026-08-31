@@ -92,6 +92,22 @@ found zero regressions. 8 separate commits. See `cpython_test_suite_compat` memo
 including two things caught only by manually verifying the agent's work rather than trusting its report
 (a deleted `GAP_ANALYSIS.md` the agent said it hadn't touched, and the `zip()` hang above).
 
+**Full-corpus sweep after the above found a real regression the targeted 25-file sweep missed**: PASS
+100 → 97. One (`test_baseexception`: the pseudo-type bypass above let `range`/`memoryview`/etc. reach
+`is_exception_subclass`'s own catch-all, which treats any unrecognized name as a direct `Exception`
+subclass — `issubclass(range, BaseException)` wrongly returned `True`) was found and fixed immediately.
+The other two — `test_dbm` and `test_dbm_dumb` — resisted multiple hours of investigation with no
+conclusive root cause: both trace back to `import collections.abc` executed from *within* another
+module's own top-level execution (only reproducible via `unittest`'s test runner or
+`import_helper.import_fresh_module`, never in a standalone reduced repro), manifesting as either a
+module silently stopping execution right after that import line (`dbm.dumb`) or a mislabeled
+`ImportError: cannot import name 'runner' from 'unittest'` while a *different* module's `from
+collections.abc import ...` is what's actually failing (`test_dbm_dumb`). Kept the collections.abc
+change anyway — the net effect (aggregate failures/errors across the corpus, not just whole-file
+pass/fail count) is clearly positive — but these 2 regressions are a known, accepted, NOT understood
+trade-off, worth a dedicated future investigation. Net PASS after the `test_baseexception` fix: **98**.
+See `cpython_test_suite_compat` memory topic for the full diagnostic trail.
+
 **2026-08-30 session, batch 2** (pace changed per user feedback: fast per-fix checks only, full
 sweep deferred until several fixes land): four more fixes, three root-caused via parallel `Agent`
 investigations. (1) `PyDict::apply_probed_set` bumped its iterator-invalidation version counter on
