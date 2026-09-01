@@ -814,3 +814,184 @@ impl Drop for IsinstanceRecursionGuard {
         ISINSTANCE_RECURSION_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
     }
 }
+
+
+/// True if `e` is an `AttributeError` — either the native `PyError`
+/// variant (raised internally by `get_attribute_impl`'s own "no such
+/// attribute" arms) or a Python-level `raise AttributeError(...)` surfaced
+/// via the generic `PyError::Exception(msg, obj)` shape. NOTE: that first
+/// tuple field is NOT reliably the exception's type name across this
+/// codebase — `op_exc.rs`'s general `RAISE_VARARGS` handler packs the
+/// exception's own MESSAGE there instead (confirmed via a direct repro:
+/// `raise AttributeError('x')` produced `PyError::Exception("x", ...)`, not
+/// `PyError::Exception("AttributeError", ...)`) — so the real type must be
+/// read off the wrapped exception object itself instead.
+pub(crate) fn is_attribute_error(e: &PyError) -> bool {
+    match e {
+        PyError::AttributeError(_) => true,
+        PyError::Exception(_, obj) => match &*obj.borrow() {
+            PyObject::Exception { typ, .. } => {
+                typ == "AttributeError" || crate::vm::is_exception_subclass(typ, "AttributeError")
+            }
+            PyObject::Instance { typ, .. } => find_exception_base_name(typ)
+                .is_some_and(|base| crate::vm::is_exception_subclass(&base, "AttributeError")),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+
+/// `ObjectAccess::get_attribute` (the plain, VM-less attribute lookup every
+/// free-standing native function like this one is stuck with) never applies
+/// the descriptor protocol to a `property` found via an `Instance`'s
+/// type/MRO dict — only `LOAD_ATTR`'s own opcode handler and `getattr()`'s
+/// dedicated `resolve_descriptor_attr` special case do (see their own doc
+/// comments; both needed a live `&mut VirtualMachine` to actually call the
+/// getter, which this function's callers deliberately don't have — same
+/// constraint `call_bound_method` itself works around via a disposable VM).
+/// Confirmed general via `c.__bases__` on a `__bases__ = property(...)`
+/// class returning the raw, uninvoked `<property object>` through this path
+/// while ordinary dot access already worked. Used here (instead of just
+/// `obj.borrow().get_attribute(name)`) so a duck-typed abstract class using
+/// a `property` for `__bases__` (`test_isinstance.py`'s `AbstractClass`)
+/// actually gets its getter invoked.
+pub(crate) fn get_attribute_with_properties(obj: &PyObjectRef, name: &str) -> PyResult<PyObjectRef> {
+    let typ = match &*obj.borrow() {
+        PyObject::Instance { typ, .. } => typ.clone(),
+        _ => return obj.borrow().get_attribute(name),
+    };
+    let found = {
+        let typ_ref = typ.borrow();
+        if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+            type_dict.get_str(name).cloned().or_else(|| {
+                for base in mro.iter().skip(1) {
+                    if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                        if let Some(val) = base_dict.get_str(name) {
+                            return Some(val.clone());
+                        }
+                    }
+                }
+                None
+            })
+        } else {
+            None
+        }
+    };
+    match found {
+        Some(val) => {
+            let is_getter_property = matches!(&*val.borrow(), PyObject::Property(d) if d.getter.is_some());
+            if is_getter_property {
+                let getter = if let PyObject::Property(d) = &*val.borrow() {
+                    d.getter.clone().unwrap()
+                } else {
+                    unreachable!()
+                };
+                call_bound_method(getter, obj.clone(), vec![])
+            } else {
+                Ok(val)
+            }
+        }
+        None => {
+            // Same "plain `get_attribute` doesn't apply the full protocol"
+            // gap as the property case above, for `__getattr__` specifically
+            // — LOAD_ATTR's opcode handler falls back to a type's
+            // `__getattr__` when the raw lookup misses, but the plain
+            // `ObjectAccess::get_attribute` used here does not. Confirmed
+            // general via `test_isinstance.py`'s `Failure` helper: `f.__bases__`
+            // (dot access) correctly invokes `__getattr__` and gets `(f, None)`
+            // back, but `get_attribute_with_properties` fell straight to a
+            // bare `AttributeError` for the identical attribute on the
+            // identical object.
+            match obj.borrow().get_attribute(name) {
+                Err(e) if is_attribute_error(&e) => {
+                    if let Some(getattr_fn) = crate::object::lookup_dunder_via_mro(&typ, "__getattr__") {
+                        call_bound_method(getattr_fn, obj.clone(), vec![py_str(name)])
+                    } else {
+                        Err(e)
+                    }
+                }
+                other => other,
+            }
+        }
+    }
+}
+
+
+/// CPython's `abstract_get_bases()`: fetch `obj.__bases__`, treating a
+/// missing attribute (`AttributeError`) OR a non-tuple value as "no
+/// bases" rather than an error — this is what lets a duck-typed
+/// "abstract class" (any object with a `__bases__` property, not
+/// necessarily a real `type`) participate in `isinstance()`/
+/// `issubclass()`'s abstract-class protocol (`test_isinstance.py`'s
+/// `AbstractClass`/`AbstractInstance` helpers). Any OTHER exception
+/// raised while fetching `__bases__` (e.g. a property that raises
+/// `RuntimeError`) is a real error and must propagate, not be masked.
+pub(crate) fn get_bases_duck(obj: &PyObjectRef) -> PyResult<Option<Vec<PyObjectRef>>> {
+    match get_attribute_with_properties(obj, "__bases__") {
+        Ok(bases) => {
+            let b = bases.borrow();
+            if let PyObject::Tuple(items) = &*b {
+                Ok(Some(items.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+        Err(e) if is_attribute_error(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+
+/// CPython's `check_class()`: an object with no usable `__bases__` is not
+/// "class-like" at all, raising `TypeError` with the caller-supplied
+/// message — UNLESS fetching `__bases__` itself raised some other
+/// (non-`AttributeError`) exception, which must surface unmasked instead
+/// (`test_isinstance.py`'s `test_dont_mask_non_attribute_error*` vs
+/// `test_mask_attribute_error*`).
+pub(crate) fn check_class_duck(obj: &PyObjectRef, msg: &str) -> PyResult<()> {
+    match get_bases_duck(obj)? {
+        Some(_) => Ok(()),
+        None => Err(PyError::type_error(msg.to_string())),
+    }
+}
+
+
+/// CPython's `abstract_issubclass()`: walk `__bases__` (a duck-typed
+/// class need not be a real `type` at all — see `AbstractClass` in
+/// `test_isinstance.py`) looking for `cls` by identity. Single-base
+/// chains loop in place (matching CPython's own "avoid recursivity in
+/// the single inheritance case"); multi-base fan-out recurses through
+/// `IsinstanceRecursionGuard`, which — combined with each branch
+/// propagating its error immediately via `?` instead of trying the
+/// remaining siblings first — keeps a cyclic `__bases__` (e.g. `(self,
+/// self, self)`) a bounded, linear number of calls rather than an
+/// exponential blowup.
+pub(crate) fn abstract_issubclass(derived: &PyObjectRef, cls: &PyObjectRef) -> PyResult<bool> {
+    let _guard = IsinstanceRecursionGuard::enter()?;
+    let mut derived = derived.clone();
+    loop {
+        if derived.is(cls) {
+            return Ok(true);
+        }
+        let bases = match get_bases_duck(&derived)? {
+            Some(b) => b,
+            None => return Ok(false),
+        };
+        match bases.len() {
+            0 => return Ok(false),
+            1 => {
+                derived = bases[0].clone();
+                continue;
+            }
+            _ => {
+                for b in &bases {
+                    if abstract_issubclass(b, cls)? {
+                        return Ok(true);
+                    }
+                }
+                return Ok(false);
+            }
+        }
+    }
+}

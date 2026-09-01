@@ -1,5 +1,8 @@
 use super::*;
-use super::introspection1::{abc_registry_matches_in_subtree, call_bound_method, IsinstanceRecursionGuard};
+use super::introspection1::{
+    abc_registry_matches_in_subtree, abstract_issubclass, call_bound_method, check_class_duck,
+    get_attribute_with_properties, is_attribute_error, IsinstanceRecursionGuard,
+};
 
 pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let trace = std::env::var("RPY_TRACE_IS").is_ok();
@@ -83,6 +86,25 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
         }
         return Ok(py_bool(false));
+    }
+    // CPython's abstract-class protocol: `classinfo` need not be a real
+    // `type` at all — any object exposing a `__bases__` property counts
+    // (`test_isinstance.py`'s `AbstractClass`/`AbstractInstance`). Only a
+    // genuine `Instance` (a plain user object, never a builtin
+    // representation already handled by the arms below) triggers this, so
+    // the internal by-name fallbacks those arms rely on (`BuiltinFunction`/
+    // `Str` classinfo) are untouched.
+    if matches!(&*class, PyObject::Instance { .. }) {
+        check_class_duck(
+            &args[1],
+            "isinstance() arg 2 must be a type, a tuple of types, or a union",
+        )?;
+        let icls = match get_attribute_with_properties(&args[0], "__class__") {
+            Ok(v) => v,
+            Err(e) if is_attribute_error(&e) => return Ok(py_bool(false)),
+            Err(e) => return Err(e),
+        };
+        return Ok(py_bool(abstract_issubclass(&icls, &args[1])?));
     }
     match (&*obj, &*class) {
         (
@@ -171,6 +193,21 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     || matches!(&*typ.borrow(), PyObject::Type { mro, .. } if mro.iter().any(|c| c.is(registered)))
             }) {
                 return Ok(py_bool(true));
+            }
+            // About to report `False` — before doing so, fetch `obj.__class__`
+            // purely to surface any exception a CUSTOM (property-based)
+            // override might raise. Real CPython's `object_isinstance` reads
+            // `__class__` unconditionally (even on this "definitely not, by
+            // real type" path) and only swallows `AttributeError`; anything
+            // else propagates rather than being reported as a quiet `False`
+            // (`test_isinstance.py`'s `test_isinstance_dont_mask_non_attribute_error`).
+            // Deliberately placed on the FALSE path only, not the common
+            // True/identity fast paths above, to keep the extra lookup off
+            // the hot, overwhelmingly-common `isinstance()` case.
+            if let Err(e) = get_attribute_with_properties(&args[0], "__class__") {
+                if !is_attribute_error(&e) {
+                    return Err(e);
+                }
             }
             Ok(py_bool(false))
         }
@@ -514,12 +551,33 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 // `BuiltinFunction` representation reachable from the
                 // current frame's builtins.
                 | PyObject::Str(_)
+                // A plain `Instance` is deferred to the abstract-class
+                // protocol check just below (CPython's `check_class()`) —
+                // it's only "bogus" there if it turns out to have no
+                // usable `__bases__` either.
+                | PyObject::Instance { .. }
         );
         if is_bogus {
             return Err(PyError::type_error(
                 "issubclass() arg 2 must be a class, a tuple of classes, or a union",
             ));
         }
+    }
+    // CPython's abstract-class protocol (`recursive_issubclass` +
+    // `abstract_issubclass`): triggers whenever EITHER side is a
+    // duck-typed "class" (a plain `Instance` with a `__bases__`
+    // property) rather than a real `Type`/`BuiltinFunction`/`Str` — see
+    // `test_isinstance.py`'s `AbstractClass`/`AbstractSuper`/`AbstractChild`
+    // and the various `test_..._bases`/`test_..._mask_..._error` cases.
+    if matches!(&*args[0].borrow(), PyObject::Instance { .. })
+        || matches!(&*args[1].borrow(), PyObject::Instance { .. })
+    {
+        check_class_duck(&args[0], "issubclass() arg 1 must be a class")?;
+        check_class_duck(
+            &args[1],
+            "issubclass() arg 2 must be a class, a tuple of classes, or a union",
+        )?;
+        return Ok(py_bool(abstract_issubclass(&args[0], &args[1])?));
     }
     // Handle tuple of types: issubclass(cls, (type1, type2, ...))
     let base = args[1].borrow();

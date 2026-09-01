@@ -44,6 +44,7 @@ pub(crate) use string2::{check_int_to_str_limit, int_value_or_backing};
 mod introspection1;
 mod introspection2;
 pub use introspection1::{builtin_dir, builtin_globals, builtin_hash, builtin_id, builtin_locals, builtin_object, builtin_slice, builtin_vars, call_bound_method, call_function_disposable};
+pub(crate) use introspection1::is_attribute_error;
 pub use introspection2::{builtin_help, builtin_isinstance, builtin_issubclass, builtin_open};
 pub(crate) use introspection1::{exception_instance_repr, exception_instance_str, is_exception_type};
 pub(crate) use introspection2::path_arg_to_string;
