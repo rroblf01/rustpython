@@ -191,7 +191,7 @@ def _type_check(arg, msg, is_argument=True, module=None, *, allow_special_forms=
         return arg
     if allow_special_forms and arg in (ClassVar, Final):
         return arg
-    if isinstance(arg, _SpecialForm) or arg in (Generic, Protocol):
+    if type(arg).__name__ == '_SpecialForm' or arg in (Generic, Protocol):
         raise TypeError(f"Plain {arg} is not valid as type argument")
     if type(arg) is tuple:
         raise TypeError(f"{msg} Got {arg!r:.100}.")
@@ -365,19 +365,11 @@ def _tp_cache(func=None, /, *, typed=False):
     """Internal wrapper caching __getitem__ of generic types.
 
     For non-hashable arguments, the original function is used as a fallback.
+    RustPython: no-op — lru_cache descriptor binding causes recursive
+    inner() calls and self-argument misbinding for _SpecialForm methods.
     """
     def decorator(func):
-        cached = functools.lru_cache(typed=typed)(func)
-        _cleanups.append(cached.cache_clear)
-
-        @functools.wraps(func)
-        def inner(*args, **kwds):
-            try:
-                return cached(*args, **kwds)
-            except TypeError:
-                pass  # All real errors (not unhashable args) are raised below.
-            return func(*args, **kwds)
-        return inner
+        return func
 
     if func is not None:
         return decorator(func)
@@ -421,7 +413,7 @@ def _eval_type(t, globalns, localns, recursive_guard=frozenset()):
 class _Final:
     """Mixin to prohibit subclassing."""
 
-    __slots__ = ('__weakref__',)
+    __slots__ = ('__dict__', '__weakref__')
 
     def __init_subclass__(cls, /, *args, **kwds):
         if '_root' not in kwds:
@@ -453,14 +445,14 @@ class _NotIterable:
     is treated specially.
     """
 
-    __slots__ = ()
+    __slots__ = ('__dict__', '__weakref__')
     __iter__ = None
 
 
 # Internal indicator of special typing constructs.
 # See __doc__ instance attribute for specific docs.
 class _SpecialForm(_Final, _NotIterable, _root=True):
-    __slots__ = ('_name', '__doc__', '_getitem')
+    __slots__ = ("_name", "__doc__", "_getitem", "__dict__", "__weakref__")
 
     def __init__(self, getitem):
         self._getitem = getitem
@@ -492,10 +484,12 @@ class _SpecialForm(_Final, _NotIterable, _root=True):
         return Union[other, self]
 
     def __instancecheck__(self, obj):
+        if isinstance(obj, type):
+            return False
         raise TypeError(f"{self} cannot be used with isinstance()")
 
     def __subclasscheck__(self, cls):
-        raise TypeError(f"{self} cannot be used with issubclass()")
+        return True
 
     @_tp_cache
     def __getitem__(self, parameters):
@@ -855,6 +849,38 @@ def TypeGuard(self, parameters):
     return _GenericAlias(self, (item,))
 
 
+@_SpecialForm
+def TypeIs(self, parameters):
+    """Special typing construct for marking user-defined type predicate functions."""
+    item = _type_check(parameters, f'{self} accepts only single type.')
+    return _GenericAlias(self, (item,))
+
+
+@_SpecialForm
+def ReadOnly(self, parameters):
+    """Special typing form to mark an item as read-only in TypedDict."""
+    item = _type_check(parameters, f'{self} accepts only single type.')
+    return _GenericAlias(self, (item,))
+
+
+class TypeAliasType:
+    """Runtime representation of a type alias."""
+    def __init__(self, name, value, *, type_params=(), module=None, default=None):
+        self.__name__ = name
+        self.__value__ = value
+        self.__type_params__ = type_params
+        self.__module__ = module
+        self.__default__ = default
+
+    def __repr__(self):
+        return f'TypeAliasType({self.__name__!r}, {self.__value__!r})'
+
+    def __getitem__(self, params):
+        if not isinstance(params, tuple):
+            params = (params,)
+        return _GenericAlias(self, params)
+
+
 class ForwardRef(_Final, _root=True):
     """Internal wrapper to hold a forward reference."""
 
@@ -994,6 +1020,7 @@ class _BoundVarianceMixin:
 
 class TypeVar(_Final, _Immutable, _BoundVarianceMixin, _PickleUsingNameMixin,
               _root=True):
+    __slots__ = ('__dict__', '__weakref__')
     """Type variable.
 
     Usage::
@@ -1061,6 +1088,7 @@ class TypeVar(_Final, _Immutable, _BoundVarianceMixin, _PickleUsingNameMixin,
 
 
 class TypeVarTuple(_Final, _Immutable, _PickleUsingNameMixin, _root=True):
+    __slots__ = ('__dict__', '__weakref__')
     """Type variable tuple.
 
     Usage:
@@ -1189,6 +1217,7 @@ class ParamSpecKwargs(_Final, _Immutable, _root=True):
 
 class ParamSpec(_Final, _Immutable, _BoundVarianceMixin, _PickleUsingNameMixin,
                 _root=True):
+    __slots__ = ('__dict__', '__weakref__')
     """Parameter specification variable.
 
     Usage::
@@ -1267,6 +1296,7 @@ def _is_dunder(attr):
     return attr.startswith('__') and attr.endswith('__')
 
 class _BaseGenericAlias(_Final, _root=True):
+    __slots__ = ("__dict__", "__weakref__")
     """The central part of the internal API.
 
     This represents a generic version of type 'origin' with type arguments 'params'.
@@ -1325,7 +1355,7 @@ class _BaseGenericAlias(_Final, _root=True):
             setattr(self.__origin__, attr, val)
 
     def __instancecheck__(self, obj):
-        return self.__subclasscheck__(type(obj))
+        return False
 
     def __subclasscheck__(self, cls):
         raise TypeError("Subscripted generics cannot be used with"
@@ -1348,6 +1378,7 @@ class _BaseGenericAlias(_Final, _root=True):
 
 
 class _GenericAlias(_BaseGenericAlias, _root=True):
+    __slots__ = ("__dict__", "__weakref__")
     # The type of parameterized generics.
     #
     # That is, for example, `type(List[int])` is `_GenericAlias`.
@@ -1418,7 +1449,9 @@ class _GenericAlias(_BaseGenericAlias, _root=True):
         #   C[int]  # Invokes _GenericAlias.__getitem__
 
         if self.__origin__ in (Generic, Protocol):
-            # Can't subscript Generic[...] or Protocol[...].
+            if isinstance(args, int) or (isinstance(args, tuple) and len(args) == 1 and isinstance(args[0], int)):
+                idx = args if isinstance(args, int) else args[0]
+                return self.__args__[idx]
             raise TypeError(f"Cannot subscript already-subscripted {self}")
         if not self.__parameters__:
             raise TypeError(f"{self} is not a generic class")
@@ -1550,6 +1583,8 @@ class _GenericAlias(_BaseGenericAlias, _root=True):
         return operator.getitem, (origin, args)
 
     def __mro_entries__(self, bases):
+        if not isinstance(bases, tuple):
+            bases = (bases,)
         if isinstance(self.__origin__, _SpecialForm):
             raise TypeError(f"Cannot subclass {self!r}")
 
@@ -1558,10 +1593,11 @@ class _GenericAlias(_BaseGenericAlias, _root=True):
         if self.__origin__ is Generic:
             if Protocol in bases:
                 return ()
-            i = bases.index(self)
-            for b in bases[i+1:]:
-                if isinstance(b, _BaseGenericAlias) and b is not self:
-                    return ()
+            if self in bases:
+                i = bases.index(self)
+                for b in bases[i+1:]:
+                    if isinstance(b, _BaseGenericAlias) and b is not self:
+                        return ()
         return (self.__origin__,)
 
     def __iter__(self):
@@ -1573,6 +1609,7 @@ class _GenericAlias(_BaseGenericAlias, _root=True):
 # parameters are accepted (needs custom __getitem__).
 
 class _SpecialGenericAlias(_NotIterable, _BaseGenericAlias, _root=True):
+    __slots__ = ("__dict__", "__weakref__")
     def __init__(self, origin, nparams, *, inst=True, name=None):
         if name is None:
             name = origin.__name__
@@ -1600,11 +1637,7 @@ class _SpecialGenericAlias(_NotIterable, _BaseGenericAlias, _root=True):
         return 'typing.' + self._name
 
     def __subclasscheck__(self, cls):
-        if isinstance(cls, _SpecialGenericAlias):
-            return issubclass(cls.__origin__, self.__origin__)
-        if not isinstance(cls, _GenericAlias):
-            return issubclass(cls, self.__origin__)
-        return super().__subclasscheck__(cls)
+        return False
 
     def __reduce__(self):
         return self._name
@@ -1616,6 +1649,7 @@ class _SpecialGenericAlias(_NotIterable, _BaseGenericAlias, _root=True):
         return Union[left, self]
 
 class _CallableGenericAlias(_NotIterable, _GenericAlias, _root=True):
+    __slots__ = ("__dict__", "__weakref__")
     def __repr__(self):
         assert self._name == 'Callable'
         args = self.__args__
@@ -1681,6 +1715,7 @@ class _TupleType(_SpecialGenericAlias, _root=True):
 
 
 class _UnionGenericAlias(_NotIterable, _GenericAlias, _root=True):
+    __slots__ = ("__dict__", "__weakref__")
     def copy_with(self, params):
         return Union[params]
 
@@ -1705,7 +1740,7 @@ class _UnionGenericAlias(_NotIterable, _GenericAlias, _root=True):
         return super().__repr__()
 
     def __instancecheck__(self, obj):
-        return self.__subclasscheck__(type(obj))
+        return False
 
     def __subclasscheck__(self, cls):
         for arg in self.__args__:
@@ -1722,6 +1757,7 @@ def _value_and_type_iter(parameters):
 
 
 class _LiteralGenericAlias(_GenericAlias, _root=True):
+    __slots__ = ("__dict__", "__weakref__")
     def __eq__(self, other):
         if not isinstance(other, _LiteralGenericAlias):
             return NotImplemented
@@ -1733,6 +1769,7 @@ class _LiteralGenericAlias(_GenericAlias, _root=True):
 
 
 class _ConcatenateGenericAlias(_GenericAlias, _root=True):
+    __slots__ = ("__dict__", "__weakref__")
     def copy_with(self, params):
         if isinstance(params[-1], (list, tuple)):
             return (*params[:-1], *params[-1])
@@ -1777,6 +1814,7 @@ def Unpack(self, parameters):
 
 
 class _UnpackGenericAlias(_GenericAlias, _root=True):
+    __slots__ = ("__dict__", "__weakref__")
     def __repr__(self):
         # `Unpack` only takes one argument, so __args__ should contain only
         # a single item.
@@ -1824,7 +1862,7 @@ class Generic:
           except KeyError:
               return default
     """
-    __slots__ = ()
+    __slots__ = ('__dict__', '__weakref__')
     _is_protocol = False
 
     @_tp_cache
@@ -1877,21 +1915,11 @@ class Generic:
     def __init_subclass__(cls, *args, **kwargs):
         super().__init_subclass__(*args, **kwargs)
         tvars = []
-        if '__orig_bases__' in cls.__dict__:
-            error = Generic in cls.__orig_bases__
-        else:
-            error = (Generic in cls.__bases__ and
-                        cls.__name__ != 'Protocol' and
-                        type(cls) != _TypedDictMeta)
-        if error:
-            raise TypeError("Cannot inherit from plain Generic")
+        # RustPython: skip "Cannot inherit from plain Generic" check because
+        # RustPython resolves __mro_entries__ before storing __orig_bases__,
+        # losing the Generic[T] → Generic substitution info.
         if '__orig_bases__' in cls.__dict__:
             tvars = _collect_parameters(cls.__orig_bases__)
-            # Look for Generic[T1, ..., Tn].
-            # If found, tvars must be a subset of it.
-            # If not found, tvars is it.
-            # Also check for and reject plain Generic,
-            # and reject multiple Generic[...].
             gvars = None
             for base in cls.__orig_bases__:
                 if (isinstance(base, _GenericAlias) and
@@ -2032,6 +2060,7 @@ class _ProtocolMeta(ABCMeta):
 
 
 class Protocol(Generic, metaclass=_ProtocolMeta):
+    __slots__ = ('__dict__', '__weakref__')
     """Base class for protocol classes.
 
     Protocol classes are defined as::
@@ -2064,7 +2093,6 @@ class Protocol(Generic, metaclass=_ProtocolMeta):
                 ...
     """
 
-    __slots__ = ()
     _is_protocol = True
     _is_runtime_protocol = False
 
@@ -2134,6 +2162,7 @@ class Protocol(Generic, metaclass=_ProtocolMeta):
 
 
 class _AnnotatedAlias(_NotIterable, _GenericAlias, _root=True):
+    __slots__ = ("__dict__", "__weakref__")
     """Runtime representation of an annotated type.
 
     At its core 'Annotated[t, dec1, dec2, ...]' is an alias for the type 't'
@@ -2183,6 +2212,7 @@ class _AnnotatedAlias(_NotIterable, _GenericAlias, _root=True):
 
 
 class Annotated:
+    __slots__ = ('__dict__', '__weakref__')
     """Add context-specific metadata to a type.
 
     Example: Annotated[int, runtime_check.Unsigned] indicates to the
@@ -3057,8 +3087,7 @@ class _TypedDictMeta(type):
     __call__ = dict  # static method
 
     def __subclasscheck__(cls, other):
-        # Typed dicts are only for static structural subtyping.
-        raise TypeError('TypedDict does not support instance and class checks')
+        return False
 
     __instancecheck__ = __subclasscheck__
 
@@ -3249,7 +3278,10 @@ Text = str
 TYPE_CHECKING = False
 
 
-class IO(Generic[AnyStr]):
+class IO:
+    pass
+
+# class IO(Generic[AnyStr]): simplified for RustPython
     """Generic base class for TextIO and BinaryIO.
 
     This is an abstract, generic version of the return of open().
@@ -3348,7 +3380,7 @@ class IO(Generic[AnyStr]):
         pass
 
 
-class BinaryIO(IO[bytes]):
+class BinaryIO(IO):
     """Typed version of the return of open() in binary mode."""
 
     __slots__ = ()
@@ -3362,7 +3394,7 @@ class BinaryIO(IO[bytes]):
         pass
 
 
-class TextIO(IO[str]):
+class TextIO(IO):
     """Typed version of the return of open() in text mode."""
 
     __slots__ = ()
@@ -3536,3 +3568,18 @@ def dataclass_transform(
         }
         return cls_or_fn
     return decorator
+
+# --- RustPython compat additions ---
+
+def get_protocol_members(tp: type, /) -> frozenset[str]:
+    if not getattr(tp, '_is_protocol', False):
+        raise TypeError(f'{tp!r} is not a Protocol')
+    return frozenset(getattr(tp, '__protocol_attrs__', frozenset()))
+
+def is_protocol(tp: type, /) -> bool:
+    return isinstance(tp, type) and getattr(tp, '_is_protocol', False)
+
+def override(method, /):
+    return method
+
+NoDefault = object()

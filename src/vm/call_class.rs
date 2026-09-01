@@ -69,8 +69,22 @@ impl VirtualMachine {
                 let mro_entries_fn = base.borrow().get_attribute("__mro_entries__").ok();
                 match mro_entries_fn {
                     Some(f) => {
-                        let result =
-                            crate::object::call_bound_method(f, base.clone(), vec![bases.clone()])?;
+                        eprintln!("MRO_ENTRIES f_type={} base_type={}", f.borrow().type_name(), base.borrow().type_name());
+                        let result = {
+                            let f_borrow = f.borrow();
+                            match &*f_borrow {
+                                PyObject::BoundMethod { func, self_obj } => {
+                                    let func_clone = func.clone();
+                                    let self_clone = self_obj.clone();
+                                    drop(f_borrow);
+                                    crate::object::call_bound_method(func_clone, self_clone, vec![bases.clone()])?
+                                }
+                                _ => {
+                                    drop(f_borrow);
+                                    crate::object::call_bound_method(f, base.clone(), vec![bases.clone()])?
+                                }
+                            }
+                        };
                         let entries = match &*result.borrow() {
                             PyObject::Tuple(items) => items.clone(),
                             _ => {
