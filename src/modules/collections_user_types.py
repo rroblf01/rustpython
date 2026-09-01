@@ -139,7 +139,7 @@ class UserList:
 
 
 class UserDict:
-    def __init__(self, initdata=None, **kwargs):
+    def __init__(self, initdata=None, /, **kwargs):
         self.data = {}
         if initdata is not None:
             self.update(initdata)
@@ -152,6 +152,8 @@ class UserDict:
     def __getitem__(self, key):
         if key in self.data:
             return self.data[key]
+        if hasattr(self.__class__, "__missing__"):
+            return self.__class__.__missing__(self, key)
         raise KeyError(key)
 
     def __setitem__(self, key, item):
@@ -186,8 +188,8 @@ class UserDict:
     def items(self):
         return self.data.items()
 
-    def pop(self, key, default=None):
-        return self.data.pop(key, default)
+    def pop(self, key, *args):
+        return self.data.pop(key, *args)
 
     def popitem(self):
         return self.data.popitem()
@@ -198,18 +200,38 @@ class UserDict:
     def setdefault(self, key, default=None):
         return self.data.setdefault(key, default)
 
-    def update(self, other=None, **kwargs):
-        if other is not None:
-            if isinstance(other, UserDict):
-                self.data.update(other.data)
-            elif hasattr(other, 'keys'):
-                for k in other.keys():
-                    self.data[k] = other[k]
-            else:
-                for k, v in other:
-                    self.data[k] = v
+    def update(self, other=(), /, **kwargs):
+        if isinstance(other, UserDict):
+            self.data.update(other.data)
+        elif hasattr(other, 'keys'):
+            for k in other.keys():
+                self.data[k] = other[k]
+        else:
+            for k, v in other:
+                self.data[k] = v
         if kwargs:
             self.data.update(kwargs)
+
+    def __or__(self, other):
+        if isinstance(other, UserDict):
+            return self.__class__(self.data | other.data)
+        if isinstance(other, dict):
+            return self.__class__(self.data | other)
+        return NotImplemented
+
+    def __ror__(self, other):
+        if isinstance(other, UserDict):
+            return self.__class__(other.data | self.data)
+        if isinstance(other, dict):
+            return self.__class__(other | self.data)
+        return NotImplemented
+
+    def __ior__(self, other):
+        if isinstance(other, UserDict):
+            self.data |= other.data
+        else:
+            self.data |= other
+        return self
 
     def copy(self):
         if self.__class__ is UserDict:
@@ -232,7 +254,10 @@ class UserDict:
 
     @classmethod
     def fromkeys(cls, iterable, value=None):
-        return cls(dict.fromkeys(iterable, value))
+        d = cls()
+        for key in iterable:
+            d[key] = value
+        return d
 
 
 class Counter(dict):
