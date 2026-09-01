@@ -46,13 +46,28 @@ class _bound_cache_wrapper:
         return self._wrapper.cache_info()
 
 
-def lru_cache(maxsize=128):
-    if callable(maxsize):
-        func = maxsize
-        return _lru_cache_wrapper(func, 128)
+def lru_cache(maxsize=128, typed=False):
+    # typed is ignored (RustPython doesn't have separate typed caches, but
+    # signature must accept it for CPython compat: lru_cache(maxsize, typed)
+    # and lru_cache(typed=True) etc., as used in annotationlib).
+    # Handle @lru_cache without parens: @lru_cache -> maxsize is func
+    if callable(maxsize) and not isinstance(maxsize, bool) and typed is False:
+        # Check if maxsize is actually a function (callable and not int/None/bool)
+        # lru_cache can be called as @lru_cache or @lru_cache() or @lru_cache(maxsize=...)
+        # When used as @lru_cache without args, first arg is the function
+        try:
+            # If maxsize is callable and not an int, treat as func
+            if hasattr(maxsize, '__call__') and not isinstance(maxsize, (int, type(None))):
+                func = maxsize
+                return _lru_cache_wrapper(func, 128)
+        except:
+            pass
 
     def decorator(func):
-        return _lru_cache_wrapper(func, maxsize)
+        return _lru_cache_wrapper(func, maxsize if isinstance(maxsize, int) or maxsize is None else 128)
+    # Support @lru_cache(...) with typed
+    # Also support lru_cache(maxsize=..., typed=...) as function call returning decorator
+    # When called as lru_cache(typed=True) without maxsize, maxsize will be 128 default
     return decorator
 
 

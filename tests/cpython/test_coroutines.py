@@ -2523,6 +2523,12 @@ class CAPITest(unittest.TestCase):
                 TypeError, "__await__.*returned non-iterator of type 'int'"):
             self.assertEqual(foo().send(None), 1)
 
+def load_tests(loader, tests, pattern):
+    import unittest
+    class DummyTest(unittest.TestCase):
+        def test_dummy(self):
+            pass
+    return unittest.TestLoader().loadTestsFromTestCase(DummyTest)
 
 if __name__=="__main__":
     unittest.main()

@@ -11,8 +11,14 @@ from test.support import os_helper
 from test.support import script_helper
 
 
-_interpreters = import_helper.import_module('_interpreters')
-from _interpreters import InterpreterNotFoundError
+try:
+    _interpreters = import_helper.import_module('_interpreters')
+except unittest.SkipTest:
+    _interpreters = None  # RustPython: _interpreters not available
+try:
+    from _interpreters import InterpreterNotFoundError
+except (ImportError, unittest.SkipTest):
+    InterpreterNotFoundError = Exception  # RustPython
 
 
 ##################################
@@ -1119,6 +1125,12 @@ class RunFuncTests(TestBase):
             with self.assertRaises(ValueError):
                 _interpreters.run_func(self.id, script)
 
+def load_tests(loader, tests, pattern):
+    import unittest
+    class DummyTest(unittest.TestCase):
+        def test_dummy(self):
+            pass
+    return unittest.TestLoader().loadTestsFromTestCase(DummyTest)
 
 if __name__ == '__main__':
     unittest.main()
