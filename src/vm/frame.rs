@@ -13,7 +13,7 @@ pub struct Frame {
     pub fast_locals: Vec<Option<PyObjectRef>>,
     pub globals: Rc<RefCell<HashMap<StrId, PyObjectRef>>>,
     pub builtins: Rc<HashMap<StrId, PyObjectRef>>,
-    pub stack: SmallVec<[PyObjectRef; 4]>,
+    pub stack: SmallVec<[PyObjectRef; 8]>,
     pub ip: usize,
     pub base_sp: usize,
     pub exception_handlers: Box<Vec<ExceptionHandler>>,

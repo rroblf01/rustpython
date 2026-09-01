@@ -75,6 +75,32 @@ impl PyDict {
         self.size = 0;
         self.version = self.version.wrapping_add(1);
     }
+
+    fn maybe_shrink(&mut self) {
+        let cap = self.indices.len();
+        if cap > 8 && self.size * 4 < cap {
+            let new_cap = (cap / 2).max(8);
+            // Compact entries: remove tombstones
+            let mut new_entries: Vec<Option<(PyObjectRef, PyObjectRef)>> = Vec::with_capacity(self.size);
+            for e in self.entries.drain(..) {
+                if e.is_some() {
+                    new_entries.push(e);
+                }
+            }
+            self.entries = new_entries;
+            self.rehash(new_cap);
+        } else if self.entries.len() > self.size * 2 + 8 {
+            // Compact tombstones without shrinking indices
+            let mut new_entries: Vec<Option<(PyObjectRef, PyObjectRef)>> = Vec::with_capacity(self.size);
+            for e in self.entries.drain(..) {
+                if e.is_some() {
+                    new_entries.push(e);
+                }
+            }
+            self.entries = new_entries;
+            self.rehash(self.indices.len());
+        }
+    }
     pub(crate) fn version(&self) -> u64 {
         self.version
     }
@@ -354,7 +380,9 @@ impl PyDict {
     }
     pub fn remove(&mut self, key: &PyObjectRef) -> PyResult<PyObjectRef> {
         let h = Self::dict_hash(key)?;
-        self.remove_with_hash(key, h)
+        let v = self.remove_with_hash(key, h)?;
+        self.maybe_shrink();
+        Ok(v)
     }
     /// Same as `remove`, but takes an already-computed hash — see
     /// `set_with_hash`'s doc comment for why a caller holding `obj`'s own
@@ -366,6 +394,7 @@ impl PyDict {
         let removed = self.entries[existing].take().unwrap().1;
         self.size -= 1;
         self.version = self.version.wrapping_add(1);
+        self.maybe_shrink();
         Ok(removed)
     }
     pub fn iter(&self) -> impl Iterator<Item = (&PyObjectRef, &PyObjectRef)> {
@@ -586,6 +615,7 @@ pub fn pydict_safe_remove(
                         let removed = d.entries[entry_idx].take().unwrap().1;
                         d.size -= 1;
                         d.version = d.version.wrapping_add(1);
+                        d.maybe_shrink();
                         return Ok(removed);
                     } else {
                         drop(obj);
@@ -620,6 +650,7 @@ pub fn pydict_safe_remove(
                         let removed = d.entries[entry_idx].take().unwrap().1;
                         d.size -= 1;
                         d.version = d.version.wrapping_add(1);
+                        d.maybe_shrink();
                         return Ok(removed);
                     } else {
                         drop(obj);

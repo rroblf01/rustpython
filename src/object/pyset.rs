@@ -30,6 +30,30 @@ impl PySet {
         self.size = 0;
     }
 
+    fn maybe_shrink(&mut self) {
+        let cap = self.indices.len();
+        if cap > 8 && self.size * 4 < cap {
+            let new_cap = (cap / 2).max(8);
+            let mut new_entries: Vec<Option<PyObjectRef>> = Vec::with_capacity(self.size);
+            for e in self.entries.drain(..) {
+                if e.is_some() {
+                    new_entries.push(e);
+                }
+            }
+            self.entries = new_entries;
+            self.rehash(new_cap);
+        } else if self.entries.len() > self.size * 2 + 8 {
+            let mut new_entries: Vec<Option<PyObjectRef>> = Vec::with_capacity(self.size);
+            for e in self.entries.drain(..) {
+                if e.is_some() {
+                    new_entries.push(e);
+                }
+            }
+            self.entries = new_entries;
+            self.rehash(self.indices.len());
+        }
+    }
+
     fn mask(&self) -> usize {
         self.indices.len() - 1
     }
@@ -173,6 +197,7 @@ impl PySet {
             .ok_or_else(|| PyError::key_error(key.str()))?;
         let removed = self.entries[existing].take().unwrap();
         self.size -= 1;
+        self.maybe_shrink();
         Ok(removed)
     }
 
@@ -180,6 +205,7 @@ impl PySet {
         for entry in self.entries.iter_mut().rev() {
             if let Some(val) = entry.take() {
                 self.size -= 1;
+                self.maybe_shrink();
                 return Some(val);
             }
         }

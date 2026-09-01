@@ -31,6 +31,9 @@ impl VirtualMachine {
         let op = self.frames[fi].code.instructions[ip].op;
         let arg = self.frames[fi].code.instructions[ip].arg;
         self.frames[fi].ip = ip + 1;
+        // Hot-path: only pay atomic load when profiling is compiled in.
+        // `RPY_OPCODE_HIST` is a debug aid, not for release benchmarks.
+        #[cfg(feature = "profile")]
         if crate::vm::util::OPCODE_HIST_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
             let slot = &crate::vm::util::OPCODE_HIST[(op as usize) % crate::vm::util::OPCODE_HIST.len()];
             slot.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

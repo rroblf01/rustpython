@@ -366,7 +366,7 @@ fn print_usage() {
 // guard) with real headroom to spare.
 fn main() {
     let child = std::thread::Builder::new()
-        .stack_size(512 * 1024 * 1024)
+        .stack_size(64 * 1024 * 1024)
         .spawn(real_main)
         .expect("failed to spawn main thread with enlarged stack");
     match child.join() {
