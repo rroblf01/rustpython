@@ -12,6 +12,7 @@ target/
 .hermes/
 INSTRUCTIONS.md
 CLAUDE.md
+AGENTS.md
 .claude/
 <test.*
 <FakePath*
