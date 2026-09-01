@@ -178,6 +178,31 @@ reusing the lighter, already-existing `Exception`/`ExceptionGroup` name-resoluti
 dict or arithmetic MRO participation). Fixes `test_super.py`'s `test_super___class__`. See
 `cpython_test_suite_compat` memory topic, parte 8, for detail.
 
+**2026-08-31, opportunistic batch after the three big gaps**: with `abc`/`collections.abc`/
+`contextvars.Context` all resolved, went back to parallel opportunistic bug-hunting across the
+full failing-file corpus (likely newly reachable code paths from those three fixes). 4 fixes
+landed: (1) `LOAD_ATTR`/`resolve_descriptor_attr`/a fast-path in `import.rs` all silently swallowed
+any exception raised by a `@property` getter, returning the un-invoked `property` object as if it
+were the successful result — broke CPython's own `isinstance()`/`issubclass()` abstract-class
+duck-typing protocol, which relies on a raised `AttributeError` from a `__bases__`-like property
+meaning "not applicable"; (2) that same abstract-class protocol was then implemented for real;
+(3) `FOR_ITER`/`GET_ITER` compared `type_name() == "instance"` to detect a user-class instance,
+but `type_name()` returns the actual class name, never that literal string — permanently dead code
+that made `for x in obj:` fail for ANY class implementing `__iter__`/`__next__` by hand (not via a
+generator), the most basic iterator idiom in the language; (4) `collections.UserDict` had 5 bugs
+vs real CPython (missing `__or__`/`__ror__`/`__ior__`, no `__missing__` consultation, `pop()`
+couldn't distinguish "no default" from "default=None", `fromkeys()` routing through `dict.fromkeys()`
+unnecessarily, `__init__`/`update()` not positional-only). `test_isinstance.py`: 15→2 failures+errors.
+
+**A 5th fix was found, verified, and deliberately NOT committed**: an agent's fix for nested
+`__repr__`/`__str__` exceptions being silently swallowed (`repr({1: BadRepr()})` should propagate,
+not fall back to a default repr) correctly fixed that narrow case but broke `unittest.mock.MagicMock`
+broadly (`m.foo()` raised `TypeError: object is not callable` via a recursive `__getattr__` chain) —
+confirmed via `git stash` A/B that the regression is real and directly caused by this specific
+change. Given `unittest.mock` is used pervasively across the corpus, the risk clearly outweighs the
+narrow gain; reverted. The producing agent had independently reached the same conclusion and left it
+out of its own commits for review, matching this call.
+
 ## How "compatibility" is actually measured here
 
 There is no single trustworthy percentage for "how done is this interpreter." What exists is:
