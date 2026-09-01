@@ -3,6 +3,12 @@
 // `__import__` builtin implementation.
 use super::*;
 
+mod eval_exec;
+pub use eval_exec::{builtin_eval, builtin_exec};
+
+mod iter;
+pub use iter::{builtin_filter, builtin_map, builtin_super, builtin_zip};
+
 // ---- __import__ builtin ----
 
 /// True iff `name` is present in the `sys.modules` dict (the real import
@@ -195,113 +201,6 @@ pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-pub fn builtin_eval(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() {
-        return Err(PyError::type_error("eval() requires at least 1 argument"));
-    }
-    let source = args[0].str();
-    let mut parser = crate::parser::Parser::new(&source);
-    let program = parser
-        .parse_program()
-        .map_err(|e| PyError::type_error(format!("eval parse error: {}", e)))?;
-    let mut compiler = crate::compiler::Compiler::new();
-    let code = compiler
-        .compile(&program, "<eval>")
-        .map_err(|e| PyError::type_error(format!("eval compile error: {}", e)))?;
-    let code2 = code.clone();
-    // Use current VM if available via VM_PTR so exec() shares modules, sys.path, etc.
-    match with_vm_mut(|vm| vm.run(code)) {
-        Ok(Ok(val)) => Ok(val),
-        Ok(Err(e)) => Err(PyError::type_error(format!("eval error: {}", e))),
-        Err(_) => {
-            let mut new_vm = crate::vm::VirtualMachine::new();
-            new_vm
-                .run(code2)
-                .map_err(|e| PyError::type_error(format!("eval error: {}", e)))
-        }
-    }
-}
-
-pub fn builtin_exec(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() {
-        return Err(PyError::type_error("exec() requires at least 1 argument"));
-    }
-    // Check if first arg is a code object (compile() result)
-    let code = match &*args[0].borrow() {
-        PyObject::Code(c) => (**c).clone(),
-        _ => (|| -> Result<CodeObject, String> {
-            let source = args[0].str();
-            let mut parser = crate::parser::Parser::new(&source);
-            let program = parser.parse_program()?;
-            let mut compiler = crate::compiler::Compiler::new();
-            compiler.compile(&program, "<exec>")
-        })()
-        .map_err(|e| PyError::type_error(format!("exec error: {}", e)))?,
-    };
-    // Handle globals/locals arguments
-    let (original_globals, compiled_globals) = if args.len() > 1 {
-        match &*args[1].borrow() {
-            PyObject::Dict(d) => {
-                let compiled = Rc::new(RefCell::new(
-                    d.items()
-                        .into_iter()
-                        .map(|(k, v)| (interner::intern(&k.str()), v))
-                        .collect::<HashMap<StrId, PyObjectRef>>(),
-                ));
-                (Some(args[1].clone()), Some(compiled))
-            }
-            _ => (None, None),
-        }
-    } else {
-        (None, None)
-    };
-    let code2 = code.clone();
-    // Use current VM if available via VM_PTR so exec() shares modules, sys.path, etc.
-    let result = match with_vm_mut(|vm| {
-        if let Some(ref g) = compiled_globals {
-            vm.exec_code(code, Some(g.clone()))
-        } else {
-            vm.run(code)
-        }
-    }) {
-        Ok(Ok(ref _val)) => Ok(py_none()),
-        Ok(Err(e)) => Err(PyError::type_error(format!("exec error: {}", e))),
-        Err(_) => {
-            let mut new_vm = crate::vm::VirtualMachine::new();
-            new_vm
-                .run(code2)
-                .map_err(|e| PyError::type_error(format!("exec error: {}", e)))?;
-            Ok(py_none())
-        }
-    };
-    // Copy results back to original globals dict
-    // If the original dict had __annotations__, restore it (the compiled
-    // code creates a new one which should not overwrite the existing)
-    if let Some(ref orig) = original_globals {
-        if let PyObject::Dict(orig_dict) = &mut *orig.borrow_mut() {
-            // Check if original dict had __annotations__
-            if orig_dict
-                .get(&py_str("__annotations__"))
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                // The original dict already has __annotations__ — restore it
-                // (the compiled code created a new __annotations__ which
-                // overwrites the original, but we want to preserve the original)
-                // The original dict's __annotations__ is already correct,
-                // so we just need to ensure the compiled code's __annotations__
-                // doesn't overwrite it. Since the compiled code writes to
-                // compiled_globals (a separate HashMap), the original dict
-                // should be unchanged. But if it IS modified (due to some
-                // code path), we restore the original value here.
-                // For now, the original dict should be unchanged because
-                // the compiled code uses compiled_globals, not the original dict.
-            }
-        }
-    }
-    result
-}
 
 /// PEP 263 source-encoding-cookie detection: real Python scans the first
 /// TWO lines of a `bytes` source for a `# -*- coding: <name> -*-`-shaped
@@ -409,8 +308,228 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // `compile("def f(...): pass", "<t>", "single")` raise a spurious
     // SyntaxError (test_keywordonlyarg::testSyntaxForManyArguments, which
     // compiles a 300-argument `def` in "single" mode).
+    // Helper to detect incomplete input for PyCF_ALLOW_INCOMPLETE_INPUT
+    fn has_unclosed_brackets(src: &str) -> bool {
+        let mut depth_paren: i32 = 0;
+        let mut depth_brack: i32 = 0;
+        let mut depth_brace: i32 = 0;
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut in_triple_single = false;
+        let mut in_triple_double = false;
+        let mut escaped = false;
+        let chars: Vec<char> = src.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if escaped {
+                escaped = false;
+                i += 1;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                i += 1;
+                continue;
+            }
+            if !in_single && !in_double && !in_triple_single && !in_triple_double {
+                if c == '\'' && i + 2 < chars.len() && chars[i + 1] == '\'' && chars[i + 2] == '\'' {
+                    in_triple_single = true;
+                    i += 3;
+                    continue;
+                }
+                if c == '"' && i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"' {
+                    in_triple_double = true;
+                    i += 3;
+                    continue;
+                }
+                if c == '\'' {
+                    in_single = true;
+                } else if c == '"' {
+                    in_double = true;
+                } else if c == '(' {
+                    depth_paren += 1;
+                } else if c == ')' {
+                    depth_paren -= 1;
+                } else if c == '[' {
+                    depth_brack += 1;
+                } else if c == ']' {
+                    depth_brack -= 1;
+                } else if c == '{' {
+                    depth_brace += 1;
+                } else if c == '}' {
+                    depth_brace -= 1;
+                }
+            } else if in_triple_single {
+                if c == '\'' && i + 2 < chars.len() && chars[i + 1] == '\'' && chars[i + 2] == '\'' {
+                    in_triple_single = false;
+                    i += 3;
+                    continue;
+                }
+            } else if in_triple_double {
+                if c == '"' && i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"' {
+                    in_triple_double = false;
+                    i += 3;
+                    continue;
+                }
+            } else if in_single {
+                if c == '\'' {
+                    in_single = false;
+                }
+            } else if in_double {
+                if c == '"' {
+                    in_double = false;
+                }
+            }
+            i += 1;
+        }
+        depth_paren > 0 || depth_brack > 0 || depth_brace > 0 || in_single || in_double || in_triple_single || in_triple_double
+    }
+
+    fn has_bare_newline_in_unclosed_single(src: &str) -> bool {
+        // Detect a single-quoted (non-triple) string that contains a bare newline
+        // without escaping backslash. In that case, unterminated string is a real
+        // syntax error, not incomplete input.
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
+        let chars: Vec<char> = src.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if escaped {
+                escaped = false;
+                i += 1;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                i += 1;
+                continue;
+            }
+            if !in_single && !in_double {
+                if c == '\'' && !(i + 2 < chars.len() && chars[i + 1] == '\'' && chars[i + 2] == '\'') {
+                    in_single = true;
+                } else if c == '"' && !(i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"') {
+                    in_double = true;
+                }
+            } else if in_single {
+                if c == '\n' {
+                    return true;
+                }
+                if c == '\'' {
+                    in_single = false;
+                }
+            } else if in_double {
+                if c == '\n' {
+                    return true;
+                }
+                if c == '"' {
+                    in_double = false;
+                }
+            }
+            i += 1;
+        }
+        false
+    }
+
+    fn has_indented_last_line(src: &str) -> bool {
+        if let Some(last) = src.lines().last() {
+            // Last line is indented (starts with space/tab) and non-empty
+            let trimmed = last.trim_start();
+            if trimmed.is_empty() {
+                return false;
+            }
+            return last.starts_with(' ') || last.starts_with('\t');
+        }
+        false
+    }
+
+    fn is_incomplete_source(src: &str, err: &str, mode: &str) -> bool {
+        let lower = err.to_lowercase();
+        if lower.contains("unterminated triple-quoted") {
+            return true;
+        }
+        if lower.contains("unterminated string literal") {
+            if has_bare_newline_in_unclosed_single(src) {
+                return false;
+            }
+            return true;
+        }
+        if lower.contains("unexpected character after line continuation") {
+            return true;
+        }
+        if lower.contains("expected an indented block") {
+            // Only incomplete if source ends with ':' (e.g. "def x():"), not for
+            // cases like "def x():\n\npass\n" where pass is at wrong indent (invalid)
+            let trimmed = src.trim_end();
+            if trimmed.ends_with(':') {
+                return true;
+            }
+            return false;
+        }
+        if lower.contains("endoffile") || lower.contains("eof") {
+            if has_unclosed_brackets(src) {
+                return true;
+            }
+            let trimmed = src.trim_end();
+            if trimmed.is_empty() && mode == "eval" {
+                return true;
+            }
+            if trimmed.ends_with(':') || trimmed.ends_with('\\') || trimmed.ends_with(',') || trimmed.ends_with('(') || trimmed.ends_with('[') || trimmed.ends_with('{') {
+                return true;
+            }
+            // For eval, empty parentheses etc. already handled via brackets
+            // Check for incomplete keywords that expect suite
+            let lower_trim = trimmed.to_lowercase();
+            if lower_trim.ends_with("else:") || lower_trim.ends_with("elif") || lower_trim.ends_with("except:") || lower_trim.ends_with("finally:") || lower_trim.ends_with("try:") || lower_trim.ends_with("while") || lower_trim.ends_with("for") || lower_trim.ends_with("with") || lower_trim.ends_with("class") || lower_trim.ends_with("def") {
+                return true;
+            }
+            return false;
+        }
+        false
+    }
+
     let program = if mode == "eval" {
-        crate::parser::try_parse_as_expression(&source).map_err(|e| PyError::syntax_error(e))?
+        match crate::parser::try_parse_as_expression(&source) {
+            Ok(p) => p,
+            Err(e) => {
+                // Check incomplete flag even for eval mode
+                let compile_flags = |args: &[PyObjectRef]| -> i64 {
+                    let mut flags = 0;
+                    if args.len() >= 4 {
+                        flags |= args[3].as_i64().unwrap_or(0);
+                    }
+                    for a in args {
+                        if let PyObject::Dict(kw) = &*a.borrow() {
+                            flags |= kw
+                                .get(&py_str("flags"))
+                                .ok()
+                                .flatten()
+                                .and_then(|f| f.as_i64())
+                                .unwrap_or(0);
+                        }
+                    }
+                    flags
+                };
+                let flags = compile_flags(args);
+                if flags & 0x4000 != 0 && is_incomplete_source(&source, &e, &mode) {
+                    return Err(PyError::Exception(
+                        "_IncompleteInputError".to_string(),
+                        PyObjectRef::new(PyObject::Exception {
+                            typ: "_IncompleteInputError".to_string(),
+                            args: vec![py_str(&e)],
+                            cause: None,
+                            suppress_context: false,
+                            context: None,
+                            traceback: None,
+                            extra: None,
+                        }),
+                    ));
+                }
+                return Err(PyError::syntax_error_with_filename(e, &filename, &source));
+            }
+        }
     } else {
         // `flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` (0x8000) permits
         // `await`/`async for`/`async with` at module scope — test_builtin's
@@ -442,9 +561,47 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let mut parser = crate::parser::Parser::new(&source);
         parser.allow_top_level_await = allow_top_level_await;
         parser.barry_as_bdfl = barry_as_bdfl;
-        parser
-            .parse_program()
-            .map_err(|e| PyError::syntax_error_with_filename(e, &filename, &source))?
+        let program = match parser.parse_program() {
+            Ok(p) => {
+                // For single mode with DONT_IMPLY_DEDENT, a final line without trailing
+                // newline that is inside a block is incomplete (needs extra newline to dedent)
+                if (flags & 0x200 != 0) && (flags & 0x4000 != 0) && mode == "single" {
+                    if !source.ends_with('\n') && (source.contains(":\n") || source.contains(":\r\n")) {
+                        return Err(PyError::Exception(
+                            "_IncompleteInputError".to_string(),
+                            PyObjectRef::new(PyObject::Exception {
+                                typ: "_IncompleteInputError".to_string(),
+                                args: vec![py_str("incomplete input")],
+                                cause: None,
+                                suppress_context: false,
+                                context: None,
+                                traceback: None,
+                                extra: None,
+                            }),
+                        ));
+                    }
+                }
+                p
+            }
+            Err(e) => {
+                if flags & 0x4000 != 0 && is_incomplete_source(&source, &e, &mode) {
+                    return Err(PyError::Exception(
+                        "_IncompleteInputError".to_string(),
+                        PyObjectRef::new(PyObject::Exception {
+                            typ: "_IncompleteInputError".to_string(),
+                            args: vec![py_str(&e)],
+                            cause: None,
+                            suppress_context: false,
+                            context: None,
+                            traceback: None,
+                            extra: None,
+                        }),
+                    ));
+                }
+                return Err(PyError::syntax_error_with_filename(e, &filename, &source));
+            }
+        };
+        program
     };
     let mut compiler = crate::compiler::Compiler::new();
     let code = compiler
@@ -453,115 +610,6 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::new(PyObject::Code(Rc::new(code))))
 }
 
-pub fn builtin_super(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    // super() with no args or super(class, instance)
-    if args.len() == 2 {
-        let cls = args[0].clone();
-        let obj = args[1].clone();
-        Ok(PyObjectRef::new(PyObject::Super { cls, obj }))
-    } else {
-        Err(PyError::type_error("super() requires 2 arguments"))
-    }
-}
-
-pub fn builtin_map(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 2 {
-        return Err(PyError::type_error("map() requires at least 2 arguments"));
-    }
-    let func = args[0].clone();
-    let iter = builtin_iter(&[args[1].clone()])?;
-    Ok(PyObjectRef::new(PyObject::MapIterator {
-        func,
-        iterator: Box::new(iter),
-    }))
-}
-
-pub fn builtin_filter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() != 2 {
-        return Err(PyError::type_error("filter() requires exactly 2 arguments"));
-    }
-    let func = args[0].clone();
-    let iter = builtin_iter(&[args[1].clone()])?;
-    Ok(PyObjectRef::new(PyObject::FilterIterator {
-        func,
-        iterator: Box::new(iter),
-    }))
-}
-
-pub fn builtin_zip(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() {
-        return Err(PyError::type_error("zip() requires at least 1 argument"));
-    }
-    // Keyword args (only `strict` is defined for zip()) arrive packed into a
-    // trailing dict, per the calling convention call_function uses for all
-    // BuiltinFunction calls. Without stripping it here, `zip(a, b,
-    // strict=True)` treated the kwargs dict itself as one more iterable to
-    // zip — iterating a dict yields its keys, so it silently zipped in the
-    // literal string "strict" as a bogus extra column instead of enforcing
-    // equal lengths.
-    let (iterables, strict) = {
-        let last = args.last().unwrap();
-        let last_borrowed = last.borrow();
-        if let PyObject::Dict(kwargs) = &*last_borrowed {
-            let strict = kwargs
-                .get(&py_str("strict"))
-                .ok()
-                .flatten()
-                .map(|v| v.truthy())
-                .unwrap_or(false);
-            (&args[..args.len() - 1], strict)
-        } else {
-            (args, false)
-        }
-    };
-    if iterables.is_empty() {
-        return Ok(PyObjectRef::new(PyObject::ZipIterator {
-            iterators: vec![],
-        }));
-    }
-    let iters: Vec<PyObjectRef> = iterables
-        .iter()
-        .map(|a| builtin_iter(&[a.clone()]))
-        .collect::<PyResult<Vec<_>>>()?;
-    if strict {
-        // Eagerly materialize and check equal lengths — the lazy
-        // ZipIterator has no way to distinguish "ran out because lengths
-        // differ" from "ran out because we're done" once iteration starts,
-        // so `strict` must be enforced up front.
-        let mut rows: Vec<PyObjectRef> = Vec::new();
-        loop {
-            let mut row = Vec::with_capacity(iters.len());
-            let mut stopped_indices = Vec::new();
-            for (idx, it) in iters.iter().enumerate() {
-                match builtin_next(&[it.clone()]) {
-                    Ok(v) => row.push(v),
-                    Err(e) if is_stop_iteration_error(&e) => stopped_indices.push(idx),
-                    Err(e) => return Err(e),
-                }
-            }
-            if !stopped_indices.is_empty() {
-                if stopped_indices.len() != iters.len() {
-                    let shorter_at = stopped_indices[0];
-                    let longer_at = (0..iters.len())
-                        .find(|i| !stopped_indices.contains(i))
-                        .unwrap();
-                    return Err(PyError::value_error(format!(
-                        "zip() argument {} is shorter than argument {}",
-                        shorter_at + 1,
-                        longer_at + 1,
-                    )));
-                }
-                break;
-            }
-            rows.push(py_tuple(row));
-        }
-        return Ok(PyObjectRef::new(PyObject::ListIter {
-            list: rows,
-            index: 0,
-        }));
-    }
-    Ok(PyObjectRef::new(PyObject::ZipIterator { iterators: iters }))
-}
 
 pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let f = func.clone();
@@ -836,7 +884,7 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
         6 => {
             let (func, partial_args) = {
                 let obj = f.borrow();
-                if let PyObject::Partial { func: bf, args: pa } = &*obj {
+                if let PyObject::Partial { func: bf, args: pa, .. } = &*obj {
                     (bf.clone(), pa.clone())
                 } else {
                     return Err(PyError::type_error("not a partial"));

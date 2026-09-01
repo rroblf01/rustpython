@@ -896,7 +896,11 @@ class RawConfigParser(MutableMapping):
         The section DEFAULT is special.
         """
         if section is _UNSET:
-            return super().items()
+            try:
+                return super().items()
+            except AttributeError:
+                # super().items() may fail if MutableMapping dispatch is broken; fallback
+                return [(s, self[s]) for s in self.sections()]
         d = self._defaults.copy()
         try:
             d.update(self._sections[section])
@@ -908,10 +912,10 @@ class RawConfigParser(MutableMapping):
         if vars:
             for key, value in vars.items():
                 d[self.optionxform(key)] = value
-        value_getter = lambda option: self._interpolation.before_get(self,
+        value_getter = lambda option, d=d: self._interpolation.before_get(self,
             section, option, d[option], d)
         if raw:
-            value_getter = lambda option: d[option]
+            value_getter = lambda option, d=d: d[option]
         return [(option, value_getter(option)) for option in orig_keys]
 
     def popitem(self):
@@ -926,6 +930,21 @@ class RawConfigParser(MutableMapping):
             del self[key]
             return key, value
         raise KeyError
+
+    def clear(self):
+        for sec in list(self.sections()):
+            self.remove_section(sec)
+        self._defaults.clear()
+
+    def keys(self):
+        return iter(self.sections())
+
+    def values(self):
+        for name in self.sections():
+            yield self[name]
+
+    def __iter__(self):
+        return iter(self.sections())
 
     def optionxform(self, optionstr):
         return optionstr.lower()
@@ -1304,7 +1323,9 @@ class SectionProxy(MutableMapping):
         self._name = name
         for conv in parser.converters:
             key = 'get' + conv
-            getter = functools.partial(self.get, _impl=getattr(parser, key))
+            impl = getattr(parser, key)
+            # avoid functools.partial kwargs bug (partial doesn't store kwargs correctly)
+            getter = lambda option, fallback=None, *args, _impl=impl, **kwargs: self.get(option, fallback, _impl=_impl, *args, **kwargs)
             setattr(self, key, getter)
 
     def __repr__(self):
@@ -1338,6 +1359,20 @@ class SectionProxy(MutableMapping):
             return self._parser.options(self._name)
         else:
             return self._parser.defaults()
+
+    def keys(self):
+        return iter(self._options())
+
+    def values(self):
+        for k in self._options():
+            yield self[k]
+
+    def items(self):
+        for k in self._options():
+            yield (k, self[k])
+
+    def __iter__(self):
+        return self._options().__iter__()
 
     @property
     def parser(self):
@@ -1396,11 +1431,15 @@ class ConverterMapping(MutableMapping):
         if k == 'get':
             raise ValueError('Incompatible key: cannot use "" as a name')
         self._data[key] = value
-        func = functools.partial(self._parser._get_conv, conv=value)
+        # avoid functools.partial kwargs bug: use lambda with default arg
+        _conv = value
+        func = lambda section, option, *a, _c=_conv, _p=self._parser, **kw: _p._get_conv(section, option, _c, **kw)
         func.converter = value
         setattr(self._parser, k, func)
         for proxy in self._parser.values():
-            getter = functools.partial(proxy.get, _impl=func)
+            # use lambda instead of partial with kwargs
+            _f = func
+            getter = lambda option, fallback=None, *a, _impl=_f, _pr=proxy, **kw: _pr.get(option, fallback, _impl=_impl, *a, **kw)
             setattr(proxy, k, getter)
 
     def __delitem__(self, key):
@@ -1416,6 +1455,9 @@ class ConverterMapping(MutableMapping):
                 # don't raise since the entry was present in _data, silently
                 # clean up
                 continue
+
+    def __contains__(self, key):
+        return key in self._data
 
     def __iter__(self):
         return iter(self._data)

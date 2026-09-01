@@ -80,6 +80,18 @@ impl PyError {
     pub fn key_error(msg: impl Into<String>) -> Self {
         PyError::KeyError(msg.into())
     }
+    pub fn key_error_obj(key: &PyObjectRef) -> Self {
+        let obj = PyObjectRef::new(PyObject::Exception {
+            typ: "KeyError".to_string(),
+            args: vec![key.clone()],
+            cause: None,
+            suppress_context: false,
+            context: None,
+            traceback: None,
+            extra: None,
+        });
+        PyError::Exception("KeyError".to_string(), obj)
+    }
     pub fn stop_iteration() -> Self {
         PyError::StopIteration
     }
@@ -113,7 +125,7 @@ impl PyError {
                  if let Some((col_s, rest)) = rest.split_once(':') {
                      let line = ln.parse::<i64>().ok();
                      let col = col_s.parse::<i64>().ok();
-                     (rest.to_string(), line, col)
+                     (rest.trim_start().to_string(), line, col)
                  } else {
                      (msg.clone(), None, None)
                  }
@@ -141,10 +153,23 @@ impl PyError {
         extra.insert("lineno".to_string(), py_int(line));
         extra.insert("offset".to_string(), py_int(col));
         // `text` — the offending source line (real CPython exposes it).
+        // CPython's own `.text` always carries a trailing newline, even
+        // for the source's LAST line when the source itself has no final
+        // `\n` (test_eof.py's test_line_continuation_EOF: `exec('ä = 5\\')`
+        // needs `.text == 'ä = 5\\\n'`, not `'ä = 5\\'`) — `str::lines()`
+        // strips it from every yielded line, so it must be re-added here.
         let text = source.lines().nth((line - 1).max(0) as usize).unwrap_or("");
-        extra.insert("text".to_string(), py_str(text));
-        // CPython: `str(SyntaxError)` is `msg (filename, line N)`.
-        let display = format!("{} ({}, line {})", clean_msg, filename, line);
+        let text = if text.is_empty() { text.to_string() } else { format!("{}\n", text) };
+        extra.insert("text".to_string(), py_str(&text));
+        // CPython: `str(SyntaxError)` is `msg (filename, line N)` where
+        // filename is displayed as basename (e.g. `badsyntax_3131.py`, not
+        // the full path) — this matches CPython's actual `SyntaxError`
+        // formatting and the test_unicode_identifiers expectation.
+        let display_filename = std::path::Path::new(filename)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(filename);
+        let display = format!("{} ({}, line {})", clean_msg, display_filename, line);
         PyError::Exception(
             typ.to_string(),
             PyObjectRef::new(PyObject::Exception {
@@ -183,6 +208,36 @@ impl PyError {
             "OverflowError".to_string(),
             PyObjectRef::new(PyObject::Exception {
                 typ: "OverflowError".to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
+                extra: None,
+            }),
+        )
+    }
+    pub fn buffer_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        PyError::Exception(
+            "BufferError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "BufferError".to_string(),
+                args: vec![py_str(&msg)],
+                cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
+                extra: None,
+            }),
+        )
+    }
+    pub fn system_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        PyError::Exception(
+            "SystemError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "SystemError".to_string(),
                 args: vec![py_str(&msg)],
                 cause: None,
                 suppress_context: false,
@@ -335,6 +390,20 @@ impl PyError {
     }
     pub fn recursion_error(msg: impl Into<String>) -> Self {
         PyError::RecursionError(msg.into())
+    }
+    pub fn reference_error(msg: impl Into<String>) -> Self {
+        PyError::Exception(
+            "ReferenceError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "ReferenceError".to_string(),
+                args: vec![crate::object::py_str(&msg.into())],
+                cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
+                extra: None,
+            }),
+        )
     }
     pub fn message(&self) -> String {
         match self {

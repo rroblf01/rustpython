@@ -4,270 +4,23 @@
 // list/dict/str/bytes/tuple/user-defined classes).
 use super::*;
 
-// ---- Subscript access ----
-
-pub fn to_index(obj: &PyObjectRef) -> PyResult<BigInt> {
-    let type_name = obj.get_type_name();
-    let is_instance = matches!(&*obj.borrow(), PyObject::Instance { .. });
-    if is_instance {
-        // An int SUBCLASS (`class MyInt(int)`) uses its int VALUE directly —
-        // `operator.index(MyInt(7))` is 7, NOT `MyInt.__index__()` (8) —
-        // matching CPython's PyNumber_Index exact-type fast path. Only
-        // non-int objects consult their `__index__`.
-        if let Some(backing) = crate::object::native_backing_of(obj) {
-            if let PyObject::Int(i) = &*backing.borrow() {
-                return Ok(i.clone());
-            }
-        }
-        let f = {
-            let o = obj.borrow();
-            match &*o {
-                PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__index__"),
-                _ => None,
-            }
-        };
-        if let Some(f) = f {
-            let result = call_bound_method(f, obj.clone(), vec![])?;
-            let r = result.borrow();
-            match &*r {
-                PyObject::Int(i) => Ok(i.clone()),
-                // `bool` is a genuine `int` subclass in real Python, so a
-                // `__index__` returning `True`/`False` is valid (if
-                // deprecated in modern CPython) — matches the native-`bool`
-                // arm added just below for the same reason.
-                PyObject::Bool(b) => {
-                    // CPython emits DeprecationWarning when __index__ returns
-                    // a bool (test_index::test_index_returns_int_subclass).
-                    crate::modules::warnings_emit(
-                        "__index__ returned non-int (type bool)",
-                        "DeprecationWarning",
-                    );
-                    Ok(BigInt::from(*b as i64))
-                }
-                _ => Err(PyError::type_error("__index__ must return int")),
-            }
-        } else {
-            Err(PyError::type_error(format!(
-                "'{}' object cannot be interpreted as an integer",
-                type_name
-            )))
-        }
-    } else {
-        let o = obj.borrow();
-        match &*o {
-            PyObject::Int(i) => Ok(i.clone()),
-            // `bool` is a subtype of `int` in real Python (`range(True) ==
-            // range(1)`, `[10, 20][False]`, etc.) — found via `range()`'s
-            // own `__index__`-protocol fix above surfacing this same gap.
-            PyObject::Bool(b) => Ok(BigInt::from(*b as i64)),
-            _ => Err(PyError::type_error(format!(
-                "'{}' object cannot be interpreted as an integer",
-                type_name
-            ))),
-        }
-    }
-}
-
-/// Plain-value equivalent of `to_index` for the many sequence-indexing sites
-/// below (`list`/`tuple`/`str`/`bytes`/`bytearray`/`array`/`range`) that
-/// already have `index` borrowed as a `PyObject` and just need "is this an
-/// int (or bool, a genuine int subtype) at all" without the `__index__`-via-
-/// mro dispatch `to_index` also does (those sites fall back to a `Slice`
-/// arm too, which `to_index` doesn't know about). Found via `list[True]`
-/// (and the tuple/str/bytes/bytearray/array/range equivalents) all raising
-/// `TypeError: ... indices must be integers or slices` despite `bool` being
-/// a valid index in real Python — same root gap as `range()`'s own
-/// `__index__`/bool fix just above, just for indexing instead of construction.
-fn sequence_index_int(idx: &PyObject) -> Option<BigInt> {
-    match idx {
-        PyObject::Int(i) => Some(i.clone()),
-        PyObject::Bool(b) => Some(BigInt::from(*b as i64)),
-        _ => None,
-    }
-}
-
-/// Like `sequence_index_int` but via the full `__index__` protocol (a custom
-/// object with an `__index__` method is a valid index — test_index.py).
-fn try_to_index(index: &PyObjectRef) -> Option<BigInt> {
-    crate::object::to_index(index).ok()
-}
-
-/// `slice.indices(length)` for an arbitrary-length sequence — mirrors
-/// CPython's `PySlice_GetIndicesEx` with arbitrary-precision arithmetic
-/// (negative start/stop are offset by `length`; for a negative step both
-/// are clamped to `[-1, length-1]`, otherwise to `[0, length]`). Shared by
-/// the `slice.indices` attribute, `range.__getitem__`, and sequence
-/// subscripting, so `range(10)[slice]` agrees exactly with
-/// `range(*slice.indices(10))` (CPython's own test_slice.py pins this).
-pub(crate) fn slice_indices_values(
-    start: &PyObjectRef,
-    stop: &PyObjectRef,
-    step: &PyObjectRef,
-    length: &BigInt,
-) -> PyResult<(BigInt, BigInt, BigInt)> {
-    let one = BigInt::from(1);
-    let zero = BigInt::from(0);
-    let comp = |v: &PyObjectRef| -> PyResult<BigInt> {
-        crate::object::to_index(v).map_err(|_| {
-            PyError::type_error(
-                "slice indices must be integers or None or have an __index__ method",
-            )
-        })
-    };
-    let is_none = |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::None);
-    let step = if is_none(step) {
-        one.clone()
-    } else {
-        let s = comp(step)?;
-        if s == zero {
-            return Err(PyError::value_error("slice step cannot be zero"));
-        }
-        s
-    };
-    let neg = step.sign() == num_bigint::Sign::Minus;
-    let start = if is_none(start) {
-        if neg {
-            length - &one
-        } else {
-            zero.clone()
-        }
-    } else {
-        comp(start)?
-    };
-    let stop = if is_none(stop) {
-        if neg {
-            -(length + &one)
-        } else {
-            length.clone()
-        }
-    } else {
-        comp(stop)?
-    };
-    let clamp = |v: BigInt, lo: &BigInt, hi: &BigInt| -> BigInt {
-        let v = if v.sign() == num_bigint::Sign::Minus {
-            length + &v
-        } else {
-            v
-        };
-        let v = if &v < lo { lo.clone() } else { v };
-        if &v > hi {
-            hi.clone()
-        } else {
-            v
-        }
-    };
-    let (res_start, res_stop) = if neg {
-        let lo = BigInt::from(-1);
-        let hi = length - &one;
-        (clamp(start, &lo, &hi), clamp(stop, &lo, &hi))
-    } else {
-        (clamp(start, &zero, length), clamp(stop, &zero, length))
-    };
-    Ok((res_start, res_stop, step))
-}
-
-/// Real Python slice-index normalization for a sequence of length `len` —
-/// mirrors CPython's own `PySlice_GetIndicesEx`. Converts a possibly-
-/// negative, possibly-omitted (`None`) start/stop pair into concrete,
-/// in-bounds `isize` values a caller can safely loop
-/// `while i (< or >) stop { ...; i += step }` over and cast to `usize`
-/// without ever going negative.
-///
-/// Was NOT applied consistently anywhere in this file before this fix:
-/// `List`/`Tuple` read-slicing did `start_val.max(0).min(len)` — clamping a
-/// negative value straight to 0 instead of first adding `len` (so
-/// `[1,2,3,4,5][-3:]`, meaning "last 3 elements", silently returned the
-/// WHOLE list instead — a silent wrong-answer bug, not a crash). `Str`/
-/// `Bytes`/`ByteArray` read-slicing did no clamping at all, so a negative
-/// start/stop was cast straight from a negative `isize` to `usize`,
-/// wrapping around to an astronomical value and panicking on the first
-/// array access (confirmed via the simplest possible repro: `"hello"[-3:]`
-/// crashed the whole process). Negative slice bounds are one of the most
-/// common idioms in all of Python (`seq[:-1]`, `seq[-n:]`) — this was a
-/// severe, high-blast-radius bug hiding in plain sight.
-pub(crate) fn normalize_slice_bounds(
-    start: Option<isize>,
-    stop: Option<isize>,
-    step: isize,
-    len: usize,
-) -> (isize, isize) {
-    let len = len as isize;
-    if step > 0 {
-        let start = match start {
-            None => 0,
-            Some(v) if v < 0 => (len + v).max(0),
-            Some(v) => v.min(len),
-        };
-        let stop = match stop {
-            None => len,
-            Some(v) if v < 0 => (len + v).max(0),
-            Some(v) => v.min(len),
-        };
-        (start, stop)
-    } else {
-        let start = match start {
-            None => len - 1,
-            Some(v) if v < 0 => (len + v).max(-1),
-            Some(v) => v.min(len - 1),
-        };
-        let stop = match stop {
-            None => -1,
-            Some(v) if v < 0 => (len + v).max(-1),
-            Some(v) => v.min(len - 1),
-        };
-        (start, stop)
-    }
-}
-
-/// Extracts `(start, stop, step)` as `Option<isize>`/`isize` from a
-/// `PyObject::Slice`'s three borrowed fields, ready to hand to
-/// `normalize_slice_bounds`.
-///
-/// Rejects a literal `step=0` with a real `ValueError` — this interpreter's
-/// `slice()`/`BUILD_SLICE` construction does NOT reject it up front (unlike
-/// what an earlier version of this comment assumed), so `some_list[::0]`
-/// previously reached the iteration loops below with `step_val = 0` and
-/// hung the whole process forever (`i += 0` never advances past `stop_n`,
-/// an infinite loop — confirmed via the simplest repro, `[1,2,3][::0]`).
-/// Real CPython raises `ValueError: slice step cannot be zero` at the point
-/// a zero-step slice is actually USED for indexing, matched here.
-pub(crate) fn extract_slice_fields(
-    start: &PyObjectRef,
-    stop: &PyObjectRef,
-    step: &PyObjectRef,
-) -> PyResult<(Option<isize>, Option<isize>, isize)> {
-    // Slice components must be int (or int-like via __index__) or None; a
-    // component whose __index__ misbehaves must TypeError (test_index).
-    let to_opt = |v: &PyObjectRef| -> PyResult<Option<isize>> {
-        if matches!(&*v.borrow(), PyObject::None) {
-            return Ok(None);
-        }
-        let i = crate::object::to_index(v).map_err(|_| {
-            PyError::type_error(
-                "slice indices must be integers or None or have an __index__ method",
-            )
-        })?;
-        Ok(i.to_isize())
-    };
-    let step_val = if matches!(&*step.borrow(), PyObject::None) {
-        1
-    } else {
-        let i = crate::object::to_index(step).map_err(|_| {
-            PyError::type_error(
-                "slice indices must be integers or None or have an __index__ method",
-            )
-        })?;
-        i.to_isize().unwrap_or(1)
-    };
-    if step_val == 0 {
-        return Err(PyError::value_error("slice step cannot be zero"));
-    }
-    let start_val = to_opt(start)?;
-    let stop_val = to_opt(stop)?;
-    Ok((start_val, stop_val, step_val))
-}
+mod to_index;
+pub use to_index::to_index;
+mod seq_index;
+pub(crate) use seq_index::sequence_index_int;
+mod try_index;
+pub(crate) use try_index::try_to_index;
+mod slice;
+pub(crate) use slice::{extract_slice_fields, normalize_slice_bounds, slice_indices_values};
 
 pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let PyObject::WeakProxy { target, .. } = &*obj.borrow() {
+        if let Some(rc) = target.upgrade() {
+            return py_getitem(&PyObjectRef::Mut(rc), index);
+        } else {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
+    }
     // Check for __getitem__ on custom classes and __class_getitem__ on types (PEP 560)
     let f = {
         let o = obj.borrow();
@@ -382,7 +135,17 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 };
                 match missing_fn {
                     Some(f) => call_bound_method(f, obj.clone(), vec![index.clone()]),
-                    None => Err(PyError::key_error(index.str())),
+                    None => Err(PyError::key_error_obj(index)),
+                }
+            }
+            Err(PyError::Exception(t, o)) if t == "KeyError" => {
+                let missing_fn = match &*obj.borrow() {
+                    PyObject::Instance { typ, .. } => lookup_dunder_via_mro(typ, "__missing__"),
+                    _ => None,
+                };
+                match missing_fn {
+                    Some(f) => call_bound_method(f, obj.clone(), vec![index.clone()]),
+                    None => Err(PyError::Exception(t, o)),
                 }
             }
             other => other,
@@ -397,12 +160,12 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
     // very dict, which would re-enter `borrow()`/`borrow_mut()` on the same
     // RefCell and panic if the hash were computed while already borrowed.
     if matches!(&*obj.borrow(), PyObject::Dict(_)) {
-        let h = index.hash()?;
+        let h = crate::object::PyDict::dict_hash(index)?;
         let o = obj.borrow();
         if let PyObject::Dict(d) = &*o {
-            return match d.get_with_hash(index, h) {
+            return match d.get_with_hash(index, h)? {
                 Some(val) => Ok(val),
-                None => Err(PyError::key_error(index.str())),
+                None => Err(PyError::key_error_obj(index)),
             };
         }
     }
@@ -601,7 +364,7 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                     Ok(py_str(&result))
                 }
                 _ => Err(PyError::type_error(format!(
-                    "string indices must be integers or slices, not {}",
+                    "string indices must be integers, not '{}'",
                     idx.type_name()
                 ))),
             }
@@ -788,6 +551,13 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
 }
 
 pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) -> PyResult<()> {
+    if let PyObject::WeakProxy { target, .. } = &*obj.borrow() {
+        if let Some(rc) = target.upgrade() {
+            return py_setitem(&PyObjectRef::Mut(rc), index, value);
+        } else {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
+    }
     // Check for __setitem__ on custom classes
     let f = {
         let o = obj.borrow();
@@ -971,6 +741,128 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
                 idx.type_name()
             )))
         }
+        PyObject::ByteArray(b) => {
+            let idx = index.borrow();
+            if let Some(i) = try_to_index(index) {
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("bytearray index out of range"))?;
+                let len = b.len() as isize;
+                let i = if i < 0 { len + i } else { i };
+                if i < 0 || i >= len {
+                    return Err(PyError::index_error("bytearray index out of range"));
+                }
+                let val = value
+                    .as_i64()
+                    .ok_or_else(|| PyError::type_error("an integer is required"))?;
+                if !(0..=255).contains(&val) {
+                    return Err(PyError::value_error("byte must be in range(0, 256)"));
+                }
+                b[i as usize] = val as u8;
+                return Ok(());
+            }
+            match &*idx {
+                PyObject::Slice { start, stop, step } => {
+                    let len = b.len();
+                    let (start_val, stop_val, step_val) =
+                        extract_slice_fields(start, stop, step)?;
+                    let (start_n, stop_n) =
+                        normalize_slice_bounds(start_val, stop_val, step_val, len);
+                    // Collect replacement bytes from value (bytes, bytearray, or iterable of ints)
+                    let new_bytes: Vec<u8> = {
+                        let vt = value.borrow();
+                        match &*vt {
+                            PyObject::Bytes(v) => v.clone(),
+                            PyObject::ByteArray(v) => v.clone(),
+                            PyObject::List(items) => {
+                                let mut vec = Vec::new();
+                                for item in items {
+                                    let v = item
+                                        .as_i64()
+                                        .ok_or_else(|| {
+                                            PyError::type_error("an integer is required")
+                                        })?;
+                                    if !(0..=255).contains(&v) {
+                                        return Err(PyError::value_error(
+                                            "byte must be in range(0, 256)",
+                                        ));
+                                    }
+                                    vec.push(v as u8);
+                                }
+                                vec
+                            }
+                            PyObject::Str(s) => s.as_bytes().to_vec(),
+                            _ => {
+                                // Generic iterable fallback
+                                drop(vt);
+                                let it = crate::object::builtin_iter(&[value.clone()])?;
+                                let mut vec = Vec::new();
+                                loop {
+                                    match crate::object::builtin_next(&[it.clone()]) {
+                                        Ok(item) => {
+                                            let v = item.as_i64().ok_or_else(|| {
+                                                PyError::type_error("an integer is required")
+                                            })?;
+                                            if !(0..=255).contains(&v) {
+                                                return Err(PyError::value_error(
+                                                    "byte must be in range(0, 256)",
+                                                ));
+                                            }
+                                            vec.push(v as u8);
+                                        }
+                                        Err(PyError::StopIteration) => break,
+                                        Err(e) => return Err(e),
+                                    }
+                                }
+                                vec
+                            }
+                        }
+                    };
+                    if step_val == 1 {
+                        let stop_n = stop_n.max(start_n);
+                        b.splice(start_n as usize..stop_n as usize, new_bytes);
+                        return Ok(());
+                    } else {
+                        let mut indices = Vec::new();
+                        let mut i = start_n;
+                        if step_val > 0 {
+                            while i < stop_n {
+                                indices.push(i as usize);
+                                match i.checked_add(step_val) {
+                                    Some(next) => i = next,
+                                    None => break,
+                                }
+                            }
+                        } else {
+                            while i > stop_n {
+                                indices.push(i as usize);
+                                match i.checked_add(step_val) {
+                                    Some(next) => i = next,
+                                    None => break,
+                                }
+                            }
+                        }
+                        if indices.len() != new_bytes.len() {
+                            return Err(PyError::value_error(format!(
+                                "attempt to assign sequence of size {} to extended slice of size {}",
+                                new_bytes.len(),
+                                indices.len()
+                            )));
+                        }
+                        for (idx, val) in indices.into_iter().zip(new_bytes) {
+                            b[idx] = val;
+                        }
+                        return Ok(());
+                    }
+                }
+                _ => {
+                    return Err(PyError::type_error(format!(
+                        "bytearray indices must be integers or slices, not {}",
+                        idx.type_name()
+                    )))
+                }
+            }
+        }
         // PyObject::Dict is handled above, before this borrow is taken.
         _ => Err(PyError::type_error(format!(
             "'{}' object does not support item assignment",
@@ -980,6 +872,13 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
 }
 
 pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
+    if let PyObject::WeakProxy { target, .. } = &*obj.borrow() {
+        if let Some(rc) = target.upgrade() {
+            return py_delitem(&PyObjectRef::Mut(rc), index);
+        } else {
+            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+        }
+    }
     // Check for __delitem__ on custom classes
     let f = {
         let o = obj.borrow();
@@ -995,18 +894,9 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
     if let Some(native) = native_backing_of(obj) {
         return py_delitem(&native, index);
     }
-    // Dict deletion: compute the key's hash BEFORE taking `obj`'s own
-    // mutable borrow — see `PyDict::set_with_hash`'s doc comment for why
-    // (a custom `__hash__` can run arbitrary Python that mutates this same
-    // dict, and computing the hash while already mutably borrowed would
-    // panic on re-entry).
     if matches!(&*obj.borrow(), PyObject::Dict(_)) {
-        let h = index.hash()?;
-        let mut o = obj.borrow_mut();
-        if let PyObject::Dict(d) = &mut *o {
-            d.remove_with_hash(index, h)?;
-            return Ok(());
-        }
+        crate::object::pydict_safe_remove(obj, index)?;
+        return Ok(());
     }
     if let PyObject::Globals(g) = &*obj.borrow() {
         let key = match &*index.borrow() {

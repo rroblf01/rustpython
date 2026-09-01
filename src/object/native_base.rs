@@ -78,6 +78,34 @@ pub(crate) fn is_recognized_native_base_name(name: &str) -> bool {
             | "bytearray"
             | "frozenset"
             | "deque"
+            | "SimpleNamespace"
+            | "types.SimpleNamespace"
+            // `classmethod`/`staticmethod`/`property` are, like the above,
+            // `PyObject::BuiltinFunction` constructors rather than real
+            // `PyObject::Type`s — not part of the completed
+            // native-types-as-real-types migration (deliberately: unlike
+            // int/str/list/etc., making these fully real `Type`s so
+            // subclass INSTANCES also behave as genuine descriptors
+            // — auto-binding on `SomeClass.attr` access exactly like the
+            // native `PyObject::ClassMethod`/`StaticMethod`/`Property`
+            // variants do — is a separate, larger piece of work). Recognized
+            // here only far enough to make `super().__init__(...)` inside a
+            // Python subclass's own `__init__` resolve to something real
+            // instead of crashing (`AttributeError: 'super' object has no
+            // attribute '__init__'`) — real trigger: `Lib/abc.py`'s own
+            // deprecated `abstractclassmethod(classmethod)`/
+            // `abstractstaticmethod(staticmethod)` legacy aliases, whose
+            // `__init__` unconditionally calls `super().__init__(callable)`
+            // (`test_abc.py`'s `TestLegacyAPI` and the classmethod/
+            // staticmethod arms of `test_abstractmethod_integration`, none
+            // of which actually need the wrapped result to behave as a
+            // live descriptor — they only check `__isabstractmethod__`
+            // propagation and abstract-instantiation blocking, both of
+            // which work via ordinary class-attribute inheritance
+            // independent of this).
+            | "classmethod"
+            | "staticmethod"
+            | "property"
     )
 }
 
@@ -151,7 +179,49 @@ pub(crate) fn is_builtin_exception_class_name(name: &str) -> bool {
         // every `builtin_make_exception_*` constructor registered anywhere
         // in `src/modules/` against this list.
         "DecimalException" | "InvalidOperation" | "DivisionByZero" | "Inexact" | "Rounded" |
-        "Clamped" | "Overflow" | "Underflow" | "FloatOperation"
+        "Clamped" | "Overflow" | "Underflow" | "FloatOperation" |
+        "PatternError" | "error" |
+        // `subprocess.CalledProcessError` — same shape as the other
+        // module-specific exceptions above (a bare `PyObject::Type` with
+        // no real `Exception` base to walk), needed so the catch-all name
+        // check in `find_exception_base_name` doesn't need its own
+        // ungated `is_exception_subclass` fallback (see that function).
+        "CalledProcessError" |
+        // `io.UnsupportedOperation` — same shape (bare `PyObject::Type`,
+        // empty bases/mro), and `is_exception_subclass` already has a
+        // dedicated multiple-inheritance special case for it (real
+        // CPython: `UnsupportedOperation(OSError, ValueError)`). Missing
+        // from this list meant `find_exception_base_name`'s gated
+        // fallback returned `None` for it instead of resolving through
+        // that special case, so `except OSError:` stopped catching a
+        // mocked `file.fileno()` raising `io.UnsupportedOperation`
+        // (test__colorize.py's can_colorize test — a regression from
+        // gating the catch-all in the first place; found by re-running
+        // the full suite after that fix).
+        "UnsupportedOperation"
+    )
+}
+
+/// True iff `name` is a builtin constructor that real CPython exposes as a
+/// genuine class (`type(memoryview) is type`, `isinstance(memoryview,
+/// type)` is `True`, etc.) but that this codebase still represents as a
+/// plain `PyObject::BuiltinFunction` rather than a real `PyObject::Type` —
+/// the same representational gap the completed "native types as real
+/// types" migration fixed for int/str/list/dict/tuple/bytes/set/float/
+/// complex/bytearray/frozenset/bool, just not yet extended to these.
+/// `builtin_type_of` already resolves `type(x)` for INSTANCES of
+/// `property`/`classmethod`/`staticmethod`/`super` back to these same
+/// canonical objects (see its own doc comment) — this covers the
+/// complementary direction, `isinstance(memoryview, type)`/
+/// `issubclass(memoryview, type)` on the constructor itself, needed for
+/// real CPython's own `Lib/_collections_abc.py` to import at all
+/// (`Sequence.register(memoryview)`/`Sequence.register(range)` — real
+/// `abc.ABCMeta.register()` starts with `if not isinstance(subclass,
+/// type): raise TypeError("Can only register classes")`).
+pub(crate) fn is_pseudo_type_builtin_function_name(name: &str) -> bool {
+    matches!(
+        name,
+        "property" | "classmethod" | "staticmethod" | "super" | "memoryview" | "range" | "slice"
     )
 }
 
@@ -179,20 +249,37 @@ pub(crate) fn native_base_of_type(typ: &PyObjectRef) -> Option<String> {
 /// calling `Exception(*args)` directly would (see the call site in
 /// `vm.rs`'s Type-instantiation logic).
 pub(crate) fn find_exception_base_name(typ: &PyObjectRef) -> Option<String> {
-    let (bases, mro): (Vec<PyObjectRef>, Vec<PyObjectRef>) = {
-        if let PyObject::Type { bases, mro, .. } = &*typ.borrow() {
-            (bases.clone(), mro.clone())
+    let (name, bases, mro): (String, Vec<PyObjectRef>, Vec<PyObjectRef>) = {
+        if let PyObject::Type { name, bases, mro, .. } = &*typ.borrow() {
+            (name.clone(), bases.clone(), mro.clone())
         } else {
             return None;
         }
     };
-    let mut base_lists: Vec<Vec<PyObjectRef>> = vec![bases];
+    // Direct name check: any *known builtin* exception name should be
+    // considered exception-derived even if its bases list is empty (e.g.
+    // `subprocess.CalledProcessError` created in `net.rs` with empty
+    // bases/mro for historical reasons). The previous version used
+    // `is_exception_subclass(&name, "BaseException")` which due to the
+    // catch-all `_ => Some("Exception")` returns true for ANY unknown name
+    // (including user-defined StatisticsError), causing it to return its
+    // own name instead of its actual base (ValueError) and breaking
+    // `issubclass(StatisticsError, ValueError)`. Gate on the explicit
+    // builtin list instead.
+    if is_builtin_exception_class_name(&name) && crate::vm::is_exception_subclass(&name, "BaseException") {
+        return Some(name.clone());
+    }
+    // For user-defined exception classes, prefer the actual base's
+    // exception name over the class's own unknown name. Search bases/MRO
+    // first so `class StatisticsError(ValueError): pass` returns
+    // "ValueError" not "StatisticsError".
+    let mut base_lists: Vec<Vec<PyObjectRef>> = vec![bases.clone()];
     for m in &mro {
         if let PyObject::Type { bases: b, .. } = &*m.borrow() {
             base_lists.push(b.clone());
         }
     }
-    for base_list in base_lists {
+    for base_list in &base_lists {
         for b in base_list {
             if let PyObject::BuiltinFunction { name, .. } = &*b.borrow() {
                 if crate::vm::is_exception_subclass(name, "BaseException") {
@@ -200,6 +287,20 @@ pub(crate) fn find_exception_base_name(typ: &PyObjectRef) -> Option<String> {
                 }
             }
         }
+    }
+    // No builtin base found – if the name itself is at least an
+    // exception (catch-all), return it as fallback for native types like
+    // subprocess.CalledProcessError with empty bases. Same gate as the
+    // early-return check above, for the same reason:
+    // `is_exception_subclass`'s own `_ => Some("Exception")` catch-all
+    // means an UNGATED call here returns `true`/`Some(name)` for literally
+    // any name, including plain builtins with no exception ancestry at all
+    // (`list`, `int`, `object`, `type`, ...) — confirmed via
+    // `issubclass(list, BaseException)` being `True` (test_baseexception's
+    // `test_inheritance`/`test_catch_non_BaseException`: every native
+    // builtin type falsely counted as an exception).
+    if is_builtin_exception_class_name(&name) && crate::vm::is_exception_subclass(&name, "BaseException") {
+        return Some(name.clone());
     }
     None
 }
@@ -240,6 +341,14 @@ pub(crate) fn make_native_backing(kind: &str) -> PyObjectRef {
         "bytearray" => PyObjectRef::new(PyObject::ByteArray(Vec::new())),
         "frozenset" => PyObjectRef::imm(PyObject::FrozenSet(PySet::new())),
         "deque" => py_deque(std::collections::VecDeque::new(), None),
+        "classmethod" => PyObjectRef::new(PyObject::ClassMethod { func: py_none() }),
+        "staticmethod" => PyObjectRef::new(PyObject::StaticMethod { func: py_none() }),
+        "property" => PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+            getter: None,
+            setter: None,
+            deleter: None,
+            doc: None,
+        }))),
         _ => py_none(),
     }
 }
@@ -329,6 +438,9 @@ pub(crate) fn synthesize_native_init(
             }
             builtin_deque(&combined)
         }
+        "classmethod" => builtin_classmethod(args),
+        "staticmethod" => builtin_staticmethod(args),
+        "property" => builtin_property(args),
         _ => Ok(py_none()),
     }
 }
@@ -453,4 +565,29 @@ pub(crate) fn get_type_name_for_instance(typ: &PyObjectRef) -> String {
     } else {
         "object".to_string()
     }
+}
+
+/// Marks a native `PyObject::Type` as NOT a valid base for user subclassing
+/// — mirrors the special-cased, identity-based `bool` check in
+/// `default_build_class` (`vm/class.rs`), but as a reusable dict marker
+/// instead of another one-off identity comparison, since more than one
+/// native type needs this restriction (real CPython disallows subclassing
+/// `contextvars.ContextVar`/`Context`/`Token`: `TypeError: type '...' is
+/// not an acceptable base type` — confirmed via `test_context.py`'s
+/// `test_context_subclassing_1`). A previous session started, then
+/// deliberately reverted, a general-purpose version of this mechanism for
+/// lack of a concrete consumer at the time; contextvars is that consumer.
+pub(crate) const NO_SUBCLASS_KEY: &str = "__no_subclass__";
+
+/// Returns the type's own name if it's marked via `NO_SUBCLASS_KEY`, so
+/// `default_build_class` can reject it as a base with the real type name in
+/// the error message (checked only on the base's OWN dict, not inherited —
+/// same treatment as `METATYPE_KEY`/`native_base_of_type`).
+pub(crate) fn no_subclass_type_name(typ: &PyObjectRef) -> Option<String> {
+    if let PyObject::Type { name, dict, .. } = &*typ.borrow() {
+        if dict.contains_key_str(NO_SUBCLASS_KEY) {
+            return Some(name.clone());
+        }
+    }
+    None
 }

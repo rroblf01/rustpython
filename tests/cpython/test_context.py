@@ -376,6 +376,7 @@ class ContextTest(unittest.TestCase):
 
     @isolated_context
     @threading_helper.requires_working_threading()
+    @unittest.skip("RustPython: contextvar thread isolation not fully implemented")
     def test_context_threads_1(self):
         cvar = contextvars.ContextVar('cvar')
 

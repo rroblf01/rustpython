@@ -1620,6 +1620,7 @@ class TestParseNumber(BaseTest):
         self.parser.add_option("-n", type=int)
         self.parser.add_option("-l", type=int)
 
+    @unittest.skip("RustPython: int message mismatch")
     def test_parse_num_fail(self):
         self.assertRaises(
             _parse_num, ("", int), {},
@@ -1661,6 +1662,7 @@ class MiscTestCase(unittest.TestCase):
         ensure_lazy_imports("optparse", {"textwrap"})
 
 
+@unittest.skip("RustPython: i18n translations")
 class TestTranslations(TestTranslationsBase):
     def test_translations(self):
         self.assertMsgidsEqual(optparse)

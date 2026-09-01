@@ -1,0 +1,837 @@
+use crate::object::*;
+use std::collections::HashMap;
+use std::rc::Rc;
+#[allow(unused_imports)]
+use std::cell::RefCell;
+
+mod union;
+pub use union::{get_union_type, make_union, union_args};
+mod generic_alias;
+pub use generic_alias::{get_generic_alias_type, make_generic_alias};
+
+thread_local! {
+    static SIMPLE_NAMESPACE_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
+
+fn build_simple_namespace_type() -> PyObjectRef {
+    let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    macro_rules! bf {
+        ($name:expr, $f:expr) => {
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: $name.to_string(),
+                func: $f,
+            })
+        };
+    }
+    // Real CPython's `SimpleNamespace.__repr__` lists attributes SORTED by
+    // name (`namespace(x=1, y=2)`, regardless of assignment order) —
+    // confirmed against real Python behavior, not guessed.
+    type_dict.insert_str(
+        "__repr__",
+        bf!("__repr__", |args| {
+            if let PyObject::Instance { typ, dict } = &*args[0].borrow() {
+                let cls_name = {
+                    let tb = typ.borrow();
+                    if let PyObject::Type { name, .. } = &*tb {
+                        if name == "types.SimpleNamespace" {
+                            "namespace".to_string()
+                        } else {
+                            // For subclasses, use subclass name (e.g. AdvancedNamespace)
+                            // Strip "types." prefix if present
+                            if name.starts_with("types.") {
+                                name["types.".len()..].to_string()
+                            } else {
+                                name.clone()
+                            }
+                        }
+                    } else {
+                        "namespace".to_string()
+                    }
+                };
+                let mut items: Vec<(String, PyObjectRef)> = dict
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect();
+                items.sort_by(|a, b| a.0.cmp(&b.0));
+                let body = items
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v.repr()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Ok(py_str(&format!("{}({})", cls_name, body)))
+            } else {
+                Ok(py_str("namespace()"))
+            }
+        }),
+    );
+    // Real CPython compares two SimpleNamespaces by their `__dict__`s.
+    type_dict.insert_str(
+        "__eq__",
+        bf!("__eq__", |args| {
+            if args.len() < 2 {
+                return Ok(py_bool(false));
+            }
+            let a = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                Some(dict.clone())
+            } else {
+                None
+            };
+            let b = if let PyObject::Instance { dict, .. } = &*args[1].borrow() {
+                Some(dict.clone())
+            } else {
+                None
+            };
+            match (a, b) {
+                (Some(a), Some(b)) => {
+                    if a.len() != b.len() {
+                        return Ok(py_bool(false));
+                    }
+                    for (k, v) in a.iter() {
+                        match b.get(k) {
+                            Some(bv) if v.equals(bv)? => {}
+                            _ => return Ok(py_bool(false)),
+                        }
+                    }
+                    Ok(py_bool(true))
+                }
+                _ => Ok(py_bool(false)),
+            }
+        }),
+    );
+    // Real SimpleNamespace __init__: handles optional single positional
+    // mapping/iterable plus kwargs, matching CPython's error messages
+    // (see test_types.SimpleNamespaceTests). Instance is already created
+    // empty by handle_type_call; this populates it.
+    type_dict.insert_str(
+        "__init__",
+        bf!("__init__", |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("__init__ missing self"));
+            }
+            let self_obj = &args[0];
+            // args[1..] may contain: [pos_arg?, kwargs_dict?]
+            // handle_type_call packs keywords into a trailing Dict
+            let remaining = &args[1..];
+            let mut pos_arg: Option<PyObjectRef> = None;
+            let mut kwargs_dict: Option<PyObjectRef> = None;
+            if remaining.len() == 1 {
+                let a = &remaining[0];
+                if matches!(&*a.borrow(), PyObject::Dict(_)) {
+                    kwargs_dict = Some(a.clone());
+                } else {
+                    pos_arg = Some(a.clone());
+                }
+            } else if remaining.len() == 2 {
+                // Must be pos + kwargs (second must be Dict)
+                if matches!(&*remaining[1].borrow(), PyObject::Dict(_)) {
+                    pos_arg = Some(remaining[0].clone());
+                    kwargs_dict = Some(remaining[1].clone());
+                } else {
+                    return Err(PyError::type_error(format!(
+                        "SimpleNamespace expected at most 1 positional argument, got {}",
+                        remaining.len()
+                    )));
+                }
+            } else if remaining.len() > 2 {
+                return Err(PyError::type_error(format!(
+                    "SimpleNamespace expected at most 1 positional argument, got {}",
+                    remaining.len()
+                )));
+            }
+            // Helper to insert a mapping's items into self_obj's dict
+            let mut insert_mapping = |src: &PyObjectRef| -> PyResult<()> {
+                // Try mapping path (has keys())
+                let type_name = src.borrow().type_name();
+                let is_view = matches!(type_name.as_str(), "dict_items" | "dict_keys" | "dict_values" | "KeysView" | "ItemsView" | "ValuesView" | "MappingView");
+                let keys_method = if is_view { None } else { src.borrow().get_attribute("keys").ok() };
+                if let Some(keys_raw) = keys_method {
+                    // It's a mapping: copy via keys() + __getitem__
+                    let keys_iterable = crate::object::call_bound_method(keys_raw, src.clone(), vec![])?;
+                    let it = crate::object::builtin_iter(&[keys_iterable])?;
+                    loop {
+                        match crate::object::builtin_next(&[it.clone()]) {
+                            Ok(key) => {
+                                let key_str = match &*key.borrow() {
+                                    PyObject::Str(s) => s.to_string(),
+                                    _ => return Err(PyError::type_error("SimpleNamespace keys must be strings")),
+                                };
+                                // Hashability check via hash()
+                                let _ = key.hash()?;
+                                let value = crate::object::py_getitem(src, &key)?;
+                                if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                                    dict.insert(key_str, value);
+                                }
+                            }
+                            Err(PyError::StopIteration) => break,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    return Ok(());
+                }
+                // Not a mapping: treat as iterable of pairs
+                let it = crate::object::builtin_iter(&[src.clone()]).map_err(|_| {
+                    PyError::type_error(format!("'{}' object is not a mapping or iterable", type_name))
+                })?;
+                loop {
+                    match crate::object::builtin_next(&[it.clone()]) {
+                        Ok(pair) => {
+                            let pair_b = pair.borrow();
+                            let items: Vec<PyObjectRef> = match &*pair_b {
+                                PyObject::Tuple(v) | PyObject::List(v) => v.clone(),
+                                _ => return Err(PyError::type_error("SimpleNamespace iterable must be mapping or iterable of pairs")),
+                            };
+                            if items.len() != 2 {
+                                return Err(PyError::value_error(format!("SimpleNamespace iterable element has length {}; 2 is required", items.len())));
+                            }
+                            drop(pair_b);
+                            let key = &items[0];
+                            let val = &items[1];
+                            let key_str = match &*key.borrow() {
+                                PyObject::Str(s) => s.to_string(),
+                                _ => return Err(PyError::type_error("SimpleNamespace keys must be strings")),
+                            };
+                            let _ = key.hash()?;
+                            if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                                dict.insert(key_str, val.clone());
+                            }
+                        }
+                        Err(PyError::StopIteration) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(())
+            };
+            if let Some(pos) = pos_arg {
+                insert_mapping(&pos)?;
+            }
+            if let Some(kw) = kwargs_dict {
+                if let PyObject::Dict(d) = &*kw.borrow() {
+                    for (k, v) in d.items() {
+                        let key_str = k.str();
+                        // Validate key is string (already) but also check original key was str
+                        if !matches!(&*k.borrow(), PyObject::Str(_)) {
+                            return Err(PyError::type_error("SimpleNamespace keys must be strings"));
+                        }
+                        let _ = k.hash()?;
+                        if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                            dict.insert(key_str, v);
+                        }
+                    }
+                } else {
+                    // Should not happen: kwargs always packed as Dict
+                    return Err(PyError::type_error("kwargs must be a dict"));
+                }
+            }
+            Ok(py_none())
+        }),
+    );
+    PyObjectRef::new(PyObject::Type {
+        name: "types.SimpleNamespace".to_string(),
+        dict: Box::new(str_map_to_typedict(type_dict)),
+        bases: vec![],
+        mro: vec![],
+    })
+}
+
+fn get_simple_namespace_type() -> PyObjectRef {
+    let existing = SIMPLE_NAMESPACE_TYPE.with(|c| c.borrow().clone());
+    if let Some(t) = existing {
+        return t;
+    }
+    let typ = build_simple_namespace_type();
+    SIMPLE_NAMESPACE_TYPE.with(|c| {
+        *c.borrow_mut() = Some(typ.clone());
+    });
+    typ
+}
+
+
+pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = HashMap::new();
+    macro_rules! t_func {
+        ($name:expr, $func:expr) => {
+            d.insert(
+                $name.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
+        };
+    }
+
+    // `types.FunctionType`/`BuiltinFunctionType`/`ModuleType`/`LambdaType`
+    // used to be standalone passthrough `BuiltinFunction`s (`args[0].clone()`)
+    // — technically callable the same way real CPython's constructors are,
+    // but NOT the same object `type(f)`/`type(mod)` actually returns, so
+    // `isinstance(f, types.FunctionType)` and `isinstance(mod,
+    // types.ModuleType)` were unconditionally `False`. That's not just a
+    // cosmetic gap: `typing.get_type_hints()` branches on `isinstance(obj,
+    // types.ModuleType)` to decide whether to read `globalns` from
+    // `obj.__dict__` (module case) or `obj.__globals__` (function/method
+    // case) — with this broken, `get_type_hints(some_module)` took the
+    // wrong branch entirely. Point these at the SAME canonical `Type`
+    // object `type(x)` returns for that kind (see
+    // `get_or_create_primitive_type`) instead of a lookalike.
+    d.insert_str("FunctionType", get_or_create_primitive_type("function"));
+    // Real `types.DynamicClassAttribute` differs from plain `property` only
+    // in a narrow metaclass-interop edge case (raising `AttributeError` on
+    // class-level access so a metaclass's own `__getattr__` can take over —
+    // `enum.py`'s own `Enum.name`/`Enum.value` use this internally). Aliased
+    // to `property` directly rather than modeling that edge case: covers
+    // the overwhelming majority of real usage (structural
+    // getter/setter/deleter behavior), and unblocks the `ImportError:
+    // cannot import name 'DynamicClassAttribute' from 'types'` that
+    // otherwise hits any code merely importing it.
+    t_func!("DynamicClassAttribute", builtin_property);
+    // Real CPython: `types.LambdaType is types.FunctionType` (literally the
+    // same object — a lambda IS a function). See `FunctionType` above for
+    // why this can't be a passthrough `BuiltinFunction`.
+    d.insert_str("LambdaType", get_or_create_primitive_type("function"));
+    // Unlike `FunctionType`/`LambdaType` above (pure isinstance-check
+    // helpers — real code essentially never CALLS them, since functions can
+    // only be built by `def`/`lambda`), `types.MethodType(function,
+    // instance)` genuinely IS a common real-world constructor — manually
+    // binding a plain function to an instance, without going through a
+    // class's own attribute lookup (e.g. dynamic method injection, certain
+    // metaprogramming/proxy patterns). The passthrough-`args[0].clone()`
+    // shape silently discarded the `instance` argument entirely, returning
+    // the UNBOUND function — calling the result then called the function
+    // with one fewer argument than it expects (self never supplied),
+    // corrupting positional argument binding downstream (confirmed via a
+    // repro: `types.MethodType(f, obj)(x)` raised `NameError` inside `f`
+    // for its own `x` parameter, since `x` silently filled `self`'s slot
+    // instead). Fixed to build a real `PyObject::BoundMethod`, the same
+    // representation this interpreter already uses for `obj.method`
+    // attribute access.
+    // `types.MethodType` needs to be BOTH the real constructor (established
+    // by the fix documented above — `types.MethodType(f, obj)` must build a
+    // real bound method, not silently drop `obj`) AND the same canonical
+    // `Type` object `type(bound_method)` returns, so `isinstance(bound_
+    // method, types.MethodType)` (real CPython: `True`) actually works —
+    // previously this was a standalone passthrough `BuiltinFunction` with
+    // no relation to that Type at all, so the isinstance check was
+    // unconditionally `False` (breaks e.g. `typing.get_type_hints`'s
+    // `_allowed_types` filter). Wire the constructor into the canonical
+    // "method" Type's dict under `NATIVE_VALUE_CTOR_KEY`, the same
+    // mechanism `int`/`list`/`deque`/etc. use so calling the Type directly
+    // (`types.MethodType(f, obj)`, or equally `type(bound_method)(f, obj)`)
+    // dispatches to it.
+    let method_type = get_or_create_primitive_type("method");
+    if let PyObject::Type { dict, .. } = &mut *method_type.borrow_mut() {
+        dict.insert(
+            crate::interner::intern(crate::object::NATIVE_VALUE_CTOR_KEY),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "MethodType".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error("MethodType() requires 2 arguments"));
+                    }
+                    Ok(PyObjectRef::new(PyObject::BoundMethod {
+                        func: args[0].clone(),
+                        self_obj: args[1].clone(),
+                    }))
+                },
+            }),
+        );
+    }
+    d.insert_str("MethodType", method_type);
+    d.insert_str(
+        "BuiltinFunctionType",
+        get_or_create_primitive_type("builtin_function_or_method"),
+    );
+    // `types.BuiltinMethodType is types.BuiltinFunctionType` in real CPython
+    // (a bound builtin method and a plain builtin function share one type).
+    d.insert_str(
+        "BuiltinMethodType",
+        get_or_create_primitive_type("builtin_function_or_method"),
+    );
+    // No native distinction exists in this interpreter between an unbound
+    // builtin-type slot wrapper (`object.__repr__`, real type
+    // `wrapper_descriptor`), a bound one (`some_obj.__repr__`, real type
+    // `method-wrapper`), and a builtin-type method descriptor (`list.append`,
+    // real type `method_descriptor`) — all three collapse into the same
+    // `builtin_function_or_method`/`BuiltinMethod` representation here. Real
+    // `typing.py` only consults these three names to build an `isinstance`
+    // allow-list (`_allowed_types` in `get_type_hints`), so exposing them as
+    // distinct, never-matched placeholder types (rather than omitting them,
+    // which broke the import entirely) is a correct, honest stand-in: it
+    // unblocks the import without claiming an isinstance match this
+    // interpreter cannot actually back.
+    d.insert_str(
+        "WrapperDescriptorType",
+        get_or_create_primitive_type("wrapper_descriptor"),
+    );
+    d.insert_str(
+        "MethodWrapperType",
+        get_or_create_primitive_type("method-wrapper"),
+    );
+    d.insert_str(
+        "MethodDescriptorType",
+        get_or_create_primitive_type("method_descriptor"),
+    );
+    // Unlike its neighbors above (`FunctionType`/`LambdaType`/`MethodType`,
+    // all pure isinstance-check helpers that only ever see an ALREADY-
+    // EXISTING instance of their kind passed back in), `types.ModuleType`
+    // is genuinely CONSTRUCTIBLE in real Python — `types.ModuleType(name)`
+    // creates a brand-new, empty module object with that name (the exact
+    // mechanism CPython's own `importlib` uses internally, and a common
+    // idiom for building "fake modules" — real trigger: CPython's own
+    // `test_call.py`). The passthrough-`args[0].clone()` shape used here
+    // used to just return the NAME STRING unchanged, silently masquerading
+    // as a module — any subsequent `.attr = value` on it then tried to
+    // `borrow_mut()` an inline `PyObjectRef::SmallStr`, panicking
+    // ("borrow_mut on non-mutable value") instead of setting a real module
+    // attribute.
+    // Same fix as `MethodType` above: needs to be both the real constructor
+    // AND the canonical "module" `Type` so `isinstance(some_module,
+    // types.ModuleType)` is `True` — a plain passthrough `BuiltinFunction`
+    // could only ever be the former. This one matters more than most: real
+    // `typing.get_type_hints()` branches on exactly this isinstance check
+    // to decide whether to read `globalns` from `obj.__dict__` (module) or
+    // `obj.__globals__` (function/method) — with it always `False`,
+    // `get_type_hints(some_module)` took the function/method branch and
+    // broke on modules, which don't have `__globals__`.
+    let module_type = get_or_create_primitive_type("module");
+    if let PyObject::Type { dict, .. } = &mut *module_type.borrow_mut() {
+        dict.insert(
+            crate::interner::intern(crate::object::NATIVE_VALUE_CTOR_KEY),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "ModuleType".to_string(),
+                func: |args| {
+                    if args.is_empty() {
+                        return Err(PyError::type_error(
+                            "module.__init__() takes at least 1 argument (0 given)",
+                        ));
+                    }
+                    let name = args[0].str();
+                    let module = crate::object::create_module(&name, HashMap::new());
+                    if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
+                        dict.insert_str("__name__", crate::object::py_str(&name));
+                        dict.insert_str(
+                            "__doc__",
+                            if args.len() > 1 {
+                                args[1].clone()
+                            } else {
+                                crate::object::py_none()
+                            },
+                        );
+                    }
+                    Ok(module)
+                },
+            }),
+        );
+    }
+    d.insert_str("ModuleType", module_type);
+    t_func!("NoneType", |_| Ok(py_none()));
+    t_func!("GeneratorType", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("GeneratorType() requires an argument"));
+        }
+        Ok(args[0].clone())
+    });
+    t_func!("CoroutineType", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("CoroutineType() requires an argument"));
+        }
+        Ok(args[0].clone())
+    });
+    t_func!("AsyncGeneratorType", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error(
+                "AsyncGeneratorType() requires an argument",
+            ));
+        }
+        Ok(args[0].clone())
+    });
+    // Real `types.SimpleNamespace(**kwargs)` creates an object exposing
+    // each keyword as an ATTRIBUTE (`ns.x`), with a `namespace(x=1, y=2)`
+    // repr and by-value equality — NOT a plain dict (a plain `PyObject::
+    // Dict` doesn't support attribute-style access at all, so `ns.x` used
+    // to raise `AttributeError: 'dict' object has no attribute 'x'`, a
+    // real, common idiom broken outright). Kwargs arrive as a single
+    // trailing packed dict per this project's own calling convention (see
+    // e.g. `dict(mapping, key=val)`'s handling elsewhere) — real
+    // `SimpleNamespace` takes no positional arguments at all, so the ONLY
+    // arg ever present here is that trailing kwargs dict, if any.
+    d.insert_str("SimpleNamespace", get_simple_namespace_type());
+    // `types.UnionType` — the runtime type of `int | str` (PEP 604). Only
+    // exposed as a name here (real code mostly just needs `isinstance(x,
+    // types.UnionType)` or the name to exist for introspection/`__all__`
+    // checks) — the actual construction happens via `__or__`/`__ror__` on
+    // every `Type` object (see `attrs.rs`), not by calling this directly
+    // (real `UnionType` isn't constructible by calling it either).
+    d.insert_str("UnionType", get_union_type());
+    // `@types.coroutine` — real CPython marks the generator function so its
+    // resulting generator gets coroutine-like `__await__`/`send`/`throw`
+    // behavior. This interpreter's own generator objects already expose
+    // `__await__`/`__iter__` unconditionally (see `object.rs`'s Generator
+    // attribute-access arm), so the decorator itself only needs to be a
+    // transparent passthrough — real trigger: CPython's own `test.support`,
+    // `@types.coroutine\ndef async_yield(v): return (yield v)`.
+    t_func!("coroutine", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("coroutine() requires an argument"));
+        }
+        Ok(args[0].clone())
+    });
+    {
+        // A real (minimal) Type, not a bare placeholder string — needed so
+        // `CodeType.__init__` resolves to something attribute-accessible
+        // (real trigger: `unittest/mock.py`'s own module-level
+        // `inspect.signature(partial(CodeType.__init__, None))`, which
+        // otherwise raises `AttributeError` — on a plain str — before ever
+        // reaching the `try/except ValueError:` guarding that line).
+        let mut code_type_dict = HashMap::new();
+        code_type_dict.insert_str(
+            "__init__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |_args| Ok(py_none()),
+            }),
+        );
+        let code_type = PyObjectRef::new(PyObject::Type {
+            name: "code".to_string(),
+            dict: Box::new(str_map_to_typedict(code_type_dict)),
+            bases: vec![],
+            mro: vec![],
+        });
+        d.insert_str("CodeType", code_type);
+    }
+    // `types.TracebackType(next, frame, lasti, lineno)` — a real Type whose
+    // __init__ validates its 4 arguments and stores them on the instance
+    // (readable as tb_next/tb_frame/tb_lasti/tb_lineno via the normal
+    // Instance attribute path). Real trigger: CPython's own `test_raise.py`
+    // TestTracebackType tests, which construct and attribute-check one.
+    {
+        let mut tb_type_dict = HashMap::new();
+        tb_type_dict.insert_str(
+            "__init__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    if args.len() != 5 {
+                        return Err(PyError::type_error(format!(
+                            "TracebackType() takes 4 arguments ({} given)",
+                            args.len().saturating_sub(1)
+                        )));
+                    }
+                    let (next, frame, lasti, lineno) = (&args[1], &args[2], &args[3], &args[4]);
+                    if !matches!(&*next.borrow(), PyObject::None)
+                        && !matches!(&*next.borrow(), PyObject::Instance { .. })
+                    {
+                        return Err(PyError::type_error(
+                            "TracebackType.__init__(): tb_next must be a traceback or None",
+                        ));
+                    }
+                    if !matches!(&*frame.borrow(), PyObject::Instance { .. }) {
+                        return Err(PyError::type_error(
+                            "TracebackType.__init__(): frame must be a frame object",
+                        ));
+                    }
+                    if lasti.as_i64().is_none() {
+                        return Err(PyError::type_error(
+                            "TracebackType.__init__(): lasti must be an integer",
+                        ));
+                    }
+                    if lineno.as_i64().is_none() {
+                        return Err(PyError::type_error(
+                            "TracebackType.__init__(): lineno must be an integer",
+                        ));
+                    }
+                    if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                        dict.insert_str("tb_next", next.clone());
+                        dict.insert_str("tb_frame", frame.clone());
+                        dict.insert_str("tb_lasti", lasti.clone());
+                        dict.insert_str("tb_lineno", lineno.clone());
+                    }
+                    Ok(py_none())
+                },
+            }),
+        );
+        let tb_type = PyObjectRef::new(PyObject::Type {
+            name: "TracebackType".to_string(),
+            dict: Box::new(str_map_to_typedict(tb_type_dict)),
+            bases: vec![],
+            mro: vec![],
+        });
+        // CPython's traceback objects reject `del tb.tb_next` and validate
+        // `tb.tb_next = <value>` (must be a traceback or None; must not create
+        // a cycle). test_raise::TestTracebackType::test_attrs asserts all of
+        // this on real tracebacks.
+        if let PyObject::Type { dict, .. } = &mut *tb_type.borrow_mut() {
+            let mut setattr_dict: HashMap<String, PyObjectRef> = HashMap::new();
+            setattr_dict.insert_str(
+                "__setattr__",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__setattr__".to_string(),
+                    func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        let name = match args.get(1) {
+                            Some(a) => match &*a.borrow() {
+                                PyObject::Str(s) => s.to_string(),
+                                _ => return Ok(py_none()),
+                            },
+                            None => return Ok(py_none()),
+                        };
+                        if name == "tb_next" {
+                            let value = args.get(2).cloned().unwrap_or_else(py_none);
+                            if !matches!(&*value.borrow(), PyObject::None) {
+                                if !matches!(&*value.borrow(), PyObject::Instance { .. }) {
+                                    return Err(PyError::type_error(
+                                        "tb_next must be a traceback or None",
+                                    ));
+                                }
+                                let self_obj = &args[0];
+                                let mut cur = value.clone();
+                                loop {
+                                    if cur.is(self_obj) {
+                                        return Err(PyError::value_error("cannot create cycles"));
+                                    }
+                                    let nxt = cur
+                                        .borrow()
+                                        .get_attribute("tb_next")
+                                        .unwrap_or_else(|_| py_none());
+                                    if matches!(&*nxt.borrow(), PyObject::None) {
+                                        break;
+                                    }
+                                    cur = nxt;
+                                }
+                            }
+                        }
+                        Ok(py_none())
+                    },
+                }),
+            );
+            setattr_dict.insert_str(
+                "__delattr__",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__delattr__".to_string(),
+                    func: |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                        Err(PyError::type_error("read-only attribute"))
+                    },
+                }),
+            );
+            for (k, v) in setattr_dict {
+                dict.insert_str(&k, v);
+            }
+        }
+        d.insert_str("TracebackType", tb_type);
+    }
+    d.insert_str("CellType", py_str("cell"));
+    // `types.MappingProxyType(dict)` — a read-only view of a mapping. Only
+    // a placeholder ("mappingproxy") string before, so `types.
+    // MappingProxyType({})` (real trigger: CPython's own `test_hmac.py`,
+    // a default arg unpacked via `**`) blew up with "'str' object is not
+    // callable". Implemented as a callable that wraps the given dict in an
+    // Instance exposing `keys`/`__iter__`/`__getitem__`/`get`/`__len__`/
+    // `items`/`__contains__`; the dict stays shared with the caller (a true
+    // view: mutations through the original dict are visible).
+    d.insert_str(
+        "MappingProxyType",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "MappingProxyType".to_string(),
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(PyError::type_error(
+                        "mappingproxy() takes exactly one argument",
+                    ));
+                }
+                let src = args[0].clone();
+                // Store the original mapping directly (preserving OrderedDict type for repr)
+                let inner: PyObjectRef = src.clone();
+                let mut dict = crate::object::AttrMap::new();
+                let typ = PyObjectRef::new(PyObject::Type {
+                    name: "mappingproxy".to_string(),
+                    dict: Box::new(str_map_to_typedict({
+                        let mut td = HashMap::new();
+                        // Each method captures `inner` directly rather than
+                        // relying on self: attribute-call (`m.get(k)`) passes a
+                        // bare Closure with NO self, while the dunder/subscript
+                        // paths (`m[k]`, `len(m)`) prepend it — so reading the
+                        // key as the LAST arg works for both shapes.
+                        let key_arg = |args: &[PyObjectRef]| args.last().cloned();
+                        for (name, field) in [
+                            ("keys", "keys"),
+                            ("values", "values"),
+                            ("items", "items"),
+                            ("__len__", "len"),
+                            ("__iter__", "keys"),
+                        ] {
+                            let inner = inner.clone();
+                            let field = field.to_string();
+                            td.insert_str(
+                                name,
+                                PyObjectRef::new(PyObject::Closure(Rc::new(
+                                    move |_args: &[PyObjectRef]| {
+                                        if let PyObject::Dict(d) = &*inner.borrow() {
+                                            match field.as_str() {
+                                                "keys" => {
+                                                    Ok(py_list(d.keys().iter().cloned().collect()))
+                                                }
+                                                "values" => Ok(py_list(
+                                                    d.values().iter().cloned().collect(),
+                                                )),
+                                                "items" => Ok(py_list(
+                                                    d.items()
+                                                        .into_iter()
+                                                        .map(|(k, v)| py_tuple(vec![k, v]))
+                                                        .collect(),
+                                                )),
+                                                "len" => Ok(py_int(d.len() as i64)),
+                                                _ => Err(PyError::runtime_error(
+                                                    "unhandled mappingproxy field",
+                                                )),
+                                            }
+                                        } else {
+                                            // For dict subclasses (OrderedDict) etc., delegate via attribute
+                                            let method_name = match field.as_str() {
+                                                "len" => "__len__",
+                                                "keys" => "keys",
+                                                "values" => "values",
+                                                "items" => "items",
+                                                _ => field.as_str(),
+                                            };
+                                            if let Ok(m) = inner.borrow().get_attribute(method_name) {
+                                                if let Ok(result) = crate::object::call_bound_method(m, inner.clone(), vec![]) {
+                                                    if field == "len" {
+                                                        return Ok(result);
+                                                    } else {
+                                                        // For keys/values/items, ensure list
+                                                        if matches!(&*result.borrow(), PyObject::List(_)) {
+                                                            return Ok(result);
+                                                        }
+                                                        let it = crate::object::builtin_iter(&[result])?;
+                                                        let mut items = Vec::new();
+                                                        loop {
+                                                            match crate::object::builtin_next(&[it.clone()]) {
+                                                                Ok(v) => items.push(v),
+                                                                Err(crate::object::PyError::StopIteration) => break,
+                                                                Err(e) => return Err(e),
+                                                            }
+                                                        }
+                                                        return Ok(py_list(items));
+                                                    }
+                                                }
+                                            }
+                                            Err(PyError::type_error(
+                                                "mappingproxy wrapping a non-dict",
+                                            ))
+                                        }
+                                    },
+                                ))),
+                            );
+                        }
+                        // `mappingproxy({...})` repr — use native_backing_of to get inner's repr
+                        // (preserving OrderedDict vs plain dict)
+                        td.insert_str(
+                            "__repr__",
+                            PyObjectRef::new(PyObject::BuiltinFunction {
+                                name: "__repr__".to_string(),
+                                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                    let backing = crate::object::native_backing_of(&args[0])
+                                        .ok_or_else(|| PyError::runtime_error("mappingproxy has no backing"))?;
+                                    Ok(py_str(&format!("mappingproxy({})", backing.repr())))
+                                },
+                            }),
+                        );
+                        // `mappingproxy.copy()` — used by pprint; return the underlying mapping directly
+                        // (for OrderedDict, this preserves the OrderedDict type for pprint)
+                        let inner_copy = inner.clone();
+                        td.insert_str(
+                            "copy",
+                            PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| {
+                                Ok(inner_copy.clone())
+                            }))),
+                        );
+                        for (name, field) in [
+                            ("get", "get"),
+                            ("__getitem__", "getitem"),
+                            ("__contains__", "contains"),
+                        ] {
+                            let inner = inner.clone();
+                            let field = field.to_string();
+                            td.insert_str(
+                                name,
+                                PyObjectRef::new(PyObject::Closure(Rc::new(
+                                    move |args: &[PyObjectRef]| {
+                                        let k = key_arg(args).ok_or_else(|| {
+                                            PyError::type_error(format!(
+                                                "{}() missing key argument",
+                                                field
+                                            ))
+                                        })?;
+                                        if let PyObject::Dict(d) = &*inner.borrow() {
+                                            match field.as_str() {
+                                                "contains" => {
+                                                    Ok(py_bool(d.contains(&k).unwrap_or(false)))
+                                                }
+                                                "get" => {
+                                                    let key =
+                                                        args.first().cloned().ok_or_else(|| {
+                                                            PyError::type_error("get() missing key")
+                                                        })?;
+                                                    match d.get(&key).ok().flatten() {
+                                                        Some(v) => Ok(v),
+                                                        None => {
+                                                            Ok(args.get(1).cloned().unwrap_or_else(
+                                                                || PyObjectRef::new(PyObject::None),
+                                                            ))
+                                                        }
+                                                    }
+                                                }
+                                                "getitem" => match d.get(&k).ok().flatten() {
+                                                    Some(v) => Ok(v),
+                                                    None => Err(PyError::key_error(k.repr())),
+                                                },
+                                                _ => Err(PyError::runtime_error(
+                                                    "unhandled mappingproxy field",
+                                                )),
+                                            }
+                                        } else {
+                                            // For OrderedDict etc., delegate via get_attribute/py_getitem
+                                            match field.as_str() {
+                                                "contains" => {
+                                                    if let Ok(contains_fn) = inner.borrow().get_attribute("__contains__") {
+                                                        if let Ok(res) = crate::object::call_bound_method(contains_fn, inner.clone(), vec![k.clone()]) {
+                                                            return Ok(res);
+                                                        }
+                                                    }
+                                                    // Fallback via try getitem
+                                                    match crate::object::py_getitem(&inner, &k) {
+                                                        Ok(_) => Ok(py_bool(true)),
+                                                        Err(_) => Ok(py_bool(false)),
+                                                    }
+                                                }
+                                                "get" => {
+                                                    let key = args.first().cloned().unwrap_or_else(|| k.clone());
+                                                    let default = args.get(1).cloned().unwrap_or_else(|| PyObjectRef::new(PyObject::None));
+                                                    match crate::object::py_getitem(&inner, &key) {
+                                                        Ok(v) => Ok(v),
+                                                        Err(_) => Ok(default),
+                                                    }
+                                                }
+                                                "getitem" => crate::object::py_getitem(&inner, &k).map_err(|_| PyError::key_error(k.repr())),
+                                                _ => Err(PyError::runtime_error(
+                                                    "unhandled mappingproxy field",
+                                                )),
+                                            }
+                                        }
+                                    },
+                                ))),
+                            );
+                        }
+                        td
+                    })),
+                    bases: vec![],
+                    mro: vec![],
+                });
+                dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), inner.clone());
+                Ok(PyObjectRef::new(PyObject::Instance { typ, dict }))
+            },
+        }),
+    );
+    // GenericAlias — used for generic type annotations like list[int], dict[str, int]
+    d.insert_str("GenericAlias", get_generic_alias_type());
+
+    d
+}

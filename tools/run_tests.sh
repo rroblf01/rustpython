@@ -28,10 +28,26 @@ while [ $# -gt 0 ]; do
         --timeout) TOUT="$2"; shift 2 ;;
         --debug) MODE="debug"; shift ;;
         --time) SHOW_TIME=1; shift ;;
-        --all) ARGS=(tests/cpython/test_*.py); shift ;;
+        --skip)
+            # --skip name1,name2,... exclude files by basename.
+            # NOTE: applied when --all is expanded below (order-independent).
+            IFS=',' read -ra SKIP_LIST <<< "$2"; shift 2 ;;
+        --all) ALL_MODE=1; shift ;;
         *) ARGS+=("$1"); shift ;;
     esac
 done
+
+# Expand --all honoring any --skip list regardless of argument order.
+if [ "${ALL_MODE:-0}" = 1 ]; then
+    for f in tests/cpython/test_*.py; do
+        base="$(basename "$f" .py)"
+        skip_it=0
+        for sk in ${SKIP_LIST[@]:-}; do
+            [ "$base" = "$sk" ] && skip_it=1 && break
+        done
+        [ $skip_it = 0 ] && ARGS+=("$f")
+    done
+fi
 
 if [ "$MODE" = "release" ]; then
     BIN="${BIN:-target/release/rustpython}"

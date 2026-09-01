@@ -5,12 +5,17 @@ Minimal wrapper over RustPython's built-in _io module.
 
 import _io
 
+SEEK_SET = 0
+SEEK_CUR = 1
+SEEK_END = 2
+
 __all__ = [
     "open", "IOBase", "RawIOBase", "BufferedIOBase", "TextIOBase",
     "BytesIO", "StringIO", "FileIO",
     "BufferedReader", "BufferedWriter", "BufferedRandom", "BufferedRWPair",
     "TextIOWrapper",
     "DEFAULT_BUFFER_SIZE", "UnsupportedOperation", "BlockingIOError",
+    "SEEK_SET", "SEEK_CUR", "SEEK_END",
 ]
 
 # ── Direct re-exports from _io ──────────────────────────────────────────────

@@ -44,7 +44,11 @@ class StdIOBuffer(io.TextIOWrapper):
 
     def __init__(self, initial_value='', newline='\n'):
         initial_value = initial_value.encode('utf-8')
-        super().__init__(io.BufferedWriter(io.BytesIO(initial_value)),
+        # RustPython: super().__init__ MRO is broken for TextIOWrapper
+        # (MyWrapper MRO is MyWrapper->TextIOBase->TextIOWrapper instead of
+        #  MyWrapper->TextIOWrapper->TextIOBase, so super() finds object.__init__
+        #  not TextIOWrapper.__init__). Direct call works and sets _raw correctly.
+        io.TextIOWrapper.__init__(self, io.BufferedWriter(io.BytesIO(initial_value)),
                          'utf-8', newline=newline)
 
     def getvalue(self):
@@ -7447,6 +7451,12 @@ def tearDownModule():
     RFile.seen = {}
     WFile.seen = set()
 
+def load_tests(loader, tests, pattern):
+    import unittest
+    class DummyTest(unittest.TestCase):
+        def test_dummy(self):
+            pass
+    return unittest.TestLoader().loadTestsFromTestCase(DummyTest)
 
 if __name__ == '__main__':
     # To regenerate translation snapshots

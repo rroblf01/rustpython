@@ -18,14 +18,30 @@ fn make_crc32_table() -> [u32; 256] {
     table
 }
 
-fn crc32_impl(data: &[u8]) -> u32 {
+fn crc32_impl(data: &[u8], initial: u32) -> u32 {
     let table = make_crc32_table();
-    let mut crc = 0xffffffffu32;
+    let mut crc = initial ^ 0xffffffffu32;
     for &byte in data {
         let idx = ((crc ^ byte as u32) & 0xff) as usize;
         crc = table[idx] ^ (crc >> 8);
     }
     crc ^ 0xffffffff
+}
+
+/// CRC-CCITT (XMODEM variant, polynomial 0x1021) — verified against real
+/// CPython's `binascii.crc_hqx` for several inputs before wiring in.
+fn crc_hqx_impl(data: &[u8], mut crc: u16) -> u16 {
+    for &byte in data {
+        crc ^= (byte as u16) << 8;
+        for _ in 0..8 {
+            if crc & 0x8000 != 0 {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
 }
 
 /// Standard base64 alphabet (RFC 4648)
@@ -194,6 +210,33 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         }),
     );
 
+    // `binascii.Incomplete` (a2b_uu/a2b_base64's "not enough data" signal —
+    // real CPython raises it for a truncated uuencoded line, distinct from
+    // the generic `Error`) was entirely missing, same shape as `Error`
+    // above (referenced directly by test_binascii.py::test_exceptions).
+    d.insert_str(
+        "Incomplete",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "Incomplete".to_string(),
+            func: |args| {
+                let msg = if args.is_empty() {
+                    String::new()
+                } else {
+                    args[0].str()
+                };
+                Ok(PyObjectRef::new(PyObject::Exception {
+                    typ: "Incomplete".to_string(),
+                    args: vec![py_str(&msg)],
+                    cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
+                    extra: None,
+                }))
+            },
+        }),
+    );
+
     macro_rules! bin_func {
         ($name:expr, $func:expr) => {
             d.insert(
@@ -207,38 +250,91 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
     }
 
     // --- hexlify ---
-    bin_func!("hexlify", |args| {
+    fn hexlify_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("hexlify() missing required argument"));
         }
-        let data = match &*args[0].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => {
-                return Err(PyError::type_error(
-                    "argument must be bytes, bytearray, or str",
-                ))
-            }
+        let data = if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else if let PyObject::Str(s) = &*args[0].borrow() {
+            s.as_bytes().to_vec()
+        } else {
+            return Err(PyError::type_error(
+                "argument must be bytes, bytearray, or str",
+            ));
         };
-        let hex: String = data.iter().map(|b| format!("{:02x}", b)).collect();
-        Ok(PyObjectRef::imm(PyObject::Bytes(hex.into_bytes())))
-    });
+        // Optional `sep`/`bytes_per_sep` (real CPython 3.8+
+        // `hexlify(data, sep, bytes_per_sep=1)`): inserts a separator byte
+        // every `bytes_per_sep` input bytes — grouped from the left for a
+        // positive count, from the right for a negative one.
+        let sep = match args.get(1).map(|v| v.borrow()) {
+            Some(b) => match &*b {
+                PyObject::Str(s) => s.chars().next(),
+                PyObject::Bytes(bs) | PyObject::ByteArray(bs) => bs.first().map(|&c| c as char),
+                _ => None,
+            },
+            None => None,
+        };
+        let hex: Vec<u8> = data
+            .iter()
+            .flat_map(|b| format!("{:02x}", b).into_bytes())
+            .collect();
+        let out = if let Some(sep) = sep {
+            let bytes_per_sep = args.get(2).and_then(|v| v.as_i64()).unwrap_or(1);
+            if bytes_per_sep == 0 || data.is_empty() {
+                hex
+            } else {
+                let group_bytes = bytes_per_sep.unsigned_abs() as usize;
+                let group_hexlen = group_bytes * 2;
+                let mut groups: Vec<&[u8]> = Vec::new();
+                if bytes_per_sep > 0 {
+                    let mut i = 0;
+                    while i < hex.len() {
+                        let end = (i + group_hexlen).min(hex.len());
+                        groups.push(&hex[i..end]);
+                        i = end;
+                    }
+                } else {
+                    let mut chunks: Vec<&[u8]> = Vec::new();
+                    let mut end = hex.len();
+                    while end > 0 {
+                        let start = end.saturating_sub(group_hexlen);
+                        chunks.push(&hex[start..end]);
+                        end = start;
+                    }
+                    chunks.reverse();
+                    groups = chunks;
+                }
+                let mut joined = Vec::with_capacity(hex.len() + groups.len());
+                for (i, g) in groups.iter().enumerate() {
+                    if i > 0 {
+                        joined.extend_from_slice(sep.to_string().as_bytes());
+                    }
+                    joined.extend_from_slice(g);
+                }
+                joined
+            }
+        } else {
+            hex
+        };
+        Ok(PyObjectRef::imm(PyObject::Bytes(out)))
+    }
+    bin_func!("hexlify", hexlify_impl);
+    bin_func!("b2a_hex", hexlify_impl);
 
     // --- unhexlify ---
-    bin_func!("unhexlify", |args| {
+    fn unhexlify_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("unhexlify() missing required argument"));
         }
-        let hex_str = match &*args[0].borrow() {
-            PyObject::Bytes(b) => String::from_utf8_lossy(b).to_string(),
-            PyObject::ByteArray(b) => String::from_utf8_lossy(b).to_string(),
-            PyObject::Str(s) => s.to_string(),
-            _ => {
-                return Err(PyError::type_error(
-                    "argument must be bytes, bytearray, or str",
-                ))
-            }
+        let hex_str = if let PyObject::Str(s) = &*args[0].borrow() {
+            s.to_string()
+        } else if let Some(b) = arg_bytes(&args[0]) {
+            String::from_utf8_lossy(&b).to_string()
+        } else {
+            return Err(PyError::type_error(
+                "argument must be bytes, bytearray, or str",
+            ));
         };
         let clean: String = hex_str.chars().filter(|c| !c.is_whitespace()).collect();
         if clean.len() % 2 != 0 {
@@ -250,7 +346,9 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| PyError::value_error("non-hexadecimal number found"))?;
         Ok(PyObjectRef::imm(PyObject::Bytes(bytes)))
-    });
+    }
+    bin_func!("unhexlify", unhexlify_impl);
+    bin_func!("a2b_hex", unhexlify_impl);
 
     // --- a2b_base64 ---
     bin_func!("a2b_base64", |args| {
@@ -259,15 +357,14 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
                 "a2b_base64() missing required argument",
             ));
         }
-        let data = match &*args[0].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => {
-                return Err(PyError::type_error(
-                    "argument must be bytes, bytearray, or str",
-                ))
-            }
+        let data = if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else if let PyObject::Str(s) = &*args[0].borrow() {
+            s.as_bytes().to_vec()
+        } else {
+            return Err(PyError::type_error(
+                "argument must be bytes, bytearray, or str",
+            ));
         };
         match b64_decode(&data) {
             Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
@@ -282,10 +379,10 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
                 "b2a_base64() missing required argument",
             ));
         }
-        let data = match &*args[0].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            _ => return Err(PyError::type_error("argument must be bytes or bytearray")),
+        let data = if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else {
+            return Err(PyError::type_error("argument must be bytes or bytearray"));
         };
         let mut encoded = b64_encode(&data);
         encoded.push('\n');
@@ -297,10 +394,12 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("a2b_uu() missing required argument"));
         }
-        let data = match &*args[0].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("argument must be bytes or str")),
+        let data = if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else if let PyObject::Str(s) = &*args[0].borrow() {
+            s.as_bytes().to_vec()
+        } else {
+            return Err(PyError::type_error("argument must be bytes or str"));
         };
         match uu_decode(&data) {
             Ok(bytes) => Ok(PyObjectRef::imm(PyObject::Bytes(bytes))),
@@ -313,10 +412,10 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("b2a_uu() missing required argument"));
         }
-        let data = match &*args[0].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            _ => return Err(PyError::type_error("argument must be bytes or bytearray")),
+        let data = if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else {
+            return Err(PyError::type_error("argument must be bytes or bytearray"));
         };
         let encoded = uu_encode(&data);
         Ok(PyObjectRef::imm(PyObject::Bytes(encoded.into_bytes())))
@@ -327,13 +426,34 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("crc32() missing required argument"));
         }
-        let data = match &*args[0].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            _ => return Err(PyError::type_error("argument must be bytes or bytearray")),
+        let data = if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else {
+            return Err(PyError::type_error("argument must be bytes or bytearray"));
         };
-        // Optional second argument: initial CRC (not implemented, Python's binascii.crc32 doesn't use it in simple cases)
-        Ok(py_int(crc32_impl(&data) as i64))
+        // Optional second argument: initial/running CRC value, letting
+        // crc32 be chained across successive chunks
+        // (`crc32(b, crc32(a)) == crc32(a + b)`, verified against real
+        // CPython) — previously always started fresh, breaking any
+        // incremental-hashing use.
+        let initial = args
+            .get(1)
+            .and_then(|v| v.as_i64())
+            .map(|v| v as u32)
+            .unwrap_or(0);
+        Ok(py_int(crc32_impl(&data, initial) as i64))
+    });
+    bin_func!("crc_hqx", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("crc_hqx() takes exactly 2 arguments"));
+        }
+        let data = if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else {
+            return Err(PyError::type_error("argument must be bytes or bytearray"));
+        };
+        let initial = args[1].as_i64().unwrap_or(0) as u16;
+        Ok(py_int(crc_hqx_impl(&data, initial) as i64))
     });
 
     // --- a2b_qp (stub) ---
@@ -341,10 +461,12 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("a2b_qp() missing required argument"));
         }
-        let data = match &*args[0].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("argument must be bytes or str")),
+        let data = if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else if let PyObject::Str(s) = &*args[0].borrow() {
+            s.as_bytes().to_vec()
+        } else {
+            return Err(PyError::type_error("argument must be bytes or str"));
         };
         // Simple quoted-printable decoder: handle =XX hex escapes
         let mut out = Vec::new();
@@ -378,10 +500,10 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("b2a_qp() missing required argument"));
         }
-        let data = match &*args[0].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            _ => return Err(PyError::type_error("argument must be bytes or bytearray")),
+        let data = if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else {
+            return Err(PyError::type_error("argument must be bytes or bytearray"));
         };
         // Simple quoted-printable encoder: encode non-printable and non-ASCII bytes
         let mut out = Vec::new();
@@ -413,10 +535,10 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("b2a_qp() missing required argument"));
         }
-        let data = match &*args[0].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            _ => return Err(PyError::type_error("argument must be bytes or bytearray")),
+        let data = if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else {
+            return Err(PyError::type_error("argument must be bytes or bytearray"));
         };
         let mut quotetabs = false;
         let mut istext = true;
@@ -577,10 +699,10 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("a2b_qp() missing required argument"));
         }
-        let data = match &*args[0].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            _ => return Err(PyError::type_error("argument must be bytes or bytearray")),
+        let data = if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else {
+            return Err(PyError::type_error("argument must be bytes or bytearray"));
         };
         let mut header = false;
         if let Some(last) = args.last().cloned() {
@@ -654,10 +776,10 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
                 "rlecode_hqx() missing required argument",
             ));
         }
-        let data = match &*args[0].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            _ => return Err(PyError::type_error("argument must be bytes or bytearray")),
+        let data = if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else {
+            return Err(PyError::type_error("argument must be bytes or bytearray"));
         };
         // Simplified: return data as-is (no RLE encoding)
         Ok(PyObjectRef::imm(PyObject::Bytes(data)))
@@ -670,10 +792,10 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
                 "rledecode_hqx() missing required argument",
             ));
         }
-        let data = match &*args[0].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::ByteArray(b) => b.clone(),
-            _ => return Err(PyError::type_error("argument must be bytes or bytearray")),
+        let data = if let Some(b) = arg_bytes(&args[0]) {
+            b
+        } else {
+            return Err(PyError::type_error("argument must be bytes or bytearray"));
         };
         // Simplified: return data as-is (no RLE decoding)
         Ok(PyObjectRef::imm(PyObject::Bytes(data)))

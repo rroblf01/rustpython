@@ -140,7 +140,17 @@ pub enum Opcode {
     REG_BUILD_LIST = 0xC9,    // r[dst] = [r[arg0], r[arg1], ...]
 
     // Custom opcodes for dict operations
-    DICT_MERGE = 202, // Pop TOS (source dict) and merge into dict at TOS1
+    //
+    // `DICT_MERGE` (call-site `f(**a, **b)`/`f(x=1, **a)` keyword
+    // unpacking) and `DICT_UPDATE` (`{**a, **b}` dict DISPLAY unpacking)
+    // are DELIBERATELY separate opcodes, matching real CPython — they have
+    // different collision semantics: `DICT_MERGE` raises `TypeError: ...
+    // got multiple values for keyword argument 'x'` on any duplicate key,
+    // while `DICT_UPDATE` silently overrides (`{**{'x': 1}, **{'x': 2}}`
+    // == `{'x': 2}` is legal). A single shared opcode can't distinguish
+    // them; see the compiler emit sites for which is used where.
+    DICT_MERGE = 202, // Pop TOS (source mapping) and merge into dict at TOS1, raising on duplicate keys
+    DICT_UPDATE = 204, // Pop TOS (source mapping) and merge into dict at TOS1, silently overriding on duplicate keys
 
     // Pop TOS (a list) and push a tuple with the same elements — used to
     // build a tuple literal containing starred unpacking, e.g. (*a, *b),
@@ -280,6 +290,7 @@ impl Opcode {
             0 => STORE_SUBSCR,
             261 => LOAD_CLOSURE,
             202 => DICT_MERGE,
+            204 => DICT_UPDATE,
             218 => UNPACK_SEQUENCE_TWO_TUPLE,
             120 => CHECK_EXC_MATCH_STAR,
             124 => SUPER_FAST2_BIN,
@@ -411,6 +422,7 @@ pub(crate) fn needs_arg(op: Opcode) -> bool {
             | LOAD_CLOSURE
             | POP_ITER
             | DICT_MERGE
+            | DICT_UPDATE
     )
 }
 

@@ -6,6 +6,9 @@
 use super::*;
 
 pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjectRef> {
+    if std::env::var("RPY_DEBUG_NUMERIC").is_ok() && matches!(op, 0 | 1 | 3 | 4) {
+        eprintln!("PY_COMPARE op={} a={} b={} a_type={} b_type={}", op, a.borrow().repr(), b.borrow().repr(), a.get_type_name(), b.get_type_name());
+    }
     // Fast path for small int comparisons — no borrow() needed
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         return Ok(py_bool(match op {
@@ -31,6 +34,9 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
     if matches!(op, 0..=5) {
         let is_a_instance = matches!(&*a.borrow(), PyObject::Instance { .. });
         let is_b_instance = matches!(&*b.borrow(), PyObject::Instance { .. });
+        if std::env::var("RPY_DEBUG_NUMERIC").is_ok() && matches!(op, 0 | 1 | 3 | 4) {
+            eprintln!("INSTANCE CHECK: op={} a_is_instance={} b_is_instance={} a={} b={}", op, is_a_instance, is_b_instance, a.borrow().repr(), b.borrow().repr());
+        }
         if is_a_instance || is_b_instance {
             if let Some(result) = try_rich_compare(a, b, op)? {
                 return Ok(result);
@@ -72,13 +78,39 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
             // 1001`). `try_rich_compare` returned None (Fraction/Decimal
             // have no __eq__ for these operand types), so without this the
             // fallback below would return raw IDENTITY for ==/!=.
-            if matches!(op, 2 | 5) {
-                if let (Some(ap), Some(bp)) = (
-                    crate::modules::numeric_parts_from_ref(a),
-                    crate::modules::numeric_parts_from_ref(b),
-                ) {
+            // For ordering (<, <=, >, >=) use the same numeric value (f64)
+            // comparison when both sides are real numbers (imag == 0).
+            let ap_opt = crate::modules::numeric_parts_from_ref(a);
+            let bp_opt = crate::modules::numeric_parts_from_ref(b);
+            if std::env::var("RPY_DEBUG_NUMERIC").is_ok() && matches!(op, 0 | 1 | 3 | 4) {
+                eprintln!("NUMERIC DEBUG: op={} a={} b={} ap={:?} bp={:?}", op, a.borrow().repr(), b.borrow().repr(), ap_opt, bp_opt);
+            }
+            if let (Some(ap), Some(bp)) = (ap_opt, bp_opt) {
+                // Equality / inequality always works via numeric parts
+                if matches!(op, 2 | 5) {
                     let eq = ap == bp;
                     return Ok(py_bool(if op == 2 { eq } else { !eq }));
+                }
+                // Ordering: only for real numbers (imag == 0 for both) and
+                // neither is a Complex (complex ordering must raise TypeError
+                // even for 1+0j, per test_numeric_tower.test_complex)
+                let a_is_complex = matches!(&*a.borrow(), PyObject::Complex(_, _));
+                let b_is_complex = matches!(&*b.borrow(), PyObject::Complex(_, _));
+                if matches!(op, 0 | 1 | 3 | 4) && ap.1 == 0.0 && bp.1 == 0.0 && !a_is_complex && !b_is_complex {
+                    let ord = ap.0.partial_cmp(&bp.0);
+                    let result = match (op, ord) {
+                        (0, Some(std::cmp::Ordering::Less)) => true,
+                        (0, _) => false,
+                        (1, Some(std::cmp::Ordering::Less)) | (1, Some(std::cmp::Ordering::Equal)) => true,
+                        (1, _) => false,
+                        (3, Some(std::cmp::Ordering::Greater)) | (3, Some(std::cmp::Ordering::Equal)) => true,
+                        (3, _) => false,
+                        (4, Some(std::cmp::Ordering::Greater)) => true,
+                        (4, _) => false,
+                        _ => false,
+                    };
+                    // NaN ordering: always false for <,>,<=,>= (like CPython)
+                    return Ok(py_bool(result));
                 }
             }
             return Ok(py_bool(match op {
@@ -332,8 +364,29 @@ fn try_rich_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<Optio
                     other_ref: &PyObjectRef,
                     method: &str|
      -> PyResult<Option<PyObjectRef>> {
-        if let PyObject::Instance { typ, .. } = &*self_ref.borrow() {
-            if let Some(f) = lookup_dunder_via_mro(typ, method) {
+        // Extract (clone) `typ` and drop the borrow BEFORE calling
+        // `call_bound_method` — `typ` used to stay borrowed from
+        // `self_ref` for the whole `if let` block (a `&*self_ref.borrow()`
+        // temporary lives as long as the binding it produced), which is
+        // still live while the found dunder method's body actually runs.
+        // A method that mutates `self` (any ordinary `self.attr = ...`,
+        // e.g. `test_collections.py`'s own comparison-mixin test helper:
+        // `class Other: def __eq__(self, other): self.right_side = True;
+        // return True`, aliased as `__lt__`/`__gt__`/etc. too) then hit a
+        // STORE_ATTR needing `self_ref.borrow_mut()` while THIS closure
+        // still held an outstanding `.borrow()` on the very same object —
+        // a guaranteed double-borrow panic. Real trigger: real
+        // `Lib/_collections_abc.py`'s `Mapping.__eq__` finally being a
+        // genuine Python method (the old native `collections.abc` stub's
+        // comparisons never exercised this path the same way) made
+        // `test_collections.py`'s `TestCollectionABCs.test_Mapping` reach
+        // this reflected-operator dispatch for the first time.
+        let typ = match &*self_ref.borrow() {
+            PyObject::Instance { typ, .. } => Some(typ.clone()),
+            _ => None,
+        };
+        if let Some(typ) = typ {
+            if let Some(f) = lookup_dunder_via_mro(&typ, method) {
                 let result = call_bound_method(f, self_ref.clone(), vec![other_ref.clone()])?;
                 if !is_not_implemented(&result) {
                     // Return the RAW dunder result — real CPython's rich
@@ -353,13 +406,20 @@ fn try_rich_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<Optio
     // side, never to its own `__eq__`).
     let try_ne_side =
         |self_ref: &PyObjectRef, other_ref: &PyObjectRef| -> PyResult<Option<PyObjectRef>> {
-            if let PyObject::Instance { typ, .. } = &*self_ref.borrow() {
-                if let Some(f) = lookup_dunder_via_mro(typ, "__ne__") {
+            // See `try_side`'s doc comment just above for why `typ` must be
+            // cloned and the borrow dropped before calling into Python —
+            // same fix, same reason, for both dunders this tries.
+            let typ = match &*self_ref.borrow() {
+                PyObject::Instance { typ, .. } => Some(typ.clone()),
+                _ => None,
+            };
+            if let Some(typ) = typ {
+                if let Some(f) = lookup_dunder_via_mro(&typ, "__ne__") {
                     let result = call_bound_method(f, self_ref.clone(), vec![other_ref.clone()])?;
                     if !is_not_implemented(&result) {
                         return Ok(Some(result));
                     }
-                } else if let Some(f) = lookup_dunder_via_mro(typ, "__eq__") {
+                } else if let Some(f) = lookup_dunder_via_mro(&typ, "__eq__") {
                     let result = call_bound_method(f, self_ref.clone(), vec![other_ref.clone()])?;
                     if !is_not_implemented(&result) {
                         return Ok(Some(py_bool(!result.truthy())));

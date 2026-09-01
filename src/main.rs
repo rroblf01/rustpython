@@ -77,10 +77,23 @@ fn print_py_error(err: &PyError, fallback_file: &str) {
                         let indent = "    ";
                         let spaces = (offset - 1) as usize;
                         let trimmed = display_text.trim_end();
+                        // `offset` is a CHARACTER column (CPython's own
+                        // convention), but `str::len()` is a BYTE count —
+                        // for a line with any multi-byte UTF-8 character,
+                        // comparing/subtracting the two directly is wrong
+                        // (wrong caret length) and can underflow into a
+                        // panic when `offset` (in chars) legitimately
+                        // exceeds `trimmed.len()` in bytes is false but the
+                        // reverse miscount happens (confirmed crash:
+                        // `attempt to subtract with overflow` on a line
+                        // containing `ä`/`î`, test_eof.py's
+                        // test_EOFS_with_file). Count chars, not bytes, and
+                        // saturate defensively either way.
+                        let trimmed_chars = trimmed.chars().count();
                         let caret_len = if trimmed.is_empty() {
                             1
                         } else {
-                            std::cmp::max(1, trimmed.len() - offset as usize + 1)
+                            std::cmp::max(1, trimmed_chars.saturating_sub(offset as usize).saturating_add(1))
                         };
                         eprintln!("{}{}{}", indent, " ".repeat(spaces), "^".repeat(caret_len));
                     }
@@ -88,10 +101,24 @@ fn print_py_error(err: &PyError, fallback_file: &str) {
             } else {
                 eprintln!("  File \"{}\", line ??, in <module>", file);
             }
+            // NOTE: `type_name` (the raw first field of `PyError::Exception`)
+            // is NOT always the real exception type — for a bare re-raise
+            // it's the literal dispatch tag `"re-raise"`, and previously a
+            // plain `raise Foo(...)` stored the exception's *message* there
+            // instead of its type name (fixed at the raise site in
+            // op_exc.rs, but other producers of `PyError::Exception` may
+            // still pass non-type-name tags). `PyError::type_name_for_display()`
+            // already exists specifically to resolve the real type name from
+            // the wrapped exception object in every such case — use it here
+            // instead of the raw tag so top-level uncaught exceptions always
+            // print "RealTypeName: message" (previously e.g. a bare
+            // `assert False`/`raise SomeError()` printed a blank line, and
+            // `raise ValueError("x")` printed "x: x").
+            let display_type_name = err.type_name_for_display();
             if msg.is_empty() {
-                eprintln!("{}", type_name);
+                eprintln!("{}", display_type_name);
             } else {
-                eprintln!("{}: {}", type_name, msg);
+                eprintln!("{}: {}", display_type_name, msg);
             }
         }
         _ => eprintln!("{}", err),
@@ -472,11 +499,14 @@ fn real_main() {
                 i += 2;
                 continue;
             }
-            "-I" | "-E" | "-u" => {
+            "-I" | "-E" | "-u" | "-S" | "-s" => {
                 // `-u` (unbuffered stdout/stderr) is a no-op here (Rust's
                 // stdout is flushed explicitly where it matters); `-I`/`-E`
-                // as above. `-u` comes from test.support's run_test_script
-                // ("-u" to get full output if a test hangs).
+                // as above, `-S`/`-s` (don't import site/user site) are also
+                // no-ops — this interpreter doesn't auto-import site.py anyway.
+                // `-u` comes from test.support's run_test_script
+                // ("-u" to get full output if a test hangs), `-S` from
+                // test_genericpath's test_import (assert_python_ok('-S', ...)).
                 i += 1;
                 continue;
             }

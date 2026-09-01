@@ -56,7 +56,7 @@ class JSONEncoder:
 
     def encode(self, o):
         normalized = self._normalize(o)
-        return _json.dumps(
+        return _dumps(
             normalized,
             self.indent if self.indent is not None else -1,
             self.sort_keys,

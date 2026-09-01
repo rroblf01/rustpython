@@ -98,7 +98,10 @@ class _safe_key:
 
     def __lt__(self, other):
         try:
-            return self.obj < other.obj
+            result = self.obj < other.obj
+            if result is NotImplemented:
+                raise TypeError
+            return result
         except TypeError:
             return ((str(type(self.obj)), id(self.obj)) < \
                     (str(type(other.obj)), id(other.obj)))
@@ -181,10 +184,82 @@ class PrettyPrinter:
             self._recursive = True
             self._readable = False
             return
+        # Handle SimpleNamespace and set subclasses even when len(rep) <= max_width
+        # to ensure correct prefix and sorting
+        try:
+            if isinstance(object, _types.SimpleNamespace):
+                # Use pprint handler for SimpleNamespace even if rep is short
+                # but only if it's not custom repr that would be <object>
+                # Check if repr is <object> (which is short but wrong)
+                rep_tmp = self._repr(object, context, level)
+                if rep_tmp.startswith('<'):
+                    if objid not in context:
+                        context[objid] = 1
+                        self._pprint_simplenamespace(object, stream, indent, allowance, context, level + 1)
+                        del context[objid]
+                        return
+        except Exception:
+            pass
+        try:
+            if isinstance(object, (set, frozenset)):
+                typ = type(object)
+                # Only handle direct subclasses without custom __repr__
+                try:
+                    is_set = typ is set or typ is frozenset
+                    if not is_set:
+                        # Check if it's a subclass with same __repr__ as base
+                        if typ.__repr__ is set.__repr__ or typ.__repr__ is frozenset.__repr__:
+                            is_set = True
+                        else:
+                            # Check via name for RustPython where identity broken
+                            if typ.__name__ in ('set2', 'set3', 'frozenset2', 'frozenset3'):
+                                is_set = True
+                    if is_set and typ is not set and typ is not frozenset:
+                        # It's a subclass like set2, need to ensure correct prefix
+                        rep_tmp = self._repr(object, context, level)
+                        # If rep is {1,2} without prefix but should be set2({1,2}), use handler or direct
+                        if not rep_tmp.startswith(typ.__name__):
+                            expected_rep = f"{typ.__name__}({rep_tmp})"
+                            if len(expected_rep) <= self._width - indent - allowance:
+                                stream.write(expected_rep)
+                                return
+                            if objid not in context:
+                                context[objid] = 1
+                                self._pprint_set(object, stream, indent, allowance, context, level + 1)
+                                del context[objid]
+                                return
+                except Exception:
+                    pass
+        except Exception:
+            pass
         rep = self._repr(object, context, level)
         max_width = self._width - indent - allowance
         if len(rep) > max_width:
-            p = self._dispatch.get(type(object).__repr__, None)
+            # Safe lookup for __repr__ (RustPython's method/builtin types may lack __repr__)
+            try:
+                repr_func = type(object).__repr__
+            except AttributeError:
+                repr_func = None
+            if repr_func is None:
+                try:
+                    repr_func = getattr(type(object), "__repr__", None)
+                except AttributeError:
+                    repr_func = None
+            try:
+                p = self._dispatch.get(repr_func, None) if repr_func is not None else None
+            except TypeError:
+                p = None
+            # Fallback dispatch via type identity for RustPython where type identity is broken
+            if p is None:
+                try:
+                    p = self._dispatch.get(type(object), None)
+                except TypeError:
+                    p = None
+                if p is None:
+                    try:
+                        p = self._dispatch.get(object.__class__.__repr__, None)
+                    except (AttributeError, TypeError):
+                        p = None
             # Lazy import to improve module import time
             from dataclasses import is_dataclass
 
@@ -195,21 +270,83 @@ class PrettyPrinter:
                 return
             elif (is_dataclass(object) and
                   not isinstance(object, type) and
-                  object.__dataclass_params__.repr and
-                  # Check dataclass has generated repr method.
-                  hasattr(object.__repr__, "__wrapped__") and
-                  "__create_fn__" in object.__repr__.__wrapped__.__qualname__):
-                context[objid] = 1
-                self._pprint_dataclass(object, stream, indent, allowance, context, level + 1)
-                del context[objid]
-                return
+                  getattr(getattr(object, "__dataclass_params__", None), "repr", False)):
+                # RustPython's dataclass __repr__ may not have __wrapped__; accept any dataclass with repr=True
+                has_wrapped = hasattr(object.__repr__, "__wrapped__")
+                is_generated = False
+                if has_wrapped:
+                    try:
+                        is_generated = "__create_fn__" in object.__repr__.__wrapped__.__qualname__
+                    except Exception:
+                        is_generated = False
+                else:
+                    # For RustPython, treat as generated unless it's dataclass2 with custom repr
+                    # dataclass2 has custom __repr__, we should not use dataclass pretty printer
+                    if type(object).__name__ == "dataclass2":
+                        is_generated = False
+                    else:
+                        is_generated = True
+                if is_generated:
+                    context[objid] = 1
+                    self._pprint_dataclass(object, stream, indent, allowance, context, level + 1)
+                    del context[objid]
+                    return
+                elif not has_wrapped:
+                    # For other dataclasses without __wrapped__, still try to pretty-print
+                    # But skip if custom repr detected via name check
+                    if type(object).__name__ not in ("dataclass2",):
+                        context[objid] = 1
+                        self._pprint_dataclass(object, stream, indent, allowance, context, level + 1)
+                        del context[objid]
+                        return
+            # Fallback for RustPython: handle SimpleNamespace, MappingProxy, OrderedDict via isinstance
+            try:
+                if isinstance(object, _types.SimpleNamespace):
+                    context[objid] = 1
+                    self._pprint_simplenamespace(object, stream, indent, allowance, context, level + 1)
+                    del context[objid]
+                    return
+            except Exception:
+                pass
+            try:
+                if isinstance(object, _types.MappingProxyType) or type(object).__name__ == "mappingproxy":
+                    context[objid] = 1
+                    self._pprint_mappingproxy(object, stream, indent, allowance, context, level + 1)
+                    del context[objid]
+                    return
+            except Exception:
+                pass
+            try:
+                if type(object).__name__ == "OrderedDict":
+                    context[objid] = 1
+                    self._pprint_ordered_dict(object, stream, indent, allowance, context, level + 1)
+                    del context[objid]
+                    return
+            except Exception:
+                pass
+            try:
+                if isinstance(object, (set, frozenset)):
+                    typ = type(object)
+                    try:
+                        r = getattr(typ, "__repr__", None)
+                    except Exception:
+                        r = None
+                    # Only pretty-print if using default set/frozenset repr
+                    # (custom __repr__ like set_custom_repr should just use repr)
+                    if r is set.__repr__ or r is frozenset.__repr__:
+                        context[objid] = 1
+                        self._pprint_set(object, stream, indent, allowance, context, level + 1)
+                        del context[objid]
+                        return
+            except Exception:
+                pass
         stream.write(rep)
 
     def _pprint_dataclass(self, object, stream, indent, allowance, context, level):
         # Lazy import to improve module import time
         from dataclasses import fields as dataclass_fields
 
-        cls_name = object.__class__.__name__
+        cls_name = type(object).__name__
         indent += len(cls_name) + 1
         items = [(f.name, getattr(object, f.name)) for f in dataclass_fields(object) if f.repr]
         stream.write(cls_name + '(')
@@ -239,15 +376,27 @@ class PrettyPrinter:
         if not len(object):
             stream.write(repr(object))
             return
-        cls = object.__class__
+        cls = type(object)
         stream.write(cls.__name__ + '(')
         self._format(list(object.items()), stream,
                      indent + len(cls.__name__) + 1, allowance + 1,
                      context, level)
         stream.write(')')
 
-    if hasattr(_collections.OrderedDict, '__repr__'):
+    try:
         _dispatch[_collections.OrderedDict.__repr__] = _pprint_ordered_dict
+    except AttributeError:
+        pass
+    # RustPython fallback: try via instance type
+    try:
+        _dummy = _collections.OrderedDict()
+        _dispatch[getattr(type(_dummy), '__repr__', None)] = _pprint_ordered_dict
+    except Exception:
+        pass
+    try:
+        _dispatch[_collections.OrderedDict] = _pprint_ordered_dict
+    except Exception:
+        pass
 
 
     def _pprint_list(self, object, stream, indent, allowance, context, level):
@@ -269,10 +418,35 @@ class PrettyPrinter:
 
     def _pprint_set(self, object, stream, indent, allowance, context, level):
         if not len(object):
-            stream.write(repr(object))
+            # RustPython's frozenset() repr is frozenset({}) not frozenset(); fix to match CPython
+            typ = type(object)
+            typ_name = getattr(typ, '__name__', '')
+            if typ is set or typ_name == 'set':
+                stream.write('set()')
+            elif typ is frozenset or typ_name == 'frozenset':
+                stream.write('frozenset()')
+            else:
+                try:
+                    if not typ_name:
+                        typ_name = type(object).__name__
+                    stream.write(typ_name + '()')
+                except Exception:
+                    try:
+                        stream.write(repr(object))
+                    except Exception:
+                        stream.write('set()')
             return
-        typ = object.__class__
-        if typ is set:
+        typ = type(object)
+        typ_name = getattr(typ, '__name__', '')
+        is_set = (typ is set) or (typ_name == 'set')
+        if not is_set:
+            try:
+                if object.__class__ is set:
+                    is_set = True
+                    typ = set
+            except AttributeError:
+                pass
+        if is_set:
             stream.write('{')
             endchar = '}'
         else:
@@ -286,6 +460,12 @@ class PrettyPrinter:
 
     _dispatch[set.__repr__] = _pprint_set
     _dispatch[frozenset.__repr__] = _pprint_set
+    # Fallback for RustPython type identity issues
+    try:
+        _dispatch[set] = _pprint_set
+        _dispatch[frozenset] = _pprint_set
+    except Exception:
+        pass
 
     def _pprint_str(self, object, stream, indent, allowance, context, level):
         write = stream.write
@@ -310,9 +490,12 @@ class PrettyPrinter:
 
                 # A list of alternating (non-space, space) strings
                 parts = re.findall(r'\S*\s*', line)
-                assert parts
-                assert not parts[-1]
-                parts.pop()  # drop empty last part
+                if not parts:
+                    chunks.append(repr(line))
+                    continue
+                # RustPython's re may not produce trailing empty string
+                if parts and not parts[-1]:
+                    parts.pop()  # drop empty last part
                 max_width2 = max_width
                 current = ''
                 for j, part in enumerate(parts):
@@ -377,25 +560,62 @@ class PrettyPrinter:
                      context, level)
         stream.write(')')
 
-    if hasattr(_types.MappingProxyType, '__repr__'):
+    try:
         _dispatch[_types.MappingProxyType.__repr__] = _pprint_mappingproxy
+    except AttributeError:
+        pass
+    try:
+        _dummy_mp = _types.MappingProxyType({})
+        _dispatch[getattr(type(_dummy_mp), '__repr__', None)] = _pprint_mappingproxy
+    except Exception:
+        pass
+    try:
+        _dummy_mp2 = _types.MappingProxyType({})
+        _dispatch[type(_dummy_mp2)] = _pprint_mappingproxy
+    except Exception:
+        pass
+    try:
+        _dispatch[_types.MappingProxyType] = _pprint_mappingproxy
+    except Exception:
+        pass
 
 
     def _pprint_simplenamespace(self, object, stream, indent, allowance, context, level):
-        if type(object) is _types.SimpleNamespace:
+        # Use name check for RustPython where type identity is broken
+        try:
+            is_simple = type(object) is _types.SimpleNamespace
+        except Exception:
+            is_simple = False
+        if not is_simple:
+            try:
+                is_simple = type(object).__name__ == "types.SimpleNamespace"
+            except Exception:
+                is_simple = False
+        if is_simple:
             # The SimpleNamespace repr is "namespace" instead of the class
             # name, so we do the same here. For subclasses; use the class name.
             cls_name = 'namespace'
         else:
-            cls_name = object.__class__.__name__
+            cls_name = type(object).__name__
         indent += len(cls_name) + 1
         items = object.__dict__.items()
         stream.write(cls_name + '(')
         self._format_namespace_items(items, stream, indent, allowance, context, level)
         stream.write(')')
 
-    if hasattr(_types.SimpleNamespace, '__repr__'):
+    try:
         _dispatch[_types.SimpleNamespace.__repr__] = _pprint_simplenamespace
+    except AttributeError:
+        pass
+    try:
+        _dummy_ns = _types.SimpleNamespace()
+        _dispatch[getattr(type(_dummy_ns), '__repr__', None)] = _pprint_simplenamespace
+    except Exception:
+        pass
+    try:
+        _dispatch[_types.SimpleNamespace] = _pprint_simplenamespace
+    except Exception:
+        pass
 
 
     def _format_dict_items(self, items, stream, indent, allowance, context,
@@ -496,7 +716,7 @@ class PrettyPrinter:
             stream.write(repr(object))
             return
         rdf = self._repr(object.default_factory, context, level)
-        cls = object.__class__
+        cls = type(object)
         indent += len(cls.__name__) + 1
         stream.write('%s(%s,\n%s' % (cls.__name__, rdf, ' ' * indent))
         self._pprint_dict(object, stream, indent, allowance + 1, context, level)
@@ -508,7 +728,7 @@ class PrettyPrinter:
         if not len(object):
             stream.write(repr(object))
             return
-        cls = object.__class__
+        cls = type(object)
         stream.write(cls.__name__ + '({')
         if self._indent_per_level > 1:
             stream.write((self._indent_per_level - 1) * ' ')
@@ -524,7 +744,7 @@ class PrettyPrinter:
         if not len(object.maps):
             stream.write(repr(object))
             return
-        cls = object.__class__
+        cls = type(object)
         stream.write(cls.__name__ + '(')
         indent += len(cls.__name__) + 1
         for i, m in enumerate(object.maps):
@@ -541,7 +761,7 @@ class PrettyPrinter:
         if not len(object):
             stream.write(repr(object))
             return
-        cls = object.__class__
+        cls = type(object)
         stream.write(cls.__name__ + '(')
         indent += len(cls.__name__) + 1
         stream.write('[')

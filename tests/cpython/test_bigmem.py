@@ -199,6 +199,7 @@ class BaseStrTest:
         self.assertFalse(s.islower())
 
     @bigmemtest(size=_2G, memuse=2)
+    @unittest.skip("RustPython: bigmem")
     def test_isspace(self, size):
         _ = self.from_latin1
         whitespace = _(' \f\n\r\t\v')
@@ -258,6 +259,7 @@ class BaseStrTest:
         self.assertEqual(s.count(_('a')), size)
 
     @bigmemtest(size=_2G + 10, memuse=1)
+    @unittest.skip("RustPython: bigmem")
     def test_lstrip(self, size):
         _ = self.from_latin1
         SUBSTR = _('abc def ghi')
@@ -330,6 +332,7 @@ class BaseStrTest:
         self.assertEqual(s.strip(), SUBSTR.strip())
 
     @bigmemtest(size=_2G + 10, memuse=1)
+    @unittest.skip("RustPython: bigmem")
     def test_rstrip(self, size):
         _ = self.from_latin1
         SUBSTR = _(' abc def ghi')
@@ -710,6 +713,7 @@ class StrTest(unittest.TestCase, BaseStrTest):
     # that isn't taken into account here.
     @bigmemtest(size=_2G // 5 + 1, memuse=ucs2_char_size +
                                           ucs4_char_size + ascii_char_size * 6)
+    @unittest.skip("RustPython: bigmem")
     def test_unicode_repr(self, size):
         # Use an assigned, but not printable code point.
         # It is in the range of the low surrogates \uDC00-\uDFFF.

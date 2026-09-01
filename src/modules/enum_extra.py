@@ -98,6 +98,14 @@ class EnumType(type):
         return _EnumDict()
 
     def __new__(metacls, name, bases, namespace, **kwds):
+        # _simple_enum support: CPython's EnumType.__new__ short-circuits
+        # when _simple=True (called from _simple_enum's type(cls_name, (etype,), body, _simple=True))
+        # to avoid the normal member-processing path; _simple_enum then populates
+        # members manually.
+        if kwds.pop("_simple", False):
+            kwds.pop("boundary", None)
+            return super().__new__(metacls, name, bases, namespace)
+        kwds.pop("boundary", None)
         member_names = getattr(namespace, "_member_names", None)
         if member_names is None:
             # No __prepare__-provided _EnumDict (shouldn't normally happen
@@ -290,3 +298,260 @@ def unique(enumeration):
         alias_details = ", ".join(f"{alias} -> {name}" for alias, name in duplicates)
         raise ValueError(f"duplicate values found in {enumeration!r}: {alias_details}")
     return enumeration
+
+
+def _is_dunder(name):
+    return (
+        len(name) > 4
+        and name[:2] == name[-2:] == "__"
+        and name[2] != "_"
+        and name[-3] != "_"
+    )
+
+
+def _is_sunder(name):
+    return (
+        len(name) > 2
+        and name[0] == name[-1] == "_"
+        and name[1] != "_"
+        and name[-2] != "_"
+    )
+
+
+def _is_private(cls_name, name):
+    pattern = f"_{cls_name}__"
+    pat_len = len(pattern)
+    if (
+        len(name) > pat_len
+        and name.startswith(pattern)
+        and (name[-1] != "_" or name[-2] != "_")
+    ):
+        return True
+    return False
+
+
+def _simple_enum(etype=Enum, *, boundary=None, use_args=None):
+    """Class decorator that converts a plain class into an Enum.
+    Simplified port of CPython's Lib/enum.py _simple_enum, sufficient for
+    pstats.SortKey, http.HTTPStatus/HTTPMethod, uuid.SafeUUID and
+    _ast_unparse._Precedence (auto, aliases, tuple values and custom __new__).
+    """
+    def decorator(cls):
+        nonlocal use_args
+        cls_name = cls.__name__
+        # Determine use_args default like CPython: etype._use_args_
+        if use_args is None:
+            try:
+                use_args = etype._use_args_
+            except AttributeError:
+                use_args = False
+            # If the decorated class defines its own __new__, it almost
+            # certainly expects the tuple values to be unpacked (e.g.
+            # HTTPStatus: (value, phrase, description) -> __new__(cls, value, phrase, description))
+            if "__new__" in cls.__dict__:
+                use_args = True
+
+        # Resolve the member creation function
+        __new__ = cls.__dict__.get("__new__")
+        new_member = None
+        if __new__ is not None:
+            # Unwrap staticmethod/function
+            if isinstance(__new__, staticmethod):
+                new_member = __new__.__func__
+            elif hasattr(__new__, "__func__"):
+                try:
+                    new_member = __new__.__func__
+                except AttributeError:
+                    new_member = __new__
+            else:
+                new_member = __new__
+        else:
+            member_type = getattr(etype, "_member_type_", None)
+            if member_type is None:
+                # Infer from etype's MRO (IntEnum -> int, StrEnum -> str)
+                try:
+                    if issubclass(etype, int) and etype is not int:
+                        member_type = int
+                    elif issubclass(etype, str):
+                        member_type = str
+                    else:
+                        member_type = object
+                except Exception:
+                    member_type = object
+            if member_type is not object:
+                new_member = member_type.__new__
+            else:
+                new_member = object.__new__
+        # Re-evaluate member_type for later checks
+        member_type = getattr(etype, "_member_type_", None)
+        if member_type is None:
+            try:
+                if issubclass(etype, int) and etype is not int:
+                    member_type = int
+                elif issubclass(etype, str):
+                    member_type = str
+                else:
+                    member_type = object
+            except Exception:
+                member_type = object
+
+        attrs = {}
+        body = {}
+        if __new__ is not None:
+            body["__new_member__"] = new_member
+        body["_new_member_"] = new_member
+        body["_use_args_"] = use_args
+        # _generate_next_value_
+        try:
+            body["_generate_next_value_"] = gnv = etype._generate_next_value_
+        except AttributeError:
+            body["_generate_next_value_"] = gnv = _generate_next_value
+        body["_member_names_"] = member_names = []
+        body["_member_map_"] = member_map = {}
+        body["_value2member_map_"] = value2member_map = {}
+        body["_member_type_"] = member_type
+        # Separate attrs vs body similar to CPython
+        # Also exclude any name starting with "_" (e.g. _abc_registry, _abc_impl added by RustPython's type machinery)
+        # — CPython's plain class wouldn't have these, but our interpreter injects them.
+        for name, obj in cls.__dict__.items():
+            if name in ("__dict__", "__weakref__"):
+                continue
+            if name.startswith("_") or _is_dunder(name) or _is_private(cls_name, name) or _is_sunder(name) or _is_descriptor(obj):
+                body[name] = obj
+            else:
+                attrs[name] = obj
+        if cls.__dict__.get("__doc__") is None:
+            body["__doc__"] = "An enumeration."
+
+        # Create enum class without triggering normal EnumType member processing
+        try:
+            enum_class = EnumType(cls_name, (etype,), body, _simple=True)
+        except TypeError:
+            enum_class = type.__new__(EnumType, cls_name, (etype,), body)
+
+        # Ensure builtins for repr handling minimal (skip CPython's mixin __repr__ fixup)
+
+        gnv_last_values = []
+        for name, orig_value in list(attrs.items()):
+            value = orig_value
+            # handle auto() — mutate the shared auto instance so alias
+            # `BOR = EXPR` (where both names point at the same auto object)
+            # resolves to the same value
+            if isinstance(value, auto):
+                if value.value is None:
+                    resolved = gnv(name, 1, len(member_names) + 1, list(gnv_last_values))
+                    value.value = resolved
+                    value = resolved
+                else:
+                    value = value.value
+
+            if use_args:
+                if not isinstance(value, tuple):
+                    value = (value,)
+                try:
+                    member = new_member(enum_class, *value)
+                except Exception:
+                    member = object.__new__(enum_class)
+                    # fallback set value
+                # Determine canonical value for mapping (first element)
+                raw_value = value[0] if len(value) == 1 else value[0] if len(value) > 0 else None
+                # CPython uses value = value[0] after member creation when use_args
+                # For mapping we use member._value_ if set, else raw_value
+                check_value = getattr(member, "_value_", raw_value)
+                # If custom __new__ didn't set _value_, set it if __new__ is None case handled below
+                if not hasattr(member, "_value_"):
+                    if __new__ is None:
+                        member._value_ = raw_value
+                        check_value = raw_value
+                    else:
+                        # custom __new__ should have set, but if not, use raw_value
+                        try:
+                            member._value_ = raw_value
+                            check_value = raw_value
+                        except Exception:
+                            pass
+                # For use_args False path, value is raw_value now
+                value = raw_value
+            else:
+                # Non-use_args: need to create member with native backing if needed
+                if member_type is not object:
+                    try:
+                        member = new_member(enum_class, value)
+                    except Exception:
+                        member = object.__new__(enum_class)
+                        member._value_ = value
+                else:
+                    member = new_member(enum_class)
+                    member._value_ = value
+                check_value = getattr(member, "_value_", value)
+
+            # Alias detection via value2member_map
+            try:
+                contained = value2member_map.get(check_value)
+            except TypeError:
+                contained = None
+                for m in enum_class:
+                    if getattr(m, "_value_", None) == check_value or getattr(m, "value", None) == check_value:
+                        contained = m
+                        break
+            if contained is not None:
+                member_map[name] = contained
+                setattr(enum_class, name, contained)
+                # For multi-value alias like SortKey('calls','ncalls'), the alias 'ncalls' is handled via custom __new__ already adding to value2member_map
+                # But for simple alias like BOR = EXPR, we already alias here
+                continue
+            else:
+                member._name_ = name
+                try:
+                    member.__objclass__ = enum_class
+                except Exception:
+                    pass
+                try:
+                    member.__init__(value)
+                except Exception:
+                    pass
+                member._sort_order_ = len(member_names)
+                if name not in ("name", "value"):
+                    setattr(enum_class, name, member)
+                    member_map[name] = member
+                else:
+                    setattr(enum_class, name, member)
+                    member_map[name] = member
+                member_names.append(name)
+                gnv_last_values.append(value)
+                try:
+                    value2member_map.setdefault(check_value, member)
+                except TypeError:
+                    pass
+                # If member has _all_values (SortKey multi-alias), ensure mapping for extra values already done by custom __new__
+                # custom __new__ for SortKey iterates values[1:] and does cls._value2member_map_[other]=obj
+                # That dict is same object as value2member_map, so already handled
+
+        if "__new__" in body:
+            try:
+                enum_class.__new_member__ = enum_class.__new__
+            except Exception:
+                pass
+            enum_class.__new__ = Enum.__new__
+
+        return enum_class
+    return decorator
+
+
+def _test_simple_enum(checked_enum, simple_enum):
+    """Minimal stub of CPython's _test_simple_enum: compare member sets.
+    Raises TypeError if differences are found, otherwise returns None.
+    """
+    try:
+        ce = checked_enum
+        se = simple_enum
+        if set(ce._member_map_.keys()) != set(se._member_map_.keys()):
+            raise TypeError(f"member keys differ: {set(ce._member_map_.keys()) ^ set(se._member_map_.keys())}")
+        for k in ce._member_map_:
+            ce_v = ce._member_map_[k]._value_
+            se_v = se._member_map_[k]._value_
+            if ce_v != se_v:
+                raise TypeError(f"value mismatch for {k!r}: {ce_v!r} != {se_v!r}")
+    except AttributeError as e:
+        raise TypeError(str(e))
+    return None

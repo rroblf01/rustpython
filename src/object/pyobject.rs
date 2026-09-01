@@ -4,33 +4,12 @@
 // `PyObject`'s basic accessor methods (`type_name`/`repr`/`str`/`truthy`/
 // `hash`/`equals`).
 use super::*;
-
-/// Boxed function data — separates Function's large payload from the
-/// `PyObject` enum so the enum itself stays small (176 -> 8 bytes in enum).
-pub struct PyFunction {
-    pub code: Rc<CodeObject>,
-    pub globals: Rc<RefCell<HashMap<StrId, PyObjectRef>>>,
-    pub defaults: Vec<PyObjectRef>,
-    pub closure: Vec<PyObjectRef>,
-    pub dict: HashMap<String, PyObjectRef>,
-    pub jit_ptr: std::cell::Cell<usize>,
-    pub jit_consts: std::cell::RefCell<Vec<PyObjectRef>>,
-}
-
-impl Clone for PyFunction {
-    fn clone(&self) -> Self {
-        PyFunction {
-            code: self.code.clone(),
-            globals: self.globals.clone(),
-            defaults: self.defaults.clone(),
-            closure: self.closure.clone(),
-            dict: self.dict.clone(),
-            jit_ptr: std::cell::Cell::new(self.jit_ptr.get()),
-            jit_consts: std::cell::RefCell::new(self.jit_consts.borrow().clone()),
-        }
-    }
-}
-
+mod func;
+pub use func::PyFunction;
+mod format;
+pub(crate) use format::{escape_string, format_complex_part, format_py_float};
+mod repr;
+mod hash;
 #[derive(Clone)]
 pub enum PyObject {
     None,
@@ -85,6 +64,36 @@ pub enum PyObject {
         deque: PyObjectRef,
         index: usize,
         start_len: usize,
+    },
+    /// Backing for `reversed(deque)` — reverse LIVE iterator with mutation detection.
+    DequeRevIter {
+        deque: PyObjectRef,
+        index: isize,
+        start_len: usize,
+    },
+    DictIter {
+        dict: PyObjectRef,
+        keys: Vec<PyObjectRef>,
+        index: usize,
+        expected_version: u64,
+    },
+    DictValuesIter {
+        dict: PyObjectRef,
+        values: Vec<PyObjectRef>,
+        index: usize,
+        expected_version: u64,
+    },
+    DictItemsIter {
+        dict: PyObjectRef,
+        items: Vec<(PyObjectRef, PyObjectRef)>,
+        index: usize,
+        expected_version: u64,
+    },
+    DictRevIter {
+        dict: PyObjectRef,
+        keys: Vec<PyObjectRef>,
+        index: isize,
+        expected_version: u64,
     },
     /// Backing for the "old-style sequence iteration" fallback: real Python
     /// makes ANY object with `__getitem__` but no `__iter__` iterable by
@@ -217,6 +226,18 @@ pub enum PyObject {
     Cell {
         value: Option<PyObjectRef>,
     },
+    /// A real weak reference (`weakref.ref(obj)`): holds only a `Weak` to the
+    /// target, so it never keeps the target alive. Calling it yields the
+    /// target (or `None`, or a caller-supplied default once dead).
+    WeakRef {
+        target: std::rc::Weak<std::cell::RefCell<PyObject>>,
+        callback: Option<PyObjectRef>,
+        hash_cache: std::cell::RefCell<Option<usize>>,
+    },
+    WeakProxy {
+        target: std::rc::Weak<std::cell::RefCell<PyObject>>,
+        callback: Option<PyObjectRef>,
+    },
     // Reserved for future C-extension capsule support (ffi_bridge.rs); not
     // constructed anywhere yet.
     #[allow(dead_code)]
@@ -249,6 +270,8 @@ pub enum PyObject {
     Partial {
         func: PyObjectRef,
         args: Vec<PyObjectRef>,
+        /// Per-instance attribute storage (CPython's partial has __dict__).
+        dict: crate::object::core::AttrMap,
     },
     File {
         file: std::rc::Rc<std::cell::RefCell<std::fs::File>>,
@@ -340,6 +363,7 @@ pub enum PyObject {
         itemsize: usize,
         offset: usize,
         readonly: bool,
+        released: bool,
     },
     CompiledRegex {
         regex: Box<fancy_regex::Regex>,
@@ -372,65 +396,11 @@ pub enum SocketInner {
     TcpStream(std::net::TcpStream),
     Uninitialized,
 }
-
-fn format_py_float(f: f64) -> String {
-    if f.is_nan() {
-        "nan".to_string()
-    } else if f.is_infinite() && f.is_sign_positive() {
-        "inf".to_string()
-    } else if f.is_infinite() {
-        "-inf".to_string()
-    } else {
-        // Rust's `{:?}` on f64 is the SHORTEST round-trip representation
-        // (Ryu) — the same unique digit string CPython's repr uses, where the
-        // old `{:.17}` form always emitted 17 significant digits (1.3 became
-        // "1.30000000000000004") and never used exponents (1e300 printed as a
-        // giant integer). Only the EXPONENT syntax differs from Python:
-        // Python always writes a sign for positive exponents and pads the
-        // exponent to at least two digits (`1e-05`, `1e+16`).
-        let mut s = format!("{:?}", f);
-        if let Some(epos) = s.find('e') {
-            let sign_pos = epos + 1;
-            let has_sign = s[sign_pos..].starts_with('-') || s[sign_pos..].starts_with('+');
-            if !has_sign {
-                s.insert(sign_pos, '+');
-            }
-            // pad exponent to at least 2 digits: 1e-5 -> 1e-05
-            let digits_start = sign_pos + 1;
-            if s.len() - digits_start < 2 {
-                s.insert(digits_start, '0');
-            }
-        }
-        s
-    }
-}
-
-/// Like `format_py_float`, but for a `complex` literal's real/imaginary
-/// components — real CPython's `complex.__repr__` does NOT force a trailing
-/// `.0` on whole-number parts the way `float.__repr__` does (`repr(2j)` ==
-/// `'2j'`, not `'2.0j'`; `repr(complex(3,4))` == `'(3+4j)'`, not
-/// `'(3.0+4.0j)'`).
-fn format_complex_part(f: f64) -> String {
-    if f.is_nan() {
-        "nan".to_string()
-    } else if f.is_infinite() && f.is_sign_positive() {
-        "inf".to_string()
-    } else if f.is_infinite() {
-        "-inf".to_string()
-    } else {
-        let s = format_py_float(f);
-        // A whole-number part loses its ".0" (`repr(2j)` == "2j", not
-        // "2.0j") — Rust's shortest repr emits "2.0" for 2.0.
-        if s.ends_with(".0") && !s.contains('e') {
-            s[..s.len() - 2].to_string()
-        } else {
-            s
-        }
-    }
-}
-
 impl PyObject {
     pub fn type_name(&self) -> String {
+        if let PyObject::Instance { typ, .. } = self {
+            return get_type_name_for_instance(typ);
+        }
         match self {
             PyObject::None => "NoneType",
             PyObject::Bool(_) => "bool",
@@ -451,6 +421,7 @@ impl PyObject {
             PyObject::RangeIter { .. } => "range_iterator",
             PyObject::ListIter { .. } => "list_iterator",
             PyObject::DequeIter { .. } => "deque_iterator",
+            PyObject::DequeRevIter { .. } => "deque_reverse_iterator",
             PyObject::GetItemIter { .. } => "iterator",
             PyObject::CallSentinelIter { .. } => "callable_iterator",
             PyObject::EnumerateIter { .. } => "enumerate",
@@ -466,6 +437,18 @@ impl PyObject {
             PyObject::Type { name, .. } => name,
             PyObject::Instance { .. } => "instance",
             PyObject::Cell { .. } => "cell",
+            PyObject::WeakRef { .. } => "weakref",
+            PyObject::WeakProxy { target, .. } => {
+                if let Some(rc) = target.upgrade() {
+                    let b = rc.borrow();
+                    let is_callable = match &*b {
+                        PyObject::Instance { typ, .. } => crate::object::lookup_dunder_via_mro(typ, "__call__").is_some(),
+                        PyObject::Function(_) | PyObject::BuiltinFunction { .. } | PyObject::BuiltinMethod { .. } | PyObject::BoundMethod { .. } => true,
+                        _ => b.get_attribute("__call__").is_ok(),
+                    };
+                    if is_callable { "weakcallableproxy" } else { "weakproxy" }
+                } else { "weakproxy" }
+            },
             PyObject::Capsule { .. } => "capsule",
             PyObject::Exception { typ, .. } => typ,
             PyObject::ExceptionGroup { typ, .. } => typ,
@@ -493,260 +476,14 @@ impl PyObject {
             PyObject::Process { .. } => "Popen",
             PyObject::CycleIter { .. } => "itertools.cycle",
             PyObject::GroupByIter { .. } => "itertools.groupby",
+            PyObject::DictIter { .. } => "dict_keyiterator",
+            PyObject::DictValuesIter { .. } => "dict_valueiterator",
+            PyObject::DictItemsIter { .. } => "dict_itemiterator",
+            PyObject::DictRevIter { .. } => "dict_reversekeyiterator",
         }
         .to_string()
     }
 
-    pub fn repr(&self) -> String {
-        match self {
-            PyObject::None => "None".to_string(),
-            PyObject::Bool(b) => if *b { "True" } else { "False" }.to_string(),
-            PyObject::Int(i) => i.to_string(),
-            PyObject::Float(f) => format_py_float(*f),
-            PyObject::Complex(re, im) => {
-                // Real CPython: a zero real part reprs as just `<imag>j`;
-                // otherwise `(<real><sign><|imag|>j)` — matches `repr(1+2j)`
-                // == '(1+2j)', `repr(2j)` == '2j', `repr(1-2j)` == '(1-2j)'.
-                if *re == 0.0 && re.is_sign_positive() {
-                    format!("{}j", format_complex_part(*im))
-                } else {
-                    let sign = if im.is_sign_negative() { "-" } else { "+" };
-                    format!(
-                        "({}{}{}j)",
-                        format_complex_part(*re),
-                        sign,
-                        format_complex_part(im.abs())
-                    )
-                }
-            }
-            PyObject::Str(s) => format!("'{}'", escape_string(s)),
-            PyObject::Bytes(b) => {
-                let s: String = b
-                    .iter()
-                    .map(|&byte| match byte {
-                        b'\\' => "\\\\".to_string(),
-                        b'\'' => "\\'".to_string(),
-                        b'\n' => "\\n".to_string(),
-                        b'\t' => "\\t".to_string(),
-                        b'\r' => "\\r".to_string(),
-                        0x20..=0x7e => (byte as char).to_string(),
-                        _ => format!("\\x{:02x}", byte),
-                    })
-                    .collect();
-                format!("b'{}'", s)
-            }
-            PyObject::ByteArray(b) => {
-                let s: String = b
-                    .iter()
-                    .map(|&byte| match byte {
-                        b'\\' => "\\\\".to_string(),
-                        b'\'' => "\\'".to_string(),
-                        b'\n' => "\\n".to_string(),
-                        b'\t' => "\\t".to_string(),
-                        b'\r' => "\\r".to_string(),
-                        0x20..=0x7e => (byte as char).to_string(),
-                        _ => format!("\\x{:02x}", byte),
-                    })
-                    .collect();
-                format!("bytearray(b'{}')", s)
-            }
-            PyObject::List(items) => {
-                let items: Vec<String> = items.iter().map(|x| x.repr()).collect();
-                format!("[{}]", items.join(", "))
-            }
-            PyObject::Deque { data, maxlen } => {
-                let items: Vec<String> = data.iter().map(|x| x.repr()).collect();
-                match maxlen {
-                    Some(n) => format!("deque([{}], maxlen={})", items.join(", "), n),
-                    None => format!("deque([{}])", items.join(", ")),
-                }
-            }
-            PyObject::Tuple(items) => {
-                let items: Vec<String> = items.iter().map(|x| x.repr()).collect();
-                if items.len() == 1 {
-                    format!("({},)", items[0])
-                } else {
-                    format!("({})", items.join(", "))
-                }
-            }
-            PyObject::Dict(d) => {
-                let items: Vec<String> = d
-                    .items()
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", k.repr(), v.repr()))
-                    .collect();
-                format!("{{{}}}", items.join(", "))
-            }
-            PyObject::Globals(g) => {
-                let entries: Vec<(PyObjectRef, PyObjectRef)> = g
-                    .borrow()
-                    .iter()
-                    .map(|(k, v)| (py_str(interner::lookup_str(*k)), v.clone()))
-                    .collect();
-                let parts: Vec<String> = entries
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", k.repr(), v.repr()))
-                    .collect();
-                format!("{{{}}}", parts.join(", "))
-            }
-            PyObject::Set(items) => {
-                let vec = items.to_vec();
-                let items: Vec<String> = vec.iter().map(|x| x.repr()).collect();
-                format!("{{{}}}", items.join(", "))
-            }
-            PyObject::FrozenSet(items) => {
-                let vec = items.to_vec();
-                let items: Vec<String> = vec.iter().map(|x| x.repr()).collect();
-                format!("frozenset({{{}}})", items.join(", "))
-            }
-            PyObject::Range { start, stop, step } => {
-                if *step == num_bigint::BigInt::from(1) {
-                    format!("range({}, {})", start, stop)
-                } else {
-                    format!("range({}, {}, {})", start, stop, step)
-                }
-            }
-            PyObject::RangeIter { .. } => "<range_iterator object>".to_string(),
-            PyObject::ListIter { .. } => "<list_iterator object>".to_string(),
-            PyObject::DequeIter { .. } => "<deque_iterator object>".to_string(),
-            PyObject::GetItemIter { .. } => "<iterator object>".to_string(),
-            PyObject::CallSentinelIter { .. } => "<callable_iterator object>".to_string(),
-            PyObject::EnumerateIter { .. } => "<enumerate object>".to_string(),
-            PyObject::MapIterator { .. } => "<map object>".to_string(),
-            PyObject::FilterIterator { .. } => "<filter object>".to_string(),
-            PyObject::ZipIterator { .. } => "<zip object>".to_string(),
-            PyObject::Slice { start, stop, step } => {
-                format!("slice({}, {}, {})", start.repr(), stop.repr(), step.repr())
-            }
-            PyObject::Function(ref f) => format!("<function {}>", f.code.name),
-            PyObject::BuiltinFunction { name, .. } => format!("<built-in function {}>", name),
-            PyObject::BuiltinMethod { name, self_obj, .. } => {
-                // CPython: `<built-in method split of str object at 0x...>`
-                // — a method bound to a native receiver reports the
-                // receiver's type (test_reprlib::test_builtin_function).
-                let receiver = self_obj.borrow();
-                let owner = if matches!(&*receiver, PyObject::None) {
-                    None
-                } else {
-                    Some(receiver.type_name().to_string())
-                };
-                match owner {
-                    Some(t) => format!(
-                        "<built-in method {} of {} object at 0x{:x}>",
-                        name, t, self as *const PyObject as usize
-                    ),
-                    None => format!("<built-in method {}>", name),
-                }
-            }
-            PyObject::Module { name, .. } => format!("<module '{}'>", name),
-            PyObject::Type { name, .. } => format!("<class '{}'>", name),
-            PyObject::Instance { typ, .. } => {
-                // CPython: `<module.Class object at 0x...>` — dataclasses'
-                // repr=False instances and test_pprint's regex expect the
-                // module-qualified name, not the bare `<Class object>`.
-                let tb = typ.borrow();
-                let name = if let PyObject::Type { dict, name, .. } = &*tb {
-                    let module = dict
-                        .get_str("__module__")
-                        .map(|m| m.str())
-                        .unwrap_or_else(|| "builtins".to_string());
-                    format!("{}.{}", module, name)
-                } else {
-                    tb.type_name().to_string()
-                };
-                format!(
-                    "<{} object at 0x{:x}>",
-                    name, self as *const PyObject as usize
-                )
-            }
-            PyObject::Code(c) => format!("<code object {}>", c.name),
-            PyObject::Cell { value: Some(v) } => v.repr(),
-            PyObject::Cell { value: None } => "None".to_string(),
-            PyObject::Capsule { name, .. } => format!("<capsule object '{}'>", name),
-            PyObject::Exception {
-                typ,
-                args,
-                cause: _,
-                suppress_context: _,
-                ..
-            } => {
-                let args_str: Vec<String> = args.iter().map(|a| a.repr()).collect();
-                format!("{}({})", typ, args_str.join(", "))
-            }
-            PyObject::ExceptionGroup {
-                typ,
-                args,
-                exceptions,
-            } => {
-                let args_str: Vec<String> = args.iter().map(|a| a.repr()).collect();
-                let exc_str: Vec<String> = exceptions.iter().map(|e| e.repr()).collect();
-                format!("{}({}, {})", typ, args_str.join(", "), exc_str.join(", "))
-            }
-            PyObject::BuildClass => "<builtin function __build_class__>".to_string(),
-            PyObject::BoundMethod { func, .. } => {
-                format!("<bound method {}>", func.borrow().type_name())
-            }
-            PyObject::Partial { func, .. } => format!("<partial {}>", func.borrow().type_name()),
-            PyObject::File { name, .. } => format!("<_io.FileIO '{}'>", name),
-            PyObject::Socket { .. } => format!("<socket object>"),
-            PyObject::Thread(_) => "<Thread>".to_string(),
-            PyObject::Lock(_) => "<lock>".to_string(),
-            PyObject::RLock(_) => "<RLock>".to_string(),
-            PyObject::Event(_) => "<Event>".to_string(),
-            PyObject::Queue(_) => "<Queue>".to_string(),
-            PyObject::Super { .. } => format!("<super object>"),
-            PyObject::Property(_) => format!("<property object>"),
-            PyObject::StaticMethod { func } => format!("<staticmethod({})>", func.repr()),
-            PyObject::ClassMethod { func } => format!("<classmethod({})>", func.repr()),
-            PyObject::Generator { .. } => format!("<generator object>"),
-            PyObject::Coroutine { .. } => format!("<coroutine object>"),
-            PyObject::Array(arr) => {
-                let items: Vec<String> = arr
-                    .data
-                    .iter()
-                    .map(|v| {
-                        if array_typecode_is_float(arr.typecode) {
-                            py_float(*v).repr()
-                        } else {
-                            py_int(*v as i64).repr()
-                        }
-                    })
-                    .collect();
-                if items.is_empty() {
-                    // CPython: an empty array reprs as `array('i')`.
-                    format!("array('{}')", arr.typecode)
-                } else {
-                    format!("array('{}', [{}])", arr.typecode, items.join(", "))
-                }
-            }
-            PyObject::MemoryView { .. } => {
-                format!("<memory at 0x{:012x}>", self as *const PyObject as usize)
-            }
-            PyObject::CompiledRegex { pattern, .. } => format!("re.compile('{}')", pattern),
-            PyObject::Closure(_) => "<builtin function>".to_string(),
-            PyObject::FutureAwaitIterator { future, yielded } => {
-                format!(
-                    "<future_await_iterator future={} yielded={}>",
-                    future.repr(),
-                    yielded
-                )
-            }
-            PyObject::Process {
-                pid, returncode, ..
-            } => {
-                format!(
-                    "<Popen: returncode: {} args: [pid {}]>",
-                    returncode
-                        .borrow()
-                        .map(|r| r.to_string())
-                        .unwrap_or_else(|| "None".to_string()),
-                    pid
-                )
-            }
-            PyObject::CycleIter { .. } => "<itertools.cycle object>".to_string(),
-            PyObject::GroupByIter { .. } => "<itertools.groupby object>".to_string(),
-        }
-    }
 
     pub fn str(&self) -> String {
         match self {
@@ -843,227 +580,52 @@ impl PyObject {
             // an empty-bytes EOF sentinel from `readline()`).
             PyObject::Bytes(b) => !b.is_empty(),
             PyObject::ByteArray(b) => !b.is_empty(),
+            PyObject::WeakProxy { target, .. } => {
+                if let Some(rc) = target.upgrade() {
+                    return rc.borrow().truthy();
+                } else {
+                    return false;
+                }
+            }
             _ => true,
         }
     }
 
-    pub fn hash(&self) -> PyResult<usize> {
-        match self {
-            PyObject::None => Ok(0),
-            PyObject::Bool(b) => Ok(if *b { 1 } else { 0 }),
-            PyObject::Int(i) => Ok(hash_bigint(i)),
-            // A whole-number float must hash IDENTICALLY to the equal int
-            // (`1.0 == 1` is true, per the numeric-tower equality fix above,
-            // and Python's dict/set invariant requires `a == b => hash(a) ==
-            // hash(b)` — otherwise `{1: 'x'}[1.0]` raises `KeyError` even
-            // though `1.0 in {1: 'x'}` reports the key as present via `==`).
-            // Reuses Int's own (already-established) hash function directly
-            // rather than reimplementing CPython's real mod-2**61-1 float
-            // hash algorithm — this covers the overwhelmingly common case
-            // (whole-number float dict/set keys) without changing Int's own
-            // existing hash values. Non-whole-number floats keep the prior
-            // bit-pattern hash (internally consistent, just not
-            // cross-type-matching — which only matters for fractional
-            // int/float equality, impossible for finite non-whole floats).
-            PyObject::Float(f) => {
-                // NaN hashes to 0 (see the SmallFloat arm in
-                // `PyObjectRef::hash` — this enum method has no handle to
-                // compute an object-identity hash). Finite values use
-                // CPython's `_Py_HashDouble` so whole-number floats hash
-                // identically to the equal int AND `hash(inf) == 314159`.
-                if f.is_nan() {
-                    Ok(0)
-                } else {
-                    Ok(hash_double(*f))
-                }
-            }
-            PyObject::Complex(re, im) => {
-                let real_hash = PyObject::Float(*re).hash()?;
-                if *im == 0.0 {
-                    Ok(real_hash)
-                } else {
-                    let imag_hash = PyObject::Float(*im).hash()?;
-                    let combined =
-                        (real_hash as i64).wrapping_add(1000003i64.wrapping_mul(imag_hash as i64));
-                    Ok((if combined == -1 { -2 } else { combined }) as usize)
-                }
-            }
-            PyObject::Str(s) => Ok(py_hash_str(s)),
-            PyObject::Bytes(b) => Ok(py_hash_bytes(b)),
-            PyObject::Range { start, stop, step } => {
-                // CPython hashes (length, start, step) — NOT stop, so equal
-                // ranges hash equal regardless of differing stops.
-                let length = crate::object::ops_contains::range_len_values(start, stop, step);
-                let one = num_bigint::BigInt::from(1);
-                let mut h: usize = 0x345678;
-                let mix = |h: usize, v: &num_bigint::BigInt| -> usize {
-                    h.wrapping_mul(1000003)
-                        .wrapping_add(v.to_usize().unwrap_or(0))
-                };
-                h = mix(h, &length);
-                let zero = num_bigint::BigInt::from(0);
-                if length != zero {
-                    h = mix(h, start);
-                    if length != one {
-                        h = mix(h, step);
-                    }
-                }
-                Ok(h)
-            }
-            PyObject::Tuple(items) => {
-                // CPython 3.14's exact tuple hash (xxHash-style, so
-                // hash((...)) matches real CPython on 64-bit platforms).
-                const PRIME_1: u64 = 11400714785074694791;
-                const PRIME_2: u64 = 14029467366897019727;
-                const PRIME_5: u64 = 2870177450012600261;
-                let mut acc: u64 = PRIME_5;
-                for item in items {
-                    let lane = item.hash()? as u64;
-                    acc = acc.wrapping_add(lane.wrapping_mul(PRIME_2));
-                    acc = acc.rotate_left(31);
-                    acc = acc.wrapping_mul(PRIME_1);
-                }
-                let len = items.len() as u64;
-                acc = acc.wrapping_add(len ^ (PRIME_5 ^ 3527539));
-                if acc == u64::MAX {
-                    acc = 1546275796;
-                }
-                Ok(acc as usize)
-            }
-            PyObject::FrozenSet(items) => {
-                let mut h: usize = 0x987654;
-                for item in items.to_vec() {
-                    h = h.wrapping_mul(1000003).wrapping_add(item.hash()?);
-                }
-                Ok(h)
-            }
-            PyObject::Instance { typ, dict } => {
-                // Check for __hash__ method (walking the MRO)
-                let f = lookup_dunder_via_mro(typ, "__hash__");
-                if let Some(f) = f {
-                    let result = call_bound_method(
-                        f,
-                        PyObjectRef::new(PyObject::Instance {
-                            typ: typ.clone(),
-                            dict: dict.clone(),
-                        }),
-                        vec![],
-                    )?;
-                    let n = result.borrow();
-                    if let PyObject::Int(i) = &*n {
-                        let bytes = i.to_signed_bytes_le();
-                        let mut h: usize = 0;
-                        for (j, &b) in bytes.iter().enumerate() {
-                            h ^= (b as usize) << ((j % (std::mem::size_of::<usize>())) * 8);
-                        }
-                        Ok(h)
-                    } else {
-                        Err(PyError::type_error("__hash__ should return an integer"))
-                    }
-                } else if let Some(native) = dict.get(NATIVE_BACKING_KEY) {
-                    native.hash()
-                } else {
-                    Err(PyError::type_error(format!(
-                        "unhashable type: '{}'",
-                        self.type_name()
-                    )))
-                }
-            }
-            PyObject::Array(arr) => {
-                let mut h: usize = 0xabcdef;
-                for &v in &arr.data {
-                    let bits = v.to_bits();
-                    h = h.wrapping_mul(1000003).wrapping_add(bits as usize);
-                }
-                Ok(h)
-            }
-            PyObject::Slice { start, stop, step } => {
-                let mut h: usize = 0x345679;
-                h = h.wrapping_mul(1000003).wrapping_add(start.hash()?);
-                h = h.wrapping_mul(1000003).wrapping_add(stop.hash()?);
-                h = h.wrapping_mul(1000003).wrapping_add(step.hash()?);
-                Ok(h)
-            }
-            PyObject::CompiledRegex { pattern, flags, .. } => {
-                let mut h: usize = 0x123456;
-                for b in pattern.bytes() {
-                    h = h.wrapping_mul(1000003).wrapping_add(b as usize);
-                }
-                h = h.wrapping_mul(1000003).wrapping_add(*flags as usize);
-                Ok(h)
-            }
-            // Functions, types, modules, etc. are hashable by identity in
-            // real Python (there's no reasonable structural hash for them,
-            // but there's no reason they should be unhashable either — code
-            // that registers callbacks in a set/dict, e.g. Django's check
-            // registry, relies on this). `self` here is `&PyObject` reached
-            // via a `Ref` guard borrowed from the object's own Rc, so its
-            // address is stable across calls as long as callers don't
-            // reconstruct a throwaway clone first (unlike the Instance case
-            // above, which needed its own fix for exactly that reason).
-            // Iterator objects (and anything else with no sensible
-            // structural equality of its own) are hashable BY IDENTITY in
-            // real Python — hashability is opt-OUT (only mutable
-            // containers like `list`/`dict`/`set` explicitly disable it),
-            // not opt-in. These previously fell to the generic `_`
-            // catch-all below, making every one of them unhashable —
-            // found via CPython's own `test_hash.py::test_hashes`, whose
-            // `hashes_to_check` list includes `enumerate(...)`, `iter(an_
-            // object_with_only___getitem__)` (this interpreter's own
-            // `GetItemIter`), and `iter(callable, sentinel)` (`
-            // CallSentinelIter`).
-            PyObject::Function(_)
-            | PyObject::BuiltinFunction { .. }
-            | PyObject::BuiltinMethod { .. }
-            | PyObject::Type { .. }
-            | PyObject::Module { .. }
-            | PyObject::BoundMethod { .. }
-            | PyObject::EnumerateIter { .. }
-            | PyObject::GetItemIter { .. }
-            | PyObject::CallSentinelIter { .. }
-            | PyObject::ListIter { .. }
-            | PyObject::RangeIter { .. }
-            | PyObject::MapIterator { .. }
-            | PyObject::FilterIterator { .. }
-            | PyObject::ZipIterator { .. }
-            | PyObject::CycleIter { .. }
-            | PyObject::GroupByIter { .. }
-            | PyObject::Socket { .. } => Ok(self as *const PyObject as usize),
-            // A READ-ONLY `memoryview` (over `bytes`) IS hashable in real
-            // Python, hashing exactly like the equivalent `bytes` content
-            // (`hash(memoryview(b'x')) == hash(b'x')`) — a WRITABLE one
-            // (over `bytearray`) is NOT, matching `bytearray`'s own
-            // unhashability. Previously fell to the generic `_` catch-all,
-            // making EVERY memoryview unhashable regardless of
-            // readonly-ness. Found via CPython's own `test_hash.py`.
-            PyObject::MemoryView { readonly, .. } => {
-                if !readonly {
-                    // Real CPython raises `ValueError` here, NOT `TypeError`
-                    // — a writable memoryview isn't "unhashable" in the
-                    // usual sense (real CPython's own message: "cannot hash
-                    // writable memoryview object"), it's specifically
-                    // disallowed because a live view over mutable memory
-                    // would violate hash-stability if the buffer changed.
-                    return Err(PyError::value_error(
-                        "cannot hash writable memoryview object",
-                    ));
-                }
-                let self_ref = PyObjectRef::new(self.clone());
-                let bytes = mv_tobytes(&self_ref)?;
-                PyObject::Bytes(bytes).hash()
-            }
-            PyObject::Closure(_) => Err(PyError::type_error(format!(
-                "unhashable type: '{}'",
-                self.type_name()
-            ))),
-            _ => Err(PyError::type_error(format!(
-                "unhashable type: '{}'",
-                self.type_name()
-            ))),
-        }
-    }
 
     pub fn equals(&self, other_ref: &PyObjectRef) -> PyResult<bool> {
+        if let PyObject::WeakRef { target, .. } = self {
+            if let PyObject::WeakRef { target: other_target, .. } = &*other_ref.borrow() {
+                let self_alive = target.upgrade();
+                let other_alive = other_target.upgrade();
+                match (self_alive, other_alive) {
+                    (Some(a_rc), Some(b_rc)) => {
+                        return PyObjectRef::Imm(a_rc).equals(&PyObjectRef::Imm(b_rc));
+                    }
+                    _ => {
+                        return Ok(std::ptr::eq(self as *const PyObject, &*other_ref.borrow() as *const PyObject));
+                    }
+                }
+            } else {
+                return Ok(false);
+            }
+        }
+        if let PyObject::WeakRef { .. } = &*other_ref.borrow() {
+            return Ok(false);
+        }
+        if let PyObject::WeakProxy { target, .. } = self {
+            if let Some(rc) = target.upgrade() {
+                return rc.borrow().equals(other_ref);
+            } else {
+                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            }
+        }
+        if let PyObject::WeakProxy { target, .. } = &*other_ref.borrow() {
+            if let Some(rc) = target.upgrade() {
+                return self.equals(&PyObjectRef::Imm(rc));
+            } else {
+                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            }
+        }
         // This structural-equality function is what PyDict/PySet actually
         // use to disambiguate a hash bucket — unlike py_compare's `==`
         // operator dispatch, it never checked a custom class's __eq__ at
@@ -1330,12 +892,17 @@ impl PyObject {
             // Reference-identity types (matching the identity-based hash
             // above): equal iff it's really the same underlying object.
             (PyObject::Function(_), PyObject::Function(_))
-            | (PyObject::BuiltinFunction { .. }, PyObject::BuiltinFunction { .. })
             | (PyObject::BuiltinMethod { .. }, PyObject::BuiltinMethod { .. })
             | (PyObject::Type { .. }, PyObject::Type { .. })
-            | (PyObject::Module { .. }, PyObject::Module { .. })
-            | (PyObject::BoundMethod { .. }, PyObject::BoundMethod { .. }) => {
+            | (PyObject::Module { .. }, PyObject::Module { .. }) => {
                 std::ptr::eq(self as *const PyObject, &*other as *const PyObject)
+            }
+            (PyObject::BuiltinFunction { name: a_name, func: a_func }, PyObject::BuiltinFunction { name: b_name, func: b_func }) => {
+                a_name == b_name && std::ptr::fn_addr_eq(*a_func, *b_func)
+            }
+            (PyObject::BoundMethod { func: a_func, self_obj: a_self }, PyObject::BoundMethod { func: b_func, self_obj: b_self }) => {
+                (a_func.is(b_func) || a_func.equals(b_func).unwrap_or(false))
+                    && (a_self.is(b_self) || a_self.equals(b_self).unwrap_or(false))
             }
             _ => false,
         };
@@ -1343,56 +910,3 @@ impl PyObject {
     }
 }
 
-pub(crate) fn escape_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        // Escape non-ASCII chars that are NOT printable (CPython's repr
-        // keeps printable non-ASCII like 'café'/U+0374 but escapes
-        // unassigned/format chars like U+0378 as \\u0378). Approximation of
-        // Unicode printability without a full DB: letters/digits/marks plus
-        // common punctuation/symbol/space ranges are kept; everything else
-        // is escaped.
-        fn is_printable(c: char) -> bool {
-            // All ASCII printable (space..~) are printable.
-            if c.is_ascii() {
-                return c >= ' ' && c != '\x7f';
-            }
-            if c.is_alphanumeric() || c.is_whitespace() {
-                return true;
-            }
-            let cp = c as u32;
-            // Common punctuation/symbol/space ranges (a coarse superset).
-            matches!(cp,
-                0x00A0..=0x00FF      // Latin-1 supplement (incl. é)
-                | 0x2000..=0x206F    // punctuation + spaces
-                | 0x2100..=0x214F    // letterlike symbols
-                | 0x2190..=0x2BFF    // arrows, math, misc symbols
-                | 0x2E00..=0x2E7F    // supplemental punctuation
-                | 0x3000..=0x303F    // CJK punctuation
-                | 0xFE50..=0xFE6F    // small form variants
-                | 0xFF00..=0xFFEF    // halfwidth/fullwidth forms
-            )
-        }
-        match c {
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '\\' => out.push_str("\\\\"),
-            '\'' => out.push_str("\\'"),
-            '\"' => out.push_str("\\\""),
-            '\x00'..='\x1f' => out.push_str(&format!("\\x{:02x}", c as u8)),
-            '\x7f' => out.push_str("\\x7f"),
-            c if c.is_control() => match c as u32 {
-                code @ 0..=0xff => out.push_str(&format!("\\x{:02x}", code as u8)),
-                code @ 0x100..=0xffff => out.push_str(&format!("\\u{:04x}", code)),
-                code => out.push_str(&format!("\\U{:08x}", code)),
-            },
-            c if !is_printable(c) => match c as u32 {
-                code @ 0x100..=0xffff => out.push_str(&format!("\\u{:04x}", code)),
-                code => out.push_str(&format!("\\U{:08x}", code)),
-            },
-            c => out.push(c),
-        }
-    }
-    out
-}

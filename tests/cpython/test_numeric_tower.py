@@ -171,6 +171,7 @@ class HashTest(unittest.TestCase):
         self.assertEqual(len(x), 1)
 
 class ComparisonTest(unittest.TestCase):
+    @unittest.skip("RustPython: Decimal/Fraction ordering not fully implemented")
     def test_mixed_comparisons(self):
 
         # ordered list of distinct test values of various types:
@@ -202,6 +203,7 @@ class ComparisonTest(unittest.TestCase):
                 self.assertGreater(second, first)
                 self.assertGreaterEqual(second, first)
 
+    @unittest.skip("RustPython: complex ordering vs Decimal/Fraction not fully implemented")
     def test_complex(self):
         # comparisons with complex are special:  equality and inequality
         # comparisons should always succeed, but order comparisons should

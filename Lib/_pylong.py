@@ -123,8 +123,8 @@ def compute_powers(w, base, more_than, *, need_hi=False, show=False):
             print(" at", n, "needed" if n in need else "extra")
         d[n] = result
 
-    assert need <= d.keys()
-    if excess := d.keys() - need:
+    assert need <= set(d.keys())
+    if excess := set(d.keys()) - need:
         assert need_hi
         for n in excess:
             del d[n]

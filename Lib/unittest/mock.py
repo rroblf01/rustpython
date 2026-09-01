@@ -152,13 +152,16 @@ def _copy_func_details(func, funcopy):
 
 
 def _callable(obj):
-    if isinstance(obj, type):
-        return True
-    if isinstance(obj, (staticmethod, classmethod, MethodType)):
-        return _callable(obj.__func__)
-    if getattr(obj, '__call__', None) is not None:
-        return True
-    return False
+    # RustPython's function objects don't expose `__call__` via
+    # `getattr(func, '__call__')`, so the original check incorrectly
+    # classified real functions/lambdas as non-callable. That caused
+    # mock to treat a function `side_effect` as an iterable and try
+    # `next(effect)`, failing with "function is not an iterator".
+    # `callable()` is the correct, VM-backed check.
+    try:
+        return callable(obj)
+    except Exception:
+        return False
 
 
 def _is_list(obj):

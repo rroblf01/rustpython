@@ -192,6 +192,117 @@ class TemporaryDirectory:
         self.cleanup()
 
 
+class _TemporaryFileCloser:
+    """A separate object allowing proper closing of a temporary file's underlying file."""
+
+    cleanup_called = False
+    close_called = False
+
+    def __init__(self, file, name, delete=True, delete_on_close=True,
+                 warn_message="Implicitly cleaning up unknown file"):
+        self.file = file
+        self.name = name
+        self.delete = delete
+        self.delete_on_close = delete_on_close
+        self.warn_message = warn_message
+        self.cleanup_called = False
+        self.close_called = False
+
+    def cleanup(self, windows=(_os.name == 'nt'), unlink=_os.unlink):
+        if not self.cleanup_called:
+            self.cleanup_called = True
+            try:
+                if not self.close_called:
+                    self.close_called = True
+                    try:
+                        self.file.close()
+                    except Exception:
+                        pass
+            finally:
+                if self.delete and not (windows and self.delete_on_close):
+                    try:
+                        unlink(self.name)
+                    except FileNotFoundError:
+                        pass
+                    except Exception:
+                        pass
+
+    def close(self):
+        if not self.close_called:
+            self.close_called = True
+            try:
+                try:
+                    self.file.close()
+                except Exception:
+                    pass
+            finally:
+                if self.delete and self.delete_on_close:
+                    self.cleanup()
+
+    def __del__(self):
+        close_called = self.close_called
+        self.cleanup()
+        if not close_called:
+            try:
+                import warnings as _warnings
+                _warnings.warn(self.warn_message, ResourceWarning)
+            except Exception:
+                pass
+
+
+class _TemporaryFileWrapper:
+    """Temporary file wrapper — file-like object that deletes file on close."""
+
+    def __init__(self, file, name, delete=True, delete_on_close=True):
+        self.file = file
+        self.name = name
+        self._closer = _TemporaryFileCloser(
+            file, name, delete, delete_on_close,
+            warn_message=f"Implicitly cleaning up {self!r}",
+        )
+
+    def __repr__(self):
+        file = self.__dict__['file']
+        return f"<{type(self).__name__} {file=}>"
+
+    def __getattr__(self, name):
+        file = self.__dict__['file']
+        a = getattr(file, name)
+        if hasattr(a, '__call__'):
+            func = a
+            def func_wrapper(*args, **kwargs):
+                return func(*args, **kwargs)
+            try:
+                import functools as _functools
+                func_wrapper = _functools.wraps(func)(func_wrapper)
+            except Exception:
+                pass
+            func_wrapper._closer = self._closer
+            a = func_wrapper
+        if not isinstance(a, int):
+            try:
+                setattr(self, name, a)
+            except Exception:
+                pass
+        return a
+
+    def __enter__(self):
+        self.file.__enter__()
+        return self
+
+    def __exit__(self, exc, value, tb):
+        result = self.file.__exit__(exc, value, tb)
+        self._closer.cleanup()
+        return result
+
+    def close(self):
+        self._closer.close()
+
+    def __iter__(self):
+        for line in self.file:
+            yield line
+
+
 def _remove_all(*args, **kwargs):
     for path in _temp_files:
         try:

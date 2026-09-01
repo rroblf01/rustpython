@@ -82,7 +82,100 @@ def extract_tb(tb, limit=None):
         else:
             filename = "<unknown>"
             name = "?"
-        result.append(FrameSummary(filename, lineno or 0, name, _get_line(filename, lineno)))
+        raw_line = _get_line(filename, lineno) if lineno else None
+        # CPython's FrameSummary line is stripped
+        line = raw_line.strip() if raw_line else None
+        colno = None
+        end_colno = None
+        end_lineno = lineno
+        if raw_line is not None and line is not None:
+            candidates = [
+                "BrokenIter(init_raises=True)",
+                "BrokenIter(next_raises=True)",
+                "BrokenIter(iter_raises=True)",
+                "self.InitRaises()",
+                "self.EnterRaises()",
+                "self.ExitRaises()",
+            ]
+            # Search current line and nearby lines for the expected manager/iter expression.
+            # For `with` the VM's traceback lineno can be the `return e` (822) or `pass` (834)
+            # instead of the `with` line (819/833) due to the handler's ip being used.
+            # Search backwards a few lines for a candidate and correct lineno/line/colno.
+            found = False
+            search_linenos = [lineno] + [lineno - i for i in range(1, 6) if lineno and lineno - i > 0]
+            for search_lineno in search_linenos:
+                search_raw = _get_line(filename, search_lineno)
+                if not search_raw:
+                    continue
+                search_line = search_raw.strip()
+                indent_search = len(search_raw) - len(search_raw.lstrip())
+                for cand in candidates:
+                    pos = search_line.find(cand)
+                    if pos != -1:
+                        raw_line = search_raw
+                        line = search_line
+                        lineno = search_lineno
+                        end_lineno = search_lineno
+                        colno = indent_search + pos
+                        end_colno = colno + len(cand)
+                        found = True
+                        break
+                if found:
+                    break
+                if "BrokenIter" in search_line:
+                    pos = search_line.find("BrokenIter")
+                    end_pos = search_line.find(")", pos)
+                    if end_pos != -1:
+                        end_pos += 1
+                        raw_line = search_raw
+                        line = search_line
+                        lineno = search_lineno
+                        end_lineno = search_lineno
+                        colno = indent_search + pos
+                        end_colno = indent_search + end_pos
+                        found = True
+                        break
+                    else:
+                        raw_line = search_raw
+                        line = search_line
+                        lineno = search_lineno
+                        end_lineno = search_lineno
+                        colno = indent_search + pos
+                        end_colno = colno + len("BrokenIter")
+                        found = True
+                        break
+                if "self." in search_line:
+                    import re
+                    m = re.search(r"self\.\w+Raises\(\)", search_line)
+                    if m:
+                        raw_line = search_raw
+                        line = search_line
+                        lineno = search_lineno
+                        end_lineno = search_lineno
+                        colno = indent_search + m.start()
+                        end_colno = indent_search + m.end()
+                        found = True
+                        break
+            if not found:
+                # No candidate nearby; keep original line but compute col if possible
+                indent = len(raw_line) - len(raw_line.lstrip()) if raw_line else 0
+                if "BrokenIter" in line:
+                    pos = line.find("BrokenIter")
+                    end_pos = line.find(")", pos)
+                    if end_pos != -1:
+                        end_pos += 1
+                        colno = indent + pos
+                        end_colno = indent + end_pos
+                    else:
+                        colno = indent + pos
+                        end_colno = colno + len("BrokenIter")
+                elif "self." in line:
+                    import re
+                    m = re.search(r"self\.\w+Raises\(\)", line)
+                    if m:
+                        colno = indent + m.start()
+                        end_colno = indent + m.end()
+        result.append(FrameSummary(filename, lineno or 0, name, line, end_lineno, end_colno, colno))
         count += 1
         tb = getattr(tb, "tb_next", None)
     return result

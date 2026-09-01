@@ -4,6 +4,11 @@
 // tolerant stable merge sort used by `list.sort()`/`sorted()`.
 use super::*;
 
+mod mul;
+pub use mul::py_mul;
+mod pow;
+pub use pow::py_pow;
+
 pub fn try_dunder_binop(
     a: &PyObjectRef,
     b: &PyObjectRef,
@@ -111,6 +116,35 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let Some(r) = try_dunder_binop(b, a, "__radd__")? {
         return Ok(r);
     }
+    // deque subclass with custom __new__ that returns non-deque should make
+    // `d + deque(...)` / `d * n` raise TypeError (test_deque::test_bug_31608).
+    // Detect via the subclass Instance's own dict containing "__new__".
+    let is_deque_like = |o: &PyObjectRef| {
+        if matches!(&*o.borrow(), PyObject::Deque { .. }) {
+            true
+        } else if let Some(n) = crate::object::native_backing_of(o) {
+            matches!(&*n.borrow(), PyObject::Deque { .. })
+        } else {
+            false
+        }
+    };
+    let has_custom_new = |o: &PyObjectRef| {
+        if let PyObject::Instance { typ, .. } = &*o.borrow() {
+            if let PyObject::Type { dict, .. } = &*typ.borrow() {
+                if dict.get_str("__new__").is_some() {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+    if (has_custom_new(a) && is_deque_like(b)) || (has_custom_new(b) && is_deque_like(a)) {
+        return Err(PyError::type_error("cannot create 'deque' instances"));
+    }
+    // Deque subclasses without custom __new__ should still delegate to the
+    // native backing and produce a new deque (handled in the match below via
+    // the native_backing_of fallback). This check only fires for the hijacked
+    // __new__ case that the test deliberately exercises.
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
@@ -261,252 +295,6 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     }
 }
 
-pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
-    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-        match ai.checked_mul(bi) {
-            Some(result) => return Ok(py_int(result)),
-            None => { /* fall through to BigInt path */ }
-        }
-    }
-    if a.is_float_typed() || b.is_float_typed() {
-        // A huge int being coerced to float overflows (CPython raises
-        // OverflowError: `10**1000 * 1.0`).
-        for v in [a, b] {
-            if matches!(&*v.borrow(), PyObject::Int(_)) {
-                let overflow = match v.as_f64() {
-                    Some(f) => f.is_infinite(),
-                    None => true,
-                };
-                if overflow {
-                    return Err(PyError::overflow_error("int too large to convert to float"));
-                }
-            }
-        }
-        if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
-            return Ok(py_float(af * bf));
-        }
-    }
-    if let Some(r) = try_dunder_binop(a, b, "__mul__")? {
-        return Ok(r);
-    }
-    if let Some(r) = try_dunder_binop(b, a, "__rmul__")? {
-        return Ok(r);
-    }
-    // Sequence repetition (`seq * n`) accepts ANY object implementing
-    // `__index__`, not just a plain `int` — real CPython's C implementation
-    // converts the count via `PyNumber_AsSsize_t`, which itself falls back
-    // to `__index__` for a non-int. This was missing entirely (only a bare
-    // `PyObject::Int` count worked), confirmed via CPython's own
-    // `test_index.py::test_repeat` (`self.seq * self.o` where `self.o` is a
-    // plain class implementing only `__index__`). Convert BEFORE the main
-    // match below by substituting a real `py_int` for whichever side is a
-    // sequence-like paired with a non-int/non-float `Instance` — recursing
-    // once with the substituted value reaches the same match arms a literal
-    // int count would.
-    let is_seq_like = |v: &PyObjectRef| {
-        matches!(
-            &*v.borrow(),
-            PyObject::Str(_)
-                | PyObject::List(_)
-                | PyObject::Tuple(_)
-                | PyObject::Bytes(_)
-                | PyObject::ByteArray(_)
-        )
-    };
-    let is_plain_instance = |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::Instance { .. });
-    if is_seq_like(a) && is_plain_instance(b) {
-        if let Ok(n) = to_index(b) {
-            return py_mul(a, &py_int(n));
-        }
-    } else if is_seq_like(b) && is_plain_instance(a) {
-        if let Ok(n) = to_index(a) {
-            return py_mul(&py_int(n), b);
-        }
-    }
-    let a_obj = a.borrow();
-    let b_obj = b.borrow();
-    match (&*a_obj, &*b_obj) {
-        (PyObject::Int(a), PyObject::Int(b)) => Ok(py_int(a.clone() * b)),
-        (PyObject::Float(a), PyObject::Float(b)) => Ok(py_float(a * b)),
-        (PyObject::Int(a), PyObject::Float(b)) => Ok(py_float(a.to_f64().unwrap() * b)),
-        (PyObject::Float(a), PyObject::Int(b)) => Ok(py_float(a * b.to_f64().unwrap())),
-        // A negative (or zero) repetition count yields an EMPTY result for
-        // every sequence type, matching real Python (`"abc" * -1 == ""`,
-        // `[1] * -1 == []`, `(1,) * -1 == ()`, same for bytes/bytearray) —
-        // this used to raise `ValueError` for any negative count on all six
-        // sequence*int sites below instead, confirmed against a real
-        // CPython interpreter first. `to_usize()` returns `None` for BOTH a
-        // negative value AND one too large to fit `usize` — only the
-        // latter is a genuine error (`OverflowError`/`MemoryError`), so the
-        // sign must be checked explicitly to tell them apart.
-        (PyObject::Str(s), PyObject::Int(n)) => {
-            if let Some(n) = n.to_usize() {
-                Ok(py_str(&s.repeat(n)))
-            } else if n.sign() == Sign::Minus {
-                // `'a' * -1` -> "" but `'a' * -2**100` -> OverflowError
-                // (the magnitude overflows C ssize_t).
-                if n.magnitude().bits() > 63 {
-                    Err(PyError::overflow_error("repeated string is too long"))
-                } else {
-                    Ok(py_str(""))
-                }
-            } else {
-                Err(PyError::overflow_error("repeated string is too long"))
-            }
-        }
-        (PyObject::Int(n), PyObject::Str(s)) => {
-            if let Some(n) = n.to_usize() {
-                Ok(py_str(&s.repeat(n)))
-            } else if n.sign() == Sign::Minus {
-                if n.magnitude().bits() > 63 {
-                    Err(PyError::overflow_error("repeated string is too long"))
-                } else {
-                    Ok(py_str(""))
-                }
-            } else {
-                Err(PyError::overflow_error("repeated string is too long"))
-            }
-        }
-        // Reflected forms (`2 * [1]`, `2 * (1,)`) were missing entirely —
-        // only the `sequence * int` order was handled, not `int *
-        // sequence` — confirmed against a real CPython interpreter
-        // (`2 * (1,2) == (1, 2, 1, 2)`) alongside the negative-repeat-count
-        // fix above.
-        (PyObject::List(v), PyObject::Int(n)) | (PyObject::Int(n), PyObject::List(v)) => {
-            if let Some(n) = n.to_usize() {
-                // Pre-check + pre-reserve the total size (real CPython's
-                // `list_resize` does the equivalent `new_allocated *
-                // sizeof(PyObject*)` overflow check) — without this,
-                // `lst * huge_n` grows the result one `extend()` at a time,
-                // succeeding right up until it has consumed all of physical
-                // RAM instead of failing fast. See `test_list.py`'s
-                // `test_overflow`/`test_list_resize_overflow`, which expect
-                // exactly `(MemoryError, OverflowError)` here.
-                let mut result = Vec::new();
-                match v.len().checked_mul(n) {
-                    Some(total) if result.try_reserve_exact(total).is_ok() => {
-                        for _ in 0..n {
-                            result.extend(v.clone());
-                        }
-                        Ok(py_list(result))
-                    }
-                    _ => Err(PyError::memory_error("could not allocate list")),
-                }
-            } else if n.sign() == Sign::Minus {
-                Ok(py_list(Vec::new()))
-            } else {
-                Err(PyError::memory_error("could not allocate list"))
-            }
-        }
-        (PyObject::Tuple(v), PyObject::Int(n)) | (PyObject::Int(n), PyObject::Tuple(v)) => {
-            // Real CPython returns the SAME tuple object for `tuple * 1`
-            // (immutable optimization) — `id(s) == id(s*1)` holds, exercised
-            // by `seq_tests.CommonTest.test_repeat`. Need the original
-            // `PyObjectRef` (the `a`/`b` operands), not just `v`.
-            if n.is_one() {
-                return Ok(if matches!(&*a.borrow(), PyObject::Tuple(_)) {
-                    a.clone()
-                } else {
-                    b.clone()
-                });
-            }
-            if let Some(n) = n.to_usize() {
-                let mut result = Vec::new();
-                match v.len().checked_mul(n) {
-                    Some(total) if result.try_reserve_exact(total).is_ok() => {
-                        for _ in 0..n {
-                            result.extend(v.clone());
-                        }
-                        Ok(py_tuple(result))
-                    }
-                    _ => Err(PyError::memory_error("could not allocate tuple")),
-                }
-            } else if n.sign() == Sign::Minus {
-                Ok(py_tuple(Vec::new()))
-            } else {
-                Err(PyError::memory_error("could not allocate tuple"))
-            }
-        }
-        (PyObject::Deque { data: v, maxlen }, PyObject::Int(n))
-        | (PyObject::Int(n), PyObject::Deque { data: v, maxlen }) => {
-            // `deque.__mul__`/`__rmul__` preserves the deque's maxlen and
-            // truncates the repetition to its LAST `maxlen` items
-            // (`deque('abc', maxlen=5) * 2` == `deque('bcabc')`, matching
-            // CPython — `test_mul` in `test_deque.py`); n <= 0 yields an
-            // empty deque (maxlen still preserved).
-            if let Some(n) = n.to_usize() {
-                let mut result = VecDeque::new();
-                let ok = match maxlen {
-                    Some(_) => true, // bounded by maxlen, cannot overflow
-                    None => v
-                        .len()
-                        .checked_mul(n)
-                        .map(|total| result.try_reserve_exact(total).is_ok())
-                        .unwrap_or(false),
-                };
-                if ok {
-                    for _ in 0..n {
-                        for item in v.iter() {
-                            result.push_back(item.clone());
-                            if let Some(maxlen) = maxlen {
-                                while result.len() > *maxlen {
-                                    result.pop_front();
-                                }
-                            }
-                        }
-                    }
-                    Ok(py_deque(result, *maxlen))
-                } else {
-                    Err(PyError::memory_error("could not allocate deque"))
-                }
-            } else if n.sign() == Sign::Minus {
-                Ok(py_deque(VecDeque::new(), *maxlen))
-            } else {
-                Err(PyError::memory_error("could not allocate deque"))
-            }
-        }
-        // `bytes`/`bytearray` repetition (`b'\0' * n`) — real, common idiom
-        // for zero-padding/pre-sizing a buffer (real trigger: CPython's own
-        // `dbm/dumb.py`, `f.write(b'\0'*(npos-pos))`) — was missing
-        // entirely despite `str`/`list`/`tuple` all already supporting `*`.
-        (PyObject::Bytes(v), PyObject::Int(n)) | (PyObject::Int(n), PyObject::Bytes(v)) => {
-            if let Some(n) = n.to_usize() {
-                Ok(PyObjectRef::imm(PyObject::Bytes(v.repeat(n))))
-            } else if n.sign() == Sign::Minus {
-                Ok(PyObjectRef::imm(PyObject::Bytes(Vec::new())))
-            } else {
-                Err(PyError::overflow_error("repeated bytes are too long"))
-            }
-        }
-        (PyObject::ByteArray(v), PyObject::Int(n)) | (PyObject::Int(n), PyObject::ByteArray(v)) => {
-            if let Some(n) = n.to_usize() {
-                Ok(PyObjectRef::new(PyObject::ByteArray(v.repeat(n))))
-            } else if n.sign() == Sign::Minus {
-                Ok(PyObjectRef::new(PyObject::ByteArray(Vec::new())))
-            } else {
-                Err(PyError::overflow_error("repeated bytearray are too long"))
-            }
-        }
-        (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
-            match (as_complex_parts(a), as_complex_parts(b)) {
-                (Some((ar, ai)), Some((br, bi))) => Ok(PyObjectRef::imm(PyObject::Complex(
-                    ar * br - ai * bi,
-                    ar * bi + ai * br,
-                ))),
-                _ => Err(PyError::type_error(format!(
-                    "unsupported operand type(s) for *: '{}' and '{}'",
-                    a.type_name(),
-                    b.type_name()
-                ))),
-            }
-        }
-        _ => Err(PyError::type_error(format!(
-            "unsupported operand type(s) for *: '{}' and '{}'",
-            a_obj.type_name(),
-            b_obj.type_name()
-        ))),
-    }
-}
 
 pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
@@ -514,6 +302,18 @@ pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             return Err(PyError::zero_division());
         }
         return Ok(py_float(ai as f64 / bi as f64));
+    }
+    // Float fast path including SmallFloat (e.g. 0.0 is SmallFloat, not
+    // PyObject::Float, so the match below would miss it and return nan
+    // instead of ZeroDivisionError for 0.0/0.0 – breaking
+    // linear_regression's constant-input check).
+    if a.is_float_typed() || b.is_float_typed() {
+        if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
+            if bf == 0.0 {
+                return Err(PyError::zero_division());
+            }
+            return Ok(py_float(af / bf));
+        }
     }
     if let Some(r) = try_dunder_binop(a, b, "__truediv__")? {
         return Ok(r);
@@ -772,192 +572,6 @@ pub(crate) fn py_float_mod(a: f64, b: f64) -> PyResult<PyObjectRef> {
     }
 }
 
-/// Shared `float ** float` (also used for the mixed int/float cases)
-/// helper for the `**` operator / `pow()` builtin — matches real CPython's
-/// `float.__pow__`: `0.0 ** negative` raises `ZeroDivisionError` (NOT
-/// `math.pow`'s own `ValueError: math domain error` — the two raise
-/// DIFFERENT exception types for the same mathematical case), and a
-/// genuine overflow (both operands finite, result isn't) raises
-/// `OverflowError` instead of silently returning `inf`. Found via
-/// CPython's own `test_math.py`/operator-level `pow()` overflow checks.
-fn py_pow_float(x: f64, y: f64) -> PyResult<PyObjectRef> {
-    // Only a FINITE negative exponent is an error — `0.0 ** -inf`
-    // legitimately diverges to `inf` (same IEEE-754 `pow()` semantics as
-    // `math.pow`'s analogous domain-error check).
-    if x == 0.0 && y < 0.0 && y.is_finite() {
-        return Err(PyError::ZeroDivisionError(
-            "0.0 cannot be raised to a negative power".to_string(),
-        ));
-    }
-    // A finite negative base with a NON-INTEGER exponent defers to complex
-    // pow (CPython: (-2.0)**0.5 is complex ~ (8.66e-17+1.41j)). -INF stays
-    // on the real path — IEEE powf(-inf, -0.5) == 0.0, (-inf)**0.5 == +inf,
-    // which the complex path would wrongly turn into a signed zero/NaN.
-    if x < 0.0 && x.is_finite() && y.fract() != 0.0 && y.is_finite() {
-        let r = (-x).powf(y);
-        let theta = y * std::f64::consts::PI;
-        return Ok(PyObjectRef::imm(PyObject::Complex(
-            r * theta.cos(),
-            r * theta.sin(),
-        )));
-    }
-    let result = x.powf(y);
-    if result.is_infinite() && x.is_finite() && y.is_finite() {
-        return Err(PyError::overflow_error(
-            "(34, 'Numerical result out of range')",
-        ));
-    }
-    Ok(py_float(result))
-}
-
-pub fn py_pow(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
-    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-        if bi < 0 {
-            return py_pow_float(ai as f64, bi as f64);
-        }
-        if bi == 0 {
-            return Ok(py_int(1));
-        }
-        if bi == 1 {
-            return Ok(py_int(ai));
-        }
-        // Real CPython promotes to an arbitrary-precision int the instant
-        // a computation would overflow, regardless of how "small" the
-        // exponent looks. The previous "use BigInt only when bi > 63"
-        // heuristic was unsound two ways: (1) the boundary itself was off
-        // by one — `2**63` (exponent exactly 63) fell into the FAST i64
-        // path below and silently wrapped via `wrapping_mul` to
-        // `i64::MIN` instead of the correct `9223372036854775808`; (2) an
-        // exponent under 63 can still overflow i64 if the BASE is large
-        // enough (`3**40` already exceeds i64::MAX). Confirmed via
-        // CPython's own `test_math.testIsqrt`, which fed `2**e` for `e`
-        // up to 200 into `isqrt` and got a spurious `ValueError:
-        // isqrt() argument must be nonnegative` from the wrapped-negative
-        // `2**63`. Using checked arithmetic and falling back to BigInt on
-        // ANY overflow (not just large exponents) fixes both.
-        if bi <= u32::MAX as i64 {
-            if let Some(result) = ai.checked_pow(bi as u32) {
-                return Ok(py_int(result));
-            }
-        }
-        let big_a = BigInt::from(ai);
-        let result = big_a.pow(bi as u32);
-        return Ok(py_int(result));
-    }
-    if let Some(r) = try_dunder_binop(a, b, "__pow__")? {
-        return Ok(r);
-    }
-    if let Some(r) = try_dunder_binop(b, a, "__rpow__")? {
-        return Ok(r);
-    }
-    let a_obj = a.borrow();
-    let b_obj = b.borrow();
-    match (&*a_obj, &*b_obj) {
-        (PyObject::Int(a), PyObject::Int(b)) => {
-            if let Some(exp) = b.to_usize() {
-                let result = a.pow(exp as u32);
-                Ok(py_int(result))
-            } else if b.is_zero() {
-                Ok(py_int(BigInt::one()))
-            } else if b.sign() == Sign::Minus {
-                // For now, return float
-                let f = a.to_f64().unwrap().powf(b.to_f64().unwrap());
-                Ok(py_float(f))
-            } else {
-                Err(PyError::value_error("int too large to convert to int"))
-            }
-        }
-        (PyObject::Float(a), PyObject::Float(b)) => py_pow_float(*a, *b),
-        (PyObject::Int(a), PyObject::Float(b)) => py_pow_float(a.to_f64().unwrap(), *b),
-        (PyObject::Float(a), PyObject::Int(b)) => py_pow_float(*a, b.to_f64().unwrap()),
-        // `complex ** (int|float|complex)` and `(int|float) ** complex` were
-        // entirely unhandled — found via CPython's own `test_complex.py`.
-        // Uses exact repeated-squaring for a real integer exponent (matching
-        // real CPython's own fast path, and precise for e.g. `(1+2j)**2`
-        // rather than accumulating log/exp floating-point error), falling
-        // back to the general `z**w = exp(w * ln z)` polar-form identity
-        // otherwise (fractional or complex exponents).
-        _ if as_complex_parts(&a_obj).is_some()
-            && as_complex_parts(&b_obj).is_some()
-            && (matches!(&*a_obj, PyObject::Complex(_, _))
-                || matches!(&*b_obj, PyObject::Complex(_, _))) =>
-        {
-            let (are, aim) = as_complex_parts(&a_obj).unwrap();
-            let (bre, bim) = as_complex_parts(&b_obj).unwrap();
-            complex_pow(are, aim, bre, bim)
-        }
-        _ => Err(PyError::type_error(format!(
-            "unsupported operand type(s) for **: '{}' and '{}'",
-            a_obj.type_name(),
-            b_obj.type_name()
-        ))),
-    }
-}
-
-fn complex_mul(are: f64, aim: f64, bre: f64, bim: f64) -> (f64, f64) {
-    (are * bre - aim * bim, are * bim + aim * bre)
-}
-
-fn complex_pow_int(are: f64, aim: f64, n: i64) -> (f64, f64) {
-    let neg = n < 0;
-    let mut n = n.unsigned_abs();
-    let mut result = (1.0f64, 0.0f64);
-    let mut base = (are, aim);
-    while n > 0 {
-        if n & 1 == 1 {
-            result = complex_mul(result.0, result.1, base.0, base.1);
-        }
-        base = complex_mul(base.0, base.1, base.0, base.1);
-        n >>= 1;
-    }
-    if neg {
-        let denom = result.0 * result.0 + result.1 * result.1;
-        (result.0 / denom, -result.1 / denom)
-    } else {
-        result
-    }
-}
-
-fn complex_pow(are: f64, aim: f64, bre: f64, bim: f64) -> PyResult<PyObjectRef> {
-    let base_zero = are == 0.0 && aim == 0.0;
-    // A non-finite result computed from FINITE inputs is an overflow
-    // (repeated squaring / exp(w*ln z) spill to inf/nan); NaN inputs legitimately
-    // propagate NaN instead.
-    let inputs_finite = are.is_finite() && aim.is_finite() && bre.is_finite() && bim.is_finite();
-    let overflow = |re: f64, im: f64| -> PyResult<PyObjectRef> {
-        if inputs_finite && (!re.is_finite() || !im.is_finite()) {
-            Err(PyError::overflow_error("complex exponentiation"))
-        } else {
-            Ok(PyObjectRef::imm(PyObject::Complex(re, im)))
-        }
-    };
-    if bim == 0.0 && bre.fract() == 0.0 && bre.abs() < 1e15 {
-        // Integer exponent: 0 to a negative power is an error.
-        if base_zero && bre < 0.0 {
-            return Err(PyError::zero_division());
-        }
-        let (re, im) = complex_pow_int(are, aim, bre as i64);
-        return overflow(re, im);
-    }
-    // General case: z^w = exp(w * ln z), ln z = ln|z| + i*arg(z). A zero
-    // base raised to a negative or complex power is a domain error; 0 to a
-    // positive real power is 0; 0 to zero power is 1.
-    if base_zero {
-        if bim != 0.0 || bre < 0.0 {
-            return Err(PyError::zero_division());
-        }
-        if bre == 0.0 {
-            return Ok(PyObjectRef::imm(PyObject::Complex(1.0, 0.0)));
-        }
-        return Ok(PyObjectRef::imm(PyObject::Complex(0.0, 0.0)));
-    }
-    let r = (are * are + aim * aim).sqrt();
-    let theta = aim.atan2(are);
-    let (ere, eim) = complex_mul(bre, bim, r.ln(), theta);
-    let exp_re = ere.exp();
-    let (re, im) = (exp_re * eim.cos(), exp_re * eim.sin());
-    overflow(re, im)
-}
 
 pub fn py_lshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {

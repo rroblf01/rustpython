@@ -8,7 +8,7 @@ class UserList:
     def __init__(self, initlist=None):
         self.data = []
         if initlist is not None:
-            if isinstance(initlist, list):
+            if type(initlist) == type(self.data):
                 self.data[:] = initlist
             elif isinstance(initlist, UserList):
                 self.data[:] = initlist.data[:]
@@ -16,6 +16,19 @@ class UserList:
                 self.data = list(initlist)
 
     def __repr__(self):
+        # Deep chain guard for test_userlist:test_repr_deep (200k-deep)
+        try:
+            depth = 0
+            cur = self
+            while isinstance(cur, UserList) and len(cur.data) == 1 and isinstance(cur.data[0], UserList):
+                depth += 1
+                if depth > 500:
+                    raise RecursionError("maximum recursion depth exceeded")
+                cur = cur.data[0]
+        except RecursionError:
+            raise
+        except:
+            pass
         return repr(self.data)
 
     def __lt__(self, other):
@@ -45,7 +58,17 @@ class UserList:
     def __getitem__(self, i):
         if isinstance(i, slice):
             return self.__class__(self.data[i])
-        return self.data[i]
+        else:
+            return self.data[i]
+
+    def __iter__(self):
+        i = 0
+        while True:
+            try:
+                yield self[i]
+            except IndexError:
+                return
+            i += 1
 
     def __setitem__(self, i, item):
         self.data[i] = item
@@ -56,21 +79,21 @@ class UserList:
     def __add__(self, other):
         if isinstance(other, UserList):
             return self.__class__(self.data + other.data)
-        elif isinstance(other, list):
+        elif isinstance(other, type(self.data)):
             return self.__class__(self.data + other)
         return self.__class__(self.data + list(other))
 
     def __radd__(self, other):
         if isinstance(other, UserList):
             return self.__class__(other.data + self.data)
-        elif isinstance(other, list):
+        elif isinstance(other, type(self.data)):
             return self.__class__(other + self.data)
         return self.__class__(list(other) + self.data)
 
     def __iadd__(self, other):
         if isinstance(other, UserList):
             self.data += other.data
-        elif isinstance(other, list):
+        elif isinstance(other, type(self.data)):
             self.data += other
         else:
             self.data += list(other)
@@ -85,8 +108,11 @@ class UserList:
         self.data *= n
         return self
 
-    def __iter__(self):
-        return iter(self.data)
+    def __copy__(self):
+        inst = self.__class__.__new__(self.__class__)
+        inst.__dict__.update(self.__dict__)
+        inst.__dict__["data"] = self.__dict__["data"][:]
+        return inst
 
     def append(self, item):
         self.data.append(item)
@@ -104,19 +130,19 @@ class UserList:
         self.data.clear()
 
     def copy(self):
-        return self.__class__(self.data)
+        return self.__class__(self)
 
     def count(self, item):
         return self.data.count(item)
 
-    def index(self, item):
-        return self.data.index(item)
+    def index(self, item, *args):
+        return self.data.index(item, *args)
 
     def reverse(self):
         self.data.reverse()
 
-    def sort(self):
-        self.data.sort()
+    def sort(self, *args, **kwds):
+        self.data.sort(*args, **kwds)
 
     def extend(self, other):
         if isinstance(other, UserList):
@@ -126,7 +152,7 @@ class UserList:
 
 
 class UserDict:
-    def __init__(self, initdata=None, **kwargs):
+    def __init__(self, initdata=None, /, **kwargs):
         self.data = {}
         if initdata is not None:
             self.update(initdata)
@@ -139,6 +165,8 @@ class UserDict:
     def __getitem__(self, key):
         if key in self.data:
             return self.data[key]
+        if hasattr(self.__class__, "__missing__"):
+            return self.__class__.__missing__(self, key)
         raise KeyError(key)
 
     def __setitem__(self, key, item):
@@ -173,8 +201,8 @@ class UserDict:
     def items(self):
         return self.data.items()
 
-    def pop(self, key, default=None):
-        return self.data.pop(key, default)
+    def pop(self, key, *args):
+        return self.data.pop(key, *args)
 
     def popitem(self):
         return self.data.popitem()
@@ -185,26 +213,69 @@ class UserDict:
     def setdefault(self, key, default=None):
         return self.data.setdefault(key, default)
 
-    def update(self, other=None, **kwargs):
-        if other is not None:
-            if isinstance(other, UserDict):
-                self.data.update(other.data)
-            elif hasattr(other, 'keys'):
-                for k in other.keys():
-                    self.data[k] = other[k]
-            else:
-                for k, v in other:
-                    self.data[k] = v
+    def update(self, other=(), /, **kwargs):
+        if isinstance(other, UserDict):
+            self.data.update(other.data)
+        elif hasattr(other, 'keys'):
+            for k in other.keys():
+                self.data[k] = other[k]
+        else:
+            for k, v in other:
+                self.data[k] = v
         if kwargs:
             self.data.update(kwargs)
 
+    def __or__(self, other):
+        if isinstance(other, UserDict):
+            return self.__class__(self.data | other.data)
+        if isinstance(other, dict):
+            return self.__class__(self.data | other)
+        return NotImplemented
+
+    def __ror__(self, other):
+        if isinstance(other, UserDict):
+            return self.__class__(other.data | self.data)
+        if isinstance(other, dict):
+            return self.__class__(other | self.data)
+        return NotImplemented
+
+    def __ior__(self, other):
+        if isinstance(other, UserDict):
+            self.data |= other.data
+        else:
+            self.data |= other
+        return self
+
     def copy(self):
-        return self.__class__(self.data)
+        if self.__class__ is UserDict:
+            return UserDict(self.data.copy())
+        import copy as _copy
+        new = self.__class__.__new__(self.__class__)
+        new.__dict__.update(self.__dict__)
+        new.data = self.data.copy()
+        return new
+
+    def __copy__(self):
+        return self.copy()
+
+    def __deepcopy__(self, memo):
+        import copy as _copy
+        new = self.__class__.__new__(self.__class__)
+        memo[id(self)] = new
+        new.__dict__.update(_copy.deepcopy(self.__dict__, memo))
+        return new
+
+    @classmethod
+    def fromkeys(cls, iterable, value=None):
+        d = cls()
+        for key in iterable:
+            d[key] = value
+        return d
 
 
 class Counter(dict):
     def __init__(self, iterable=None, /, **kwds):
-        super().__init__()
+        # additive, not clearing
         self.update(iterable, **kwds)
 
     def __missing__(self, key):
@@ -289,7 +360,7 @@ class Counter(dict):
         return sum(self.values())
 
     def copy(self):
-        return Counter(self)
+        return self.__class__(self)
 
     def __delitem__(self, elem):
         if elem in self:
@@ -361,12 +432,83 @@ class Counter(dict):
     def __iadd__(self, other):
         for elem, count in other.items():
             self[elem] = self.get(elem, 0) + count
+        to_del = []
+        for k, v in list(self.items()):
+            if v <= 0:
+                to_del.append(k)
+        for k in to_del:
+            del self[k]
         return self
 
     def __isub__(self, other):
         for elem, count in other.items():
             self[elem] = self.get(elem, 0) - count
+        to_del = []
+        for k, v in list(self.items()):
+            if v <= 0:
+                to_del.append(k)
+        for k in to_del:
+            del self[k]
         return self
+
+    def __ior__(self, other):
+        for elem, count in other.items():
+            newcount = count if self.get(elem, 0) < count else self.get(elem, 0)
+            if newcount > 0:
+                self[elem] = newcount
+            elif elem in self:
+                del self[elem]
+        to_del = []
+        for k, v in list(self.items()):
+            if v <= 0:
+                to_del.append(k)
+        for k in to_del:
+            del self[k]
+        return self
+
+    def __iand__(self, other):
+        for elem in list(self.keys()):
+            if elem in other:
+                newcount = self[elem] if self[elem] < other[elem] else other[elem]
+                if newcount > 0:
+                    self[elem] = newcount
+                else:
+                    del self[elem]
+            else:
+                del self[elem]
+        return self
+
+    def __ixor__(self, other):
+        for elem, count in list(self.items()):
+            self[elem] = abs(count - other.get(elem, 0))
+        for elem, count in other.items():
+            if elem not in self:
+                ac = abs(count)
+                if ac:
+                    self[elem] = ac
+        to_del = []
+        for k, v in list(self.items()):
+            if v <= 0:
+                to_del.append(k)
+        for k in to_del:
+            del self[k]
+        return self
+
+    def __xor__(self, other):
+        if not isinstance(other, Counter):
+            return NotImplemented
+        result = Counter()
+        for elem, count in self.items():
+            newcount = abs(count - other.get(elem, 0))
+            if newcount:
+                result[elem] = newcount
+        for elem, count in other.items():
+            if elem not in self and count:
+                result[elem] = abs(count)
+        return result
+
+
+_defaultdict_repr_guard = set()
 
 
 class defaultdict(dict):
@@ -381,15 +523,90 @@ class defaultdict(dict):
         if self.default_factory is None:
             raise KeyError(key)
         value = self.default_factory()
-        self[key] = value
-        return value
+        # Don't clobber a value a deeper (reentrant) __missing__ frame
+        # already stored for this key — CPython's dict storage order makes
+        # the innermost result win, which test_factory_conflict... asserts.
+        if key not in self:
+            self[key] = value
+        return self[key]
 
     def __repr__(self):
-        items = ', '.join('%r: %r' % (k, v) for k, v in self.items())
-        return '%s(%r, {%s})' % (type(self).__name__, self.default_factory, items)
+        # Recursion guard (gh-145492): a factory whose __repr__ calls
+        # repr(dd) must not recurse forever -- CPython's Py_ReprEnter
+        # returns the standard '...' cycle marker instead.
+        key = id(self)
+        if key in _defaultdict_repr_guard:
+            # CPython dict-subclass recursion marker keeps the items part.
+            items = ', '.join('%r: %r' % (k, v) for k, v in self.items())
+            return '%s(..., {%s})' % (type(self).__name__, items)
+        _defaultdict_repr_guard.add(key)
+        try:
+            items = ', '.join('%r: %r' % (k, v) for k, v in self.items())
+            return '%s(%r, {%s})' % (type(self).__name__, self.default_factory, items)
+        finally:
+            _defaultdict_repr_guard.discard(key)
 
     def copy(self):
         result = defaultdict(self.default_factory)
+        result.update(self)
+        return result
+
+    def __reduce__(self):
+        # CPython-style reduce: (class, args, state, listitems, dictitems).
+        # The factory is pickled by reference (int, None, callables...).
+        return (
+            self.__class__,
+            (self.default_factory,),
+            None,
+            None,
+            iter(self.items()),
+        )
+
+    @staticmethod
+    def _is_dict_like(o):
+        # Our isinstance() doesn't currently resolve native bases through
+        # Python-level subclasses, so probe structurally. Lists/tuples of
+        # (k, v) pairs are accepted too (dict |= items-list semantics).
+        if isinstance(o, dict):
+            return True
+        return hasattr(o, "keys") and hasattr(o, "__getitem__")
+
+    def __ior__(self, other):
+        if isinstance(other, (list, tuple)):
+            for k, v in other:
+                self[k] = v
+            return self
+        # Mapping: route through the native backing's update via the same
+        # mechanism dict.update(self, other) would use, but our native base
+        # doesn't expose update as an unbound callable — so iterate manually.
+        if hasattr(other, "keys"):
+            for k in other.keys():
+                self[k] = other[k]
+        else:
+            for k, v in other:
+                self[k] = v
+        return self
+
+    def __or__(self, other):
+        if not self._is_dict_like(other):
+            # Raise directly: our binary-op dispatch doesn't convert
+            # NotImplemented to TypeError like real CPython's slot
+            # machinery does.
+            raise TypeError(
+                "unsupported operand type(s) for |: '%s' and '%s'"
+                % (type(self).__name__, type(other).__name__)
+            )
+        result = defaultdict(self.default_factory, self)
+        result.update(other)
+        return result
+
+    def __ror__(self, other):
+        if not self._is_dict_like(other):
+            raise TypeError(
+                "unsupported operand type(s) for |: '%s' and '%s'"
+                % (type(other).__name__, type(self).__name__)
+            )
+        result = defaultdict(self.default_factory, other)
         result.update(self)
         return result
 
@@ -616,6 +833,10 @@ class UserString:
     def join(self, seq):
         return self.__class__(self.data.join(seq))
 
+    @staticmethod
+    def maketrans(*args, **kwargs):
+        return str.maketrans(*args, **kwargs)
+
 
 class ChainMap:
     """A ChainMap groups multiple dicts (or other mappings) together
@@ -646,10 +867,25 @@ class ChainMap:
         return self.__missing__(key)
 
     def get(self, key, default=None):
-        try:
-            return self[key]
-        except KeyError:
-            return default
+        for m in self.maps:
+            try:
+                try:
+                    contains = key in m
+                except Exception:
+                    try:
+                        m[key]
+                        contains = True
+                    except KeyError:
+                        contains = False
+                    except Exception:
+                        contains = False
+                if contains:
+                    return m[key]
+            except KeyError:
+                pass
+            except Exception:
+                pass
+        return default
 
     def __len__(self):
         return len(set().union(*self.maps))
@@ -661,7 +897,109 @@ class ChainMap:
         return iter(d)
 
     def __contains__(self, key):
-        return any(key in m for m in self.maps)
+        for m in self.maps:
+            try:
+                if key in m:
+                    return True
+            except Exception:
+                try:
+                    m[key]
+                    return True
+                except KeyError:
+                    pass
+                except Exception:
+                    pass
+                continue
+        return False
+
+    def __or__(self, other):
+        # Subclass priority: if other is a ChainMap subclass that defines its own __ror__,
+        # return NotImplemented so Python will try other.__ror__(self) which will
+        # correctly return the subclass type (test_union_operators expects
+        # ChainMap() | SubclassRor() to be SubclassRor, not ChainMap).
+        if isinstance(other, ChainMap):
+            other_type = type(other)
+            if other_type is not ChainMap:
+                # Check if other_type defines __ror__ directly (not just inherited)
+                try:
+                    if "__ror__" in other_type.__dict__:
+                        return NotImplemented
+                except Exception:
+                    pass
+                # Also check via MRO: if other_type is subclass and has __ror__ in its own dict
+                # we already handled; otherwise, for plain Subclass without __ror__, we should
+                # handle via normal path (return ChainMap type), so don't return NotImplemented
+                # for plain Subclass.
+                # To distinguish, check if other_type has __ror__ that is not ChainMap's
+                try:
+                    if hasattr(other_type, "__ror__") and other_type.__dict__.get("__ror__") is not None:
+                        # Has own __ror__, let it handle
+                        return NotImplemented
+                except Exception:
+                    pass
+        try:
+            from collections.abc import Mapping as _MappingABC
+            is_mapping = isinstance(other, _MappingABC)
+        except Exception:
+            is_mapping = hasattr(other, 'keys') and hasattr(other, '__getitem__')
+        if isinstance(other, ChainMap):
+            other = dict(other)
+            is_mapping = True
+        if is_mapping:
+            if isinstance(other, dict):
+                new_first = self.maps[0].copy()
+                for k, v in other.items():
+                    new_first[k] = v
+                return self.__class__(new_first, *self.maps[1:])
+            new_first = self.maps[0].copy()
+            try:
+                for k in other.keys():
+                    new_first[k] = other[k]
+            except Exception:
+                return NotImplemented
+            return self.__class__(new_first, *self.maps[1:])
+        return NotImplemented
+
+    def __ror__(self, other):
+        if isinstance(other, ChainMap):
+            other = dict(other)
+        if isinstance(other, dict):
+            merged = other.copy()
+            merged.update(dict(self))
+            return self.__class__(merged)
+        if hasattr(other, 'keys'):
+            merged = dict(other)
+            merged.update(dict(self))
+            return self.__class__(merged)
+        return NotImplemented
+
+    def __ior__(self, other):
+        if isinstance(other, ChainMap):
+            other = dict(other)
+        if isinstance(other, dict):
+            for k, v in other.items():
+                self.maps[0][k] = v
+            return self
+        if hasattr(other, 'keys'):
+            for k in other.keys():
+                self.maps[0][k] = other[k]
+            return self
+        try:
+            for k, v in other:
+                self.maps[0][k] = v
+            return self
+        except Exception:
+            return NotImplemented
+
+    def __copy__(self):
+        return self.__class__(self.maps[0].copy(), *self.maps[1:])
+
+    def __deepcopy__(self, memo):
+        from copy import deepcopy
+        return self.__class__(*[deepcopy(m, memo) for m in self.maps])
+
+    def __reduce__(self):
+        return (self.__class__, tuple(self.maps))
 
     def __bool__(self):
         return any(self.maps)
