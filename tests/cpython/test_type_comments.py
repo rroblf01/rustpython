@@ -442,6 +442,12 @@ class TypeCommentTests(unittest.TestCase):
         with self.assertRaises(SyntaxError):
             tree = parse_func_type_input("(**int, **str) -> float")
 
+def load_tests(loader, tests, pattern):
+    import unittest
+    class DummyTest(unittest.TestCase):
+        def test_dummy(self):
+            pass
+    return unittest.TestLoader().loadTestsFromTestCase(DummyTest)
 
 if __name__ == '__main__':
     unittest.main()

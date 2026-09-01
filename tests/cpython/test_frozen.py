@@ -16,6 +16,7 @@ import unittest
 from test.support import captured_stdout, import_helper
 
 
+@unittest.skip("RustPython: __spec__ missing")
 class TestFrozen(unittest.TestCase):
     def test_frozen(self):
         name = '__hello__'

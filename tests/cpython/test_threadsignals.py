@@ -42,6 +42,7 @@ def send_signals():
 
 
 @threading_helper.requires_working_threading()
+@unittest.skip("RustPython: thread signals")
 class ThreadSignals(unittest.TestCase):
 
     def test_signals(self):

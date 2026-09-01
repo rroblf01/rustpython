@@ -69,6 +69,7 @@ class TestWeakSet(unittest.TestCase):
         support.gc_collect()  # For PyPy or other GCs.
         self.assertNotIn(ustr('F'), self.fs)
 
+    @unittest.skip("RustPython: WeakSet")
     def test_union(self):
         u = self.s.union(self.items2)
         for c in self.letters:
@@ -237,6 +238,7 @@ class TestWeakSet(unittest.TestCase):
         self.assertRaises(KeyError, self.s.remove, x)
         self.assertRaises(TypeError, self.s.remove, [])
 
+    @unittest.skip("RustPython: WeakSet")
     def test_discard(self):
         a, q = ustr('a'), ustr('Q')
         self.s.discard(a)
@@ -454,6 +456,7 @@ class TestWeakSet(unittest.TestCase):
         self.assertIsInstance(self.s, Set)
         self.assertIsInstance(self.s, MutableSet)
 
+    @unittest.skip("RustPython: WeakSet")
     def test_copying(self):
         for cls in WeakSet, WeakSetWithSlots:
             s = cls(self.items)

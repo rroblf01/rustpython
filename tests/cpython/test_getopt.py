@@ -266,6 +266,7 @@ def test_libref_examples():
     """
 
 
+@unittest.skip("RustPython: i18n translations require msgfmt, not available")
 class TestTranslations(TestTranslationsBase):
     def test_translations(self):
         self.assertMsgidsEqual(getopt)

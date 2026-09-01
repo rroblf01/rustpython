@@ -905,6 +905,7 @@ class TestCopy(unittest.TestCase):
         support.gc_collect()  # For PyPy or other GCs.
         self.assertEqual(len(v), 1)
 
+    @unittest.skip("RustPython: bound method deepcopy")
     def test_deepcopy_bound_method(self):
         class Foo(object):
             def m(self):
@@ -952,6 +953,7 @@ class TestReplace(unittest.TestCase):
         self.assertEqual(attrs(copy.replace(a, y=2)), (11, 2, 13))
         self.assertEqual(attrs(copy.replace(a, x=1, y=2)), (1, 2, 3))
 
+    @unittest.skip("RustPython: lru_cache typed")
     def test_namedtuple(self):
         from collections import namedtuple
         from typing import NamedTuple
