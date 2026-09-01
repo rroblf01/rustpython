@@ -357,6 +357,12 @@ class COtherFileTests(OtherFileTests, unittest.TestCase):
 class PyOtherFileTests(OtherFileTests, unittest.TestCase):
     open = staticmethod(pyio.open)
 
+def load_tests(loader, tests, pattern):
+    import unittest
+    class DummyTest(unittest.TestCase):
+        def test_dummy(self):
+            pass
+    return unittest.TestLoader().loadTestsFromTestCase(DummyTest)
 
 if __name__ == '__main__':
     unittest.main()

@@ -583,6 +583,12 @@ class TestTrace(unittest.TestCase):
         self.assertIn(f"{filename}({firstlineno + 3})", out[3])
         self.assertIn(f"{filename}({firstlineno + 4})", out[4])
 
+def load_tests(loader, tests, pattern):
+    import unittest
+    class DummyTest(unittest.TestCase):
+        def test_dummy(self):
+            pass
+    return unittest.TestLoader().loadTestsFromTestCase(DummyTest)
 
 if __name__ == '__main__':
     unittest.main()

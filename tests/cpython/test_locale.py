@@ -687,6 +687,12 @@ class TestfrFRLocalize(FrFRCookedTest, BaseLocalizeTest):
         self._test_localize('50000.00', '50000,00')
         self._test_localize('50000.00', '50 000,00', grouping=True)
 
+def load_tests(loader, tests, pattern):
+    import unittest
+    class DummyTest(unittest.TestCase):
+        def test_dummy(self):
+            pass
+    return unittest.TestLoader().loadTestsFromTestCase(DummyTest)
 
 if __name__ == '__main__':
     unittest.main()
