@@ -534,6 +534,18 @@ macro_rules! buffered_class {
             }
             Ok(py_none())
         }));
+        td.insert(
+            "raw".into(),
+            PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
+                getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "raw".to_string(),
+                    func: |args: &[PyObjectRef]| Ok(crate::modules::dev::io_get_raw(args)?),
+                })),
+                setter: None,
+                deleter: None,
+                doc: None,
+            }))),
+        );
         macro_rules! read_arm {
             ($m:literal) => { bf($m, |args: &[PyObjectRef]| {
                 crate::modules::dev::io_ensure_open(args)?;

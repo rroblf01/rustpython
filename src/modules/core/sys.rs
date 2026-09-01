@@ -418,9 +418,13 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
             "utf8_mode",
             "safe_path",
             "warn_default_encoding",
+            "context_aware_warnings",
+            "thread_inherit_context",
         ] {
             flags_dict.insert(flag.to_string(), py_int(0));
         }
+        flags_dict.insert_str("gil", py_int(1));
+        flags_dict.insert_str("hash_randomization", py_int(1));
         flags_dict.insert_str("int_max_str_digits", py_int(4300));
         d.insert_str(
             "flags",

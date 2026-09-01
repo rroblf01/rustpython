@@ -101,10 +101,24 @@ fn print_py_error(err: &PyError, fallback_file: &str) {
             } else {
                 eprintln!("  File \"{}\", line ??, in <module>", file);
             }
+            // NOTE: `type_name` (the raw first field of `PyError::Exception`)
+            // is NOT always the real exception type — for a bare re-raise
+            // it's the literal dispatch tag `"re-raise"`, and previously a
+            // plain `raise Foo(...)` stored the exception's *message* there
+            // instead of its type name (fixed at the raise site in
+            // op_exc.rs, but other producers of `PyError::Exception` may
+            // still pass non-type-name tags). `PyError::type_name_for_display()`
+            // already exists specifically to resolve the real type name from
+            // the wrapped exception object in every such case — use it here
+            // instead of the raw tag so top-level uncaught exceptions always
+            // print "RealTypeName: message" (previously e.g. a bare
+            // `assert False`/`raise SomeError()` printed a blank line, and
+            // `raise ValueError("x")` printed "x: x").
+            let display_type_name = err.type_name_for_display();
             if msg.is_empty() {
-                eprintln!("{}", type_name);
+                eprintln!("{}", display_type_name);
             } else {
-                eprintln!("{}: {}", type_name, msg);
+                eprintln!("{}: {}", display_type_name, msg);
             }
         }
         _ => eprintln!("{}", err),

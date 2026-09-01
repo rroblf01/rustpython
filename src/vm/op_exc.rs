@@ -254,7 +254,29 @@ impl VirtualMachine {
                             );
                         }
                         self.capture_exception_context(&exc);
-                        return Err(PyError::Exception(msg, exc));
+                        // `PyError::Exception`'s first field is the exception's
+                        // TYPE NAME (relied on elsewhere for matching, e.g.
+                        // `PyError::Exception(typ, _) if typ == "StopIteration"`
+                        // in dispatch.rs/generators.rs and "ModuleNotFoundError"
+                        // in op_import.rs) — NOT the exception's message. This
+                        // used to pass `msg` (the message, computed above only
+                        // to detect the StopIteration-with-no-args special
+                        // case) here instead, so every uncaught `raise X(...)`
+                        // printed "<message>: <message-or-repr>" instead of
+                        // "<TypeName>: <message>" (and printed nothing at all
+                        // when the exception had no message, e.g. bare
+                        // `assert False` / `raise SomeError()`) — a general,
+                        // broadly-impactful bug, not specific to any one
+                        // exception type.
+                        let type_name = match &*exc.borrow() {
+                            PyObject::Exception { typ, .. } => typ.clone(),
+                            PyObject::ExceptionGroup { typ, .. } => typ.clone(),
+                            PyObject::Instance { typ, .. } => {
+                                crate::object::get_type_name_for_instance(typ)
+                            }
+                            _ => msg.clone(),
+                        };
+                        return Err(PyError::Exception(type_name, exc));
                     }
                     2 => {
                         let cause = self.frames[fi].pop()?;

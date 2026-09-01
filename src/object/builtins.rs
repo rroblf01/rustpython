@@ -12,7 +12,10 @@ pub(crate) use print::{call_method_rebound, print_with_vm};
 
 mod builtin_type;
 pub use builtin_type::{builtin_type_of, type_new_builtin};
-pub(crate) use builtin_type::{dict_arg_to_hashmap, get_primitive_type, seed_primitive_type_cache};
+pub(crate) use builtin_type::{
+    dict_arg_to_hashmap, get_or_create_primitive_type, get_primitive_type,
+    seed_primitive_type_cache,
+};
 
 mod attribute;
 pub use attribute::{builtin_ascii, builtin_bin, builtin_chr, builtin_delattr, builtin_exit, builtin_getattr, builtin_hasattr, builtin_hex, builtin_input, builtin_oct, builtin_ord, builtin_setattr};

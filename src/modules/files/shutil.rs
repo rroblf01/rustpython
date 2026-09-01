@@ -172,5 +172,72 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
             .map_err(|e| PyError::os_error_from_io(&e))?;
         Ok(py_none())
     });
+
+    shutil_func!("which", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("which() missing 1 required argument: 'cmd'"));
+        }
+        let cmd = args[0].str();
+        // If cmd contains a path separator, check directly
+        if cmd.contains('/') || cmd.contains('\\') {
+            let p = std::path::Path::new(&cmd);
+            if p.is_file() {
+                // Check executable bit on Unix
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(meta) = std::fs::metadata(p) {
+                        if meta.permissions().mode() & 0o111 != 0 {
+                            return Ok(py_str(&cmd));
+                        } else {
+                            return Ok(py_none());
+                        }
+                    }
+                }
+                return Ok(py_str(&cmd));
+            }
+            return Ok(py_none());
+        }
+        // Search PATH
+        let path_var = std::env::var("PATH").unwrap_or_default();
+        // Handle optional path argument (second arg or kwarg)
+        let mut search_path = path_var.clone();
+        if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::Dict(_)) {
+            search_path = args[1].str();
+        }
+        // Check kwargs dict if present
+        for arg in args.iter() {
+            if let PyObject::Dict(d) = &*arg.borrow() {
+                if let Ok(Some(v)) = d.get(&py_str("path")) {
+                    if !matches!(&*v.borrow(), PyObject::None) {
+                        search_path = v.str();
+                    }
+                }
+            }
+        }
+        for dir in search_path.split(':') {
+            if dir.is_empty() {
+                continue;
+            }
+            let candidate = format!("{}/{}", dir, cmd);
+            let p = std::path::Path::new(&candidate);
+            if p.is_file() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(meta) = std::fs::metadata(p) {
+                        if meta.permissions().mode() & 0o111 != 0 {
+                            return Ok(py_str(&candidate));
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    return Ok(py_str(&candidate));
+                }
+            }
+        }
+        Ok(py_none())
+    });
     d
 }

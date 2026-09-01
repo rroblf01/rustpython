@@ -260,12 +260,20 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
-    t_func!("FunctionType", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("FunctionType() requires an argument"));
-        }
-        Ok(args[0].clone())
-    });
+    // `types.FunctionType`/`BuiltinFunctionType`/`ModuleType`/`LambdaType`
+    // used to be standalone passthrough `BuiltinFunction`s (`args[0].clone()`)
+    // — technically callable the same way real CPython's constructors are,
+    // but NOT the same object `type(f)`/`type(mod)` actually returns, so
+    // `isinstance(f, types.FunctionType)` and `isinstance(mod,
+    // types.ModuleType)` were unconditionally `False`. That's not just a
+    // cosmetic gap: `typing.get_type_hints()` branches on `isinstance(obj,
+    // types.ModuleType)` to decide whether to read `globalns` from
+    // `obj.__dict__` (module case) or `obj.__globals__` (function/method
+    // case) — with this broken, `get_type_hints(some_module)` took the
+    // wrong branch entirely. Point these at the SAME canonical `Type`
+    // object `type(x)` returns for that kind (see
+    // `get_or_create_primitive_type`) instead of a lookalike.
+    d.insert_str("FunctionType", get_or_create_primitive_type("function"));
     // Real `types.DynamicClassAttribute` differs from plain `property` only
     // in a narrow metaclass-interop edge case (raising `AttributeError` on
     // class-level access so a metaclass's own `__getattr__` can take over —
@@ -276,12 +284,10 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     // cannot import name 'DynamicClassAttribute' from 'types'` that
     // otherwise hits any code merely importing it.
     t_func!("DynamicClassAttribute", builtin_property);
-    t_func!("LambdaType", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("LambdaType() requires an argument"));
-        }
-        Ok(args[0].clone())
-    });
+    // Real CPython: `types.LambdaType is types.FunctionType` (literally the
+    // same object — a lambda IS a function). See `FunctionType` above for
+    // why this can't be a passthrough `BuiltinFunction`.
+    d.insert_str("LambdaType", get_or_create_primitive_type("function"));
     // Unlike `FunctionType`/`LambdaType` above (pure isinstance-check
     // helpers — real code essentially never CALLS them, since functions can
     // only be built by `def`/`lambda`), `types.MethodType(function,
@@ -298,29 +304,72 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     // instead). Fixed to build a real `PyObject::BoundMethod`, the same
     // representation this interpreter already uses for `obj.method`
     // attribute access.
+    // `types.MethodType` needs to be BOTH the real constructor (established
+    // by the fix documented above — `types.MethodType(f, obj)` must build a
+    // real bound method, not silently drop `obj`) AND the same canonical
+    // `Type` object `type(bound_method)` returns, so `isinstance(bound_
+    // method, types.MethodType)` (real CPython: `True`) actually works —
+    // previously this was a standalone passthrough `BuiltinFunction` with
+    // no relation to that Type at all, so the isinstance check was
+    // unconditionally `False` (breaks e.g. `typing.get_type_hints`'s
+    // `_allowed_types` filter). Wire the constructor into the canonical
+    // "method" Type's dict under `NATIVE_VALUE_CTOR_KEY`, the same
+    // mechanism `int`/`list`/`deque`/etc. use so calling the Type directly
+    // (`types.MethodType(f, obj)`, or equally `type(bound_method)(f, obj)`)
+    // dispatches to it.
+    let method_type = get_or_create_primitive_type("method");
+    if let PyObject::Type { dict, .. } = &mut *method_type.borrow_mut() {
+        dict.insert(
+            crate::interner::intern(crate::object::NATIVE_VALUE_CTOR_KEY),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "MethodType".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error("MethodType() requires 2 arguments"));
+                    }
+                    Ok(PyObjectRef::new(PyObject::BoundMethod {
+                        func: args[0].clone(),
+                        self_obj: args[1].clone(),
+                    }))
+                },
+            }),
+        );
+    }
+    d.insert_str("MethodType", method_type);
     d.insert_str(
-        "MethodType",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "MethodType".to_string(),
-            func: |args| {
-                if args.len() < 2 {
-                    return Err(PyError::type_error("MethodType() requires 2 arguments"));
-                }
-                Ok(PyObjectRef::new(PyObject::BoundMethod {
-                    func: args[0].clone(),
-                    self_obj: args[1].clone(),
-                }))
-            },
-        }),
+        "BuiltinFunctionType",
+        get_or_create_primitive_type("builtin_function_or_method"),
     );
-    t_func!("BuiltinFunctionType", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error(
-                "BuiltinFunctionType() requires an argument",
-            ));
-        }
-        Ok(args[0].clone())
-    });
+    // `types.BuiltinMethodType is types.BuiltinFunctionType` in real CPython
+    // (a bound builtin method and a plain builtin function share one type).
+    d.insert_str(
+        "BuiltinMethodType",
+        get_or_create_primitive_type("builtin_function_or_method"),
+    );
+    // No native distinction exists in this interpreter between an unbound
+    // builtin-type slot wrapper (`object.__repr__`, real type
+    // `wrapper_descriptor`), a bound one (`some_obj.__repr__`, real type
+    // `method-wrapper`), and a builtin-type method descriptor (`list.append`,
+    // real type `method_descriptor`) — all three collapse into the same
+    // `builtin_function_or_method`/`BuiltinMethod` representation here. Real
+    // `typing.py` only consults these three names to build an `isinstance`
+    // allow-list (`_allowed_types` in `get_type_hints`), so exposing them as
+    // distinct, never-matched placeholder types (rather than omitting them,
+    // which broke the import entirely) is a correct, honest stand-in: it
+    // unblocks the import without claiming an isinstance match this
+    // interpreter cannot actually back.
+    d.insert_str(
+        "WrapperDescriptorType",
+        get_or_create_primitive_type("wrapper_descriptor"),
+    );
+    d.insert_str(
+        "MethodWrapperType",
+        get_or_create_primitive_type("method-wrapper"),
+    );
+    d.insert_str(
+        "MethodDescriptorType",
+        get_or_create_primitive_type("method_descriptor"),
+    );
     // Unlike its neighbors above (`FunctionType`/`LambdaType`/`MethodType`,
     // all pure isinstance-check helpers that only ever see an ALREADY-
     // EXISTING instance of their kind passed back in), `types.ModuleType`
@@ -334,33 +383,46 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     // `borrow_mut()` an inline `PyObjectRef::SmallStr`, panicking
     // ("borrow_mut on non-mutable value") instead of setting a real module
     // attribute.
-    d.insert_str(
-        "ModuleType",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "ModuleType".to_string(),
-            func: |args| {
-                if args.is_empty() {
-                    return Err(PyError::type_error(
-                        "module.__init__() takes at least 1 argument (0 given)",
-                    ));
-                }
-                let name = args[0].str();
-                let module = crate::object::create_module(&name, HashMap::new());
-                if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
-                    dict.insert_str("__name__", crate::object::py_str(&name));
-                    dict.insert_str(
-                        "__doc__",
-                        if args.len() > 1 {
-                            args[1].clone()
-                        } else {
-                            crate::object::py_none()
-                        },
-                    );
-                }
-                Ok(module)
-            },
-        }),
-    );
+    // Same fix as `MethodType` above: needs to be both the real constructor
+    // AND the canonical "module" `Type` so `isinstance(some_module,
+    // types.ModuleType)` is `True` — a plain passthrough `BuiltinFunction`
+    // could only ever be the former. This one matters more than most: real
+    // `typing.get_type_hints()` branches on exactly this isinstance check
+    // to decide whether to read `globalns` from `obj.__dict__` (module) or
+    // `obj.__globals__` (function/method) — with it always `False`,
+    // `get_type_hints(some_module)` took the function/method branch and
+    // broke on modules, which don't have `__globals__`.
+    let module_type = get_or_create_primitive_type("module");
+    if let PyObject::Type { dict, .. } = &mut *module_type.borrow_mut() {
+        dict.insert(
+            crate::interner::intern(crate::object::NATIVE_VALUE_CTOR_KEY),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "ModuleType".to_string(),
+                func: |args| {
+                    if args.is_empty() {
+                        return Err(PyError::type_error(
+                            "module.__init__() takes at least 1 argument (0 given)",
+                        ));
+                    }
+                    let name = args[0].str();
+                    let module = crate::object::create_module(&name, HashMap::new());
+                    if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
+                        dict.insert_str("__name__", crate::object::py_str(&name));
+                        dict.insert_str(
+                            "__doc__",
+                            if args.len() > 1 {
+                                args[1].clone()
+                            } else {
+                                crate::object::py_none()
+                            },
+                        );
+                    }
+                    Ok(module)
+                },
+            }),
+        );
+    }
+    d.insert_str("ModuleType", module_type);
     t_func!("NoneType", |_| Ok(py_none()));
     t_func!("GeneratorType", |args| {
         if args.is_empty() {

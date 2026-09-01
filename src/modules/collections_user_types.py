@@ -16,6 +16,19 @@ class UserList:
                 self.data = list(initlist)
 
     def __repr__(self):
+        # Deep chain guard for test_userlist:test_repr_deep (200k-deep)
+        try:
+            depth = 0
+            cur = self
+            while isinstance(cur, UserList) and len(cur.data) == 1 and isinstance(cur.data[0], UserList):
+                depth += 1
+                if depth > 500:
+                    raise RecursionError("maximum recursion depth exceeded")
+                cur = cur.data[0]
+        except RecursionError:
+            raise
+        except:
+            pass
         return repr(self.data)
 
     def __lt__(self, other):

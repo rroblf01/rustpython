@@ -978,9 +978,18 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             }
             Ok(raw)
         }));
-        td.insert("buffer".into(), bf("buffer", |args: &[PyObjectRef]| {
-            Ok(crate::modules::dev::io_get_raw(args)?)
-        }));
+        td.insert(
+            "buffer".into(),
+            PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
+                getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "buffer".to_string(),
+                    func: |args: &[PyObjectRef]| Ok(crate::modules::dev::io_get_raw(args)?),
+                })),
+                setter: None,
+                deleter: None,
+                doc: None,
+            }))),
+        );
         td.insert("__enter__".into(), bf("__enter__", |args: &[PyObjectRef]| Ok(args[0].clone())));
         td.insert("__exit__".into(), bf("__exit__", |_a| Ok(py_bool(false))));
         td

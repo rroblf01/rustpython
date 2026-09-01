@@ -43,6 +43,22 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    // Missing entirely before: `(2.0).__float__()` raised
+                    // `AttributeError` even though `int.__float__` (above)
+                    // was implemented — broke anything calling `.__float__()`
+                    // generically on a value already known to be a float
+                    // (e.g. `cmath`'s `test_input_type`: `f(arg.__float__())`).
+                    "__float__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__float__".to_string(),
+                        func: |args| {
+                            if let PyObject::Float(v) = &*args[0].borrow() {
+                                Ok(py_float(*v))
+                            } else {
+                                Err(PyError::runtime_error("__float__ on non-float"))
+                            }
+                        },
+                        self_obj: PyObjectRef::imm(PyObject::Float(*_f)),
+                    })),
                     // The numeric protocol dunders — real floats expose the
                     // full arithmetic operator set as methods
                     // (float(2).__truediv__(d), test_float's

@@ -158,9 +158,6 @@ impl VirtualMachine {
                 Ok(None) => continue,
                 Ok(Some(val)) => return Ok(val),
                 Err(e) => {
-                    if matches!(&e, PyError::SystemExit(_)) {
-                        return Err(e);
-                    }
                     if std::env::var("RPY_DEBUG_EXC").is_ok() {
                         eprintln!(
                             "handle_exception: frame_floor={} frames.len()={} err={}",

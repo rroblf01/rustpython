@@ -38,6 +38,34 @@ pub(crate) fn get_primitive_type(name: &str) -> Option<PyObjectRef> {
     PRIMITIVE_TYPE_CACHE.with(|c| c.borrow().get(name).cloned())
 }
 
+/// Return the SAME canonical `Type` object `type(x)` would return for a
+/// value whose `type_name()` is `name` (creating and caching it on first
+/// use if nothing has called `type()` on such a value yet) — used so
+/// pseudo-type markers exposed elsewhere (e.g. `types.FunctionType`,
+/// `types.ModuleType`) are identical objects to what `type(f)`/`type(m)`
+/// actually returns, rather than unrelated lookalikes. Previously
+/// `types.rs` built these as standalone passthrough `BuiltinFunction`s, so
+/// `isinstance(f, types.FunctionType)` and `isinstance(mod,
+/// types.ModuleType)` were unconditionally `False` — a real bug, since the
+/// latter specifically breaks `typing.get_type_hints(some_module)` (it
+/// branches on `isinstance(obj, types.ModuleType)` to decide where to read
+/// `globalns` from).
+pub(crate) fn get_or_create_primitive_type(name: &str) -> PyObjectRef {
+    if let Some(cached) = PRIMITIVE_TYPE_CACHE.with(|c| c.borrow().get(name).cloned()) {
+        return cached;
+    }
+    let new_type = PyObjectRef::new(PyObject::Type {
+        name: name.to_string(),
+        dict: Box::new(TypeDict::default()),
+        bases: vec![],
+        mro: vec![],
+    });
+    PRIMITIVE_TYPE_CACHE.with(|c| {
+        c.borrow_mut().insert(name.to_string(), new_type.clone());
+    });
+    new_type
+}
+
 pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() == 1 {
         // type(obj) -> return the type of an object
@@ -113,20 +141,7 @@ pub fn builtin_type_of(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             _ => {
                 let name = borrowed.type_name();
                 drop(borrowed);
-                if let Some(cached) = PRIMITIVE_TYPE_CACHE.with(|c| c.borrow().get(&name).cloned())
-                {
-                    return Ok(cached);
-                }
-                let new_type = PyObjectRef::new(PyObject::Type {
-                    name: name.clone(),
-                    dict: Box::new(TypeDict::default()),
-                    bases: vec![],
-                    mro: vec![],
-                });
-                PRIMITIVE_TYPE_CACHE.with(|c| {
-                    c.borrow_mut().insert(name, new_type.clone());
-                });
-                Ok(new_type)
+                Ok(get_or_create_primitive_type(&name))
             }
         }
     } else if args.len() == 3 {
