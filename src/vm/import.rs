@@ -804,6 +804,24 @@ impl VirtualMachine {
                 Opcode::RETURN_VALUE => return Some(Ok(stack.pop()?)),
                 Opcode::LOAD_ATTR => {
                     let obj = stack.pop()?;
+                    // A plain `Instance` needs the FULL LOAD_ATTR protocol
+                    // (property/descriptor invocation, `__getattr__`
+                    // fallback) — this fast path's own inline
+                    // `get_attribute` call is the same "raw, non-invoking"
+                    // lookup used elsewhere (see
+                    // `get_attribute_with_properties`'s doc comment), so it
+                    // silently returned an un-invoked `property` object
+                    // instead of calling its getter, and never consulted
+                    // `__getattr__` at all. Confirmed general via a
+                    // self-recursive property getter (`return self.__bases__`
+                    // as its OWN body) that should recurse until
+                    // `RecursionError` but instead "resolved" in one step by
+                    // handing back the bare descriptor. Bail to the slow,
+                    // `Frame`-based path (which gets this right) whenever the
+                    // receiver could plausibly need it.
+                    if matches!(&*obj.borrow(), PyObject::Instance { .. }) {
+                        return None;
+                    }
                     let name_id = code.names[instr.arg as usize];
                     let name = crate::interner::lookup_str(name_id);
                     let val = obj.borrow().get_attribute(name);

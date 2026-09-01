@@ -86,6 +86,17 @@ impl VirtualMachine {
                 if let Some(v) = self.resolve_descriptor_attr(&obj, &attr_name) {
                     return Ok(Some(v));
                 }
+                // `resolve_descriptor_attr` returning `None` is ambiguous —
+                // "no such descriptor here" (fall through to the plain
+                // lookup below) vs. "found one, but invoking it raised" (see
+                // its own doc comment) — check for the latter and propagate
+                // it for real instead of silently falling back to the
+                // "direct" (non-invoking) lookup, which would otherwise
+                // return the un-invoked descriptor as if it were a normal
+                // attribute value.
+                if let Some(e) = crate::vm::descriptor::take_pending_descriptor_error() {
+                    return Err(e);
+                }
                 let direct = obj.borrow().get_attribute(&attr_name);
                 match direct {
                     Ok(v) => {
@@ -230,6 +241,34 @@ impl VirtualMachine {
                 }
                 if self.resolve_descriptor_attr(&obj, &attr_name).is_some() {
                     return Ok(Some(py_bool(true)));
+                }
+                // Real `hasattr()` (Python 3+) only masks `AttributeError` —
+                // any other exception raised by a descriptor (a property
+                // getter, say) propagates out of `hasattr()` itself instead
+                // of just making it return `False`. `PyError::type_name()`
+                // is NOT the right check here: a user-level `raise
+                // AttributeError(...)` is wrapped as `PyError::Exception`
+                // (whose OWN `.type_name()` is the fixed literal string
+                // "Exception", not the real exception's name — only an
+                // internally-constructed `PyError::AttributeError` variant
+                // reports that directly) — use the same `is_attribute_error`
+                // helper this batch's `introspection1.rs`/`introspection2.rs`
+                // fixes already use for exactly this reason, which unwraps
+                // `PyError::Exception`'s real wrapped exception object.
+                if let Some(e) = crate::vm::descriptor::take_pending_descriptor_error() {
+                    if !crate::object::is_attribute_error(&e) {
+                        return Err(e);
+                    }
+                    // A descriptor WAS found and invoking it raised
+                    // AttributeError — real `hasattr()` is False here, full
+                    // stop. Falling through to the plain `get_attribute`
+                    // check below would be wrong: that's a NON-invoking
+                    // lookup, so it would find the raw, un-invoked
+                    // `property` object still sitting in the class's dict
+                    // and wrongly report `True` (attribute *access* failed;
+                    // the descriptor's mere *existence* is not what
+                    // `hasattr` means).
+                    return Ok(Some(py_bool(false)));
                 }
                 if obj.borrow().get_attribute(&attr_name).is_ok() {
                     return Ok(Some(py_bool(true)));

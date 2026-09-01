@@ -282,7 +282,14 @@ impl VirtualMachine {
                                             PyObject::Property(ref d) if d.getter.is_some() => {
                                                 drop(typ_ref);
                                                 let g = d.getter.as_ref().unwrap();
-                                                return Ok(Some(self.call_function(g.clone(), vec![obj.clone()], vec![]).unwrap_or_else(|_| val.clone())));
+                                                // A raised exception from the getter (e.g.
+                                                // `raise AttributeError`/`RuntimeError` from a
+                                                // property, used by CPython's own abstract-class
+                                                // duck-typing protocol) must propagate as a real
+                                                // error, not be silently swallowed into
+                                                // returning the bare, uninvoked `property`
+                                                // object as if that were the successful result.
+                                                return Ok(Some(self.call_function(g.clone(), vec![obj.clone()], vec![])?));
                                             }
                                             PyObject::StaticMethod { func } => {
                                                 return Ok(Some(func.clone()));
