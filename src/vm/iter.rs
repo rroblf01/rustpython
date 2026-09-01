@@ -7,8 +7,18 @@ impl VirtualMachine {
         match op {
             Opcode::GET_ITER => {
                 let val = self.frames[fi].pop()?;
-                // Check for user-class instance (needs __iter__ protocol)
-                let is_instance = val.borrow().type_name() == "instance";
+                // Check for user-class instance (needs __iter__ protocol).
+                // NOTE: `type_name()` returns the CLASS name for an
+                // `Instance` (e.g. "Seq"), never the literal string
+                // "instance" — comparing against that literal was always
+                // false, so this whole branch (and its FOR_ITER sibling
+                // below) was dead code; every custom `__iter__`/`__next__`
+                // class silently fell through to the generic `builtin_iter`
+                // fallback for GET_ITER (which happens to still work) but
+                // had NO working fallback in FOR_ITER, so `for x in
+                // obj_implementing_iter_next_manually:` raised "for_iter on
+                // non-iterable" instead of actually iterating.
+                let is_instance = matches!(&*val.borrow(), PyObject::Instance { .. });
                 if is_instance {
                     // A class transparently subclassing list/dict/str
                     // (`class Foo(list): ...`) with no __iter__ override
@@ -420,7 +430,7 @@ impl VirtualMachine {
                                 // panicked with "RefCell already borrowed" for ANY
                                 // `yield from custom_iter` / `for x in custom:`
                                 // whose __next__ stores attributes.
-                                let is_inst = obj.type_name() == "instance";
+                                let is_inst = matches!(&*obj, PyObject::Instance { .. });
                                 drop(obj);
                                 if is_inst {
                                     self.for_iter_next(iter_val.clone(), arg)?;
