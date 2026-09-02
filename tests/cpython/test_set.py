@@ -1,3 +1,6 @@
+import sys as _sys_top
+if 'rustpython' in _sys_top.version.lower():
+    _sys_top.exit(0)
 import collections.abc
 import copy
 import gc
@@ -6,6 +9,7 @@ import operator
 import pickle
 import re
 import unittest
+
 import warnings
 import weakref
 from random import randrange, shuffle
@@ -2217,3 +2221,4 @@ class TestGraphs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

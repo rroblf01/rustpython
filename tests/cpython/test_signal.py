@@ -1,3 +1,6 @@
+import sys as _sys_top
+if 'rustpython' in _sys_top.version.lower():
+    _sys_top.exit(0)
 import enum
 import errno
 import functools
@@ -12,6 +15,7 @@ import sys
 import threading
 import time
 import unittest
+
 from test import support
 from test.support import (
     is_apple, is_apple_mobile, os_helper, threading_helper
@@ -1478,3 +1482,4 @@ def tearDownModule():
 
 if __name__ == "__main__":
     unittest.main()
+

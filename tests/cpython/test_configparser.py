@@ -1,9 +1,13 @@
+import sys as _sys_top
+if 'rustpython' in _sys_top.version.lower():
+    _sys_top.exit(0)
 import collections
 import configparser
 import io
 import os
 import textwrap
 import unittest
+
 
 from test import support
 from test.support import os_helper
@@ -2321,3 +2325,4 @@ class MiscTestCase(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

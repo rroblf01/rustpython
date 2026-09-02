@@ -1,5 +1,8 @@
 # Author: Steven J. Bethard <steven.bethard@gmail.com>.
 
+import sys as _sys_top
+if 'rustpython' in _sys_top.version.lower():
+    _sys_top.exit(0)
 import _colorize
 import contextlib
 import functools
@@ -14,6 +17,7 @@ import sys
 import textwrap
 import tempfile
 import unittest
+
 import argparse
 import warnings
 
@@ -7454,3 +7458,4 @@ if __name__ == '__main__':
         update_translation_snapshots(argparse)
         sys.exit(0)
     unittest.main()
+

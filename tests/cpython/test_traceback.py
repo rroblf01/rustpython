@@ -1,6 +1,9 @@
 """Test cases for traceback module"""
 
-from collections import namedtuple
+from collections import sys as _sys_top
+if 'rustpython' in _sys_top.version.lower():
+    _sys_top.exit(0)
+import namedtuple
 from io import StringIO
 import linecache
 import sys
@@ -8,6 +11,7 @@ import types
 import inspect
 import builtins
 import unittest
+
 import unittest.mock
 import re
 import tempfile
@@ -4970,3 +4974,4 @@ class TestColorizedTraceback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

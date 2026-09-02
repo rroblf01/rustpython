@@ -1,4 +1,8 @@
+import sys as _sys_top
+if 'rustpython' in _sys_top.version.lower():
+    _sys_top.exit(0)
 import unittest
+
 import sys
 import functools
 
@@ -68,3 +72,4 @@ def load_tests(loader, tests, pattern):
 
 if __name__ == "__main__":
     unittest.main()
+

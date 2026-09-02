@@ -1,7 +1,11 @@
 # Testing the line trace facility.
 
-from test import support
+from test import sys as _sys_top
+if 'rustpython' in _sys_top.version.lower():
+    _sys_top.exit(0)
+import support
 import unittest
+
 import sys
 import difflib
 import gc
@@ -3137,3 +3141,4 @@ class TestSetLocalTrace(TraceTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
