@@ -52,6 +52,8 @@ class WeakSet:
                 if isinstance(slots, str):
                     slots = (slots,)
                 for slot in slots:
+                    if slot in ('__weakref__', '__dict__', 'data'):
+                        continue
                     if hasattr(self, slot):
                         try:
                             state[slot] = getattr(self, slot)
@@ -62,13 +64,15 @@ class WeakSet:
     def __getstate__(self):
         state = {}
         if hasattr(self, '__dict__'):
-            state.update({k: v for k, v in self.__dict__.items() if k != 'data'})
+            state.update({k: v for k, v in self.__dict__.items() if k not in ('data', '__weakref__', '__dict__')})
         for cls in type(self).__mro__:
             if '__slots__' in cls.__dict__:
                 slots = cls.__dict__['__slots__']
                 if isinstance(slots, str):
                     slots = (slots,)
                 for slot in slots:
+                    if slot in ('__weakref__', '__dict__', 'data'):
+                        continue
                     if hasattr(self, slot):
                         try:
                             state[slot] = getattr(self, slot)
@@ -78,6 +82,8 @@ class WeakSet:
 
     def __setstate__(self, state):
         for k, v in state.items():
+            if k in ('__weakref__', '__dict__', 'data'):
+                continue
             setattr(self, k, v)
 
     def add(self, item):
