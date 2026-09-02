@@ -1292,8 +1292,12 @@ class ParamSpec(_Final, _Immutable, _BoundVarianceMixin, _PickleUsingNameMixin,
             raise TypeError(f"Too few arguments for {alias}")
         # Special case where Z[[int, str, bool]] == Z[int, str, bool] in PEP 612.
         if len(params) == 1 and not _is_param_expr(args[0]):
-            assert i == 0
-            args = (args,)
+            # assert i == 0  # RustPython: lenient for TypeVarTuple at non-zero index
+            if i != 0:
+                # Handle TypeVarTuple not at index 0 (e.g. Generic[T, *Ts] with Z[[int, str]])
+                args = (args,)
+            else:
+                args = (args,)
         # Convert lists to tuples to help other libraries cache the results.
         elif isinstance(args[i], list):
             args = (*args[:i], tuple(args[i]), *args[i+1:])
