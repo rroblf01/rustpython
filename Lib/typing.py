@@ -2922,7 +2922,11 @@ def _make_nmtuple(name, types, module, defaults = ()):
              for n, t in types}
     nm_tpl = collections.namedtuple(name, fields,
                                     defaults=defaults, module=module)
-    nm_tpl.__annotations__ = nm_tpl.__new__.__annotations__ = types
+    nm_tpl.__annotations__ = types
+    try:
+        nm_tpl.__new__.__annotations__ = types
+    except AttributeError:
+        pass
     return nm_tpl
 
 
@@ -3020,7 +3024,12 @@ class _TypedDictMeta(type):
                 raise TypeError('cannot inherit from both a TypedDict type '
                                 'and a non-TypedDict base class')
 
-        if any(issubclass(b, Generic) for b in bases):
+        def _is_generic(b):
+            try:
+                return issubclass(b, Generic)
+            except TypeError:
+                return False
+        if any(_is_generic(b) for b in bases):
             generic_base = (Generic,)
         else:
             generic_base = ()
