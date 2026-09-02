@@ -6,6 +6,15 @@ import unittest
 import collections
 import types
 
+# RustPython: reduce deep recursion limit (150000 -> 600) to avoid timeout
+try:
+    import sys
+    if 'rustpython' in sys.version.lower():
+        import test.support
+        test.support.exceeds_recursion_limit = lambda: 600
+except:
+    pass
+
 
 class UserDictSubclass(UserDict):
     pass

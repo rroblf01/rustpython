@@ -40,7 +40,13 @@ class WeakSet:
         return wr in self.data
 
     def __reduce__(self):
-        return self.__class__, (list(self),), self.__getstate__()
+        return self.__class__, (list(self),)
+
+    def __getstate__(self):
+        return None
+
+    def __setstate__(self, state):
+        pass
 
     def add(self, item):
         self.data.add(ref(item, self._remove))
@@ -65,7 +71,11 @@ class WeakSet:
         self.data.remove(ref(item))
 
     def discard(self, item):
-        self.data.discard(ref(item))
+        try:
+            wr = ref(item)
+        except TypeError:
+            raise TypeError(f"cannot create weak reference to '{type(item).__name__}' object")
+        self.data.discard(wr)
 
     def update(self, other):
         for element in other:

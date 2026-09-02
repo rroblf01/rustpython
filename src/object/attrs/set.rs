@@ -58,8 +58,11 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 ));
                             }
                             if let PyObject::Set(set) = &mut *args[0].borrow_mut() {
-                                let _ = set.remove(&args[1]);
-                                Ok(py_none())
+                                match set.remove(&args[1]) {
+                                    Ok(_) => Ok(py_none()),
+                                    Err(e) if e.type_name() == "KeyError" => Ok(py_none()),
+                                    Err(e) => Err(e),
+                                }
                             } else {
                                 Err(PyError::runtime_error("discard on non-set"))
                             }
