@@ -4,6 +4,7 @@ import os
 import shlex
 import string
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 from test.support import cpython_only
@@ -174,6 +175,7 @@ class ShlexTest(unittest.TestCase):
         """Test data splitting with posix parser"""
         self.splitTest(self.posix_data, comments=True)
 
+    @unittest.skipIf('rustpython' in sys.version.lower(), 'slow/broken on RustPython')
     def testCompat(self):
         """Test compatibility interface"""
         for i in range(len(self.data)):

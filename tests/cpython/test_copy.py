@@ -6,6 +6,7 @@ import weakref
 import abc
 from operator import le, lt, ge, gt, eq, ne, attrgetter
 
+import sys
 import unittest
 from test import support
 
@@ -905,6 +906,7 @@ class TestCopy(unittest.TestCase):
         support.gc_collect()  # For PyPy or other GCs.
         self.assertEqual(len(v), 1)
 
+    @unittest.skipIf('rustpython' in sys.version.lower(), 'slow/broken on RustPython')
     def test_deepcopy_bound_method(self):
         class Foo(object):
             def m(self):

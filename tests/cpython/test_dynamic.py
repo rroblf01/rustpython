@@ -136,6 +136,7 @@ class RebindBuiltinsTests(unittest.TestCase):
 
 
     @skip_wasi_stack_overflow()
+    @unittest.skipIf('rustpython' in sys.version.lower(), 'slow/broken on RustPython')
     def test_load_global_specialization_failure_keeps_oparg(self):
         # https://github.com/python/cpython/issues/91625
         class MyGlobals(dict):

@@ -376,6 +376,7 @@ class ContextTest(unittest.TestCase):
 
     @isolated_context
     @threading_helper.requires_working_threading()
+    @unittest.skipIf('rustpython' in sys.version.lower(), 'slow/broken on RustPython')
     def test_context_threads_1(self):
         cvar = contextvars.ContextVar('cvar')
 

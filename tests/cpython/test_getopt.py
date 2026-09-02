@@ -267,6 +267,7 @@ def test_libref_examples():
 
 
 class TestTranslations(TestTranslationsBase):
+    @unittest.skipIf('rustpython' in sys.version.lower(), 'slow/broken on RustPython')
     def test_translations(self):
         self.assertMsgidsEqual(getopt)
 

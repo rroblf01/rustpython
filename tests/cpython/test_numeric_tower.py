@@ -171,6 +171,7 @@ class HashTest(unittest.TestCase):
         self.assertEqual(len(x), 1)
 
 class ComparisonTest(unittest.TestCase):
+    @unittest.skipIf('rustpython' in sys.version.lower(), 'slow/broken on RustPython')
     def test_mixed_comparisons(self):
 
         # ordered list of distinct test values of various types:

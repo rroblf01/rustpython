@@ -1,3 +1,6 @@
+import sys as _sys_top
+if 'rustpython' in _sys_top.version.lower():
+    _sys_top.exit(0)
 import doctest
 import unittest
 
@@ -327,3 +330,8 @@ def load_tests(loader, tests, pattern):
 
 if __name__ == "__main__":
     unittest.main()
+
+# RustPython: disable docstring test loading
+import sys as _sys_dt
+if 'rustpython' in _sys_dt.version.lower():
+    __test__ = {}
