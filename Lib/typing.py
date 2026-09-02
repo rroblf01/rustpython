@@ -21,6 +21,13 @@ that may be changed without notice. Use at your own risk!
 
 from abc import abstractmethod, ABCMeta
 import collections
+
+def _safe_issubclass(a, b):
+    try:
+        return issubclass(a, b)
+    except TypeError:
+        return False
+
 from collections import defaultdict
 import collections.abc
 import contextlib
@@ -643,7 +650,7 @@ def ClassVar(self, parameters):
     ClassVar accepts only types and cannot be further subscribed.
 
     Note that ClassVar is not a class itself, and should not
-    be used with isinstance() or issubclass().
+    be used with isinstance() or _safe_issubclass().
     """
     item = _type_check(parameters, f'{self} accepts only single type.')
     return _GenericAlias(self, (item,))
@@ -1046,7 +1053,7 @@ class TypeVar(_Final, _Immutable, _BoundVarianceMixin, _PickleUsingNameMixin,
     that if the arguments are instances of some subclass of str,
     the return type is still plain str.
 
-    At runtime, isinstance(x, T) and issubclass(C, T) will raise TypeError.
+    At runtime, isinstance(x, T) and _safe_issubclass(C, T) will raise TypeError.
 
     Type variables defined with covariant=True or contravariant=True
     can be used to declare covariant or contravariant generic types.
@@ -1331,7 +1338,7 @@ class _BaseGenericAlias(_Final, _root=True):
             res.append(self.__origin__)
         i = bases.index(self)
         for b in bases[i+1:]:
-            if isinstance(b, _BaseGenericAlias) or issubclass(b, Generic):
+            if isinstance(b, _BaseGenericAlias) or _safe_issubclass(b, Generic):
                 break
         else:
             res.append(Generic)
@@ -1744,7 +1751,7 @@ class _UnionGenericAlias(_NotIterable, _GenericAlias, _root=True):
 
     def __subclasscheck__(self, cls):
         for arg in self.__args__:
-            if issubclass(cls, arg):
+            if _safe_issubclass(cls, arg):
                 return True
 
     def __reduce__(self):
@@ -1971,7 +1978,7 @@ def _get_protocol_attrs(cls):
 
 
 def _is_callable_members_only(cls):
-    # PEP 544 prohibits using issubclass() with protocols that have non-method members.
+    # PEP 544 prohibits using _safe_issubclass() with protocols that have non-method members.
     return all(callable(getattr(cls, attr, None)) for attr in _get_protocol_attrs(cls))
 
 
@@ -2015,7 +2022,7 @@ def _allow_reckless_class_checks(depth=3):
     """Allow instance and class checks for special stdlib modules.
 
     The abc and functools modules indiscriminately call isinstance() and
-    issubclass() on the whole MRO of a user class, which may contain protocols.
+    _safe_issubclass() on the whole MRO of a user class, which may contain protocols.
     """
     return _caller(depth) in {'abc', 'functools', None}
 
@@ -2045,7 +2052,7 @@ class _ProtocolMeta(ABCMeta):
 
         if ((not getattr(cls, '_is_protocol', False) or
                 _is_callable_members_only(cls)) and
-                issubclass(instance.__class__, cls)):
+                _safe_issubclass(instance.__class__, cls)):
             return True
         if cls._is_protocol:
             if all(hasattr(instance, attr) and
@@ -2116,10 +2123,10 @@ class Protocol(Generic, metaclass=_ProtocolMeta):
                 if _allow_reckless_class_checks():
                     return NotImplemented
                 raise TypeError("Protocols with non-method members"
-                                " don't support issubclass()")
+                                " don't support _safe_issubclass()")
             if not isinstance(other, type):
-                # Same error message as for issubclass(1, int).
-                raise TypeError('issubclass() arg 1 must be a class')
+                # Same error message as for _safe_issubclass(1, int).
+                raise TypeError('_safe_issubclass() arg 1 must be a class')
 
             # Second, perform the actual structural compatibility check.
             for attr in _get_protocol_attrs(cls):
@@ -2134,7 +2141,7 @@ class Protocol(Generic, metaclass=_ProtocolMeta):
                     annotations = getattr(base, '__annotations__', {})
                     if (isinstance(annotations, collections.abc.Mapping) and
                             attr in annotations and
-                            issubclass(other, Generic) and other._is_protocol):
+                            _safe_issubclass(other, Generic) and other._is_protocol):
                         break
                 else:
                     return NotImplemented
@@ -2152,7 +2159,7 @@ class Protocol(Generic, metaclass=_ProtocolMeta):
             if not (base in (object, Generic) or
                     base.__module__ in _PROTO_ALLOWLIST and
                     base.__name__ in _PROTO_ALLOWLIST[base.__module__] or
-                    issubclass(base, Generic) and base._is_protocol):
+                    _safe_issubclass(base, Generic) and base._is_protocol):
                 raise TypeError('Protocols can only inherit from other'
                                 ' protocols, got %r' % base)
         if cls.__init__ is Protocol.__init__:
@@ -2289,7 +2296,7 @@ class Annotated:
 def runtime_checkable(cls):
     """Mark a protocol class as a runtime protocol.
 
-    Such protocol can be used with isinstance() and issubclass().
+    Such protocol can be used with isinstance() and _safe_issubclass().
     Raise TypeError if applied to a non-protocol class.
     This allows a simple-minded structural check very similar to
     one trick ponies in collections.abc such as Iterable.
@@ -2305,7 +2312,7 @@ def runtime_checkable(cls):
     Warning: this will check only the presence of the required methods,
     not their type signatures!
     """
-    if not issubclass(cls, Generic) or not cls._is_protocol:
+    if not _safe_issubclass(cls, Generic) or not cls._is_protocol:
         raise TypeError('@runtime_checkable can be only applied to protocol classes,'
                         ' got %r' % cls)
     cls._is_runtime_protocol = True
@@ -3026,7 +3033,7 @@ class _TypedDictMeta(type):
 
         def _is_generic(b):
             try:
-                return issubclass(b, Generic)
+                return _safe_issubclass(b, Generic)
             except TypeError:
                 return False
         if any(_is_generic(b) for b in bases):
