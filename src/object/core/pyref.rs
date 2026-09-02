@@ -146,6 +146,16 @@ impl PyObjectRef {
         }
     }
 
+    pub fn try_borrow(&self) -> Result<RefOrOwned<'_>, PyError> {
+        match self {
+            PyObjectRef::Mut(rc) => match rc.try_borrow() {
+                Ok(b) => Ok(RefOrOwned::Ref(b)),
+                Err(_) => Err(PyError::runtime_error("already borrowed")),
+            },
+            _ => Ok(self.borrow()),
+        }
+    }
+
     /// Fallible version of `borrow_mut()` — returns a `TypeError` instead
     /// of panicking when called on an immutable or inline value. Use this
     /// for any code path that receives a user-provided `PyObjectRef` which

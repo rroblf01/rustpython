@@ -72,7 +72,14 @@ impl PySet {
             }
             let entry_idx = (idx_val - 1) as usize;
             if let Some(k) = &self.entries[entry_idx] {
-                if k.is(key) || k.equals(key).unwrap_or(false) {
+                let eq = if let (PyObject::Int(a), PyObject::Int(b)) = (&*k.borrow(), &*key.borrow()) {
+                    a == b
+                } else if let (PyObject::Str(a), PyObject::Str(b)) = (&*k.borrow(), &*key.borrow()) {
+                    a == b
+                } else {
+                    k.is(key) || k.equals(key).unwrap_or(false)
+                };
+                if eq {
                     return Some(entry_idx);
                 }
             }
@@ -102,7 +109,14 @@ impl PySet {
                     first_tomb = Some(i);
                 }
             } else if let Some(k) = &self.entries[entry_idx] {
-                if k.equals(key).unwrap_or(false) {
+                let eq = if let (PyObject::Int(a), PyObject::Int(b)) = (&*k.borrow(), &*key.borrow()) {
+                    a == b
+                } else if let (PyObject::Str(a), PyObject::Str(b)) = (&*k.borrow(), &*key.borrow()) {
+                    a == b
+                } else {
+                    k.is(key) || k.equals(key).unwrap_or(false)
+                };
+                if eq {
                     return (i, Some(entry_idx));
                 }
             }
@@ -256,6 +270,29 @@ impl PySet {
 /// in a loop should use this too rather than `PySet::add` directly.
 pub(crate) fn pyset_safe_add(target: &PyObjectRef, key: PyObjectRef) -> PyResult<()> {
     let h = key.hash()?;
+    // Fast path for simple hashable types (int, str, None, bool) where
+    // __eq__ is known not to mutate the set — avoid cloning the entire set
+    let is_simple = matches!(
+        &*key.borrow(),
+        PyObject::Int(_) | PyObject::Str(_) | PyObject::None | PyObject::Bool(_)
+    );
+    if is_simple {
+        let needs_insert = {
+            let obj = target.borrow();
+            if let PyObject::Set(set) = &*obj {
+                let (_, existing) = set.probe(&key, h);
+                existing.is_none()
+            } else {
+                false
+            }
+        };
+        if needs_insert {
+            if let PyObject::Set(set) = &mut *target.borrow_mut() {
+                set.insert_no_check(key, h);
+            }
+        }
+        return Ok(());
+    }
     let snapshot = {
         let obj = target.borrow();
         match &*obj {
