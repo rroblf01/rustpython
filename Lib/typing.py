@@ -1915,9 +1915,7 @@ class Generic:
     def __init_subclass__(cls, *args, **kwargs):
         super().__init_subclass__(*args, **kwargs)
         tvars = []
-        # RustPython: skip "Cannot inherit from plain Generic" check because
-        # RustPython resolves __mro_entries__ before storing __orig_bases__,
-        # losing the Generic[T] → Generic substitution info.
+        # RustPython: skip plain Generic check — __orig_bases__ handling differs
         if '__orig_bases__' in cls.__dict__:
             tvars = _collect_parameters(cls.__orig_bases__)
             gvars = None

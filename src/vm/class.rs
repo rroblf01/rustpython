@@ -243,7 +243,7 @@ impl VirtualMachine {
             eprintln!("BOZO FIX2: module_after={:?}", namespace_dict.get("__module__").map(|v| v.str()));
         }
         let class = PyObjectRef::new(PyObject::Type {
-            name: name_str,
+            name: name_str.clone(),
             dict: Box::new(str_map_to_typedict(namespace_dict.clone())),
             bases: bases_vec.clone(),
             mro: vec![],
@@ -257,6 +257,14 @@ impl VirtualMachine {
             *mro_field = mro;
         }
         crate::object::register_class(&class);
+
+        // PEP 560: inject __orig_bases__ into class dict BEFORE __init_subclass__
+        // so typing.py's Generic.__init_subclass__ can inspect the original bases.
+        if let Some(orig_bases) = namespace_dict.get("__orig_bases__").cloned() {
+            if let PyObject::Type { dict, .. } = &mut *class.borrow_mut() {
+                dict.insert_str("__orig_bases__", orig_bases);
+            }
+        }
 
         // NOTE: this used to unconditionally compute and set
         // `__abstractmethods__` (and a bogus empty `_abc_registry`

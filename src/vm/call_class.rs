@@ -55,6 +55,14 @@ impl VirtualMachine {
         // MULTIPLE entries) by the result of calling it with the full
         // original bases tuple; anything else (an ordinary class, or a
         // base with no such hook) passes through unchanged.
+        let original_bases_vec = if matches!(&*bases.borrow(), PyObject::None) {
+            vec![]
+        } else if let PyObject::Tuple(t) = &*bases.borrow() {
+            t.clone()
+        } else {
+            vec![bases.clone()]
+        };
+
         let bases_vec: Vec<PyObjectRef> = {
             let mut resolved = Vec::with_capacity(bases_vec.len());
             for base in &bases_vec {
@@ -69,20 +77,24 @@ impl VirtualMachine {
                 let mro_entries_fn = base.borrow().get_attribute("__mro_entries__").ok();
                 match mro_entries_fn {
                     Some(f) => {
-                        eprintln!("MRO_ENTRIES f_type={} base_type={}", f.borrow().type_name(), base.borrow().type_name());
+                        let orig_bases_tuple = PyObjectRef::new(PyObject::Tuple(original_bases_vec.clone()));
                         let result = {
-                            let f_borrow = f.borrow();
-                            match &*f_borrow {
-                                PyObject::BoundMethod { func, self_obj } => {
-                                    let func_clone = func.clone();
-                                    let self_clone = self_obj.clone();
-                                    drop(f_borrow);
-                                    crate::object::call_bound_method(func_clone, self_clone, vec![bases.clone()])?
-                                }
-                                _ => {
-                                    drop(f_borrow);
-                                    crate::object::call_bound_method(f, base.clone(), vec![bases.clone()])?
-                                }
+                            let is_one_arg = match &*f.borrow() {
+                                PyObject::Function(func) => func.code.arg_count == 1,
+                                PyObject::BoundMethod { func, .. } => match &*func.borrow() {
+                                    PyObject::Function(func) => func.code.arg_count == 1,
+                                    _ => false,
+                                },
+                                _ => false,
+                            };
+                            if is_one_arg {
+                                let inner = match &*f.borrow() {
+                                    PyObject::BoundMethod { func, .. } => func.clone(),
+                                    _ => f.clone(),
+                                };
+                                crate::object::call_function_disposable(&inner, vec![orig_bases_tuple], vec![])?
+                            } else {
+                                crate::object::call_bound_method(f, base.clone(), vec![orig_bases_tuple])?
                             }
                         };
                         let entries = match &*result.borrow() {
@@ -215,11 +227,19 @@ impl VirtualMachine {
             _ => return Err(PyError::type_error("class body must be a function")),
         }
 
-        let namespace_dict: HashMap<String, PyObjectRef> = namespace
+        let mut namespace_dict: HashMap<String, PyObjectRef> = namespace
             .borrow()
             .iter()
             .map(|(k, v)| (interner::lookup_str(*k).to_string(), v.clone()))
             .collect();
+        // PEP 560: store original bases as __orig_bases__ before resolution
+        // so typing.py's __init_subclass__ can distinguish Generic[T] from Generic.
+        if !original_bases_vec.is_empty() {
+            namespace_dict.insert(
+                "__orig_bases__".to_string(),
+                PyObjectRef::new(PyObject::Tuple(original_bases_vec.clone())),
+            );
+        }
         let order = name_order.borrow().clone();
 
         if let Some(prepared) = &prepared_namespace {
