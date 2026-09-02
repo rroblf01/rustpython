@@ -840,13 +840,28 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             let needle = args[1].str();
                             let start = opt_i64_arg(args.get(2));
                             let end = opt_i64_arg(args.get(3));
-                            let chars: Vec<char> = s.chars().collect();
-                            let (st, en) = resolve_str_slice_bounds(chars.len(), start, end);
-                            let sub: String = chars[st..en].iter().collect();
-                            let c = if needle.is_empty() {
-                                sub.chars().count() + 1
+                            let c = if start.is_none() && end.is_none() {
+                                if needle.is_empty() {
+                                    s.chars().count() + 1
+                                } else {
+                                    s.matches(needle.as_str()).count()
+                                }
                             } else {
-                                sub.matches(needle.as_str()).count()
+                                let char_count = s.chars().count();
+                                let (st, en) = resolve_str_slice_bounds(char_count, start, end);
+                                if st >= en {
+                                    if needle.is_empty() { 1 } else { 0 }
+                                } else {
+                                    let start_byte: usize = s.chars().take(st).map(|c| c.len_utf8()).sum();
+                                    let len_chars = en - st;
+                                    let end_byte = start_byte + s.chars().skip(st).take(len_chars).map(|c| c.len_utf8()).sum::<usize>();
+                                    let sub = &s[start_byte..end_byte];
+                                    if needle.is_empty() {
+                                        sub.chars().count() + 1
+                                    } else {
+                                        sub.matches(needle.as_str()).count()
+                                    }
+                                }
                             };
                             Ok(py_int(c as i64))
                         },
