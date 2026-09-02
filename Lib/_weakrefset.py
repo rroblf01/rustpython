@@ -9,6 +9,7 @@ __all__ = ['WeakSet']
 
 
 class WeakSet:
+    __slots__ = ('data', '_remove', '__weakref__', '__dict__')
     def __init__(self, data=None):
         self.data = set()
 
@@ -40,13 +41,44 @@ class WeakSet:
         return wr in self.data
 
     def __reduce__(self):
-        return self.__class__, (list(self),)
+        # Don't double-pickle data (already in args as list(self))
+        # Handle both __dict__ and __slots__
+        state = {}
+        if hasattr(self, '__dict__'):
+            state.update({k: v for k, v in self.__dict__.items() if k != 'data'})
+        for cls in type(self).__mro__:
+            if '__slots__' in cls.__dict__:
+                slots = cls.__dict__['__slots__']
+                if isinstance(slots, str):
+                    slots = (slots,)
+                for slot in slots:
+                    if hasattr(self, slot):
+                        try:
+                            state[slot] = getattr(self, slot)
+                        except AttributeError:
+                            pass
+        return self.__class__, (list(self),), state
 
     def __getstate__(self):
-        return None
+        state = {}
+        if hasattr(self, '__dict__'):
+            state.update({k: v for k, v in self.__dict__.items() if k != 'data'})
+        for cls in type(self).__mro__:
+            if '__slots__' in cls.__dict__:
+                slots = cls.__dict__['__slots__']
+                if isinstance(slots, str):
+                    slots = (slots,)
+                for slot in slots:
+                    if hasattr(self, slot):
+                        try:
+                            state[slot] = getattr(self, slot)
+                        except AttributeError:
+                            pass
+        return state
 
     def __setstate__(self, state):
-        pass
+        for k, v in state.items():
+            setattr(self, k, v)
 
     def add(self, item):
         self.data.add(ref(item, self._remove))

@@ -21,7 +21,14 @@ fn is_weakrefable(obj: &PyObjectRef) -> bool {
             | PyObject::Complex(..)
             | PyObject::Str(_)
             | PyObject::Bytes(_)
+            | PyObject::ByteArray(_)
             | PyObject::Tuple(_)
+            | PyObject::List(_)
+            | PyObject::Dict(_)
+            | PyObject::Set(_)
+            | PyObject::FrozenSet(_)
+            | PyObject::Deque { .. }
+            | PyObject::Range { .. }
             | PyObject::Code { .. }
     ) && matches!(obj, PyObjectRef::Mut(_) | PyObjectRef::Imm(_))
 }
