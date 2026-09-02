@@ -86,6 +86,23 @@ class WeakSet:
                 continue
             setattr(self, k, v)
 
+    def __deepcopy__(self, memo):
+        from copy import deepcopy
+        cls = self.__class__
+        result = cls.__new__(cls)
+        memo[id(self)] = result
+        result.data = set()
+        # _remove needs to be set before adding items
+        result._remove = self._remove
+        # Copy state
+        state = self.__getstate__()
+        for k, v in state.items():
+            setattr(result, k, deepcopy(v, memo))
+        # Add items via weakrefs
+        for item in self:
+            result.add(item)
+        return result
+
     def add(self, item):
         self.data.add(ref(item, self._remove))
 
