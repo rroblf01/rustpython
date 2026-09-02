@@ -131,7 +131,14 @@ impl PyDict {
             }
             let entry_idx = (idx_val - 1) as usize;
             if let Some((k, _)) = &self.entries[entry_idx] {
-                if k.is(key) || k.equals(key)? {
+                let eq = if let (PyObject::Int(a), PyObject::Int(b)) = (&*k.borrow(), &*key.borrow()) {
+                    a == b
+                } else if let (PyObject::Str(a), PyObject::Str(b)) = (&*k.borrow(), &*key.borrow()) {
+                    a == b
+                } else {
+                    k.is(key) || k.equals(key)?
+                };
+                if eq {
                     return Ok(Some(entry_idx));
                 }
             }
@@ -163,7 +170,14 @@ impl PyDict {
                     first_tomb = Some(i);
                 }
             } else if let Some((k, _)) = &self.entries[entry_idx] {
-                if k.equals(key).unwrap_or(false) {
+                let eq = if let (PyObject::Int(a), PyObject::Int(b)) = (&*k.borrow(), &*key.borrow()) {
+                    a == b
+                } else if let (PyObject::Str(a), PyObject::Str(b)) = (&*k.borrow(), &*key.borrow()) {
+                    a == b
+                } else {
+                    k.is(key) || k.equals(key).unwrap_or(false)
+                };
+                if eq {
                     return (i, Some(entry_idx));
                 }
             }
