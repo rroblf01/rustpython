@@ -693,8 +693,9 @@ fn real_main() {
                 // module, then re-run its own source into its module dict
                 // with `__name__` swapped to `__main__`.
                 let script = format!(
-                    "import sys\nimport importlib\n_mod = importlib.import_module('{}')\n_src = open(_mod.__file__, 'rb').read()\n_code = compile(_src, _mod.__file__, 'exec')\n_mod.__name__ = '__main__'\nsys.modules['__main__'] = _mod\nexec(_code, _mod.__dict__)\n",
-                    module_name.replace("'", "\\'")
+                    "import sys\nimport importlib\nimport types\n_mod = importlib.import_module('{}')\n_src = open(_mod.__file__, 'rb').read()\n_code = compile(_src, _mod.__file__, 'exec')\n_mod.__name__ = '__main__'\n_mod.__spec__ = types.SimpleNamespace(name='{}', loader=None, origin=_mod.__file__, submodule_search_locations=None)\nsys.modules['__main__'] = _mod\nexec(_code, _mod.__dict__)\n",
+                    module_name.replace("'", "\\'"),
+                    module_name.replace("'", "\\'"),
                 );
 
                 let mut parser = Parser::new(&script);
