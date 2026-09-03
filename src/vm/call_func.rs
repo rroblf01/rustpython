@@ -702,6 +702,20 @@ impl VirtualMachine {
                             false
                         }
                     }
+                    // Custom `__new__` for exception subclasses (e.g. via
+                    // `super().__new__(cls, ...)`) returns a native
+                    // `PyObject::Exception` typed by class NAME, not an
+                    // `Instance` — without this arm `__init__` was skipped
+                    // entirely (real trigger: test_exception_hierarchy's
+                    // multiple-inheritance Combined* cases setting attrs
+                    // in `__init__`).
+                    PyObject::Exception { typ: tname, .. } => {
+                        if let PyObject::Type { name: cname, .. } = &*callable.borrow() {
+                            tname == cname
+                        } else {
+                            false
+                        }
+                    }
                     _ => false,
                 };
                 drop(r);
@@ -851,6 +865,23 @@ impl VirtualMachine {
                 let mut init_args = vec![instance.clone()];
                 init_args.extend(args);
                 self.call_function(init_func, init_args, keywords)?;
+            }
+            // A custom `__init__` that never sets args (e.g. just `pass`)
+            // must still leave `e.args == ()` (CPython: BaseException
+            // always has args; real trigger: test_exception_hierarchy's
+            // standalone-init case). Only fill when missing so real
+            // assignments via `super().__init__(...)` win.
+            if crate::object::find_exception_base_name(&callable).is_some() {
+                let missing = if let PyObject::Instance { dict, .. } = &*instance.borrow() {
+                    dict.get_str("args").is_none()
+                } else {
+                    false
+                };
+                if missing {
+                    if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
+                        dict.insert_str("args", py_tuple(vec![]));
+                    }
+                }
             }
             return Ok(instance);
         }

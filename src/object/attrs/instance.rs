@@ -445,6 +445,28 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                 )))
             }
             PyObject::Instance { dict, typ } => {
+                // BaseException.args defaults to () when a custom
+                // `__init__` never sets it (real trigger:
+                // test_exception_hierarchy::test_init_standalone, whose
+                // `__init__` is just `pass`).
+                if name == "args" {
+                    if let Some(v) = dict.get_str(name).cloned() {
+                        return Ok(v);
+                    }
+                    // User exception subclass whose custom `__init__`
+                    // never sets args (or no custom `__init__` ran):
+                    // default ().
+                    let is_exc = match &*typ.borrow() {
+                        PyObject::Type { name: tn, .. } => {
+                            tn == "BaseException"
+                                || crate::object::find_exception_base_name(typ).is_some()
+                        }
+                        _ => false,
+                    };
+                    if is_exc {
+                        return Ok(py_tuple(vec![]));
+                    }
+                }
                 if name == "__dict__" {
                     // Return a copy of the instance's HashMap as a PyDict (no
                     // live view from here) — NATIVE_BACKING_KEY is internal

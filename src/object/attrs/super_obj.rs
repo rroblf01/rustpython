@@ -33,6 +33,16 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         }
                     }
                     v
+                } else if matches!(&*obj.borrow(), PyObject::Exception { .. } | PyObject::ExceptionGroup { .. }) {
+                    // Exception instances have no `Instance.typ`; their
+                    // `__class__` is a synthesized placeholder Type with
+                    // EMPTY mro (see `get_attribute_impl`), so walking it
+                    // finds nothing (real trigger: MI exception subclass
+                    // `super().__init__` after custom `__new__`). Walk
+                    // `cls`'s own MRO instead — equivalent by C3 (cls's
+                    // mro order is preserved in any subclass mro, and the
+                    // walk starts after cls either way).
+                    vec![cls.clone()]
                 } else {
                     match obj.borrow().get_attribute("__class__").ok() {
                         Some(c) => vec![c],
@@ -127,6 +137,44 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                                 }
                                                 Ok(py_none())
                                             }))));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    // Same gap for `__new__`: `super().__new__
+                                    // (cls, ...)` inside an exception
+                                    // subclass's own `__new__` (real trigger:
+                                    // test_exception_hierarchy's
+                                    // SubOSErrorWithNew etc.). Unlike
+                                    // `__init__` (mutates the instance),
+                                    // `__new__` must CREATE and return one:
+                                    // a BaseException-shaped object typed
+                                    // as `cls` carrying the extra args.
+                                    if name == "__new__" {
+                                        if let PyObject::BuiltinFunction { name: bname, .. } =
+                                            &*base.borrow()
+                                        {
+                                            if is_builtin_exception_class_name(bname) {
+                                                found = Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                                                    name: "__new__".to_string(),
+                                                    func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                                                        let cls_name = args.first().map(|c| match &*c.borrow() {
+                                                            PyObject::Type { name, .. } => name.clone(),
+                                                            PyObject::BuiltinFunction { name, .. } => name.clone(),
+                                                            _ => "Exception".to_string(),
+                                                        }).unwrap_or_else(|| "Exception".to_string());
+                                                        let exc_args = if args.len() > 1 { args[1..].to_vec() } else { vec![] };
+                                                        Ok(PyObjectRef::new(PyObject::Exception {
+                                                            typ: cls_name,
+                                                            args: exc_args,
+                                                            cause: None,
+                                                            suppress_context: false,
+                                                            context: None,
+                                                            traceback: None,
+                                                            extra: None,
+                                                        }))
+                                                    },
+                                                }));
                                                 break;
                                             }
                                         }

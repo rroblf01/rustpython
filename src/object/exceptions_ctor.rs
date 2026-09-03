@@ -134,8 +134,27 @@ pub fn builtin_make_exception_oserror(args: &[PyObjectRef]) -> PyResult<PyObject
     if let Some(a4) = args.get(4) {
         extra.insert("filename2".to_string(), a4.clone());
     }
+    // CPython maps errno values to OSError subclasses (Linux numbers;
+    // test_exception_hierarchy::test_errno_mapping checks exhaustively).
+    let typ: &str = match args.first().and_then(|a| a.as_i64()) {
+        Some(1) | Some(13) => "PermissionError", // EPERM, EACCES
+        Some(2) => "FileNotFoundError",          // ENOENT
+        Some(3) => "ProcessLookupError",         // ESRCH
+        Some(4) => "InterruptedError",           // EINTR
+        Some(10) => "ChildProcessError",         // ECHILD
+        Some(11) | Some(114) | Some(115) => "BlockingIOError", // EAGAIN/EWOULDBLOCK, EALREADY, EINPROGRESS
+        Some(17) => "FileExistsError",           // EEXIST
+        Some(20) => "NotADirectoryError",        // ENOTDIR
+        Some(21) => "IsADirectoryError",         // EISDIR
+        Some(32) | Some(108) => "BrokenPipeError", // EPIPE, ESHUTDOWN
+        Some(103) => "ConnectionAbortedError",   // ECONNABORTED
+        Some(104) => "ConnectionResetError",     // ECONNRESET
+        Some(110) => "TimeoutError",             // ETIMEDOUT
+        Some(111) => "ConnectionRefusedError",   // ECONNREFUSED
+        _ => "OSError",
+    };
     Ok(PyObjectRef::new(PyObject::Exception {
-        typ: "OSError".to_string(),
+        typ: typ.to_string(),
         args: clean_args,
         cause: None,
         suppress_context: false,
