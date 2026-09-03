@@ -181,7 +181,7 @@ impl VirtualMachine {
                                         _ => None,
                                     }
                                 });
-                                if let Some(sm) = sys_modules {
+                                if let Some(sm) = sys_modules.clone() {
                                     // Use try_borrow_mut to avoid RefCell panic if already borrowed
                                     match &sm {
                                         PyObjectRef::Mut(rc) => {
@@ -196,8 +196,40 @@ impl VirtualMachine {
                                     }
                                 }
                                 // Execute the module source
-                                let module =
-                                    self.exec_module_source(&source, candidate, &full_name)?;
+                                // On failure remove the pre-registered stub
+                                // (CPython drops failed imports from
+                                // sys.modules; stale stubs break
+                                // import_helper.import_module SkipTest).
+                                let module = match self.exec_module_source(
+                                    &source,
+                                    candidate,
+                                    &full_name,
+                                ) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        self.modules.remove(&full_name);
+                                        if let Some(sm) = sys_modules.clone() {
+                                            match &sm {
+                                                PyObjectRef::Mut(rc) => {
+                                                    if let Ok(mut guard) =
+                                                        rc.try_borrow_mut()
+                                                    {
+                                                        if let PyObject::Dict(
+                                                            ref mut d,
+                                                        ) = &mut *guard
+                                                        {
+                                                            let _ = d.remove(
+                                                                &py_str(&full_name),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        return Err(e);
+                                    }
+                                };
                                 self.modules.insert(full_name.clone(), module.clone());
                                 // Wire into parent module namespace
                                 if let Some(dot_pos) = full_name.rfind('.') {
@@ -274,7 +306,28 @@ impl VirtualMachine {
                         }
                     }
                 }
-                let module = self.exec_module_source(&source, &py_path, name)?;
+                // CPython removes failed imports from sys.modules; without
+                // cleanup the empty stub above would make a later
+                // `import name` return a partial module instead of
+                // retrying/raising (e.g. `import bz2` without `_bz2`
+                // leaving a BZ2File-less stub that defeats
+                // import_helper.import_module's SkipTest).
+                let module = match self.exec_module_source(&source, &py_path, name) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        self.modules.remove(name);
+                        if let Some(sys_mod) = self.modules.get("sys").cloned() {
+                            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                                if let Some(mod_dict) = dict.get_str("modules").cloned() {
+                                    if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                                        let _ = d.remove(&py_str(name));
+                                    }
+                                }
+                            }
+                        }
+                        return Err(e);
+                    }
+                };
                 self.modules.insert(name.to_string(), module.clone());
                 // Wire submodule into parent module namespace and update sys.modules
                 if let Some(sys_mod) = self.modules.get("sys") {
@@ -324,7 +377,22 @@ impl VirtualMachine {
                         }
                     }
                 }
-                let module = self.exec_module_source(&source, &init_path, name)?;
+                let module = match self.exec_module_source(&source, &init_path, name) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        self.modules.remove(name);
+                        if let Some(sys_mod) = self.modules.get("sys").cloned() {
+                            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                                if let Some(mod_dict) = dict.get_str("modules").cloned() {
+                                    if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                                        let _ = d.remove(&py_str(name));
+                                    }
+                                }
+                            }
+                        }
+                        return Err(e);
+                    }
+                };
                 self.modules.insert(name.to_string(), module.clone());
                 // Update sys.modules with the loaded module (overwrites empty stub)
                 if let Some(sys_mod) = self.modules.get("sys") {
