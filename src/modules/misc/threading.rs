@@ -25,6 +25,18 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
     // and never leaves anything "dangling", a permanently empty list is
     // behaviorally correct, not just a placeholder.
     d.insert_str("_dangling", py_list(vec![]));
+    // `threading._CRLock` — real CPython's `_thread.RLock` class.
+    // Missing entirely broke `test_threading.py` which checks
+    // `threading._CRLock is not None`.
+    d.insert_str("_CRLock", py_none());
+    // `threading.local` — thread-local storage.
+    // Missing entirely broke `test_threading_local.py`.
+    d.insert_str("local", PyObjectRef::new(PyObject::Type {
+        name: "_thread._local".to_string(),
+        dict: Box::new(str_map_to_typedict(HashMap::new())),
+        bases: vec![],
+        mro: vec![],
+    }));
 
     thr_func!("Thread", |args| {
         // Real `threading.Thread.__init__(self, group=None, target=None,

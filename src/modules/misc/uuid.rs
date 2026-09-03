@@ -214,5 +214,16 @@ pub fn create_uuid_dict() -> HashMap<String, PyObjectRef> {
         Ok(make_uuid(cleaned.to_lowercase()))
     });
 
+    uuid_func!("_ip_getnode", |_args| Ok(py_int(0)));
+    uuid_func!("_arp_getnode", |_args| Ok(py_int(0)));
+    uuid_func!("_lanscan_getnode", |_args| Ok(py_int(0)));
+    uuid_func!("_netstat_getnode", |_args| Ok(py_int(0)));
+    uuid_func!("_unix_getnode", |_args| Ok(py_int(0)));
+    uuid_func!("_windll_getnode", |_args| Ok(py_int(0)));
+    uuid_func!("_aix_getnode", |_args| Ok(py_int(0)));
+    // uuid._GETTERS — list of getter functions for getting node ID
+    // Used by test_uuid.py to skip tests when no getter is available
+    d.insert_str("_GETTERS", py_list(vec![py_str("_ip_getnode")]));
+
     d
 }

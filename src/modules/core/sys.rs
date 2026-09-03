@@ -344,6 +344,9 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         };
         Err(PyError::SystemExit(code))
     });
+    // sys.audit — CPython audit hook stub. No-op in this interpreter.
+    sys_func!("audit", |_args| Ok(py_none()));
+    sys_func!("addaudithook", |_args| Ok(py_none()));
     sys_func!("displayhook", |args| {
         if args.is_empty() {
             return Ok(py_none());
@@ -393,6 +396,12 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     );
     d.insert_str("float_repr_style", py_str("short"));
     d.insert_str("hexversion", py_int(0x030c0000));
+    d.insert_str(
+        "copyright",
+        py_str(
+            "Copyright (c) 2001-2025 Python Software Foundation.\nAll Rights Reserved.\n\nCopyright (c) 2000 BeOpen.com.\nAll Rights Reserved.\n\nCopyright (c) 1995-2001 Corporation for National Research Initiatives.\nAll Rights Reserved.\n\nCopyright (c) 1991-1995 Stichting Mathematisch Centrum, Amsterdam.\nAll Rights Reserved.",
+        ),
+    );
     // sys.flags — real CPython exposes this as a structseq (tuple +
     // attribute access). A plain Instance with these as attributes is
     // enough for real code that reads specific flags by name (e.g.

@@ -72,5 +72,38 @@ pub fn create_sysconfig_dict() -> HashMap<String, PyObjectRef> {
 
     syscfg_func!("is_python_build", |_| { Ok(py_bool(false)) });
 
+    syscfg_func!("get_paths", |args| {
+        // get_paths(scheme=None, vars=None, expand=True) → dict
+        let mut out = PyDict::new();
+        let base = crate::modules::get_module("sys").and_then(|m| {
+            let b = m.borrow();
+            if let PyObject::Module { dict, .. } = &*b {
+                dict.get_str("path").cloned()
+            } else {
+                None
+            }
+        });
+        let p = base.and_then(|pl| {
+            let pb = pl.borrow();
+            if let PyObject::List(items) = &*pb { items.first().map(|i| i.str()) } else { None }
+        }).unwrap_or_else(|| "/usr/local".to_string());
+        for k in ["stdlib","platstdlib","purelib","platlib","include","platinclude","scripts","data"] {
+            let v = match k {
+                "stdlib"|"platstdlib" => format!("{}/Lib", p),
+                _ => p.clone(),
+            };
+            let _ = out.set(py_str(k), py_str(&v));
+        }
+        Ok(PyObjectRef::new(PyObject::Dict(Box::new(out))))
+    });
+    syscfg_func!("get_default_scheme", |_| Ok(py_str("posix_local")));
+    syscfg_func!("_get_default_scheme", |_| Ok(py_str("posix_local")));
+    syscfg_func!("get_scheme_names", |_| Ok(py_list(vec![py_str("posix_local"), py_str("posix_prefix"), py_str("nt")])));
+    syscfg_func!("get_path_names", |_| Ok(py_list(vec![py_str("stdlib"), py_str("platstdlib"), py_str("purelib"), py_str("platlib"), py_str("include"), py_str("platinclude"), py_str("scripts"), py_str("data")])));
+    d.insert_str("_INSTALL_SCHEMES", py_dict());
+    d.insert_str("_PYTHON_BUILD", py_bool(false));
+    syscfg_func!("_expand_vars", |args| Ok(args.get(0).cloned().unwrap_or_else(|| py_str(""))));
+    syscfg_func!("_get_default_scheme", |_| Ok(py_str("posix_local")));
+
     d
 }

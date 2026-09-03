@@ -917,6 +917,178 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     }
     d.insert_str("supports_bytes_environ", py_bool(true));
 
+    // os._walk_symlinks_as_files — sentinel object used by Lib/os.py's walk()
+    // to implement followlinks=os._walk_symlinks_as_files mode.
+    // Defined in CPython's Lib/os.py as: _walk_symlinks_as_files = object()
+    d.insert_str("_walk_symlinks_as_files", PyObjectRef::new(PyObject::Type {
+        name: "_walk_symlinks_as_files".to_string(),
+        dict: Box::new(crate::object::str_map_to_typedict(std::collections::HashMap::new())),
+        bases: vec![],
+        mro: vec![],
+    }));
+
+    // os.DirEntry — type for directory entries from os.scandir().
+    // Stub: provides isinstance check only. shutil.py uses isinstance(src, os.DirEntry)
+    // to decide whether to call .stat()/.is_symlink() on the entry directly.
+    {
+        let mut de_dict: std::collections::HashMap<String, PyObjectRef> = std::collections::HashMap::new();
+        de_dict.insert_str("__doc__", py_str("DirEntry from os.scandir()"));
+        // is_dir, is_file, is_symlink methods (return False stub)
+        de_dict.insert("is_dir".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "is_dir".to_string(),
+            func: |_args| Ok(py_bool(false)),
+        }));
+        de_dict.insert("is_file".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "is_file".to_string(),
+            func: |_args| Ok(py_bool(false)),
+        }));
+        de_dict.insert("is_symlink".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "is_symlink".to_string(),
+            func: |_args| Ok(py_bool(false)),
+        }));
+        d.insert_str("DirEntry", PyObjectRef::new(PyObject::Type {
+            name: "DirEntry".to_string(),
+            dict: Box::new(crate::object::str_map_to_typedict(de_dict)),
+            bases: vec![],
+            mro: vec![],
+        }));
+    }
+
+    // os.terminal_size — namedtuple type defined in CPython's posixmodule.c.
+    // Needed by shutil.get_terminal_size and tests that access it directly.
+    {
+        // Build the type dict as a HashMap<String, PyObjectRef>
+        let mut ts_type_dict: std::collections::HashMap<String, PyObjectRef> = std::collections::HashMap::new();
+        ts_type_dict.insert_str("__doc__", py_str("A tuple subclass representing the size of the terminal in characters.\n\nIt has two attributes: columns and lines."));
+        // __new__ — os.terminal_size((columns, lines)) or os.terminal_size(columns=80, lines=24)
+        // args[0] is the type itself (cls). This is a function pointer (no captures).
+        ts_type_dict.insert(
+            "__new__".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "terminal_size.__new__".to_string(),
+                func: |args| {
+                    let typ = args.first().cloned().unwrap_or_else(|| {
+                        PyObjectRef::new(PyObject::Type {
+                            name: "os.terminal_size".to_string(),
+                            dict: Box::new(crate::object::str_map_to_typedict(std::collections::HashMap::new())),
+                            bases: vec![],
+                            mro: vec![],
+                        })
+                    });
+                    let mut columns = 80i64;
+                    let mut lines = 24i64;
+                    // Parse args: os.terminal_size((80, 24)) or os.terminal_size(columns=80, lines=24)
+                    for arg in args.iter().skip(1) {
+                        if let PyObject::Tuple(t) = &*arg.borrow() {
+                            if t.len() >= 2 {
+                                columns = t.get(0).and_then(|v| v.as_i64()).unwrap_or(80);
+                                lines = t.get(1).and_then(|v| v.as_i64()).unwrap_or(24);
+                            }
+                        }
+                    }
+                    // Check kwargs
+                    if let Some(last) = args.last() {
+                        if let PyObject::Dict(d) = &*last.borrow() {
+                            if let Ok(Some(v)) = d.get(&py_str("columns")) {
+                                columns = v.as_i64().unwrap_or(columns);
+                            }
+                            if let Ok(Some(v)) = d.get(&py_str("lines")) {
+                                lines = v.as_i64().unwrap_or(lines);
+                            }
+                        }
+                    }
+                    let mut inst_dict = crate::object::AttrMap::new();
+                    inst_dict.insert_str("columns", py_int(columns));
+                    inst_dict.insert_str("lines", py_int(lines));
+                    Ok(PyObjectRef::new(PyObject::Instance {
+                        typ,
+                        dict: inst_dict,
+                    }))
+                },
+            }),
+        );
+        // __repr__
+        ts_type_dict.insert(
+            "__repr__".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__repr__".to_string(),
+                func: |args| {
+                    if let Some(inst) = args.first() {
+                        if let PyObject::Instance { dict, .. } = &*inst.borrow() {
+                            let cols = dict.get("columns").and_then(|v| v.as_i64()).unwrap_or(80);
+                            let lns = dict.get("lines").and_then(|v| v.as_i64()).unwrap_or(24);
+                            return Ok(py_str(&format!("os.terminal_size(columns={}, lines={})", cols, lns)));
+                        }
+                    }
+                    Ok(py_str("os.terminal_size(columns=80, lines=24)"))
+                },
+            }),
+        );
+        // __reduce__ for pickling support
+        ts_type_dict.insert(
+            "__reduce__".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__reduce__".to_string(),
+                func: |args| {
+                    if let Some(inst) = args.first() {
+                        if let PyObject::Instance { dict, .. } = &*inst.borrow() {
+                            let cols = dict.get("columns").and_then(|v| v.as_i64()).unwrap_or(80);
+                            let lns = dict.get("lines").and_then(|v| v.as_i64()).unwrap_or(24);
+                            return Ok(py_tuple(vec![
+                                py_str("os.terminal_size"),
+                                py_tuple(vec![py_int(cols), py_int(lns)]),
+                            ]));
+                        }
+                    }
+                    Ok(py_tuple(vec![py_str("os.terminal_size"), py_tuple(vec![py_int(80), py_int(24)])]))
+                },
+            }),
+        );
+        let terminal_size_type = PyObjectRef::new(PyObject::Type {
+            name: "os.terminal_size".to_string(),
+            dict: Box::new(crate::object::str_map_to_typedict(ts_type_dict)),
+            bases: vec![],
+            mro: vec![],
+        });
+        d.insert_str("terminal_size", terminal_size_type.clone());
+        // os.get_terminal_size — returns a terminal_size instance
+        d.insert_str(
+            "get_terminal_size",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "get_terminal_size".to_string(),
+                func: |args| {
+                    let mut columns = 80i64;
+                    let mut lines = 24i64;
+                    // Check fallback argument
+                    if let Some(fb) = args.first() {
+                        if let PyObject::Tuple(t) = &*fb.borrow() {
+                            if t.len() >= 2 {
+                                columns = t.get(0).and_then(|v| v.as_i64()).unwrap_or(columns);
+                                lines = t.get(1).and_then(|v| v.as_i64()).unwrap_or(lines);
+                            }
+                        }
+                    }
+                    let mut inst_dict = crate::object::AttrMap::new();
+                    inst_dict.insert_str("columns", py_int(columns));
+                    inst_dict.insert_str("lines", py_int(lines));
+                    // Create type inline (function pointer can't capture)
+                    let mut td: std::collections::HashMap<String, PyObjectRef> = std::collections::HashMap::new();
+                    td.insert_str("__doc__", py_str("A tuple subclass representing the size of the terminal in characters."));
+                    let ts_type = PyObjectRef::new(PyObject::Type {
+                        name: "os.terminal_size".to_string(),
+                        dict: Box::new(crate::object::str_map_to_typedict(td)),
+                        bases: vec![],
+                        mro: vec![],
+                    });
+                    Ok(PyObjectRef::new(PyObject::Instance {
+                        typ: ts_type,
+                        dict: inst_dict,
+                    }))
+                },
+            }),
+        );
+    }
+
     // os.path sub-module will be wired as a proper submodule in vm.rs
     // The path attribute is set there (not inline) to allow proper os.path import
     d
