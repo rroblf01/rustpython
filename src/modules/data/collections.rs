@@ -476,7 +476,34 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
             }
             type_dict.insert_str("_field_defaults", PyObjectRef::new(PyObject::Dict(Box::new(fd))));
         }
-        type_dict.insert_str("__module__", module_val.clone().unwrap_or_else(|| py_str("collections")));
+        // Default __module__ is the CALLER's module (CPython uses
+        // sys._getframe(1)); fall back to 'collections' if unavailable.
+        let caller_module: Option<PyObjectRef> = (|| {
+            let sys_mod = crate::modules::get_module("sys")?;
+            let getframe = {
+                let b = sys_mod.borrow();
+                if let PyObject::Module { dict, .. } = &*b {
+                    dict.get_str("_getframe").cloned()
+                } else {
+                    None
+                }
+            }?;
+            let frame = crate::object::builtin_call(&getframe, &[py_int(1)]).ok()?;
+            let fb = frame.borrow();
+            let globals = fb.get_attribute("f_globals").ok()?;
+            let gb = globals.borrow();
+            if let PyObject::Dict(d) = &*gb {
+                d.get(&py_str("__name__")).ok().flatten()
+            } else {
+                None
+            }
+        })();
+        type_dict.insert_str(
+            "__module__",
+            module_val.clone().unwrap_or_else(|| {
+                caller_module.unwrap_or_else(|| py_str("collections"))
+            }),
+        );
         type_dict.insert_str("__doc__", py_str(&format!("{}({})", typename, fields.join(", "))));
         {
             let fields_for_setattr = fields.clone();

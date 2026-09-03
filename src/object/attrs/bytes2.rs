@@ -601,10 +601,9 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 if w <= b.len() {
                                     return Ok(PyObjectRef::imm(PyObject::Bytes(b.clone())));
                                 }
-                                // CPython gives the LARGER half to the RIGHT
-                                // when padding is odd.
+                                // CPython: left = marg//2 + ((marg & width) & 1).
                                 let pad = w - b.len();
-                                let left = pad / 2;
+                                let left = pad / 2 + ((pad & w) & 1);
                                 let right = pad - left;
                                 let mut result: Vec<u8> =
                                     std::iter::repeat(fill).take(left).collect();
