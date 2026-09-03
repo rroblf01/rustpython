@@ -499,6 +499,12 @@ fn real_main() {
                 i += 2;
                 continue;
             }
+            // CPython allows `-Xutf8` and `-X utf8` as a single argv element
+            // (e.g. test_audit.py passes [sys.executable, "-X utf8", ...]).
+            s if s.starts_with("-X") && s.len() > 2 => {
+                i += 1;
+                continue;
+            }
             "-I" | "-E" | "-u" | "-S" | "-s" => {
                 // `-u` (unbuffered stdout/stderr) is a no-op here (Rust's
                 // stdout is flushed explicitly where it matters); `-I`/`-E`
