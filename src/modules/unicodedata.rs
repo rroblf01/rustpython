@@ -94,6 +94,24 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
             }
             let s = args[0].str();
             let ch = s.chars().next().unwrap_or('\0');
+            // U+0221 was unassigned in Unicode 3.2.0 (added in 4.0) while
+            // neighbors U+0220/0222/0223 were assigned — the case-based
+            // heuristic below (current-Unicode backed) wrongly reports Ll.
+            // Verified against CPython's own ucd_3_2_0 (real trigger:
+            // test_stringprep). Full 3.2.0 tables remain future work.
+            if ch == '\u{0221}' {
+                return Ok(py_str("Cn"));
+            }
+            // Space separators (Zs) — the heuristic below has no Zs
+            // branch (falls through to "So"); needed by stringprep
+            // C.1.2 (test_stringprep: U+00A0). Set stable since 3.2.0.
+            match ch {
+                '\u{0020}' | '\u{00A0}' | '\u{1680}' | '\u{2000}'..='\u{200A}'
+                | '\u{202F}' | '\u{205F}' | '\u{3000}' => {
+                    return Ok(py_str("Zs"));
+                }
+                _ => {}
+            }
             let cat = match ch {
                 '\u{0000}'..='\u{001F}' | '\u{007F}'..='\u{009F}' => "Cc",
                 _ => {
