@@ -494,6 +494,52 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
         Ok(result)
     });
 
+    heap_func!("heappushpop", |args| {
+        // Push item then pop smallest (more efficient than separate calls).
+        // Uses _live helpers (re-borrow per access) for adversarial
+        // __lt__ safety, like the other live ops above.
+        if args.len() < 2 {
+            return Err(PyError::type_error(
+                "heappushpop() requires 2 arguments (heap, item)",
+            ));
+        }
+        if !matches!(&*args[0].borrow(), PyObject::List(_)) {
+            return Err(PyError::type_error("heappushpop() argument must be a list"));
+        }
+        let item = args[1].clone();
+        // If heap non-empty and item is NOT smaller than the top, the top
+        // stays smallest: swap item in, sift down, return old top.
+        // Otherwise item itself is smallest: heap unchanged, return item
+        // (covers empty heap too).
+        // Matches Lib/heapq.py: `if heap and heap[0] < item:` — swap only
+        // when the top is strictly smaller (preserves item identity/type
+        // on ties, e.g. heappushpop([10], 10.0) -> ([10], 10.0)).
+        let top: Option<PyObjectRef> = heap_get_live(&args[0], 0);
+        match top {
+            Some(t) => {
+                match py_lt(&t, &item) {
+                    Ok(true) => {
+                        let old = if let PyObject::List(list) =
+                            &mut *args[0].borrow_mut()
+                        {
+                            let old = list[0].clone();
+                            list[0] = item;
+                            old
+                        } else {
+                            return Err(PyError::type_error(
+                                "heappushpop() argument must be a list",
+                            ));
+                        };
+                        _siftup_live(&args[0], 0);
+                        Ok(old)
+                    }
+                    _ => Ok(item),
+                }
+            }
+            None => Ok(item),
+        }
+    });
+
     // Helper: extract comparable values for nlargest/nsmallest
     fn _extract_items(args: &[PyObjectRef]) -> PyResult<(usize, Vec<PyObjectRef>)> {
         if args.len() < 2 {
@@ -603,5 +649,16 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
         }
     }
 
+    d
+}
+
+/// C-accelerator subset for `Lib/heapq.py`'s `from _heapq import *` (mirrors
+/// CPython's own `_heapq` module): only the 5 core sift ops. `nlargest`/
+/// `nsmallest` are deliberately excluded — the native versions lack `key=`
+/// support while `Lib/heapq.py`'s Python versions have it.
+pub fn create_heapq_c_dict() -> HashMap<String, PyObjectRef> {
+    let mut d = create_heapq_dict();
+    d.remove("nlargest");
+    d.remove("nsmallest");
     d
 }

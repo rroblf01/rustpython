@@ -317,9 +317,13 @@ pub(crate) fn register_native_modules(
         // (this interpreter has no separate pure-Python wrapper).
         modules.insert_str("_bisect", create_module("_bisect", create_bisect_dict()));
 
-        // Native heapq module for heap queue operations
-        // Native heapq DISABLED: use Lib/heapq.py (CPython 3.14) for full functionality
-        // modules.insert_str("heapq", create_module("heapq", create_heapq_dict()));
+        // Native `_heapq` C-accelerator DISABLED for now: while the 5 core
+        // sift ops work (9x micro speedup), enabling it regressed
+        // test_heapq from PASS to 14 FAILs (error-handling/adversarial
+        // comparator paths + `__module__` metadata + heappushpop tie
+        // semantics need dedicated debugging). `Lib/heapq.py` pure-Python
+        // stays. Re-enable once those 14 pass with native active.
+        // modules.insert_str("_heapq", create_module("_heapq", create_heapq_c_dict()));
 
         // enum module — real Enum/IntEnum/StrEnum/EnumType semantics
         // (metaclass, real members, auto/unique) are far easier and more
