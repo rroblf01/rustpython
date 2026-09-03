@@ -1,8 +1,7 @@
 # Python test set -- math module
 # XXXX Should not do tests around zero only
 
-
-import verbose, requires_IEEE_754
+from test.support import verbose, requires_IEEE_754
 from test import support
 import unittest
 

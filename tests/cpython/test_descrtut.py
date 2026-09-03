@@ -11,6 +11,7 @@
 from test.support import sortdict  # noqa: F401
 import doctest
 import sys
+import unittest
 
 
 class defaultdict(dict):

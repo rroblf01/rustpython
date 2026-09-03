@@ -11,6 +11,7 @@ import os
 import re
 import copy
 import sys
+import unittest
 
 from io import StringIO
 from test import support

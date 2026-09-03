@@ -1,7 +1,6 @@
 """Test cases for traceback module"""
 
-
-import namedtuple
+from collections import namedtuple
 from io import StringIO
 import linecache
 import sys
