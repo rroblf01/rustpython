@@ -3,6 +3,14 @@ use crate::object::*;
 use super::*;
 use crate::interner;
 
+/// CPython bytes whitespace (space \t \n \r \v \f) — Rust's
+/// `is_ascii_whitespace` omits vertical tab, breaking `isspace`/
+/// `strip`/etc. (test_bigmem).
+#[inline]
+pub(crate) fn is_py_bytes_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c')
+}
+
 pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
     match o {
             PyObject::Bytes(_v) => {
@@ -20,7 +28,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 };
                                 let is_strip = |c: &u8| match &chars {
                                     Some(cs) => cs.contains(c),
-                                    None => c.is_ascii_whitespace(),
+                                    None => is_py_bytes_ws(*c),
                                 };
                                 let start = b.iter().position(|c| !is_strip(c)).unwrap_or(b.len());
                                 let end = b
@@ -50,7 +58,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 };
                                 let is_strip = |c: &u8| match &chars {
                                     Some(cs) => cs.contains(c),
-                                    None => c.is_ascii_whitespace(),
+                                    None => is_py_bytes_ws(*c),
                                 };
                                 let start = b.iter().position(|c| !is_strip(c)).unwrap_or(b.len());
                                 Ok(PyObjectRef::imm(PyObject::Bytes(b[start..].to_vec())))
@@ -73,7 +81,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 };
                                 let is_strip = |c: &u8| match &chars {
                                     Some(cs) => cs.contains(c),
-                                    None => c.is_ascii_whitespace(),
+                                    None => is_py_bytes_ws(*c),
                                 };
                                 let end = b
                                     .iter()
@@ -254,7 +262,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         func: |args| {
                             if let PyObject::Bytes(b) = &*args[0].borrow() {
                                 Ok(py_bool(
-                                    !b.is_empty() && b.iter().all(|c| c.is_ascii_whitespace()),
+                                    !b.is_empty() && b.iter().all(|c| is_py_bytes_ws(*c)),
                                 ))
                             } else {
                                 Err(PyError::runtime_error("isspace on non-bytes"))

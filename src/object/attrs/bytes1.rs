@@ -640,7 +640,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                             }
                                             let ws_start = rest
                                                 .iter()
-                                                .position(|c| !c.is_ascii_whitespace())
+                                                .position(|c| !super::bytes2::is_py_bytes_ws(*c))
                                                 .unwrap_or(rest.len());
                                             rest = &rest[ws_start..];
                                             if rest.is_empty() {
@@ -648,18 +648,18 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                             }
                                             let idx = rest
                                                 .iter()
-                                                .position(|c| c.is_ascii_whitespace())
+                                                .position(|c| super::bytes2::is_py_bytes_ws(*c))
                                                 .unwrap_or(rest.len());
                                             parts.push(rest[..idx].to_vec());
                                             rest = &rest[idx..];
                                         }
                                         let tail_start = rest
                                             .iter()
-                                            .position(|c| !c.is_ascii_whitespace())
+                                            .position(|c| !super::bytes2::is_py_bytes_ws(*c))
                                             .unwrap_or(rest.len());
                                         let tail_end = rest
                                             .iter()
-                                            .rposition(|c| !c.is_ascii_whitespace())
+                                            .rposition(|c| !super::bytes2::is_py_bytes_ws(*c))
                                             .map(|i| i + 1)
                                             .unwrap_or(tail_start);
                                         if tail_start < tail_end {
@@ -737,7 +737,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                             }
                                             let ws_end = rest
                                                 .iter()
-                                                .rposition(|c| !c.is_ascii_whitespace())
+                                                .rposition(|c| !super::bytes2::is_py_bytes_ws(*c))
                                                 .map(|i| i + 1)
                                                 .unwrap_or(0);
                                             rest = &rest[..ws_end];
@@ -746,7 +746,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                             }
                                             let idx = rest
                                                 .iter()
-                                                .rposition(|c| c.is_ascii_whitespace())
+                                                .rposition(|c| super::bytes2::is_py_bytes_ws(*c))
                                                 .map(|i| i + 1)
                                                 .unwrap_or(0);
                                             parts.push(rest[idx..].to_vec());
@@ -754,11 +754,11 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                         }
                                         let head_start = rest
                                             .iter()
-                                            .position(|c| !c.is_ascii_whitespace())
+                                            .position(|c| !super::bytes2::is_py_bytes_ws(*c))
                                             .unwrap_or(rest.len());
                                         let head_end = rest
                                             .iter()
-                                            .rposition(|c| !c.is_ascii_whitespace())
+                                            .rposition(|c| !super::bytes2::is_py_bytes_ws(*c))
                                             .map(|i| i + 1)
                                             .unwrap_or(head_start);
                                         if head_start < head_end {
