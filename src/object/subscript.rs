@@ -863,6 +863,22 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
                 }
             }
         }
+        PyObject::Array(arr) => {
+            let idx = index.borrow();
+            if let Some(i) = try_to_index(index) {
+                let i = i.to_isize().ok_or_else(|| PyError::index_error("array index out of range"))?;
+                let len = arr.data.len() as isize;
+                let i = if i < 0 { len + i } else { i };
+                if i < 0 || i >= len {
+                    return Err(PyError::index_error("array assignment index out of range"));
+                }
+                let is_float = crate::object::array_typecode_is_float(arr.typecode);
+                let v = if is_float { value.as_f64().unwrap_or(0.0) } else { value.as_i64().unwrap_or(0) as f64 };
+                arr.data[i as usize] = v;
+                return Ok(());
+            }
+            Err(PyError::type_error(format!("array indices must be integers or slices, not {}", idx.type_name())))
+        }
         // PyObject::Dict is handled above, before this borrow is taken.
         _ => Err(PyError::type_error(format!(
             "'{}' object does not support item assignment",
@@ -986,6 +1002,21 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
                     "deque indices must be integers or slices, not {}",
                     idx.type_name()
                 )))
+            }
+        }
+        PyObject::Array(arr) => {
+            let idx = index.borrow();
+            if let Some(i) = try_to_index(index) {
+                let i = i.to_isize().ok_or_else(|| PyError::index_error("array index out of range"))?;
+                let len = arr.data.len() as isize;
+                let i = if i < 0 { len + i } else { i };
+                if i < 0 || i >= len {
+                    return Err(PyError::index_error("array index out of range"));
+                }
+                arr.data.remove(i as usize);
+                Ok(())
+            } else {
+                Err(PyError::type_error(format!("array indices must be integers or slices, not {}", idx.type_name())))
             }
         }
         // PyObject::Dict is handled above, before this borrow is taken.
