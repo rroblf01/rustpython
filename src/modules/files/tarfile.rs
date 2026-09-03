@@ -220,6 +220,31 @@ pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
         mro: vec![],
     });
     d.insert_str("TarFile", tar_file_type);
+    // GNU/ustar type + format constants (match CPython Lib/tarfile.py;
+    // needed by test_tarfile which reads GNUTYPE_LONGNAME etc.).
+    for (name, byte) in [
+        ("REGTYPE", b'0'),
+        ("AREGTYPE", b'\x00'),
+        ("LNKTYPE", b'1'),
+        ("SYMTYPE", b'2'),
+        ("CHRTYPE", b'3'),
+        ("BLKTYPE", b'4'),
+        ("DIRTYPE", b'5'),
+        ("FIFOTYPE", b'6'),
+        ("CONTTYPE", b'7'),
+        ("XHDTYPE", b'x'),
+        ("XGLTYPE", b'g'),
+        ("SOLARIS_XHDTYPE", b'X'),
+        ("GNUTYPE_LONGNAME", b'L'),
+        ("GNUTYPE_LONGLINK", b'K'),
+        ("GNUTYPE_SPARSE", b'S'),
+    ] {
+        d.insert_str(name, PyObjectRef::imm(PyObject::Bytes(vec![byte])));
+    }
+    d.insert_str("USTAR_FORMAT", py_int(0));
+    d.insert_str("GNU_FORMAT", py_int(1));
+    d.insert_str("PAX_FORMAT", py_int(2));
+    d.insert_str("DEFAULT_FORMAT", py_int(2));
 
     d
 }

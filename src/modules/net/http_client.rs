@@ -640,6 +640,8 @@ pub fn create_smtplib_dict() -> HashMap<String, PyObjectRef> {
         mro: vec![],
     });
     d.insert_str("LMTP", lmtp_type);
+    // Maximum line length (matches CPython Lib/smtplib.py).
+    d.insert_str("_MAXLINE", py_int(8192));
 
     d
 }

@@ -310,5 +310,39 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
         py_str("TLS/SSL wrapper for socket objects (stub)"),
     );
 
+    // Purpose enum stub (real values wrap _ssl _ASN1Object; sentinels here
+    // let `from ssl import Purpose` + SSLContext(Purpose.SERVER_AUTH)
+    // import/run; real TLS verification is not implemented).
+    {
+        let mut purpose_dict = HashMap::new();
+        for name in ["SERVER_AUTH", "CLIENT_AUTH"] {
+            purpose_dict.insert(
+                name.to_string(),
+                PyObjectRef::new(PyObject::Instance {
+                    typ: PyObjectRef::new(PyObject::Type {
+                        name: "Purpose".to_string(),
+                        dict: Box::new(str_map_to_typedict(HashMap::new())),
+                        bases: vec![],
+                        mro: vec![],
+                    }),
+                    dict: {
+                        let mut inner = AttrMap::new();
+                        inner.insert_str("name", py_str(name));
+                        inner
+                    },
+                }),
+            );
+        }
+        d.insert_str(
+            "Purpose",
+            PyObjectRef::new(PyObject::Type {
+                name: "Purpose".to_string(),
+                dict: Box::new(str_map_to_typedict(purpose_dict)),
+                bases: vec![],
+                mro: vec![],
+            }),
+        );
+    }
+
     d
 }

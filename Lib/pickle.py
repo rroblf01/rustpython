@@ -119,6 +119,12 @@ def _dumps(obj, protocol=None, *, fix_imports=True, buffer_callback=None):
                  buffer_callback=buffer_callback)
 
 
+def _load(file, *, fix_imports=True, encoding='ASCII', errors='strict',
+          buffers=None):
+    return load(file, fix_imports=fix_imports, encoding=encoding,
+                errors=errors, buffers=buffers)
+
+
 def load(file, *, fix_imports=True, encoding='ASCII', errors='strict', buffers=None):
     """Deserialize object from open file."""
     data = file.read()

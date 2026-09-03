@@ -44,6 +44,26 @@ class Handler:
         raise NotImplementedError
 
 
+class Filter:
+    """Record filter by logger name (CPython API subset)."""
+
+    def __init__(self, name=""):
+        self.name = name
+        self.nlen = len(name)
+
+    def filter(self, record):
+        if self.nlen == 0:
+            return True
+        if self.name == record.name:
+            return True
+        if record.name.find(self.name, 0, self.nlen) != 0:
+            return False
+        return record.name[self.nlen] == "."
+
+    def __repr__(self):
+        return f"<logging.Filter object at 0x{id(self):x}>"
+
+
 class NullHandler(Handler):
     """A do-nothing handler, for library code that wants a default handler
     to avoid the "No handlers could be found" warning without actually
