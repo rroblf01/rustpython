@@ -182,7 +182,9 @@ impl Parser {
             self.expect(&Token::RightParen)?;
         }
         self.expect(&Token::Colon)?;
+        self.class_depth += 1;
         let body = self.parse_block()?;
+        self.class_depth -= 1;
         Ok(Stmt::ClassDef {
             name,
             bases,

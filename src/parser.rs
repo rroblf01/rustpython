@@ -42,6 +42,14 @@ pub struct Parser {
     // `global`/`nonlocal` applied to a parameter (test_syntax's
     // test_global_param_err_first / test_nonlocal_param_err_first).
     fn_params_stack: Vec<std::collections::HashSet<String>>,
+    // Depth of nested class definitions — `nonlocal`/`global` inside a
+    // class body refers to the enclosing *function* scope, not the class
+    // itself (class scopes are not function scopes). Without this, the
+    // param-vs-nonlocal check in `parse_nonlocal` incorrectly rejects
+    // `def f(x): class c: nonlocal x` which CPython allows (test_scope
+    // testNonLocalClass). Incremented in parse_class while parsing the
+    // class body.
+    class_depth: usize,
 }
 
 const MAX_UNARY_DEPTH: usize = 2000;
@@ -98,6 +106,7 @@ impl Parser {
             allow_top_level_await: false,
             barry_as_bdfl: false,
             fn_params_stack: Vec::new(),
+            class_depth: 0,
         }
     }
 

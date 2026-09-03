@@ -83,6 +83,7 @@ impl Parser {
                             };
                         }
                         Token::FStringStart => {
+                            self.next();
                             let fstr = self.parse_fstring()?;
                             expr = Expr::BinOp {
                                 left: Box::new(expr),
@@ -622,16 +623,7 @@ impl Parser {
 
     pub(crate) fn parse_fstring(&mut self) -> Result<Expr, String> {
         let mut parts = Vec::new();
-        let mut first = true;
         loop {
-            if first {
-                first = false;
-                // First token might be FStringStart (from implicit concatenation)
-                if matches!(&self.current, Token::FStringStart) {
-                    self.next();
-                    continue;
-                }
-            }
             match &self.current {
                 Token::FStringMiddle(s) => {
                     let s = s.clone();

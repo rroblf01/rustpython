@@ -489,14 +489,20 @@ impl Parser {
             names.push(self.expect_name()?);
         }
         // A parameter may not be declared global (test_syntax:
-        // test_global_param_err_first).
-        if let Some(params) = self.fn_params_stack.last() {
-            for n in &names {
-                if params.contains(n) {
-                    return Err(format!(
-                        "L{}:{}: name '{}' is parameter and global",
-                        gline, gcol, n
-                    ));
+        // test_global_param_err_first). However `global` inside a class
+        // body refers to the module scope, not the enclosing function
+        // — `def f(x): class C: global x` is legal in CPython
+        // (test_scope.testClassAndGlobal) just like the nonlocal
+        // class case. Skip the check when inside a class.
+        if self.class_depth == 0 {
+            if let Some(params) = self.fn_params_stack.last() {
+                for n in &names {
+                    if params.contains(n) {
+                        return Err(format!(
+                            "L{}:{}: name '{}' is parameter and global",
+                            gline, gcol, n
+                        ));
+                    }
                 }
             }
         }
@@ -512,14 +518,20 @@ impl Parser {
             names.push(self.expect_name()?);
         }
         // A parameter may not be declared nonlocal (test_syntax:
-        // test_nonlocal_param_err_first).
-        if let Some(params) = self.fn_params_stack.last() {
-            for n in &names {
-                if params.contains(n) {
-                    return Err(format!(
-                        "L{}:{}: name '{}' is parameter and nonlocal",
-                        nline, ncol, n
-                    ));
+        // test_nonlocal_param_err_first). However `nonlocal` inside a
+        // class body refers to the enclosing *function* scope, not the
+        // class itself — `def f(x): class c: nonlocal x` is legal in
+        // CPython (test_scope.testNonLocalClass). If we're currently
+        // inside a class definition, don't apply the check.
+        if self.class_depth == 0 {
+            if let Some(params) = self.fn_params_stack.last() {
+                for n in &names {
+                    if params.contains(n) {
+                        return Err(format!(
+                            "L{}:{}: name '{}' is parameter and nonlocal",
+                            nline, ncol, n
+                        ));
+                    }
                 }
             }
         }

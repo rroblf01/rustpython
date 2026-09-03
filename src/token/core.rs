@@ -640,13 +640,22 @@ impl Lexer {
                         while depth > 0 {
                             match self.advance() {
                                 Some(c) if str_char != '\0' && c == str_char => {
-                                    expr.push(c);
+                                    if state == 2 {
+                                        format_spec.push(c);
+                                    } else {
+                                        expr.push(c);
+                                    }
                                     if triple_str {
                                         // A triple-quoted string needs all
                                         // three quotes to close.
                                         if self.peek() == Some(c) && self.peek_ahead(1) == Some(c) {
-                                            expr.push(c);
-                                            expr.push(c);
+                                            if state == 2 {
+                                                format_spec.push(c);
+                                                format_spec.push(c);
+                                            } else {
+                                                expr.push(c);
+                                                expr.push(c);
+                                            }
                                             self.advance();
                                             self.advance();
                                             str_char = '\0';
@@ -657,10 +666,18 @@ impl Lexer {
                                     }
                                 }
                                 Some(c) if str_char != '\0' => {
-                                    expr.push(c);
+                                    if state == 2 {
+                                        format_spec.push(c);
+                                    } else {
+                                        expr.push(c);
+                                    }
                                     if c == '\\' {
                                         if let Some(next) = self.advance() {
-                                            expr.push(next);
+                                            if state == 2 {
+                                                format_spec.push(next);
+                                            } else {
+                                                expr.push(next);
+                                            }
                                         }
                                     }
                                 }
@@ -695,22 +712,37 @@ impl Lexer {
                                         }
                                     }
                                 }
-                                Some(c @ ('\'' | '"')) if str_char == '\0' && state == 0 => {
+                                Some(c @ ('\'' | '"')) if str_char == '\0' && (state == 0 || state == 2) => {
                                     // Detect a triple-quoted string (""" / '''):
                                     // the three quotes must all be consumed
                                     // together so the single-quote closer logic
                                     // above doesn't fire on the first one.
+                                    // This must also work inside format_spec
+                                    // (state == 2), e.g. `f'{2:{"{"}>10}'`
+                                    // where `{"{"}` inside the spec contains
+                                    // a quoted "{" that must not affect brace
+                                    // depth.
                                     if self.peek() == Some(c) && self.peek_ahead(1) == Some(c) {
                                         str_char = c;
                                         triple_str = true;
-                                        expr.push(c);
-                                        expr.push(c);
-                                        expr.push(c);
+                                        if state == 2 {
+                                            format_spec.push(c);
+                                            format_spec.push(c);
+                                            format_spec.push(c);
+                                        } else {
+                                            expr.push(c);
+                                            expr.push(c);
+                                            expr.push(c);
+                                        }
                                         self.advance();
                                         self.advance();
                                     } else {
                                         str_char = c;
-                                        expr.push(c);
+                                        if state == 2 {
+                                            format_spec.push(c);
+                                        } else {
+                                            expr.push(c);
+                                        }
                                     }
                                 }
                                 Some('{') => {
@@ -758,19 +790,69 @@ impl Lexer {
                                         }
                                     }
                                 }
-                                Some('=') if depth == 1 && state == 0 => match self.peek() {
-                                    Some('=') => {
-                                        expr.push('=');
-                                        expr.push('=');
-                                        self.advance();
+                                Some('=') if depth == 1 && state == 0 => {
+                                    // Check if this `=` is a debug `=` (PEP 572)
+                                    // `f"{1+2 =}"` or `f"{1+2 = # comment\n }"` etc.
+                                    // Must look ahead skipping whitespace and comments
+                                    // to see if next significant char is `}`/`!`/`:`.
+                                    let mut p = self.pos;
+                                    // Peek next char after `=` is self.peek()
+                                    // already, but we need to look further.
+                                    let mut next_idx = p;
+                                    // Helper to skip whitespace/newlines
+                                    let skip_ws = |idx: &mut usize| {
+                                        while *idx < self.chars.len()
+                                            && matches!(
+                                                self.chars[*idx],
+                                                ' ' | '\t' | '\n' | '\r'
+                                            )
+                                        {
+                                            *idx += 1;
+                                        }
+                                    };
+                                    skip_ws(&mut next_idx);
+                                    // If comment, skip it and following whitespace
+                                    if next_idx < self.chars.len() && self.chars[next_idx] == '#'
+                                    {
+                                        while next_idx < self.chars.len()
+                                            && self.chars[next_idx] != '\n'
+                                        {
+                                            next_idx += 1;
+                                        }
+                                        skip_ws(&mut next_idx);
                                     }
-                                    Some('}') | Some('!') | Some(':') => {
-                                        debug = true;
+                                    let next_sig = self.chars.get(next_idx).copied();
+                                    match self.peek() {
+                                        Some('=') => {
+                                            // `==` equality, not debug
+                                            expr.push('=');
+                                            expr.push('=');
+                                            self.advance();
+                                        }
+                                        _ if matches!(next_sig, Some('}') | Some('!') | Some(':') | None) =>
+                                        {
+                                            debug = true;
+                                            // For debug, the `=` and any
+                                            // whitespace/comments after it
+                                            // are not part of value, but we
+                                            // need to consume them so the
+                                            // later `#` handling doesn't
+                                            // misinterpret. Advance pos to
+                                            // next_sig by consuming the
+                                            // skipped chars.
+                                            // `self.pos` currently points
+                                            // just after `=`. Advance to
+                                            // next_sig.
+                                            let to_consume = next_idx - self.pos;
+                                            for _ in 0..to_consume {
+                                                self.advance();
+                                            }
+                                        }
+                                        _ => {
+                                            expr.push('=');
+                                        }
                                     }
-                                    _ => {
-                                        expr.push('=');
-                                    }
-                                },
+                                }
                                 Some('!') if depth == 1 && state == 0 => {
                                     if self.peek() == Some('=') {
                                         expr.push('!');
@@ -897,7 +979,7 @@ impl Lexer {
             if tok == Token::EndOfFile {
                 break;
             }
-            if tok == Token::Newline {
+            if tok == Token::Newline || tok == Token::Indent || tok == Token::Dedent {
                 continue;
             }
             tokens.push(tok);
