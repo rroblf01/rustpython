@@ -560,6 +560,106 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
                 },
             }),
         );
+        // Rich comparison delegates to tuple semantics (version gates like
+        // `sys.version_info >= (3, 8)` are ubiquitous; without these the
+        // structseq switch regressed them to TypeError).
+        fn vi_as_tuple(obj: &PyObjectRef) -> Option<Vec<PyObjectRef>> {
+            if let PyObject::Instance { dict, .. } = &*obj.borrow() {
+                let order = ["major", "minor", "micro", "releaselevel", "serial"];
+                if dict.get_str("major").is_none() {
+                    return None;
+                }
+                Some(
+                    order
+                        .iter()
+                        .map(|f| dict.get_str(f).cloned().unwrap_or_else(py_none))
+                        .collect(),
+                )
+            } else {
+                None
+            }
+        }
+        fn vi_compare(args: &[PyObjectRef], op: u32) -> PyResult<PyObjectRef> {
+            if args.len() < 2 {
+                return Err(PyError::type_error("comparison missing argument"));
+            }
+            let self_tup = vi_as_tuple(&args[0]).ok_or_else(|| {
+                PyError::runtime_error("comparison on non-version_info")
+            })?;
+            let self_tup = py_tuple(self_tup);
+            let other = &args[1];
+            let other_tup: Option<PyObjectRef> = match &*other.borrow() {
+                PyObject::Tuple(_) | PyObject::List(_) => Some(other.clone()),
+                PyObject::Instance { .. } => vi_as_tuple(other).map(py_tuple),
+                _ => None,
+            };
+            match other_tup {
+                Some(o) => crate::object::py_compare(&self_tup, &o, op),
+                None => {
+                    if op == 2 {
+                        Ok(py_bool(false))
+                    } else if op == 5 {
+                        Ok(py_bool(true))
+                    } else {
+                        Err(PyError::type_error(format!(
+                            "'{}' not supported between instances of 'version_info' and '{}'",
+                            match op {
+                                0 => "<",
+                                1 => "<=",
+                                3 => ">=",
+                                4 => ">",
+                                _ => "!=",
+                            },
+                            other.get_type_name(),
+                        )))
+                    }
+                }
+            }
+        }
+        // Six explicit dunders (BuiltinFunction holds a fn pointer, so
+        // capturing closures can't be used — one closure per op).
+        type_dict.insert_str(
+            "__eq__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__eq__".to_string(),
+                func: |args| vi_compare(args, 2),
+            }),
+        );
+        type_dict.insert_str(
+            "__ne__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__ne__".to_string(),
+                func: |args| vi_compare(args, 5),
+            }),
+        );
+        type_dict.insert_str(
+            "__lt__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__lt__".to_string(),
+                func: |args| vi_compare(args, 0),
+            }),
+        );
+        type_dict.insert_str(
+            "__le__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__le__".to_string(),
+                func: |args| vi_compare(args, 1),
+            }),
+        );
+        type_dict.insert_str(
+            "__gt__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__gt__".to_string(),
+                func: |args| vi_compare(args, 4),
+            }),
+        );
+        type_dict.insert_str(
+            "__ge__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__ge__".to_string(),
+                func: |args| vi_compare(args, 3),
+            }),
+        );
         let mut vi_dict = AttrMap::new();
         for (k, v) in fields {
             vi_dict.insert_str(k, v.clone());
