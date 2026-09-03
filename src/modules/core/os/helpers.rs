@@ -115,14 +115,26 @@ pub(crate) fn stat_to_dict(meta: &std::fs::Metadata) -> HashMap<String, PyObject
     if let Ok(t) = meta.modified() {
         let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         d.insert_str("st_mtime", py_float(dur.as_secs_f64()));
+        d.insert_str(
+            "st_mtime_ns",
+            py_int(dur.as_secs() as i64 * 1_000_000_000 + dur.subsec_nanos() as i64),
+        );
     }
     if let Ok(t) = meta.accessed() {
         let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         d.insert_str("st_atime", py_float(dur.as_secs_f64()));
+        d.insert_str(
+            "st_atime_ns",
+            py_int(dur.as_secs() as i64 * 1_000_000_000 + dur.subsec_nanos() as i64),
+        );
     }
     if let Ok(t) = meta.created() {
         let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         d.insert_str("st_ctime", py_float(dur.as_secs_f64()));
+        d.insert_str(
+            "st_ctime_ns",
+            py_int(dur.as_secs() as i64 * 1_000_000_000 + dur.subsec_nanos() as i64),
+        );
     }
     d
 }
