@@ -60,8 +60,10 @@ pub(crate) fn emit_part1(builder: &mut FunctionBuilder, eval_stack: &mut Vec<[Va
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, a[0], a_addr, 0);
                     builder.ins().store(memflags, a[1], a_addr, 8);
+                    builder.ins().store(memflags, a[2], a_addr, 16);
                     builder.ins().store(memflags, b[0], b_addr, 0);
                     builder.ins().store(memflags, b[1], b_addr, 8);
+                    builder.ins().store(memflags, b[2], b_addr, 16);
                     // arg encoding (must match compiler.rs's `bin_op` tables
                     // exactly): 0=add 1=sub 2=mul 3=div 4=floordiv 5=mod
                     // 6=pow 7=lshift 8=rshift 9=bitor 10=bitxor 11=bitand,
@@ -128,8 +130,10 @@ pub(crate) fn emit_part1(builder: &mut FunctionBuilder, eval_stack: &mut Vec<[Va
 
                     builder.ins().store(memflags, a[0], a_addr, 0);
                     builder.ins().store(memflags, a[1], a_addr, 8);
+                    builder.ins().store(memflags, a[2], a_addr, 16);
                     builder.ins().store(memflags, b[0], b_addr, 0);
                     builder.ins().store(memflags, b[1], b_addr, 8);
+                    builder.ins().store(memflags, b[2], b_addr, 16);
 
                     let op_val = builder.ins().iconst(types::I64, instr.arg as i64);
                     builder
@@ -410,8 +414,10 @@ pub(crate) fn emit_part1(builder: &mut FunctionBuilder, eval_stack: &mut Vec<[Va
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, a[0], a_addr, 0);
                     builder.ins().store(memflags, a[1], a_addr, 8);
+                    builder.ins().store(memflags, a[2], a_addr, 16);
                     builder.ins().store(memflags, b[0], b_addr, 0);
                     builder.ins().store(memflags, b[1], b_addr, 8);
+                    builder.ins().store(memflags, b[2], b_addr, 16);
                     builder
                         .ins()
                         .call(ctx.func_refs.contains, &[a_addr, b_addr, out_addr]);

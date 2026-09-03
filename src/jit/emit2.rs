@@ -117,6 +117,7 @@ Opcode::LOAD_ATTR => {
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, iter[0], iter_addr, 0);
                     builder.ins().store(memflags, iter[1], iter_addr, 8);
+                    builder.ins().store(memflags, iter[2], iter_addr, 16);
                     let iter_result = builder
                         .ins()
                         .call(ctx.func_refs.for_iter, &[iter_addr, out_addr]);
@@ -209,6 +210,7 @@ Opcode::LOAD_ATTR => {
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, obj[0], obj_addr, 0);
                     builder.ins().store(memflags, obj[1], obj_addr, 8);
+                    builder.ins().store(memflags, obj[2], obj_addr, 16);
                     builder.ins().store(memflags, val[0], val_addr, 0);
                     builder.ins().store(memflags, val[1], val_addr, 8);
                     builder.ins().store(memflags, val[2], val_addr, 16);
@@ -248,6 +250,7 @@ Opcode::LOAD_ATTR => {
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, seq[0], seq_addr, 0);
                     builder.ins().store(memflags, seq[1], seq_addr, 8);
+                    builder.ins().store(memflags, seq[2], seq_addr, 16);
                     let n_val = builder.ins().iconst(types::I64, n as i64);
                     builder.ins().call(
                         ctx.func_refs.unpack_sequence,
@@ -640,8 +643,10 @@ Opcode::LOAD_ATTR => {
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, a[0], a_addr, 0);
                     builder.ins().store(memflags, a[1], a_addr, 8);
+                    builder.ins().store(memflags, a[2], a_addr, 16);
                     builder.ins().store(memflags, b[0], b_addr, 0);
                     builder.ins().store(memflags, b[1], b_addr, 8);
+                    builder.ins().store(memflags, b[2], b_addr, 16);
                     let invert_val = builder.ins().iconst(types::I64, invert);
                     builder
                         .ins()
@@ -715,6 +720,7 @@ Opcode::LOAD_ATTR => {
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, module[0], module_addr, 0);
                     builder.ins().store(memflags, module[1], module_addr, 8);
+                    builder.ins().store(memflags, module[2], module_addr, 16);
                     let names_offset_val = builder.ins().iconst(types::I64, names_offset);
                     let name_idx_val = builder.ins().iconst(types::I64, name_idx);
                     builder.ins().call(
@@ -759,6 +765,7 @@ Opcode::LOAD_ATTR => {
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, seq[0], seq_addr, 0);
                     builder.ins().store(memflags, seq[1], seq_addr, 8);
+                    builder.ins().store(memflags, seq[2], seq_addr, 16);
                     let n_before_val = builder.ins().iconst(types::I64, n_before as i64);
                     let n_after_val = builder.ins().iconst(types::I64, n_after as i64);
                     builder.ins().call(
@@ -792,6 +799,7 @@ Opcode::LOAD_ATTR => {
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, mgr[0], mgr_addr, 0);
                     builder.ins().store(memflags, mgr[1], mgr_addr, 8);
+                    builder.ins().store(memflags, mgr[2], mgr_addr, 16);
                     builder
                         .ins()
                         .call(ctx.func_refs.setup_with, &[mgr_addr, out_addr]);
@@ -817,6 +825,7 @@ Opcode::LOAD_ATTR => {
                     let out_addr = builder.ins().stack_addr(types::I64, tmp_out, 0);
                     builder.ins().store(memflags, mgr[0], mgr_addr, 0);
                     builder.ins().store(memflags, mgr[1], mgr_addr, 8);
+                    builder.ins().store(memflags, mgr[2], mgr_addr, 16);
                     builder
                         .ins()
                         .call(ctx.func_refs.with_exit, &[mgr_addr, out_addr]);
