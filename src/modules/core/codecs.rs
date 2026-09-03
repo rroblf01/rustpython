@@ -9,6 +9,43 @@ thread_local! {
 }
 
 thread_local! {
+    // Pending search-function registrations deferred from re-entrant
+    // `codecs.register()` calls made WHILE a lookup is iterating the
+    // list (borrow held) — e.g. a search function re-executing
+    // `encodings/__init__.py` via `__import__`, which calls
+    // `codecs.register()` again. Pushing directly would need
+    // `borrow_mut()` and panic ("RefCell already borrowed"); cloning
+    // the list instead caused unexplained segfaults (test_dis), so
+    // deferral it is. Drained into the main list after each lookup.
+    pub(crate) static PENDING_SEARCH_FUNCTIONS: std::cell::RefCell<Vec<crate::object::PyObjectRef>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Move deferred registrations into the main search list. Call after
+/// lookup iteration ends (borrow released).
+pub(crate) fn drain_pending_search_functions() {
+    let pending: Vec<crate::object::PyObjectRef> = PENDING_SEARCH_FUNCTIONS.with(|p| {
+        p.borrow_mut().drain(..).collect()
+    });
+    if pending.is_empty() {
+        return;
+    }
+    CODEC_SEARCH_FUNCTIONS.with(|fns| {
+        if let Ok(mut g) = fns.try_borrow_mut() {
+            for f in pending {
+                g.push(f);
+            }
+        } else {
+            // Still borrowed (nested lookup); put them back for later.
+            PENDING_SEARCH_FUNCTIONS.with(|p| {
+                for f in pending {
+                    p.borrow_mut().push(f);
+                }
+            });
+        }
+    });
+}
+
+thread_local! {
     // Shared codec error-handler registry (`codecs.register_error` /
     // `codecs.lookup_error` / `_codecs._unregister_error` all operate on
     // this) — real CPython keeps it in `_codecs`; this interpreter's
@@ -649,8 +686,20 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
                         "register() requires at least 1 argument",
                     ));
                 }
+                // Never panic on re-entrant registration (search function
+                // calling register during lookup iteration): defer to the
+                // pending list, drained after the lookup ends.
                 CODEC_SEARCH_FUNCTIONS.with(|fns| {
-                    fns.borrow_mut().push(args[0].clone());
+                    match fns.try_borrow_mut() {
+                        Ok(mut g) => {
+                            g.push(args[0].clone());
+                        }
+                        Err(_) => {
+                            PENDING_SEARCH_FUNCTIONS.with(|p| {
+                                p.borrow_mut().push(args[0].clone());
+                            });
+                        }
+                    }
                 });
                 Ok(py_none())
             },

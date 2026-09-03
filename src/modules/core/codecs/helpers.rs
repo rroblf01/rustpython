@@ -106,23 +106,17 @@ pub(crate) fn _codecs_lookup(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             py_str(&encoding),
         ]))),
         _ => {
-            // Clone to avoid re-entrant borrow (search fn may call codecs.register)
-            let fns: Vec<PyObjectRef> = super::CODEC_SEARCH_FUNCTIONS.with(|fns| {
-                fns.borrow().clone()
-            });
-            let result = {
-                let mut found = None;
-                for f in fns.iter() {
+            let result = super::CODEC_SEARCH_FUNCTIONS.with(|fns| {
+                for f in fns.borrow().iter() {
                     match crate::object::builtin_call(f, &[py_str(&args[0].str())]) {
-                        Ok(res) if !matches!(&*res.borrow(), PyObject::None) => {
-                            found = Some(res);
-                            break;
-                        }
+                        Ok(res) if !matches!(&*res.borrow(), PyObject::None) => return Some(res),
                         _ => continue,
                     }
                 }
-                found
-            };
+                None
+            });
+            // Borrow released above; fold in re-entrant registrations.
+            super::drain_pending_search_functions();
             if let Some(entry) = result {
                 return Ok(entry);
             }
