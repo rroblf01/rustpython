@@ -151,7 +151,18 @@ pub(crate) fn register_native_modules(
         );
         modules.insert_str(
             "collections",
-            create_module("collections", collections_dict),
+            create_module("collections", collections_dict.clone()),
+        );
+        // `_collections` C-accelerator alias: CPython splits collections
+        // into pure-Python `Lib/collections/__init__.py` + C `_collections`.
+        // This interpreter's native collections IS the implementation, so
+        // expose it under both names. Needed so
+        // `import_fresh_module('collections', fresh=['_collections'])`
+        // (test_ordered_dict's c_coll) doesn't return None and crash the
+        // module-level `c_coll.OrderedDict` subclass.
+        modules.insert_str(
+            "_collections",
+            create_module("_collections", collections_dict),
         );
 
         let functools_dict = create_functools_dict();
