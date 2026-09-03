@@ -324,5 +324,186 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
     pickle_func!("loads", pickle_loads_impl);
     pickle_func!("_loads", pickle_loads_impl);
 
+    // Module-level dump/load (file variants). Needed so
+    // `from _pickle import dump, ...` (test_pickle's CPickleTests) works.
+    pickle_func!("dump", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("dump() requires 2 arguments"));
+        }
+        let mut protocol = 4i32;
+        for arg in args.iter().skip(2) {
+            if let PyObject::Dict(d) = &*arg.borrow() {
+                if let Ok(Some(p)) = d.get(&py_str("protocol")) {
+                    protocol = p.as_i64().unwrap_or(4) as i32;
+                }
+            } else {
+                protocol = arg.as_i64().unwrap_or(4) as i32;
+            }
+        }
+        let mut buf = Vec::new();
+        let mut memo: Vec<*const ()> = Vec::new();
+        if protocol >= 2 {
+            buf.push(0x80);
+            buf.push(protocol as u8);
+        }
+        pickle_serialize(&args[0], &mut buf, &mut memo, protocol)?;
+        buf.push(b'.');
+        let data = PyObjectRef::imm(PyObject::Bytes(buf));
+        let file = &args[1];
+        let write_m = file.borrow().get_attribute("write").map_err(|_| {
+            PyError::type_error("dump() file must have a write() method")
+        })?;
+        crate::object::builtin_call(&write_m, &[data])?;
+        Ok(py_none())
+    });
+    pickle_func!("load", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("load() missing required argument"));
+        }
+        let file = &args[0];
+        let read_m = file.borrow().get_attribute("read").map_err(|_| {
+            PyError::type_error("load() file must have a read() method")
+        })?;
+        let data = crate::object::builtin_call(&read_m, &[])?;
+        pickle_loads_impl(&[data])
+    });
+
+    // Minimal Pickler/Unpickler classes delegating to the functions above.
+    // Full protocol semantics (memo exposure, framing, persistent_id)
+    // remain future work; these exist so pickler-subclass and C-suite
+    // tests import and run instead of crashing at class definition.
+    {
+        let mut pickler_dict = HashMap::new();
+        pickler_dict.insert(
+            "__init__".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error(
+                            "Pickler() missing file argument",
+                        ));
+                    }
+                    // Optional protocol (positional or kwarg-packed dict).
+                    let mut proto = 4i64;
+                    for arg in args.iter().skip(2) {
+                        if let PyObject::Dict(d) = &*arg.borrow() {
+                            if let Ok(Some(p)) = d.get(&py_str("protocol")) {
+                                proto = p.as_i64().unwrap_or(4);
+                            }
+                        } else {
+                            proto = arg.as_i64().unwrap_or(4);
+                        }
+                    }
+                    if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                        dict.insert_str("file", args[1].clone());
+                        dict.insert_str("protocol", py_int(proto));
+                        dict.insert_str("fast", py_bool(false));
+                        dict.insert_str("memo", py_dict());
+                    }
+                    Ok(py_none())
+                },
+            }),
+        );
+        pickler_dict.insert(
+            "dump".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "dump".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error("dump() missing object"));
+                    }
+                    // Reuse module-level dump via file stored... caller
+                    // passes (self, obj); file lookup below needs self.
+                    // BoundMethod prepends self, so args[0] is self.
+                    let file = args[0].borrow().get_attribute("file").ok();
+                    // Fall back: module dump needs (obj, file); reconstruct.
+                    if let Some(f) = file {
+                        // protocol from self if present
+                        let proto = args[0]
+                            .borrow()
+                            .get_attribute("protocol")
+                            .ok()
+                            .and_then(|p| p.as_i64())
+                            .unwrap_or(4) as i32;
+                        let mut buf = Vec::new();
+                        let mut memo: Vec<*const ()> = Vec::new();
+                        if proto >= 2 {
+                            buf.push(0x80);
+                            buf.push(proto as u8);
+                        }
+                        pickle_serialize(&args[1], &mut buf, &mut memo, proto)?;
+                        buf.push(b'.');
+                        let data = PyObjectRef::imm(PyObject::Bytes(buf));
+                        let write_m = f.borrow().get_attribute("write").map_err(|_| {
+                            PyError::type_error("dump() file must have write()")
+                        })?;
+                        crate::object::builtin_call(&write_m, &[data])?;
+                        return Ok(py_none());
+                    }
+                    Err(PyError::type_error("Pickler has no file"))
+                },
+            }),
+        );
+        d.insert_str(
+            "Pickler",
+            PyObjectRef::new(PyObject::Type {
+                name: "Pickler".to_string(),
+                dict: Box::new(str_map_to_typedict(pickler_dict)),
+                bases: vec![],
+                mro: vec![],
+            }),
+        );
+    }
+    {
+        let mut unpickler_dict = HashMap::new();
+        unpickler_dict.insert(
+            "__init__".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error(
+                            "Unpickler() missing file argument",
+                        ));
+                    }
+                    if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                        dict.insert_str("file", args[1].clone());
+                        dict.insert_str("memo", py_dict());
+                    }
+                    Ok(py_none())
+                },
+            }),
+        );
+        unpickler_dict.insert(
+            "load".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "load".to_string(),
+                func: |args| {
+                    if args.is_empty() {
+                        return Err(PyError::type_error("load() missing self"));
+                    }
+                    let file = args[0].borrow().get_attribute("file").map_err(|_| {
+                        PyError::type_error("Unpickler has no file")
+                    })?;
+                    let read_m = file.borrow().get_attribute("read").map_err(|_| {
+                        PyError::type_error("load() file must have read()")
+                    })?;
+                    let data = crate::object::builtin_call(&read_m, &[])?;
+                    pickle_loads_impl(&[data])
+                },
+            }),
+        );
+        d.insert_str(
+            "Unpickler",
+            PyObjectRef::new(PyObject::Type {
+                name: "Unpickler".to_string(),
+                dict: Box::new(str_map_to_typedict(unpickler_dict)),
+                bases: vec![],
+                mro: vec![],
+            }),
+        );
+    }
+
     d
 }

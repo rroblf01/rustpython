@@ -626,5 +626,60 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_list(result))
     });
 
+    // batched(iterable, n, *, strict=False) — lazy tuples of n items
+    // (needed by Lib/pickle.py framing; also test_itertools).
+    it_func!("batched", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error(
+                "batched() requires 2 arguments (iterable, n)",
+            ));
+        }
+        let n = args[1].as_i64().ok_or_else(|| {
+            PyError::type_error("batched() n must be an integer")
+        })?;
+        if n < 1 {
+            return Err(PyError::value_error("n must be at least one"));
+        }
+        let strict = args.get(2).map(|v| v.truthy()).unwrap_or(false);
+        // CPython also accepts strict as keyword; kwargs arrive as trailing
+        // dict per this codebase's calling convention.
+        let strict = args
+            .last()
+            .and_then(|last| {
+                if let PyObject::Dict(d) = &*last.borrow() {
+                    d.get(&py_str("strict")).ok().flatten()
+                } else {
+                    None
+                }
+            })
+            .map(|v| v.truthy())
+            .unwrap_or(strict);
+        let it = builtin_iter(&[args[0].clone()])?;
+        let mut batches: Vec<PyObjectRef> = Vec::new();
+        loop {
+            let mut batch: Vec<PyObjectRef> = Vec::new();
+            for _ in 0..n {
+                match builtin_next(&[it.clone()]) {
+                    Ok(v) => batch.push(v),
+                    Err(e) if crate::object::is_stop_iteration_error(&e) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+            if batch.is_empty() {
+                break;
+            }
+            if strict && (batch.len() as i64) != n {
+                return Err(PyError::value_error(
+                    "batched(): incomplete batch",
+                ));
+            }
+            batches.push(py_tuple(batch));
+        }
+        Ok(PyObjectRef::new(PyObject::ListIter {
+            list: batches,
+            index: 0,
+        }))
+    });
+
     d
 }
