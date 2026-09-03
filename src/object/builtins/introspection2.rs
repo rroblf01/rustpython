@@ -171,6 +171,27 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             if typ.is(&args[1]) {
                 return Ok(py_bool(true));
             }
+            // Ad-hoc native instances whose Type has empty mro and an
+            // identity distinct from the module-exposed Type (e.g.
+            // `re.Match` objects each carry their own "Match" Type):
+            // recognize by exact type-name match for these known cases.
+            // (The later `(Instance, _)` arm can't see them — a `Type`
+            // classinfo lands here first.)
+            {
+                let tname = match &*typ.borrow() {
+                    PyObject::Type { name, .. } => Some(name.clone()),
+                    _ => None,
+                };
+                let cname = match &*args[1].borrow() {
+                    PyObject::Type { name, .. } => Some(name.clone()),
+                    _ => None,
+                };
+                if let (Some(t), Some(c)) = (tname, cname) {
+                    if t == c && (t == "Match" || t == "Pattern") {
+                        return Ok(py_bool(true));
+                    }
+                }
+            }
             let typ_ref = typ.borrow();
             if let PyObject::Type { mro, .. } = &*typ_ref {
                 for c in mro {
@@ -243,6 +264,19 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     }
                 }
             }
+            // Ad-hoc native `re.Match` instances carry their own "Match"
+            // Type (identity differs from `re.Match`); recognize by name.
+            // (Note: `class_name` here is the class repr for Types, so
+            // match on the Type's `name` field directly.)
+            if let PyObject::Type { name: cname, .. } = &*class {
+                if cname == "Match" {
+                    if let PyObject::Type { name, .. } = &*typ.borrow() {
+                        if name == "Match" {
+                            return Ok(py_bool(true));
+                        }
+                    }
+                }
+            }
             Ok(py_bool(
                 typ.borrow().type_name() == class_name || class_name == "object",
             ))
@@ -280,6 +314,27 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // Direct type name match for built-in types (int, str, list, etc.)
             if obj_type == class_name {
                 return Ok(py_bool(true));
+            }
+            // Native `re` objects: `CompiledRegex` reports type_name
+            // "re.Pattern" while the module exposes `Pattern`, and each
+            // Match `Instance` carries its own ad-hoc "Match" Type
+            // (identity differs from `re.Match`), so neither matches by
+            // name above. Recognize by shape + name (real trigger:
+            // test_optparse's `isinstance(msg, re.Pattern)`-style checks
+            // in custom assertRaises helpers).
+            if matches!(&*obj, PyObject::CompiledRegex { .. })
+                && (class_name == "Pattern" || class_name == "re.Pattern")
+            {
+                return Ok(py_bool(true));
+            }
+            if class_name == "Match" || class_name == "re.Match" {
+                if let PyObject::Instance { typ, .. } = &*obj {
+                    if let PyObject::Type { name, .. } = &*typ.borrow() {
+                        if name == "Match" {
+                            return Ok(py_bool(true));
+                        }
+                    }
+                }
             }
             // `bool` is real CPython's one primitive with an actual
             // inheritance relationship to another primitive
