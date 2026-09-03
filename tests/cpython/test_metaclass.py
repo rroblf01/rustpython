@@ -1,6 +1,4 @@
-import sys as _sys_top
-if 'rustpython' in _sys_top.version.lower():
-    _sys_top.exit(0)
+import sys
 import doctest
 import unittest
 
@@ -304,7 +302,4 @@ if __name__ == "__main__":
     __name__ = "test.test_metaclass"
     unittest.main()
 
-# RustPython: disable docstring test loading
-import sys as _sys_dt
-if 'rustpython' in _sys_dt.version.lower():
-    __test__ = {}
+

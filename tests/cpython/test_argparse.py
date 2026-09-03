@@ -1,8 +1,6 @@
 # Author: Steven J. Bethard <steven.bethard@gmail.com>.
 
-import sys as _sys_top
-if 'rustpython' in _sys_top.version.lower():
-    _sys_top.exit(0)
+import sys
 import _colorize
 import contextlib
 import functools

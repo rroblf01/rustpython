@@ -5,9 +5,7 @@ Written by Marc-Andre Lemburg (mal@lemburg.com).
 (c) Copyright CNRI, All Rights Reserved. NO WARRANTY.
 
 """
-import sys as _sys_top
-if 'rustpython' in _sys_top.version.lower():
-    _sys_top.exit(0)
+import sys
 import _string
 import codecs
 import datetime

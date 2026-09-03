@@ -10,9 +10,7 @@ import sys
 import os
 import re
 import copy
-import sys as _sys_top
-if 'rustpython' in _sys_top.version.lower():
-    _sys_top.exit(0)
+import sys
 
 from io import StringIO
 from test import support

@@ -1,8 +1,6 @@
 """Test cases for traceback module"""
 
-from collections import sys as _sys_top
-if 'rustpython' in _sys_top.version.lower():
-    _sys_top.exit(0)
+
 import namedtuple
 from io import StringIO
 import linecache
