@@ -721,7 +721,14 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 // to come from a second, independent `create_builtins()`
                 // call instead of the disposable VM's own, breaking
                 // pointer-identity checks like the `type(x)` special case.
-                let mut vm = crate::vm::VirtualMachine::new();
+                // Pooled disposable VM (not fresh `new()`): a fresh VM has
+                // no Lib modules cached, so every call re-imported them
+                // from scratch — notably `encodings/__init__.py` on each
+                // codec search, which re-ran `codecs.register()` and grew
+                // CODEC_SEARCH_FUNCTIONS unboundedly (O(n²) hang in
+                // test_codecs::test_cache_bounded: 1500 distinct misses).
+                // Pooled instances retain their module cache across calls.
+                let mut vm = crate::vm::VirtualMachine::take_disposable();
                 let mut frame = crate::vm::Frame::new(
                     code.clone(),
                     g.clone(),
@@ -804,7 +811,9 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                     }
                 }
                 vm.push_frame(frame);
-                vm.execute()
+                let result = vm.execute();
+                crate::vm::VirtualMachine::release_disposable(vm);
+                result
             }
         }
         3 => {
