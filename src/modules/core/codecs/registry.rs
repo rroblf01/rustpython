@@ -34,14 +34,16 @@ pub(crate) fn _codecs_charmap_build(args: &[PyObjectRef]) -> PyResult<PyObjectRe
 }
 
 pub fn lookup_codec(encoding: &str) -> Option<PyObjectRef> {
-    let candidate = super::CODEC_SEARCH_FUNCTIONS.with(|fns| {
-        for f in fns.borrow().iter() {
-            match crate::object::builtin_call(f, &[py_str(encoding)]) {
-                Ok(res) if !matches!(&*res.borrow(), PyObject::None) => return Some(res),
-                _ => continue,
-            }
-        }
-        None
+    // Clone function list to avoid re-entrant borrow: the search function
+    // (encodings/__init__.py) may call codecs.register() which borrows_mut.
+    let fns: Vec<PyObjectRef> = super::CODEC_SEARCH_FUNCTIONS.with(|fns| {
+        fns.borrow().clone()
     });
-    candidate
+    for f in fns.iter() {
+        match crate::object::builtin_call(f, &[py_str(encoding)]) {
+            Ok(res) if !matches!(&*res.borrow(), PyObject::None) => return Some(res),
+            _ => continue,
+        }
+    }
+    None
 }
