@@ -594,6 +594,146 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
             }),
         );
     }
+    {
+        // sys.monitoring — PEP 669 (CPython 3.12+) monitoring API stub.
+        // `Lib/bdb.py` (3.14) does `E = sys.monitoring.events` at import
+        // time, so the attribute must exist for `import bdb` / test_bdb.
+        // Real event delivery is not implemented (no-op); Bdb defaults to
+        // backend='settrace' which does not need monitoring.
+        // Event values are 1<<index matching CPython's monitoring.h.
+        let mut events_dict = AttrMap::new();
+        events_dict.insert_str("PY_START", py_int(1));
+        events_dict.insert_str("PY_RESUME", py_int(2));
+        events_dict.insert_str("PY_RETURN", py_int(4));
+        events_dict.insert_str("PY_YIELD", py_int(8));
+        events_dict.insert_str("CALL", py_int(16));
+        events_dict.insert_str("LINE", py_int(32));
+        events_dict.insert_str("INSTRUCTION", py_int(64));
+        events_dict.insert_str("JUMP", py_int(128));
+        events_dict.insert_str("BRANCH_LEFT", py_int(256));
+        events_dict.insert_str("BRANCH_RIGHT", py_int(512));
+        events_dict.insert_str("STOP_ITERATION", py_int(1024));
+        events_dict.insert_str("RAISE", py_int(2048));
+        events_dict.insert_str("EXCEPTION_HANDLED", py_int(4096));
+        events_dict.insert_str("PY_UNWIND", py_int(8192));
+        events_dict.insert_str("PY_THROW", py_int(16384));
+        events_dict.insert_str("RERAISE", py_int(32768));
+        events_dict.insert_str("C_RETURN", py_int(65536));
+        events_dict.insert_str("C_RAISE", py_int(131072));
+        events_dict.insert_str("BRANCH", py_int(262144));
+        events_dict.insert_str("NO_EVENTS", py_int(0));
+        let events_obj = PyObjectRef::new(PyObject::Instance {
+            typ: PyObjectRef::new(PyObject::Type {
+                name: "events".to_string(),
+                dict: Box::new(str_map_to_typedict(HashMap::new())),
+                bases: vec![],
+                mro: vec![],
+            }),
+            dict: events_dict,
+        });
+        let mut mon_dict = AttrMap::new();
+        mon_dict.insert_str("DEBUGGER_ID", py_int(0));
+        mon_dict.insert_str("COVERAGE_ID", py_int(1));
+        mon_dict.insert_str("PROFILER_ID", py_int(2));
+        mon_dict.insert_str("OPTIMIZER_ID", py_int(5));
+        mon_dict.insert_str("events", events_obj);
+        // DISABLE / MISSING singletons — unique instances for identity checks.
+        let make_sentinel = |name: &str| {
+            PyObjectRef::new(PyObject::Instance {
+                typ: PyObjectRef::new(PyObject::Type {
+                    name: name.to_string(),
+                    dict: Box::new(str_map_to_typedict(HashMap::new())),
+                    bases: vec![],
+                    mro: vec![],
+                }),
+                dict: AttrMap::new(),
+            })
+        };
+        mon_dict.insert_str("DISABLE", make_sentinel("DISABLE"));
+        mon_dict.insert_str("MISSING", make_sentinel("MISSING"));
+        mon_dict.insert_str(
+            "use_tool_id",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "use_tool_id".to_string(),
+                func: |_args| Ok(py_none()),
+            }),
+        );
+        mon_dict.insert_str(
+            "free_tool_id",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "free_tool_id".to_string(),
+                func: |_args| Ok(py_none()),
+            }),
+        );
+        mon_dict.insert_str(
+            "get_tool",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "get_tool".to_string(),
+                func: |_args| Ok(py_none()),
+            }),
+        );
+        mon_dict.insert_str(
+            "clear_tool_id",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "clear_tool_id".to_string(),
+                func: |_args| Ok(py_none()),
+            }),
+        );
+        mon_dict.insert_str(
+            "set_events",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "set_events".to_string(),
+                func: |_args| Ok(py_none()),
+            }),
+        );
+        mon_dict.insert_str(
+            "get_events",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "get_events".to_string(),
+                func: |_args| Ok(py_int(0)),
+            }),
+        );
+        mon_dict.insert_str(
+            "set_local_events",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "set_local_events".to_string(),
+                func: |_args| Ok(py_none()),
+            }),
+        );
+        mon_dict.insert_str(
+            "get_local_events",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "get_local_events".to_string(),
+                func: |_args| Ok(py_int(0)),
+            }),
+        );
+        mon_dict.insert_str(
+            "register_callback",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "register_callback".to_string(),
+                func: |_args| Ok(py_none()),
+            }),
+        );
+        mon_dict.insert_str(
+            "restart_events",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "restart_events".to_string(),
+                func: |_args| Ok(py_none()),
+            }),
+        );
+        d.insert_str(
+            "monitoring",
+            PyObjectRef::new(PyObject::Instance {
+                typ: PyObjectRef::new(PyObject::Type {
+                    name: "monitoring".to_string(),
+                    dict: Box::new(str_map_to_typedict(HashMap::new())),
+                    bases: vec![],
+                    mro: vec![],
+                }),
+                dict: mon_dict,
+            }),
+        );
+    }
     d.insert_str(
         "stdin",
         PyObjectRef::new(PyObject::File {
