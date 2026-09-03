@@ -179,7 +179,7 @@ pub(crate) fn is_builtin_exception_class_name(name: &str) -> bool {
         // every `builtin_make_exception_*` constructor registered anywhere
         // in `src/modules/` against this list.
         "DecimalException" | "InvalidOperation" | "DivisionByZero" | "Inexact" | "Rounded" |
-        "Clamped" | "Overflow" | "Underflow" | "FloatOperation" |
+        "Clamped" | "Overflow" | "Underflow" | "Subnormal" | "FloatOperation" |
         "PatternError" | "error" |
         // `subprocess.CalledProcessError` — same shape as the other
         // module-specific exceptions above (a bare `PyObject::Type` with

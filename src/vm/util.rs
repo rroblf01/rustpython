@@ -96,7 +96,7 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
         "CycleError" => Some("ValueError"),
         "DecimalException" => Some("ArithmeticError"),
         "InvalidOperation" | "DivisionByZero" | "Inexact" | "Rounded" | "Clamped" | "Overflow"
-        | "Underflow" | "FloatOperation" => Some("DecimalException"),
+        | "Underflow" | "Subnormal" | "FloatOperation" => Some("DecimalException"),
         "PickleError" => Some("Exception"),
         "PicklingError" | "UnpicklingError" => Some("PickleError"),
         "ExceptionGroup" => Some("Exception"),

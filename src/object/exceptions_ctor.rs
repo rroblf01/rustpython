@@ -302,6 +302,7 @@ make_exception_func!(builtin_make_exception_rounded, "Rounded");
 make_exception_func!(builtin_make_exception_clamped, "Clamped");
 make_exception_func!(builtin_make_exception_decimaloverflow, "Overflow");
 make_exception_func!(builtin_make_exception_decimalunderflow, "Underflow");
+make_exception_func!(builtin_make_exception_subnormal, "Subnormal");
 make_exception_func!(builtin_make_exception_floatoperation, "FloatOperation");
 make_exception_func!(builtin_make_exception_connectionerror, "ConnectionError");
 make_exception_func!(builtin_make_exception_brokenpipeerror, "BrokenPipeError");

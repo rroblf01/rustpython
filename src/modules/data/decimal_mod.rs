@@ -218,6 +218,13 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
         }),
     );
     d.insert_str(
+        "Subnormal",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "Subnormal".to_string(),
+            func: crate::object::builtin_make_exception_subnormal,
+        }),
+    );
+    d.insert_str(
         "FloatOperation",
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "FloatOperation".to_string(),
