@@ -21,12 +21,55 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
     // unlike `gc.rs`'s separate experimental tracing heap (feature `gc`,
     // not wired into the object model at all).
     gc_func!("collect", |args| {
+        // Optional generation argument (default: collect all, reported as 2).
+        let generation = args
+            .first()
+            .and_then(|a| a.as_i64())
+            .unwrap_or(2);
+        // Snapshot callbacks (a callback may mutate the list).
+        let callbacks: Vec<PyObjectRef> =
+            crate::modules::get_module("gc").and_then(|m| {
+                let b = m.borrow();
+                if let PyObject::Module { dict, .. } = &*b {
+                    dict.get_str("callbacks").cloned()
+                } else {
+                    None
+                }
+            }).and_then(|c| {
+                if let PyObject::List(items) = &*c.borrow() {
+                    Some(items.clone())
+                } else {
+                    None
+                }
+            }).unwrap_or_default();
+        let fire = |phase: &str, collected: i64, uncollectable: i64| -> PyResult<()> {
+            if callbacks.is_empty() {
+                return Ok(());
+            }
+            let mut info = PyDict::new();
+            let _ = info.set(py_str("generation"), py_int(generation));
+            let _ = info.set(py_str("collected"), py_int(collected));
+            let _ = info.set(py_str("uncollectable"), py_int(uncollectable));
+            let info = PyObjectRef::new(PyObject::Dict(Box::new(info)));
+            for cb in &callbacks {
+                crate::object::builtin_call(
+                    cb,
+                    &[py_str(phase), info.clone()],
+                )?;
+            }
+            Ok(())
+        };
+        fire("start", 0, 0)?;
         let collected = crate::cycle_gc::collect();
         crate::modules::misc::run_weakref_callbacks();
         let _ = crate::object::with_vm_mut(|vm| vm.run_pending_finalizers());
-        let _ = args;
+        fire("stop", collected as i64, 0)?;
         Ok(py_int(collected as i64))
     });
+    // gc.callbacks / gc.garbage — mutable module-level lists (CPython
+    // exposes both; callbacks fire on collect, garbage holds uncollectables).
+    d.insert_str("callbacks", py_list(vec![]));
+    d.insert_str("garbage", py_list(vec![]));
 
     gc_func!("enable", |_| {
         crate::cycle_gc::set_enabled(true);
