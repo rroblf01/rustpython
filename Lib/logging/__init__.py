@@ -2,13 +2,17 @@
 import sys
 import os
 import time
+import threading
 
 CRITICAL = 50
+FATAL = CRITICAL
 ERROR = 40
 WARNING = 30
+WARN = WARNING
 INFO = 20
 DEBUG = 10
 NOTSET = 0
+BASIC_FORMAT = "%(message)s"
 
 
 class LogRecord:
@@ -35,6 +39,7 @@ class Handler:
     def __init__(self, level=NOTSET):
         self.level = level
         self.formatter = None
+        self._closed = False
     def setFormatter(self, formatter):
         self.formatter = formatter
     def handle(self, record):
@@ -42,6 +47,12 @@ class Handler:
             self.emit(record)
     def emit(self, record):
         raise NotImplementedError
+    def close(self):
+        self._closed = True
+    def flush(self):
+        pass
+    def createLock(self):
+        self.lock = None
 
 
 class Filter:
@@ -151,6 +162,11 @@ class Logger:
         self.parent = None
         self.handlers = []
         self.disabled = False
+        # CPython sets .manager (global Manager singleton); tests read it.
+        global manager
+        if manager is None:
+            manager = type('Manager', (), {'loggerDict': {}})()
+        self.manager = manager
     def setLevel(self, level):
         self.level = level
     def addHandler(self, handler):
@@ -183,6 +199,13 @@ class Logger:
     def critical(self, msg, *args, **kwargs):
         if self.isEnabledFor(CRITICAL):
             self._log(CRITICAL, msg, args, **kwargs)
+    def log(self, level, msg, *args, **kwargs):
+        if self.isEnabledFor(level):
+            self._log(level, msg, args, **kwargs)
+    def exception(self, msg, *args, exc_info=True, **kwargs):
+        self.error(msg, *args, exc_info=exc_info, **kwargs)
+    def fatal(self, msg, *args, **kwargs):
+        self.critical(msg, *args, **kwargs)
 
 
 class LoggerAdapter:
@@ -266,3 +289,107 @@ def shutdown():
         for handler in _root.handlers:
             if hasattr(handler.stream, 'close'):
                 handler.stream.close()
+
+
+def _ensure_configured():
+    if len(root.handlers) == 0:
+        basicConfig()
+
+
+def debug(msg, *args, **kwargs):
+    _ensure_configured()
+    getLogger().debug(msg, *args, **kwargs)
+
+
+def info(msg, *args, **kwargs):
+    _ensure_configured()
+    getLogger().info(msg, *args, **kwargs)
+
+
+def warning(msg, *args, **kwargs):
+    _ensure_configured()
+    getLogger().warning(msg, *args, **kwargs)
+
+
+def warn(msg, *args, **kwargs):
+    _ensure_configured()
+    warning(msg, *args, **kwargs)
+
+
+def error(msg, *args, **kwargs):
+    _ensure_configured()
+    getLogger().error(msg, *args, **kwargs)
+
+
+def critical(msg, *args, **kwargs):
+    _ensure_configured()
+    getLogger().critical(msg, *args, **kwargs)
+
+
+def fatal(msg, *args, **kwargs):
+    _ensure_configured()
+    critical(msg, *args, **kwargs)
+
+
+def exception(msg, *args, exc_info=True, **kwargs):
+    _ensure_configured()
+    getLogger().exception(msg, *args, exc_info=exc_info, **kwargs)
+
+
+def log(level, msg, *args, **kwargs):
+    _ensure_configured()
+    getLogger().log(level, msg, *args, **kwargs)
+
+
+def disable(level=CRITICAL):
+    getLogger().manager.disable = level
+
+
+_level_names = {
+    CRITICAL: 'CRITICAL',
+    ERROR: 'ERROR',
+    WARNING: 'WARNING',
+    INFO: 'INFO',
+    DEBUG: 'DEBUG',
+    NOTSET: 'NOTSET',
+    'CRITICAL': CRITICAL,
+    'ERROR': ERROR,
+    'WARN': WARNING,
+    'WARNING': WARNING,
+    'INFO': INFO,
+    'DEBUG': DEBUG,
+    'NOTSET': NOTSET,
+}
+
+
+def getLevelName(level):
+    return _level_names.get(level, f'Level {level}')
+
+
+# Module-level names CPython exposes (test_logging reads them directly).
+_handlerList = []
+_lock = threading.RLock()
+_handlers = {}
+
+__all__ = [
+    'BASIC_FORMAT', 'BufferingFormatter', 'CRITICAL', 'DEBUG', 'ERROR',
+    'FATAL', 'FileHandler', 'Filter', 'Formatter', 'Handler', 'INFO',
+    'LogRecord', 'Logger', 'LoggerAdapter', 'NOTSET', 'NullHandler',
+    'StreamHandler', 'WARN', 'WARNING', 'basicConfig', 'getLogger',
+    'makeLogRecord', 'shutdown',
+]
+
+
+def makeLogRecord(dict):
+    rv = LogRecord(None, None, "", 0, "", (), None, None)
+    rv.__dict__.update(dict)
+    return rv
+
+
+# Eager root logger so `logging.root` exists without calling getLogger.
+if manager is None:
+    manager = type('Manager', (), {'loggerDict': {}})()
+if _root is None:
+    _root = Logger('root', WARNING)
+    _root.addHandler(StreamHandler())
+root = _root
