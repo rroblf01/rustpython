@@ -390,10 +390,152 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     d.insert_str("modules", py_dict());
     d.insert_str("warnoptions", py_list(vec![]));
     d.insert_str("version", py_str("3.12.0 (RustPython 0.1.0)"));
-    d.insert_str(
-        "version_info",
-        py_tuple(vec![py_int(3), py_int(12), py_int(0)]),
-    );
+    // sys.version_info — structseq (tuple + attributes) like
+    // time.struct_time: supports both v[0] and v.major. Plain tuple
+    // broke attribute access (`'tuple' object has no attribute
+    // 'major'`, test_embed and many version gates).
+    {
+        let fields: &[(&str, PyObjectRef)] = &[
+            ("major", py_int(3)),
+            ("minor", py_int(12)),
+            ("micro", py_int(0)),
+            ("releaselevel", py_str("final")),
+            ("serial", py_int(0)),
+        ];
+        let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+        type_dict.insert_str(
+            "__getitem__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__getitem__".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error(
+                            "__getitem__() takes exactly one argument",
+                        ));
+                    }
+                    let order = ["major", "minor", "micro", "releaselevel", "serial"];
+                    if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                        if let PyObject::Slice { start, stop, step } = &*args[1].borrow() {
+                            use crate::object::extract_slice_fields;
+                            let n = order.len() as isize;
+                            let (s0, s1, step_v) =
+                                extract_slice_fields(start, stop, step)?;
+                            let norm = |v: Option<isize>, dflt: isize| -> isize {
+                                match v {
+                                    Some(v) => {
+                                        if v < 0 { (n + v).max(0) } else { v.min(n) }
+                                    }
+                                    None => dflt,
+                                }
+                            };
+                            let mut out = Vec::new();
+                            if step_v > 0 {
+                                let (mut i, stop) = (norm(s0, 0), norm(s1, n));
+                                while i < stop {
+                                    if let Some(name) = order.get(i as usize) {
+                                        out.push(dict.get_str(name).cloned().unwrap_or_else(py_none));
+                                    }
+                                    i += step_v;
+                                }
+                            } else {
+                                let (mut i, stop) = (
+                                    match s0 {
+                                        Some(v) => {
+                                            if v < 0 { (n + v).max(-1) } else { v.min(n - 1) }
+                                        }
+                                        None => n - 1,
+                                    },
+                                    norm(s1, -1),
+                                );
+                                while i > stop {
+                                    if let Some(name) = order.get(i as usize) {
+                                        out.push(dict.get_str(name).cloned().unwrap_or_else(py_none));
+                                    }
+                                    i += step_v;
+                                }
+                            }
+                            return Ok(py_tuple(out));
+                        }
+                        let idx = args[1].as_i64().ok_or_else(|| {
+                            PyError::type_error("tuple indices must be integers")
+                        })?;
+                        let i = if idx < 0 { idx + order.len() as i64 } else { idx };
+                        let name = order.get(i as usize).ok_or_else(|| {
+                            PyError::index_error("version_info index out of range")
+                        })?;
+                        Ok(dict.get_str(name).cloned().unwrap_or_else(py_none))
+                    } else {
+                        Err(PyError::runtime_error("__getitem__ on non-version_info"))
+                    }
+                },
+            }),
+        );
+        type_dict.insert_str(
+            "__len__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__len__".to_string(),
+                func: |_args| Ok(py_int(5)),
+            }),
+        );
+        type_dict.insert_str(
+            "__iter__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__iter__".to_string(),
+                func: |args| {
+                    if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                        let order = ["major", "minor", "micro", "releaselevel", "serial"];
+                        let items: Vec<PyObjectRef> = order
+                            .iter()
+                            .map(|f| dict.get_str(f).cloned().unwrap_or_else(py_none))
+                            .collect();
+                        Ok(PyObjectRef::new(PyObject::ListIter { list: items, index: 0 }))
+                    } else {
+                        Err(PyError::runtime_error("__iter__ on non-version_info"))
+                    }
+                },
+            }),
+        );
+        type_dict.insert_str(
+            "__repr__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__repr__".to_string(),
+                func: |args| {
+                    if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                        let major = dict.get_str("major").and_then(|v| v.as_i64()).unwrap_or(3);
+                        let minor = dict.get_str("minor").and_then(|v| v.as_i64()).unwrap_or(12);
+                        let micro = dict.get_str("micro").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let rel = dict
+                            .get_str("releaselevel")
+                            .map(|v| v.str())
+                            .unwrap_or_else(|| "final".to_string());
+                        let serial = dict.get_str("serial").and_then(|v| v.as_i64()).unwrap_or(0);
+                        Ok(py_str(&format!(
+                            "sys.version_info(major={}, minor={}, micro={}, releaselevel='{}', serial={})",
+                            major, minor, micro, rel, serial
+                        )))
+                    } else {
+                        Ok(py_str("sys.version_info(...)"))
+                    }
+                },
+            }),
+        );
+        let mut vi_dict = AttrMap::new();
+        for (k, v) in fields {
+            vi_dict.insert_str(k, v.clone());
+        }
+        d.insert_str(
+            "version_info",
+            PyObjectRef::new(PyObject::Instance {
+                typ: PyObjectRef::new(PyObject::Type {
+                    name: "version_info".to_string(),
+                    dict: Box::new(str_map_to_typedict(type_dict)),
+                    bases: vec![],
+                    mro: vec![],
+                }),
+                dict: vi_dict,
+            }),
+        );
+    }
     d.insert_str("float_repr_style", py_str("short"));
     d.insert_str("hexversion", py_int(0x030c0000));
     d.insert_str(
