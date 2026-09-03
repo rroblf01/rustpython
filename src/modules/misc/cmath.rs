@@ -77,7 +77,10 @@ fn c_atan(re: f64, im: f64) -> (f64, f64) {
 
 fn c_sqrt(re: f64, im: f64) -> (f64, f64) {
     if im == 0.0 && re >= 0.0 {
-        return (re.sqrt(), 0.0);
+        // Preserve signed zero (C99 Annex G / CPython cmath_sqrt):
+        // sqrt(1-0i) == 1-0i, not 1+0i. Dropping the sign here flips
+        // downstream asin/acos/atan signs (e.g. acos(0j) imag must be -0).
+        return (re.sqrt(), im);
     }
     let r = c_abs(re, im);
     let sr = ((r + re) / 2.0).sqrt();
