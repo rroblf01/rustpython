@@ -107,6 +107,18 @@ def dump(obj, file, protocol=None, *, fix_imports=True, buffer_callback=None):
     file.write(data)
 
 
+# Private C-accelerated aliases (CPython exposes _dump/_dumps from _pickle;
+# test_pickle references them). Same semantics via the public functions.
+def _dump(obj, file, protocol=None, *, fix_imports=True, buffer_callback=None):
+    return dump(obj, file, protocol=protocol, fix_imports=fix_imports,
+                buffer_callback=buffer_callback)
+
+
+def _dumps(obj, protocol=None, *, fix_imports=True, buffer_callback=None):
+    return dumps(obj, protocol=protocol, fix_imports=fix_imports,
+                 buffer_callback=buffer_callback)
+
+
 def load(file, *, fix_imports=True, encoding='ASCII', errors='strict', buffers=None):
     """Deserialize object from open file."""
     data = file.read()

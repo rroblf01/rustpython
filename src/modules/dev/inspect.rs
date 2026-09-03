@@ -126,27 +126,180 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
 
     // Also add some opcode name constants for reference
     d.insert_str("opname", py_str("dis module for bytecode disassembly"));
-    // Real CPython's `dis` re-exports these opcode-classification lists
-    // from `opcode` (which describes CPython's OWN bytecode format — not
-    // this interpreter's, so there's nothing meaningful to populate them
-    // with). Empty lists here are enough for code that merely imports/
-    // constructs a `set()` from them without asserting real CPython opcode
-    // membership (real trigger: `test.support.bytecode_helper`, which our
-    // fundamentally-different bytecode format can't produce accurate
-    // results for regardless).
-    for name in [
-        "hasarg",
-        "hasconst",
-        "hasname",
-        "hasjrel",
-        "hasjabs",
-        "haslocal",
-        "hascompare",
-        "hasfree",
-        "hasexc",
-    ] {
-        d.insert(name.to_string(), py_list(vec![]));
+    // Real CPython's `dis` re-exports the opcode map and classification
+    // lists from `opcode`. Values describe CPython 3.14's own bytecode
+    // (not this interpreter's) but must be present and accurate for
+    // introspection (`dis.opmap["CACHE"]`, `test_dis::test_opmap`,
+    // `test.support.bytecode_helper` imports). Generated from CPython
+    // 3.14's `opcode` module; keep in sync with Lib/opcode.py.
+    {
+        let mut opmap = crate::object::PyDict::new();
+        let _ = opmap.set(py_str("ANNOTATIONS_PLACEHOLDER"), py_int(256));
+        let _ = opmap.set(py_str("BINARY_OP"), py_int(44));
+        let _ = opmap.set(py_str("BINARY_SLICE"), py_int(1));
+        let _ = opmap.set(py_str("BUILD_INTERPOLATION"), py_int(45));
+        let _ = opmap.set(py_str("BUILD_LIST"), py_int(46));
+        let _ = opmap.set(py_str("BUILD_MAP"), py_int(47));
+        let _ = opmap.set(py_str("BUILD_SET"), py_int(48));
+        let _ = opmap.set(py_str("BUILD_SLICE"), py_int(49));
+        let _ = opmap.set(py_str("BUILD_STRING"), py_int(50));
+        let _ = opmap.set(py_str("BUILD_TEMPLATE"), py_int(2));
+        let _ = opmap.set(py_str("BUILD_TUPLE"), py_int(51));
+        let _ = opmap.set(py_str("CACHE"), py_int(0));
+        let _ = opmap.set(py_str("CALL"), py_int(52));
+        let _ = opmap.set(py_str("CALL_FUNCTION_EX"), py_int(4));
+        let _ = opmap.set(py_str("CALL_INTRINSIC_1"), py_int(53));
+        let _ = opmap.set(py_str("CALL_INTRINSIC_2"), py_int(54));
+        let _ = opmap.set(py_str("CALL_KW"), py_int(55));
+        let _ = opmap.set(py_str("CHECK_EG_MATCH"), py_int(5));
+        let _ = opmap.set(py_str("CHECK_EXC_MATCH"), py_int(6));
+        let _ = opmap.set(py_str("CLEANUP_THROW"), py_int(7));
+        let _ = opmap.set(py_str("COMPARE_OP"), py_int(56));
+        let _ = opmap.set(py_str("CONTAINS_OP"), py_int(57));
+        let _ = opmap.set(py_str("CONVERT_VALUE"), py_int(58));
+        let _ = opmap.set(py_str("COPY"), py_int(59));
+        let _ = opmap.set(py_str("COPY_FREE_VARS"), py_int(60));
+        let _ = opmap.set(py_str("DELETE_ATTR"), py_int(61));
+        let _ = opmap.set(py_str("DELETE_DEREF"), py_int(62));
+        let _ = opmap.set(py_str("DELETE_FAST"), py_int(63));
+        let _ = opmap.set(py_str("DELETE_GLOBAL"), py_int(64));
+        let _ = opmap.set(py_str("DELETE_NAME"), py_int(65));
+        let _ = opmap.set(py_str("DELETE_SUBSCR"), py_int(8));
+        let _ = opmap.set(py_str("DICT_MERGE"), py_int(66));
+        let _ = opmap.set(py_str("DICT_UPDATE"), py_int(67));
+        let _ = opmap.set(py_str("END_ASYNC_FOR"), py_int(68));
+        let _ = opmap.set(py_str("END_FOR"), py_int(9));
+        let _ = opmap.set(py_str("END_SEND"), py_int(10));
+        let _ = opmap.set(py_str("ENTER_EXECUTOR"), py_int(255));
+        let _ = opmap.set(py_str("EXIT_INIT_CHECK"), py_int(11));
+        let _ = opmap.set(py_str("EXTENDED_ARG"), py_int(69));
+        let _ = opmap.set(py_str("FORMAT_SIMPLE"), py_int(12));
+        let _ = opmap.set(py_str("FORMAT_WITH_SPEC"), py_int(13));
+        let _ = opmap.set(py_str("FOR_ITER"), py_int(70));
+        let _ = opmap.set(py_str("GET_AITER"), py_int(14));
+        let _ = opmap.set(py_str("GET_ANEXT"), py_int(15));
+        let _ = opmap.set(py_str("GET_AWAITABLE"), py_int(71));
+        let _ = opmap.set(py_str("GET_ITER"), py_int(16));
+        let _ = opmap.set(py_str("GET_LEN"), py_int(18));
+        let _ = opmap.set(py_str("GET_YIELD_FROM_ITER"), py_int(19));
+        let _ = opmap.set(py_str("IMPORT_FROM"), py_int(72));
+        let _ = opmap.set(py_str("IMPORT_NAME"), py_int(73));
+        let _ = opmap.set(py_str("INSTRUMENTED_CALL"), py_int(250));
+        let _ = opmap.set(py_str("INSTRUMENTED_CALL_FUNCTION_EX"), py_int(252));
+        let _ = opmap.set(py_str("INSTRUMENTED_CALL_KW"), py_int(251));
+        let _ = opmap.set(py_str("INSTRUMENTED_END_ASYNC_FOR"), py_int(248));
+        let _ = opmap.set(py_str("INSTRUMENTED_END_FOR"), py_int(234));
+        let _ = opmap.set(py_str("INSTRUMENTED_END_SEND"), py_int(236));
+        let _ = opmap.set(py_str("INSTRUMENTED_FOR_ITER"), py_int(237));
+        let _ = opmap.set(py_str("INSTRUMENTED_INSTRUCTION"), py_int(238));
+        let _ = opmap.set(py_str("INSTRUMENTED_JUMP_BACKWARD"), py_int(253));
+        let _ = opmap.set(py_str("INSTRUMENTED_JUMP_FORWARD"), py_int(239));
+        let _ = opmap.set(py_str("INSTRUMENTED_LINE"), py_int(254));
+        let _ = opmap.set(py_str("INSTRUMENTED_LOAD_SUPER_ATTR"), py_int(249));
+        let _ = opmap.set(py_str("INSTRUMENTED_NOT_TAKEN"), py_int(240));
+        let _ = opmap.set(py_str("INSTRUMENTED_POP_ITER"), py_int(235));
+        let _ = opmap.set(py_str("INSTRUMENTED_POP_JUMP_IF_FALSE"), py_int(242));
+        let _ = opmap.set(py_str("INSTRUMENTED_POP_JUMP_IF_NONE"), py_int(243));
+        let _ = opmap.set(py_str("INSTRUMENTED_POP_JUMP_IF_NOT_NONE"), py_int(244));
+        let _ = opmap.set(py_str("INSTRUMENTED_POP_JUMP_IF_TRUE"), py_int(241));
+        let _ = opmap.set(py_str("INSTRUMENTED_RESUME"), py_int(245));
+        let _ = opmap.set(py_str("INSTRUMENTED_RETURN_VALUE"), py_int(246));
+        let _ = opmap.set(py_str("INSTRUMENTED_YIELD_VALUE"), py_int(247));
+        let _ = opmap.set(py_str("INTERPRETER_EXIT"), py_int(20));
+        let _ = opmap.set(py_str("IS_OP"), py_int(74));
+        let _ = opmap.set(py_str("JUMP"), py_int(257));
+        let _ = opmap.set(py_str("JUMP_BACKWARD"), py_int(75));
+        let _ = opmap.set(py_str("JUMP_BACKWARD_NO_INTERRUPT"), py_int(76));
+        let _ = opmap.set(py_str("JUMP_FORWARD"), py_int(77));
+        let _ = opmap.set(py_str("JUMP_IF_FALSE"), py_int(258));
+        let _ = opmap.set(py_str("JUMP_IF_TRUE"), py_int(259));
+        let _ = opmap.set(py_str("JUMP_NO_INTERRUPT"), py_int(260));
+        let _ = opmap.set(py_str("LIST_APPEND"), py_int(78));
+        let _ = opmap.set(py_str("LIST_EXTEND"), py_int(79));
+        let _ = opmap.set(py_str("LOAD_ATTR"), py_int(80));
+        let _ = opmap.set(py_str("LOAD_BUILD_CLASS"), py_int(21));
+        let _ = opmap.set(py_str("LOAD_CLOSURE"), py_int(261));
+        let _ = opmap.set(py_str("LOAD_COMMON_CONSTANT"), py_int(81));
+        let _ = opmap.set(py_str("LOAD_CONST"), py_int(82));
+        let _ = opmap.set(py_str("LOAD_DEREF"), py_int(83));
+        let _ = opmap.set(py_str("LOAD_FAST"), py_int(84));
+        let _ = opmap.set(py_str("LOAD_FAST_AND_CLEAR"), py_int(85));
+        let _ = opmap.set(py_str("LOAD_FAST_BORROW"), py_int(86));
+        let _ = opmap.set(py_str("LOAD_FAST_BORROW_LOAD_FAST_BORROW"), py_int(87));
+        let _ = opmap.set(py_str("LOAD_FAST_CHECK"), py_int(88));
+        let _ = opmap.set(py_str("LOAD_FAST_LOAD_FAST"), py_int(89));
+        let _ = opmap.set(py_str("LOAD_FROM_DICT_OR_DEREF"), py_int(90));
+        let _ = opmap.set(py_str("LOAD_FROM_DICT_OR_GLOBALS"), py_int(91));
+        let _ = opmap.set(py_str("LOAD_GLOBAL"), py_int(92));
+        let _ = opmap.set(py_str("LOAD_LOCALS"), py_int(22));
+        let _ = opmap.set(py_str("LOAD_NAME"), py_int(93));
+        let _ = opmap.set(py_str("LOAD_SMALL_INT"), py_int(94));
+        let _ = opmap.set(py_str("LOAD_SPECIAL"), py_int(95));
+        let _ = opmap.set(py_str("LOAD_SUPER_ATTR"), py_int(96));
+        let _ = opmap.set(py_str("MAKE_CELL"), py_int(97));
+        let _ = opmap.set(py_str("MAKE_FUNCTION"), py_int(23));
+        let _ = opmap.set(py_str("MAP_ADD"), py_int(98));
+        let _ = opmap.set(py_str("MATCH_CLASS"), py_int(99));
+        let _ = opmap.set(py_str("MATCH_KEYS"), py_int(24));
+        let _ = opmap.set(py_str("MATCH_MAPPING"), py_int(25));
+        let _ = opmap.set(py_str("MATCH_SEQUENCE"), py_int(26));
+        let _ = opmap.set(py_str("NOP"), py_int(27));
+        let _ = opmap.set(py_str("NOT_TAKEN"), py_int(28));
+        let _ = opmap.set(py_str("POP_BLOCK"), py_int(262));
+        let _ = opmap.set(py_str("POP_EXCEPT"), py_int(29));
+        let _ = opmap.set(py_str("POP_ITER"), py_int(30));
+        let _ = opmap.set(py_str("POP_JUMP_IF_FALSE"), py_int(100));
+        let _ = opmap.set(py_str("POP_JUMP_IF_NONE"), py_int(101));
+        let _ = opmap.set(py_str("POP_JUMP_IF_NOT_NONE"), py_int(102));
+        let _ = opmap.set(py_str("POP_JUMP_IF_TRUE"), py_int(103));
+        let _ = opmap.set(py_str("POP_TOP"), py_int(31));
+        let _ = opmap.set(py_str("PUSH_EXC_INFO"), py_int(32));
+        let _ = opmap.set(py_str("PUSH_NULL"), py_int(33));
+        let _ = opmap.set(py_str("RAISE_VARARGS"), py_int(104));
+        let _ = opmap.set(py_str("RERAISE"), py_int(105));
+        let _ = opmap.set(py_str("RESERVED"), py_int(17));
+        let _ = opmap.set(py_str("RESUME"), py_int(128));
+        let _ = opmap.set(py_str("RETURN_GENERATOR"), py_int(34));
+        let _ = opmap.set(py_str("RETURN_VALUE"), py_int(35));
+        let _ = opmap.set(py_str("SEND"), py_int(106));
+        let _ = opmap.set(py_str("SETUP_ANNOTATIONS"), py_int(36));
+        let _ = opmap.set(py_str("SETUP_CLEANUP"), py_int(263));
+        let _ = opmap.set(py_str("SETUP_FINALLY"), py_int(264));
+        let _ = opmap.set(py_str("SETUP_WITH"), py_int(265));
+        let _ = opmap.set(py_str("SET_ADD"), py_int(107));
+        let _ = opmap.set(py_str("SET_FUNCTION_ATTRIBUTE"), py_int(108));
+        let _ = opmap.set(py_str("SET_UPDATE"), py_int(109));
+        let _ = opmap.set(py_str("STORE_ATTR"), py_int(110));
+        let _ = opmap.set(py_str("STORE_DEREF"), py_int(111));
+        let _ = opmap.set(py_str("STORE_FAST"), py_int(112));
+        let _ = opmap.set(py_str("STORE_FAST_LOAD_FAST"), py_int(113));
+        let _ = opmap.set(py_str("STORE_FAST_MAYBE_NULL"), py_int(266));
+        let _ = opmap.set(py_str("STORE_FAST_STORE_FAST"), py_int(114));
+        let _ = opmap.set(py_str("STORE_GLOBAL"), py_int(115));
+        let _ = opmap.set(py_str("STORE_NAME"), py_int(116));
+        let _ = opmap.set(py_str("STORE_SLICE"), py_int(37));
+        let _ = opmap.set(py_str("STORE_SUBSCR"), py_int(38));
+        let _ = opmap.set(py_str("SWAP"), py_int(117));
+        let _ = opmap.set(py_str("TO_BOOL"), py_int(39));
+        let _ = opmap.set(py_str("UNARY_INVERT"), py_int(40));
+        let _ = opmap.set(py_str("UNARY_NEGATIVE"), py_int(41));
+        let _ = opmap.set(py_str("UNARY_NOT"), py_int(42));
+        let _ = opmap.set(py_str("UNPACK_EX"), py_int(118));
+        let _ = opmap.set(py_str("UNPACK_SEQUENCE"), py_int(119));
+        let _ = opmap.set(py_str("WITH_EXCEPT_START"), py_int(43));
+        let _ = opmap.set(py_str("YIELD_VALUE"), py_int(120));
+        d.insert_str("opmap", PyObjectRef::new(PyObject::Dict(Box::new(opmap))));
     }
+    d.insert_str("hasconst", py_list(vec![py_int(82)]));
+    d.insert_str("hasname", py_list(vec![py_int(61), py_int(64), py_int(65), py_int(72), py_int(73), py_int(80), py_int(91), py_int(92), py_int(93), py_int(96), py_int(110), py_int(115), py_int(116), py_int(249)]));
+    d.insert_str("hasjrel", py_list(vec![py_int(68), py_int(70), py_int(75), py_int(76), py_int(77), py_int(100), py_int(101), py_int(102), py_int(103), py_int(106), py_int(237), py_int(248), py_int(257), py_int(258), py_int(259), py_int(260)]));
+    d.insert_str("hasjabs", py_list(vec![]));
+    d.insert_str("haslocal", py_list(vec![py_int(63), py_int(83), py_int(84), py_int(85), py_int(86), py_int(87), py_int(88), py_int(89), py_int(112), py_int(113), py_int(114), py_int(261), py_int(266)]));
+    d.insert_str("hascompare", py_list(vec![py_int(56)]));
+    d.insert_str("hasfree", py_list(vec![py_int(62), py_int(90), py_int(97), py_int(111)]));
+    d.insert_str("hasexc", py_list(vec![py_int(263), py_int(264), py_int(265)]));
+    d.insert_str("hasarg", py_list(vec![py_int(128), py_int(255), py_int(44), py_int(45), py_int(46), py_int(47), py_int(48), py_int(49), py_int(50), py_int(51), py_int(52), py_int(53), py_int(54), py_int(55), py_int(56), py_int(57), py_int(58), py_int(59), py_int(60), py_int(61), py_int(62), py_int(63), py_int(64), py_int(65), py_int(66), py_int(67), py_int(68), py_int(69), py_int(70), py_int(71), py_int(72), py_int(73), py_int(74), py_int(75), py_int(76), py_int(77), py_int(78), py_int(79), py_int(80), py_int(81), py_int(82), py_int(83), py_int(84), py_int(85), py_int(86), py_int(87), py_int(88), py_int(89), py_int(90), py_int(91), py_int(92), py_int(93), py_int(94), py_int(95), py_int(96), py_int(97), py_int(98), py_int(99), py_int(100), py_int(101), py_int(102), py_int(103), py_int(104), py_int(105), py_int(106), py_int(107), py_int(108), py_int(109), py_int(110), py_int(111), py_int(112), py_int(113), py_int(114), py_int(115), py_int(116), py_int(117), py_int(118), py_int(119), py_int(120), py_int(237), py_int(239), py_int(241), py_int(242), py_int(243), py_int(244), py_int(245), py_int(247), py_int(248), py_int(249), py_int(250), py_int(251), py_int(253), py_int(257), py_int(258), py_int(259), py_int(260), py_int(261), py_int(263), py_int(264), py_int(265), py_int(266)]));
+    d.insert_str("hasjump", py_list(vec![py_int(68), py_int(70), py_int(75), py_int(76), py_int(77), py_int(100), py_int(101), py_int(102), py_int(103), py_int(106), py_int(237), py_int(248), py_int(257), py_int(258), py_int(259), py_int(260)]));
 
     d
 }
