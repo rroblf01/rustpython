@@ -31,6 +31,56 @@ use vm::VirtualMachine;
 /// Exit the process after running atexit handlers.
 use object::PyError;
 
+/// Uncaught `raise SystemExit` arrives as a generic `Exception` with typ
+/// "SystemExit" (only `sys.exit()` without arguments produces the native
+/// `PyError::SystemExit` variant), so every top-level error handler must
+/// check both. Returns the exit code, printing non-integer payloads to
+/// stderr (CPython behavior) instead of a traceback.
+/// Exit status from a SystemExit exception object (`args[0]`).
+fn sys_exit_obj_code(o: &object::PyObjectRef) -> Option<i32> {
+    let code = if let PyObject::Exception { args, .. } = &*o.borrow() {
+        args.first().cloned()
+    } else {
+        None
+    };
+    match code {
+        None => Some(0),
+        Some(c) => {
+            if matches!(&*c.borrow(), PyObject::None) {
+                return Some(0);
+            }
+            // Int (incl. bool) payloads become the status; anything else
+            // prints to stderr with status 1.
+            if let Some(i) = c.as_i64() {
+                Some(i as i32)
+            } else {
+                eprintln!("{}", c.str());
+                Some(1)
+            }
+        }
+    }
+}
+
+fn system_exit_code(e: &PyError) -> Option<i32> {
+    match e {
+        PyError::SystemExit(code) => Some(*code),
+        PyError::Exception(t, o) if t == "SystemExit" => sys_exit_obj_code(o),
+        // Bare `raise` re-raises carry the original exception as object.
+        PyError::Exception(t, o) if t == "re-raise" => {
+            let inner_is_sys_exit = matches!(
+                &*o.borrow(),
+                PyObject::Exception { typ, .. } if typ == "SystemExit"
+            );
+            if inner_is_sys_exit {
+                sys_exit_obj_code(o)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 fn print_traceback(vm: &VirtualMachine, e: &PyError, fallback_file: &str) {
     eprintln!("Traceback (most recent call last):");
     if vm.last_traceback.is_empty() {
@@ -596,9 +646,9 @@ fn real_main() {
                         crate::modules::run_atexit_handlers(&mut vm);
                     }
                     Err(e) => {
-                        if let PyError::SystemExit(exit_code) = &e {
+                        if let Some(exit_code) = system_exit_code(&e) {
                             crate::modules::run_atexit_handlers(&mut vm);
-                            std::process::exit(*exit_code);
+                            std::process::exit(exit_code);
                         }
                         print_traceback(&vm, &e, "<string>");
                         crate::modules::run_atexit_handlers(&mut vm);
@@ -669,9 +719,9 @@ fn real_main() {
                         crate::modules::run_atexit_handlers(&mut vm);
                     }
                     Err(e) => {
-                        if let PyError::SystemExit(exit_code) = &e {
+                        if let Some(exit_code) = system_exit_code(&e) {
                             crate::modules::run_atexit_handlers(&mut vm);
-                            std::process::exit(*exit_code);
+                            std::process::exit(exit_code);
                         }
                         print_traceback(&vm, &e, "<module>");
                         crate::modules::run_atexit_handlers(&mut vm);
@@ -751,9 +801,9 @@ fn real_main() {
                         crate::modules::run_atexit_handlers(&mut vm);
                     }
                     Err(e) => {
-                        if let PyError::SystemExit(exit_code) = &e {
+                        if let Some(exit_code) = system_exit_code(&e) {
                             crate::modules::run_atexit_handlers(&mut vm);
-                            std::process::exit(*exit_code);
+                            std::process::exit(exit_code);
                         }
                         // Use sys.excepthook for proper formatting (SyntaxError caret, etc.)
                         print_py_error(&e, filename);
