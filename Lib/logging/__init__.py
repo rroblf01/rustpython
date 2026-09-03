@@ -140,6 +140,53 @@ class Logger:
             self._log(CRITICAL, msg, args, **kwargs)
 
 
+class LoggerAdapter:
+    """Prefix/extra-data adapter wrapping a Logger (CPython API subset)."""
+
+    def __init__(self, logger, extra=None):
+        self.logger = logger
+        self.extra = extra
+
+    def process(self, msg, kwargs):
+        return msg, kwargs
+
+    def setLevel(self, level):
+        self.logger.setLevel(level)
+
+    def debug(self, msg, *args, **kwargs):
+        self.log(DEBUG, msg, *args, **kwargs)
+
+    def info(self, msg, *args, **kwargs):
+        self.log(INFO, msg, *args, **kwargs)
+
+    def warning(self, msg, *args, **kwargs):
+        self.log(WARNING, msg, *args, **kwargs)
+
+    def error(self, msg, *args, **kwargs):
+        self.log(ERROR, msg, *args, **kwargs)
+
+    def exception(self, msg, *args, exc_info=True, **kwargs):
+        self.error(msg, *args, exc_info=exc_info, **kwargs)
+
+    def critical(self, msg, *args, **kwargs):
+        self.log(CRITICAL, msg, *args, **kwargs)
+
+    def log(self, level, msg, *args, **kwargs):
+        if self.logger.isEnabledFor(level):
+            msg, kwargs = self.process(msg, kwargs)
+            self.logger._log(level, msg, args, **kwargs)
+
+    def isEnabledFor(self, level):
+        return self.logger.isEnabledFor(level)
+
+    def getEffectiveLevel(self):
+        return self.logger.level
+
+    @property
+    def name(self):
+        return self.logger.name
+
+
 def getLogger(name=None):
     global _root, manager
     if _root is None:

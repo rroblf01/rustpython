@@ -67,6 +67,26 @@ class HTTPHandler(Handler):
         pass
 
 
+class BufferingHandler(Handler):
+    """Buffer log records; flush when capacity reached (CPython API)."""
+
+    def __init__(self, capacity):
+        super().__init__()
+        self.capacity = capacity
+        self.buffer = []
+
+    def shouldFlush(self, record):
+        return len(self.buffer) >= self.capacity
+
+    def emit(self, record):
+        self.buffer.append(record)
+        if self.shouldFlush(record):
+            self.flush()
+
+    def flush(self):
+        self.buffer.clear()
+
+
 class MemoryHandler(Handler):
     def __init__(self, capacity, flushLevel=0, target=None):
         super().__init__()
