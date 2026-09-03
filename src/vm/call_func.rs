@@ -44,18 +44,27 @@ impl VirtualMachine {
                         let compiled_fn = self.jit.borrow_mut().compile(code);
                         match compiled_fn {
                             Some(compiled_fn) => {
-                                let precomputed = crate::jit::JitCompiler::precompute_for_jit(
-                                    code,
-                                    func_globals,
-                                    &self.builtins,
-                                );
                                 jit_ptr.set(compiled_fn as usize);
-                                *jit_consts.borrow_mut() = precomputed;
                             }
                             None => {
                                 jit_ptr.set(SENTINEL_FAILED);
                             }
                         }
+                    }
+                    // Refresh global VALUES on every call: the compiled
+                    // code is cached, but `precompute_for_jit` snapshots
+                    // current bindings — caching it once (first call) froze
+                    // stale values, so rebinding a global between calls
+                    // (configuration, monkeypatching, ...) silently kept
+                    // returning first-call results. Per-call refresh is one
+                    // dict scan (names count), negligible vs JIT savings.
+                    if jit_ptr.get() != 0 && jit_ptr.get() != SENTINEL_FAILED {
+                        let precomputed = crate::jit::JitCompiler::precompute_for_jit(
+                            code,
+                            func_globals,
+                            &self.builtins,
+                        );
+                        *jit_consts.borrow_mut() = precomputed;
                     }
                     let jp = jit_ptr.get();
                     if jp != 0 && jp != SENTINEL_FAILED {
