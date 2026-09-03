@@ -43,6 +43,62 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             Err(PyError::runtime_error("closed access on non-file"))
                         }
                     }
+                    // `sys.stdin.encoding/errors` (and stdout/stderr) —
+                    // needed by locale/coercion subprocess checks
+                    // (test_c_locale_coercion) which print them. Honors
+                    // PYTHONIOENCODING ("enc[:errors]"); otherwise
+                    // CPython's C.UTF-8 stream defaults.
+                    "encoding" => {
+                        if matches!(o, PyObject::File { .. }) {
+                            if let Ok(ioenc) = std::env::var("PYTHONIOENCODING") {
+                                if !ioenc.is_empty() {
+                                    let enc = ioenc.split(':').next().unwrap_or("utf-8");
+                                    if !enc.is_empty() {
+                                        return Ok(py_str(&enc.to_lowercase()));
+                                    }
+                                }
+                            }
+                            Ok(py_str("utf-8"))
+                        } else {
+                            Err(PyError::runtime_error("encoding access on non-file"))
+                        }
+                    }
+                    "errors" => {
+                        if let PyObject::File { name: fname, .. } = o {
+                            // Explicit non-empty PYTHONIOENCODING: with an
+                            // :errors part it wins everywhere; without one,
+                            // stderr keeps backslashreplace (CPython always
+                            // protects stderr) while others go strict; empty
+                            // counts as unset.
+                            if let Ok(ioenc) = std::env::var("PYTHONIOENCODING") {
+                                if !ioenc.is_empty() {
+                                    let mut parts = ioenc.splitn(2, ':');
+                                    let _enc = parts.next();
+                                    if let Some(err) = parts.next() {
+                                        if !err.is_empty() {
+                                            return Ok(py_str(err));
+                                        }
+                                    }
+                                    if fname == "<stderr>" {
+                                        return Ok(py_str("backslashreplace"));
+                                    }
+                                    return Ok(py_str("strict"));
+                                }
+                            }
+                            // Match CPython's C.UTF-8 stream defaults
+                            // (test_c_locale_coercion checks these exactly).
+                            let e = if fname == "<stderr>" {
+                                "backslashreplace"
+                            } else if fname == "<stdin>" || fname == "<stdout>" {
+                                "surrogateescape"
+                            } else {
+                                "strict"
+                            };
+                            Ok(py_str(e))
+                        } else {
+                            Err(PyError::runtime_error("errors access on non-file"))
+                        }
+                    }
                     "fileno" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "fileno".to_string(),
                         func: |args| {
