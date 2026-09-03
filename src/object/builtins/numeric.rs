@@ -286,7 +286,15 @@ pub fn builtin_abs(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match &*obj {
         PyObject::Int(i) => Ok(py_int(i.clone().abs())),
         PyObject::Float(f) => Ok(py_float(f.abs())),
-        PyObject::Complex(re, im) => Ok(py_float(re.hypot(*im))),
+        PyObject::Complex(re, im) => {
+            let r = re.hypot(*im);
+            // CPython raises OverflowError when complex abs overflows
+            // (test_cmath::test_abs_overflows); hypot alone yields inf.
+            if r.is_infinite() && re.is_finite() && im.is_finite() {
+                return Err(PyError::overflow_error("absolute value too large"));
+            }
+            Ok(py_float(r))
+        }
         PyObject::Bool(b) => Ok(py_int(if *b { 1 } else { 0 })),
         PyObject::Instance { typ, .. } => match lookup_dunder_via_mro(typ, "__abs__") {
             Some(f) => {
