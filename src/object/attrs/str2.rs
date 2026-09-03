@@ -483,12 +483,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             if w <= s.len() {
                                 Ok(py_str(&s))
                             } else {
-                                // Real CPython gives the LARGER half to the
-                                // LEFT when the padding is odd
-                                // ('ab'.center(5) == '  ab ', not ' ab  ').
+                                // CPython gives the LARGER half to the RIGHT
+                                // when padding is odd ('Mon'.center(8) ==
+                                // '  Mon   '): left = pad//2.
                                 let pad = w - s.len();
-                                let right = pad / 2;
-                                let left = pad - right;
+                                let left = pad / 2;
+                                let right = pad - left;
                                 let fill_s = fill.to_string();
                                 Ok(py_str(&(fill_s.repeat(left) + &s + &fill_s.repeat(right))))
                             }

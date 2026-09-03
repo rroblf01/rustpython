@@ -719,9 +719,25 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // `BuiltinFunction`, not a `Type`) never appears in MyError's own
             // `mro`, so the walk above can't see this. Same gap/fix as
             // isinstance()'s Instance/BuiltinFunction arm just above.
+            // Check EVERY MRO entry's name (not just the first exception
+            // base): multiple inheritance like
+            // `class IllegalMonthError(ValueError, IndexError)` must match
+            // EITHER branch (real trigger: test_calendar).
             if matches!(&*base, PyObject::BuiltinFunction { .. }) {
-                if let Some(base_exc_name) = find_exception_base_name(&args[0]) {
-                    if crate::vm::is_exception_subclass(&base_exc_name, &base_name) {
+                let mut names: Vec<String> = vec![];
+                if let PyObject::Type { name: tn, .. } = &*args[0].borrow() {
+                    names.push(tn.clone());
+                }
+                for c in cls_mro {
+                    let cn = match &*c.borrow() {
+                        PyObject::Type { name, .. } => name.clone(),
+                        PyObject::BuiltinFunction { name, .. } => name.clone(),
+                        _ => continue,
+                    };
+                    names.push(cn);
+                }
+                for n in &names {
+                    if crate::vm::is_exception_subclass(n, &base_name) {
                         return Ok(py_bool(true));
                     }
                 }

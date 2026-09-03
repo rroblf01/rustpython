@@ -3,13 +3,13 @@ unique/nonmember), loaded as Python source via
 VirtualMachine::install_source_defined_stdlib — see that function's doc
 comment for why. Deliberately scoped to what's needed for real-world use
 (including Django's `Choices`/`IntegerChoices`/`TextChoices`, which build a
-custom metaclass on top of `EnumType`): no Flag/IntFlag, no functional API
-(`Enum('Name', ['A', 'B'])`), no `__prepare__`-based duplicate-name
+custom metaclass on top of `EnumType`): no Flag/IntFlag, no `__prepare__`-based duplicate-name
 detection (this interpreter's class namespace is already delivered here in
 definition order — see Frame::name_order / PyDict::order — which is the
 part CPython's `_EnumDict` needs `__prepare__` for; strict duplicate
 rejection is not).
 """
+import sys
 
 
 class auto:
@@ -581,3 +581,33 @@ def _test_simple_enum(checked_enum, simple_enum):
     except AttributeError as e:
         raise TypeError(str(e))
     return None
+
+
+def _global_enum_repr(self):
+    module = self.__class__.__module__.split('.')[-1]
+    return '%s.%s' % (module, self._name_)
+
+
+def _global_enum_str(self):
+    module = self.__class__.__module__.split('.')[-1]
+    return '%s.%s' % (module, self._name_)
+
+
+def global_enum(cls, update_str=False):
+    """Decorator: module-qualified repr + export members to module globals.
+
+    No Flag/ReprEnum here, so always install both (CPython skips __str__
+    for ReprEnum unless update_str).
+    """
+    cls.__repr__ = _global_enum_repr
+    cls.__str__ = _global_enum_str
+    # NB: must use setattr (not __dict__.update): module __dict__ writes
+    # don't sync to frame globals (LOAD_GLOBAL), so exported members
+    # would be invisible to module code (real trigger: calendar.MONDAY).
+    try:
+        mod = sys.modules[cls.__module__]
+        for k, v in cls.__members__.items():
+            setattr(mod, k, v)
+    except Exception:
+        pass
+    return cls
