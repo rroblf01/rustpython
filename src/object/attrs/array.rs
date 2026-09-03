@@ -188,6 +188,98 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "count" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "count".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("count() takes exactly one argument")); }
+                            if let PyObject::Array(arr) = &*args[0].borrow() {
+                                let is_float = array_typecode_is_float(arr.typecode);
+                                let target = if is_float { args[1].as_f64().unwrap_or(0.0) } else { args[1].as_i64().unwrap_or(0) as f64 };
+                                let c = arr.data.iter().filter(|v| if is_float { (**v - target).abs() < 1e-9 } else { **v == target }).count();
+                                Ok(py_int(c as i64))
+                            } else { Err(PyError::runtime_error("count on non-array")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "clear" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "clear".to_string(),
+                        func: |args| {
+                            if args.len() != 1 { return Err(PyError::type_error(format!("clear() takes no arguments ({} given)", args.len()-1))); }
+                            if let PyObject::Array(arr) = &mut *args[0].borrow_mut() { arr.data.clear(); }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "byteswap" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "byteswap".to_string(),
+                        func: |args| {
+                            if let PyObject::Array(arr) = &mut *args[0].borrow_mut() {
+                                let isz = mv_itemsize(&arr.typecode.to_string());
+                                if isz > 1 {
+                                    for v in &mut arr.data {
+                                        let n = *v as i64;
+                                        let swapped = match isz {
+                                            2 => ((n as i16).swap_bytes() as i64) as f64,
+                                            4 => ((n as i32).swap_bytes() as i64) as f64,
+                                            8 => (n.swap_bytes() as f64),
+                                            _ => n as f64,
+                                        };
+                                        *v = swapped;
+                                    }
+                                }
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__setitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__setitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 3 { return Err(PyError::type_error("__setitem__ takes 2 arguments")); }
+                            let idx = args[1].as_i64().unwrap_or(0);
+                            let is_float = array_typecode_is_float(match &*args[0].borrow(){ PyObject::Array(a)=>a.typecode, _=>'B'});
+                            let v = if is_float { args[2].as_f64().unwrap_or(0.0) } else { args[2].as_i64().unwrap_or(0) as f64 };
+                            if let PyObject::Array(arr) = &mut *args[0].borrow_mut() {
+                                let len = arr.data.len() as i64;
+                                let i = if idx < 0 { len + idx } else { idx };
+                                if i <0 || i>=len { return Err(PyError::index_error("array assignment index out of range")); }
+                                arr.data[i as usize]=v;
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "__delitem__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__delitem__".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("__delitem__ takes 1 argument")); }
+                            let idx = args[1].as_i64().unwrap_or(0);
+                            if let PyObject::Array(arr) = &mut *args[0].borrow_mut() {
+                                let len = arr.data.len() as i64;
+                                let i = if idx < 0 { len + idx } else { idx };
+                                if i <0 || i>=len { return Err(PyError::index_error("array assignment index out of range")); }
+                                arr.data.remove(i as usize);
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "index" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "index".to_string(),
+                        func: |args| {
+                            if args.len() < 2 { return Err(PyError::type_error("index() takes at least 1 argument")); }
+                            if let PyObject::Array(arr) = &*args[0].borrow() {
+                                let is_float = array_typecode_is_float(arr.typecode);
+                                let target = if is_float { args[1].as_f64().unwrap_or(0.0) } else { args[1].as_i64().unwrap_or(0) as f64 };
+                                for (i, v) in arr.data.iter().enumerate() {
+                                    let eq = if is_float { (*v - target).abs() < 1e-9 } else { *v == target };
+                                    if eq { return Ok(py_int(i as i64)); }
+                                }
+                                Err(PyError::value_error("array.index(x): x not in array"))
+                            } else { Err(PyError::runtime_error("index on non-array")) }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     _ => {
                         let _ = is_float;
                         Err(PyError::attribute_error(format!(
