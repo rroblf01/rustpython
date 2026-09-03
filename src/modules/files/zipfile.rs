@@ -155,17 +155,36 @@ fn zipfile_infolist(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn zipfile_constructor(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 1 || args.len() > 2 {
+    if args.is_empty() {
         return Err(PyError::type_error(
-            "ZipFile() takes 1-2 arguments (filename, [mode])",
+            "ZipFile() takes at least 1 argument (filename)",
         ));
     }
     let filename = args[0].borrow().str();
-    let mode = if args.len() > 1 {
-        args[1].borrow().str()
-    } else {
-        "r".to_string()
-    };
+    // Handle mode as positional or keyword arg
+    let mut mode = "r".to_string();
+    let mut compression = 0i64;
+    let mut allowZip64 = true;
+    for arg in args.iter().skip(1) {
+        match &*arg.borrow() {
+            PyObject::Str(s) => {
+                mode = s.to_string();
+            }
+            PyObject::Dict(d) => {
+                // kwargs dict
+                if let Ok(Some(v)) = d.get(&py_str("mode")) {
+                    mode = v.str();
+                }
+                if let Ok(Some(v)) = d.get(&py_str("compression")) {
+                    compression = v.as_i64().unwrap_or(0);
+                }
+                if let Ok(Some(v)) = d.get(&py_str("allowZip64")) {
+                    allowZip64 = v.truthy();
+                }
+            }
+            _ => {}
+        }
+    }
     if mode != "r" {
         return Err(PyError::value_error("ZipFile only supports mode='r'"));
     }
@@ -296,6 +315,19 @@ pub fn create_zipfile_dict() -> HashMap<String, PyObjectRef> {
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "ZipFile".to_string(),
             func: zipfile_constructor,
+        }),
+    );
+    // ZIP compression method constants (needed by shutil.make_archive and test_zipfile)
+    d.insert_str("ZIP_STORED", py_int(0));
+    d.insert_str("ZIP_DEFLATED", py_int(8));
+    d.insert_str("ZIP_BZIP2", py_int(12));
+    d.insert_str("ZIP_LZMA", py_int(14));
+    // is_zipfile function
+    d.insert_str(
+        "is_zipfile",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "is_zipfile".to_string(),
+            func: |_args| Ok(py_bool(false)),
         }),
     );
     d

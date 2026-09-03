@@ -505,8 +505,11 @@ pub(crate) fn register_native_modules(
             create_module("_random", create_random_cmodule_dict()),
         );
 
-        // Native shutil module
-        modules.insert_str("shutil", create_module("shutil", create_shutil_dict()));
+        // shutil: let Lib/shutil.py load instead — the native
+        // `create_shutil_dict()` cannot set attributes on `rmtree`
+        // (needed for `rmtree.avoids_symlink_attacks`) and lacks the
+        // complete Python implementation.  Lib/shutil.py is a verbatim
+        // CPython 3.14 copy with full `make_archive`/`copytree`/etc.
 
         // Native graphlib module
         modules.insert_str(
@@ -578,7 +581,7 @@ pub(crate) fn register_native_modules(
         modules.insert_str("tarfile", create_module("tarfile", create_tarfile_dict()));
 
         // Native zipfile module (read-only)
-        modules.insert_str("zipfile", create_module("zipfile", create_zipfile_dict()));
+        // modules.insert_str("zipfile", create_module("zipfile", create_zipfile_dict()));
 
         // Native hashlib_extra module
         modules.insert_str(

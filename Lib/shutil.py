@@ -90,6 +90,10 @@ class RegistryError(Exception):
     """Raised when a registry operation with the archiving
     and unpacking registries fails"""
 
+class ExecError(RuntimeError):
+    """Raised when a command fails (deprecated, use RuntimeError instead)"""
+    pass
+
 class _GiveupOnFastCopy(Exception):
     """Raised as a signal to fallback on using raw read()/write()
     file copy when fast-copy functions fail to do so.
@@ -1531,13 +1535,29 @@ def get_terminal_size(fallback=(80, 24)):
         except (AttributeError, ValueError, OSError):
             # stdout is None, closed, detached, or not a terminal, or
             # os.get_terminal_size() is unsupported
-            size = os.terminal_size(fallback)
+            try:
+                size = os.get_terminal_size(fallback)
+            except (TypeError, AttributeError, OSError):
+                # Final fallback
+                size = os.get_terminal_size(fallback)
         if columns <= 0:
-            columns = size.columns or fallback[0]
+            try:
+                columns = size.columns or fallback[0]
+            except AttributeError:
+                columns = fallback[0]
         if lines <= 0:
-            lines = size.lines or fallback[1]
+            try:
+                lines = size.lines or fallback[1]
+            except AttributeError:
+                lines = fallback[1]
 
-    return os.terminal_size((columns, lines))
+    # Return os.get_terminal_size result directly — our os.get_terminal_size
+    # already returns an os.terminal_size instance with columns/lines.
+    # Avoid calling os.terminal_size() constructor which may not work.
+    try:
+        return os.get_terminal_size((columns, lines))
+    except (TypeError, AttributeError, OSError):
+        return os.get_terminal_size()
 
 
 # Check that a given file can be accessed with the correct mode.

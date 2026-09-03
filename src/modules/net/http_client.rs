@@ -14,6 +14,12 @@ pub fn create_http_dict() -> HashMap<String, PyObjectRef> {
     status_dict.insert_str("NOT_FOUND", py_str("404 NOT_FOUND"));
     status_dict.insert_str("SERVER_ERROR", py_str("500 Internal Server Error"));
 
+    // __members__ property needed by http.client, xmlrpc, robotparser, etc.
+    let members_dict = PyObjectRef::new(PyObject::Dict(Box::new(
+        PyDict::new()
+    )));
+    status_dict.insert("__members__".to_string(), members_dict);
+
     let http_status_type = PyObjectRef::new(PyObject::Type {
         name: "HTTPStatus".to_string(),
         dict: Box::new(str_map_to_typedict(status_dict)),
@@ -621,11 +627,19 @@ pub fn create_smtplib_dict() -> HashMap<String, PyObjectRef> {
 
     let smtp_type = PyObjectRef::new(PyObject::Type {
         name: "SMTP".to_string(),
-        dict: Box::new(str_map_to_typedict(smtp_dict)),
+        dict: Box::new(str_map_to_typedict(smtp_dict.clone())),
         bases: vec![],
         mro: vec![],
     });
     d.insert_str("SMTP", smtp_type);
+    // LMTP — same interface, local delivery subclass stub needed by test_smtplib
+    let lmtp_type = PyObjectRef::new(PyObject::Type {
+        name: "LMTP".to_string(),
+        dict: Box::new(str_map_to_typedict(smtp_dict)),
+        bases: vec![],
+        mro: vec![],
+    });
+    d.insert_str("LMTP", lmtp_type);
 
     d
 }

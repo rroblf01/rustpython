@@ -238,6 +238,26 @@ pub fn create_importlib_util_dict() -> HashMap<String, PyObjectRef> {
         let stem = base.split(".cpython-").next().unwrap_or(base);
         Ok(py_str(&format!("{}{}.py", dir, stem)))
     });
+    util_func!("spec_from_file_location", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("spec_from_file_location() missing required argument 'name'"));
+        }
+        let name = args[0].str();
+        let location = args.get(1).map(|a| a.str()).unwrap_or_default();
+        let mut spec_dict = HashMap::new();
+        spec_dict.insert("name".to_string(), py_str(&name));
+        spec_dict.insert("origin".to_string(), py_str(&location));
+        spec_dict.insert("loader".to_string(), py_none());
+        spec_dict.insert("parent".to_string(), py_str(&name.rsplit('.').skip(1).collect::<Vec<_>>().join(".")));
+        Ok(create_module("ModuleSpec", spec_dict))
+    });
+    util_func!("module_from_spec", |args| {
+        if args.is_empty() { return Err(PyError::type_error("module_from_spec() missing required argument 'spec'")); }
+        let spec = &args[0];
+        let name = spec.borrow().get_attribute("name").map(|v| v.str()).unwrap_or_default();
+        Ok(create_module(&name, HashMap::new()))
+    });
+    d.insert_str("MAGIC_NUMBER", PyObjectRef::new(PyObject::Bytes(vec![0x6f,0x0d,0x0d,0x0a])));
 
     d
 }

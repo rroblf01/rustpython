@@ -46,5 +46,8 @@ def get_running_loop():
 def set_event_loop(loop):
     pass
 
+def _set_event_loop_policy(policy):
+    pass
+
 def new_event_loop():
     return BaseEventLoop()
