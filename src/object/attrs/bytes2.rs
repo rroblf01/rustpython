@@ -36,9 +36,13 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     .rposition(|c| !is_strip(c))
                                     .map(|i| i + 1)
                                     .unwrap_or(start);
-                                Ok(PyObjectRef::imm(PyObject::Bytes(
-                                    b[start..end.max(start)].to_vec(),
-                                )))
+                                if start == 0 && end == b.len() {
+                                    Ok(args[0].clone())
+                                } else {
+                                    Ok(PyObjectRef::imm(PyObject::Bytes(
+                                        b[start..end.max(start)].to_vec(),
+                                    )))
+                                }
                             } else {
                                 Err(PyError::runtime_error("strip on non-bytes"))
                             }
@@ -61,7 +65,14 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     None => is_py_bytes_ws(*c),
                                 };
                                 let start = b.iter().position(|c| !is_strip(c)).unwrap_or(b.len());
-                                Ok(PyObjectRef::imm(PyObject::Bytes(b[start..].to_vec())))
+                                // CPython returns the SAME object when
+                                // nothing is stripped (identity optimization
+                                // relied on by test_bigmem).
+                                if start == 0 {
+                                    Ok(args[0].clone())
+                                } else {
+                                    Ok(PyObjectRef::imm(PyObject::Bytes(b[start..].to_vec())))
+                                }
                             } else {
                                 Err(PyError::runtime_error("lstrip on non-bytes"))
                             }
@@ -88,7 +99,11 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     .rposition(|c| !is_strip(c))
                                     .map(|i| i + 1)
                                     .unwrap_or(0);
-                                Ok(PyObjectRef::imm(PyObject::Bytes(b[..end].to_vec())))
+                                if end == b.len() {
+                                    Ok(args[0].clone())
+                                } else {
+                                    Ok(PyObjectRef::imm(PyObject::Bytes(b[..end].to_vec())))
+                                }
                             } else {
                                 Err(PyError::runtime_error("rstrip on non-bytes"))
                             }
