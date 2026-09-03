@@ -26,9 +26,10 @@ pub(crate) fn parse_csv_lines(lines: Vec<String>, dialect: &CsvDialect) -> PyRes
             if !in_quotes && cur_field.is_empty() && cur_row.is_empty() && dialect.skipinitialspace {
                 while chars.peek() == Some(&' ') { chars.next(); }
                 if chars.peek().is_none() && !in_quotes {
-                    // line is all spaces or empty and skipinitialspace
-                    if delimiter == ' ' {
-                        rows.push(vec![py_str("")]);
+                    // Truly empty line -> empty row; all-spaces line ->
+                    // single empty field (test_read_space_delimiter).
+                    if line.is_empty() {
+                        rows.push(vec![]);
                     } else {
                         rows.push(vec![py_str("")]);
                     }
@@ -525,8 +526,11 @@ pub(crate) fn csv_has_header(sample: &str) -> PyResult<bool> {
             for col in 0..columns {
                 if !column_types.contains_key(&col) { continue; }
                 let val_str = row[col].str();
-                // try to determine type: attempt complex/float
-                let this_type = if val_str.parse::<f64>().is_ok() || val_str.contains('j') || val_str.contains('J') {
+                // try to determine type: attempt complex/float (trimmed —
+                // test samples indent continuation lines; CPython's
+                // float()/complex() strip whitespace).
+                let trimmed = val_str.trim();
+                let this_type = if trimmed.parse::<f64>().is_ok() || trimmed.contains('j') || trimmed.contains('J') {
                     "complex".to_string()
                 } else {
                     format!("len:{}", val_str.len())
@@ -562,7 +566,8 @@ pub(crate) fn csv_has_header(sample: &str) -> PyResult<bool> {
                 } else {
                     // complex type
                     let hdr = header[col].str();
-                    if hdr.parse::<f64>().is_ok() || hdr.contains('j') || hdr.contains('J') {
+                    let hdr_t = hdr.trim();
+                    if hdr_t.parse::<f64>().is_ok() || hdr_t.contains('j') || hdr_t.contains('J') {
                         has_header -= 1;
                     } else {
                         has_header += 1;

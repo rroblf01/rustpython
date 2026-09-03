@@ -481,6 +481,10 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                 if a.len()<2 { return Err(PyError::type_error("writerow() missing argument")); }
                 let self_obj = &a[0];
                 let row_arg = &a[1];
+                // writerow(None) must raise csv.Error (not TypeError).
+                if matches!(&*row_arg.borrow(), PyObject::None) {
+                    return Err(PyError::Exception("Error".to_string(), PyObjectRef::new(PyObject::Exception{ typ: "Error".to_string(), args: vec![py_str("iterable expected, not NoneType")], cause: None, suppress_context: false, context: None, traceback: None, extra: None })));
+                }
                 let fobj = self_obj.borrow().get_attribute("_fileobj").map_err(|_| PyError::runtime_error("no fileobj"))?;
                 let dialect_obj = self_obj.borrow().get_attribute("_dialect").map_err(|_| PyError::runtime_error("no dialect"))?;
                 let dialect = {
