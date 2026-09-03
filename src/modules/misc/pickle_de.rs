@@ -923,11 +923,32 @@ pub fn pickle_deserialize(
             }))
         }
         b'c' => {
-            // GLOBAL: module\nname\n
+            // GLOBAL: module\nname\n (bounds-checked: truncated data must
+            // raise, not panic — test_pickle feeds short buffers).
+            let unpickling_error = |msg: &str| {
+                PyError::Exception(
+                    "UnpicklingError".to_string(),
+                    PyObjectRef::new(PyObject::Exception {
+                        typ: "UnpicklingError".to_string(),
+                        args: vec![py_str(msg)],
+                        cause: None,
+                        suppress_context: false,
+                        context: None,
+                        traceback: None,
+                        extra: None,
+                    }),
+                )
+            };
             let module = {
                 let start = *pos;
+                if start >= data.len() {
+                    return Err(unpickling_error("truncated GLOBAL opcode"));
+                }
                 while *pos < data.len() && data[*pos] != b'\n' {
                     *pos += 1;
+                }
+                if *pos >= data.len() {
+                    return Err(unpickling_error("truncated GLOBAL opcode"));
                 }
                 let s = std::str::from_utf8(&data[start..*pos])
                     .map_err(|_| PyError::type_error("invalid utf-8 in pickle GLOBAL"))?
@@ -937,8 +958,14 @@ pub fn pickle_deserialize(
             };
             let name = {
                 let start = *pos;
+                if start >= data.len() {
+                    return Err(unpickling_error("truncated GLOBAL opcode"));
+                }
                 while *pos < data.len() && data[*pos] != b'\n' {
                     *pos += 1;
+                }
+                if *pos >= data.len() {
+                    return Err(unpickling_error("truncated GLOBAL opcode"));
                 }
                 let s = std::str::from_utf8(&data[start..*pos])
                     .map_err(|_| PyError::type_error("invalid utf-8 in pickle GLOBAL"))?
