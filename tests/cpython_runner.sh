@@ -41,6 +41,16 @@ if [ $exit_code -eq 0 ]; then
 elif [ $exit_code -eq 124 ]; then
     echo "TIMEOUT|$name|${elapsed}ms"
 else
+    # If test raised unittest.SkipTest (platform-specific module not
+    # available, e.g. winreg on Linux, _zstd not built, etc.) it
+    # correctly skipped — don't count as FAIL. CPython's regrtest
+    # counts these as SKIPPED, not FAILED.
+    if grep -q "SkipTest" "$logfile"; then
+        echo "SKIP|$name|${elapsed}ms"
+        # Normalize exit code so Makefile's `set -e` / failure check
+        # doesn't treat a correct skip as a sweep failure.
+        exit 0
+    fi
     # Check the first line of meaningful output (skip JIT warnings)
     first_error=$(grep -v "^JIT:" "$logfile" | head -1)
     # If the first meaningful line is a Parse error from the interpreter,

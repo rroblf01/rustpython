@@ -204,16 +204,18 @@ test-cpython: build-test
 	echo "=== RESULTS ==="; \
 	latest=$$(tail -qn1 /tmp/rustpython-test-logs/cpython/summary/*.txt 2>/dev/null); \
 	pass_count=$$(echo "$$latest" | grep -c "^PASS|"); \
+	skip_count=$$(echo "$$latest" | grep -c "^SKIP|"); \
 	fail_count=$$(echo "$$latest" | grep -c "^FAIL|"); \
 	timeout_count=$$(echo "$$latest" | grep -c "^TIMEOUT|"); \
 	parse_count=$$(echo "$$latest" | grep -c "^PARSE_ERROR|"); \
 	echo "  PASS: $$pass_count"; \
+	echo "  SKIP: $$skip_count"; \
 	echo "  FAIL: $$fail_count"; \
 	echo "  TIMEOUT: $$timeout_count"; \
 	echo "  PARSE_ERROR: $$parse_count"; \
 	TOTAL=$$(ls /tmp/rustpython-test-logs/cpython/summary/*.txt 2>/dev/null | wc -l); \
 	echo "  TOTAL: $$TOTAL"; \
-	[ $$fail_count -eq 0 ] || echo -e "$(YELLOW)  ⚠  $$fail_count failures + $$timeout_count timeouts + $$parse_count parse errors$(RESET)"
+	[ $$fail_count -eq 0 ] || echo -e "$(YELLOW)  ⚠  $$fail_count failures + $$timeout_count timeouts + $$parse_count parse errors (SKIP=$$skip_count)$(RESET)"
 
 test-cpython-quick: CPYTHON_TIMEOUT := 30
 test-cpython-quick: test-cpython
