@@ -920,6 +920,40 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             }
             Ok(data)
         }));
+        td.insert("readlines".into(), bf("readlines", |args: &[PyObjectRef]| {
+            // Needed by linecache (traceback source lines) via
+            // tokenize.open(); was missing -> AttributeError on every
+            // frame, making traceback extraction ~300x slow. Loop over
+            // readline until EOF.
+            crate::modules::dev::io_ensure_open(args)?;
+            let raw = crate::modules::dev::io_get_raw(args)?;
+            let mut lines = Vec::new();
+            loop {
+                let data = crate::object::with_vm_mut(|vm| {
+                    crate::object::call_method_rebound(
+                        vm,
+                        &raw,
+                        "readline",
+                        vec![py_int(-1)],
+                    )
+                })??;
+                let s = if let PyObject::Bytes(ref b) = &*data.borrow() {
+                    py_str(&String::from_utf8_lossy(&b[..]))
+                } else {
+                    data.clone()
+                };
+                let is_empty = match &*s.borrow() {
+                    PyObject::Str(st) => st.is_empty(),
+                    PyObject::Bytes(b) => b.is_empty(),
+                    _ => false,
+                };
+                if is_empty {
+                    break;
+                }
+                lines.push(s);
+            }
+            Ok(py_list(lines))
+        }));
         td.insert("write".into(), bf("write", |args: &[PyObjectRef]| {
             crate::modules::dev::io_ensure_open(args)?;
             let text = args.get(1).cloned().ok_or_else(|| PyError::type_error("write missing text"))?;
