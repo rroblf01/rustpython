@@ -117,6 +117,8 @@ mod pickle_ser;
 pub use pickle_ser::*;
 mod pickle_de;
 pub use pickle_de::*;
+mod pickle_real_de;
+pub use pickle_real_de::*;
 mod pickle;
 pub use pickle::*;
 mod timeit;

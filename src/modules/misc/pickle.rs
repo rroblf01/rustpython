@@ -305,6 +305,15 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
         if let Some(v) = try_unpickle_rangeiter_compat(&data) {
             return Ok(v);
         }
+        // Real-protocol bytes (CPython or our pure-Python pickle.py): try
+        // the stack-machine parser first; fall back to the legacy custom
+        // format on clean failure.
+        if !data.is_empty() {
+            match crate::modules::misc::unpickle_real(&data) {
+                Ok(v) => return Ok(v),
+                Err(_) => {}
+            }
+        }
         let mut pos = 0;
         let mut memo: Vec<PyObjectRef> = Vec::new();
         let result = pickle_deserialize(&data, &mut pos, &mut memo)?;
