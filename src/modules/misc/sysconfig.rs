@@ -110,6 +110,15 @@ pub fn create_sysconfig_dict() -> HashMap<String, PyObjectRef> {
         let _ = out.set(py_str("user"), py_str("posix_user"));
         Ok(PyObjectRef::new(PyObject::Dict(Box::new(out))))
     });
+    d.insert_str(
+        "_PROJECT_BASE",
+        py_str(
+            &std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()))
+                .unwrap_or_else(|| "/usr/local".to_string()),
+        ),
+    );
     syscfg_func!("_expand_vars", |args| Ok(args.get(0).cloned().unwrap_or_else(|| py_str(""))));
     syscfg_func!("_get_default_scheme", |_| Ok(py_str("posix_local")));
 

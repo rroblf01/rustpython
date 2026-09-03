@@ -304,6 +304,30 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
         }))
     });
 
+    // TLSVersion enum stub (int members; real verifies via _ssl).
+    {
+        let mut tv_dict = HashMap::new();
+        for (name, val) in [
+            ("MINIMUM_SUPPORTED", -2),
+            ("SSLv3", 768),
+            ("TLSv1", 769),
+            ("TLSv1_1", 770),
+            ("TLSv1_2", 771),
+            ("TLSv1_3", 772),
+            ("MAXIMUM_SUPPORTED", -1),
+        ] {
+            tv_dict.insert(name.to_string(), py_int(val));
+        }
+        d.insert_str(
+            "TLSVersion",
+            PyObjectRef::new(PyObject::Type {
+                name: "TLSVersion".to_string(),
+                dict: Box::new(str_map_to_typedict(tv_dict)),
+                bases: vec![],
+                mro: vec![],
+            }),
+        );
+    }
     d.insert_str("__name__", py_str("ssl"));
     d.insert_str(
         "__doc__",

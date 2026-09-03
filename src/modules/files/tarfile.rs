@@ -245,6 +245,7 @@ pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("GNU_FORMAT", py_int(1));
     d.insert_str("PAX_FORMAT", py_int(2));
     d.insert_str("DEFAULT_FORMAT", py_int(2));
+    d.insert_str("NUL", PyObjectRef::imm(PyObject::Bytes(vec![0])));
 
     d
 }
