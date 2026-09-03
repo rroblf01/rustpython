@@ -22,8 +22,30 @@ pub fn call_function(func: &PyObjectRef, args: Vec<PyObjectRef>) -> PyResult<PyO
 }
 
 static RNG_STATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static RNG_SEEDED: std::sync::Once = std::sync::Once::new();
+
+/// Seed the fast RNG once from wall-clock + pid. The previous constant
+/// seed made EVERY process generate the IDENTICAL sequence (uuid4() and
+/// os.urandom-equivalents predictable; tempfile.mkdtemp colliding with
+/// leaked dirs from prior runs -> "could not create unique" and 1-error
+/// FAILs like test_dbm_dumb::test_readonly_files). Not cryptographic,
+/// but unpredictable per process.
+fn ensure_rng_seeded() {
+    RNG_SEEDED.call_once(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9e3779b97f4a7c15);
+        let pid = std::process::id() as u64;
+        let seed = nanos
+            ^ pid.wrapping_mul(0x9e3779b97f4a7c15).rotate_left(17)
+            ^ 0xbf58476d1ce4e5b9;
+        RNG_STATE.store(seed, std::sync::atomic::Ordering::Relaxed);
+    });
+}
 
 pub fn fast_random_u64() -> u64 {
+    ensure_rng_seeded();
     RNG_STATE
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         .wrapping_mul(6364136223846793005)
