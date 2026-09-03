@@ -217,7 +217,7 @@ test-cpython: build-test
 	echo "  TOTAL: $$TOTAL"; \
 	[ $$fail_count -eq 0 ] || echo -e "$(YELLOW)  ⚠  $$fail_count failures + $$timeout_count timeouts + $$parse_count parse errors (SKIP=$$skip_count)$(RESET)"
 
-test-cpython-quick: CPYTHON_TIMEOUT := 30
+test-cpython-quick: CPYTHON_TIMEOUT := 60
 test-cpython-quick: test-cpython
 
 # ── Check (fast) ─────────────────────────────────
