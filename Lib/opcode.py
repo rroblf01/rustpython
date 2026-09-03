@@ -1,16 +1,177 @@
-"""Minimal `opcode` module stub.
+"""CPython 3.14 opcode map for introspection compat.
 
-Real CPython's `opcode.py` describes ITS OWN bytecode format (opcode
-names/numbers, `stack_effect`, specialization metadata) — this interpreter
-has a completely different bytecode format, so a real port doesn't apply.
-This only exists so code that merely IMPORTS `opcode` (rather than asserting
-on specific CPython opcode numbers) doesn't fail outright; introspection
-helpers built on exact CPython opcode identity (`test.support.
-bytecode_helper`) won't produce meaningful results here regardless.
+This interpreter has its own bytecode format and does not execute
+CPython bytecode; these numbers are provided so code that reads
+`opcode.opmap`/`opname` (e.g. test_code module-level constants,
+dis helpers) imports without KeyError. CPython-only tests that
+assert on actual bytecode behavior skip via `support.cpython_only`.
 """
 
 cmp_op = ('<', '<=', '==', '!=', '>', '>=')
-hasarg = []
+opmap = {
+    'ANNOTATIONS_PLACEHOLDER': 256,
+    'BINARY_OP': 44,
+    'BINARY_SLICE': 1,
+    'BUILD_INTERPOLATION': 45,
+    'BUILD_LIST': 46,
+    'BUILD_MAP': 47,
+    'BUILD_SET': 48,
+    'BUILD_SLICE': 49,
+    'BUILD_STRING': 50,
+    'BUILD_TEMPLATE': 2,
+    'BUILD_TUPLE': 51,
+    'CACHE': 0,
+    'CALL': 52,
+    'CALL_FUNCTION_EX': 4,
+    'CALL_INTRINSIC_1': 53,
+    'CALL_INTRINSIC_2': 54,
+    'CALL_KW': 55,
+    'CHECK_EG_MATCH': 5,
+    'CHECK_EXC_MATCH': 6,
+    'CLEANUP_THROW': 7,
+    'COMPARE_OP': 56,
+    'CONTAINS_OP': 57,
+    'CONVERT_VALUE': 58,
+    'COPY': 59,
+    'COPY_FREE_VARS': 60,
+    'DELETE_ATTR': 61,
+    'DELETE_DEREF': 62,
+    'DELETE_FAST': 63,
+    'DELETE_GLOBAL': 64,
+    'DELETE_NAME': 65,
+    'DELETE_SUBSCR': 8,
+    'DICT_MERGE': 66,
+    'DICT_UPDATE': 67,
+    'END_ASYNC_FOR': 68,
+    'END_FOR': 9,
+    'END_SEND': 10,
+    'ENTER_EXECUTOR': 255,
+    'EXIT_INIT_CHECK': 11,
+    'EXTENDED_ARG': 69,
+    'FORMAT_SIMPLE': 12,
+    'FORMAT_WITH_SPEC': 13,
+    'FOR_ITER': 70,
+    'GET_AITER': 14,
+    'GET_ANEXT': 15,
+    'GET_AWAITABLE': 71,
+    'GET_ITER': 16,
+    'GET_LEN': 18,
+    'GET_YIELD_FROM_ITER': 19,
+    'IMPORT_FROM': 72,
+    'IMPORT_NAME': 73,
+    'INSTRUMENTED_CALL': 250,
+    'INSTRUMENTED_CALL_FUNCTION_EX': 252,
+    'INSTRUMENTED_CALL_KW': 251,
+    'INSTRUMENTED_END_ASYNC_FOR': 248,
+    'INSTRUMENTED_END_FOR': 234,
+    'INSTRUMENTED_END_SEND': 236,
+    'INSTRUMENTED_FOR_ITER': 237,
+    'INSTRUMENTED_INSTRUCTION': 238,
+    'INSTRUMENTED_JUMP_BACKWARD': 253,
+    'INSTRUMENTED_JUMP_FORWARD': 239,
+    'INSTRUMENTED_LINE': 254,
+    'INSTRUMENTED_LOAD_SUPER_ATTR': 249,
+    'INSTRUMENTED_NOT_TAKEN': 240,
+    'INSTRUMENTED_POP_ITER': 235,
+    'INSTRUMENTED_POP_JUMP_IF_FALSE': 242,
+    'INSTRUMENTED_POP_JUMP_IF_NONE': 243,
+    'INSTRUMENTED_POP_JUMP_IF_NOT_NONE': 244,
+    'INSTRUMENTED_POP_JUMP_IF_TRUE': 241,
+    'INSTRUMENTED_RESUME': 245,
+    'INSTRUMENTED_RETURN_VALUE': 246,
+    'INSTRUMENTED_YIELD_VALUE': 247,
+    'INTERPRETER_EXIT': 20,
+    'IS_OP': 74,
+    'JUMP': 257,
+    'JUMP_BACKWARD': 75,
+    'JUMP_BACKWARD_NO_INTERRUPT': 76,
+    'JUMP_FORWARD': 77,
+    'JUMP_IF_FALSE': 258,
+    'JUMP_IF_TRUE': 259,
+    'JUMP_NO_INTERRUPT': 260,
+    'LIST_APPEND': 78,
+    'LIST_EXTEND': 79,
+    'LOAD_ATTR': 80,
+    'LOAD_BUILD_CLASS': 21,
+    'LOAD_CLOSURE': 261,
+    'LOAD_COMMON_CONSTANT': 81,
+    'LOAD_CONST': 82,
+    'LOAD_DEREF': 83,
+    'LOAD_FAST': 84,
+    'LOAD_FAST_AND_CLEAR': 85,
+    'LOAD_FAST_BORROW': 86,
+    'LOAD_FAST_BORROW_LOAD_FAST_BORROW': 87,
+    'LOAD_FAST_CHECK': 88,
+    'LOAD_FAST_LOAD_FAST': 89,
+    'LOAD_FROM_DICT_OR_DEREF': 90,
+    'LOAD_FROM_DICT_OR_GLOBALS': 91,
+    'LOAD_GLOBAL': 92,
+    'LOAD_LOCALS': 22,
+    'LOAD_NAME': 93,
+    'LOAD_SMALL_INT': 94,
+    'LOAD_SPECIAL': 95,
+    'LOAD_SUPER_ATTR': 96,
+    'MAKE_CELL': 97,
+    'MAKE_FUNCTION': 23,
+    'MAP_ADD': 98,
+    'MATCH_CLASS': 99,
+    'MATCH_KEYS': 24,
+    'MATCH_MAPPING': 25,
+    'MATCH_SEQUENCE': 26,
+    'NOP': 27,
+    'NOT_TAKEN': 28,
+    'POP_BLOCK': 262,
+    'POP_EXCEPT': 29,
+    'POP_ITER': 30,
+    'POP_JUMP_IF_FALSE': 100,
+    'POP_JUMP_IF_NONE': 101,
+    'POP_JUMP_IF_NOT_NONE': 102,
+    'POP_JUMP_IF_TRUE': 103,
+    'POP_TOP': 31,
+    'PUSH_EXC_INFO': 32,
+    'PUSH_NULL': 33,
+    'RAISE_VARARGS': 104,
+    'RERAISE': 105,
+    'RESERVED': 17,
+    'RESUME': 128,
+    'RETURN_GENERATOR': 34,
+    'RETURN_VALUE': 35,
+    'SEND': 106,
+    'SETUP_ANNOTATIONS': 36,
+    'SETUP_CLEANUP': 263,
+    'SETUP_FINALLY': 264,
+    'SETUP_WITH': 265,
+    'SET_ADD': 107,
+    'SET_FUNCTION_ATTRIBUTE': 108,
+    'SET_UPDATE': 109,
+    'STORE_ATTR': 110,
+    'STORE_DEREF': 111,
+    'STORE_FAST': 112,
+    'STORE_FAST_LOAD_FAST': 113,
+    'STORE_FAST_MAYBE_NULL': 266,
+    'STORE_FAST_STORE_FAST': 114,
+    'STORE_GLOBAL': 115,
+    'STORE_NAME': 116,
+    'STORE_SLICE': 37,
+    'STORE_SUBSCR': 38,
+    'SWAP': 117,
+    'TO_BOOL': 39,
+    'UNARY_INVERT': 40,
+    'UNARY_NEGATIVE': 41,
+    'UNARY_NOT': 42,
+    'UNPACK_EX': 118,
+    'UNPACK_SEQUENCE': 119,
+    'WITH_EXCEPT_START': 43,
+    'YIELD_VALUE': 120,
+}
+_maxop = 266
+opname = ["<%r>" % (op,) for op in range(_maxop + 1)]
+for _name, _num in opmap.items():
+    if _num < len(opname):
+        opname[_num] = _name
+HAVE_ARGUMENT = 90
+EXTENDED_ARG = 69
+hasarg = [op for op in opmap.values() if op >= HAVE_ARGUMENT]
 hasconst = []
 hasname = []
 hasjrel = []
@@ -19,12 +180,6 @@ haslocal = []
 hascompare = []
 hasfree = []
 hasexc = []
-
-opname = ['<%r>' % (i,) for i in range(256)]
-opmap = {}
-HAVE_ARGUMENT = 90
-EXTENDED_ARG = 144
-
 
 def stack_effect(*args, **kwargs):
     return 0
