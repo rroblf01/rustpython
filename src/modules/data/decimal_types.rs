@@ -834,7 +834,7 @@ pub fn build_context_type() -> PyObjectRef {
                     if let Some(v) = existing {
                         return Ok(v);
                     }
-                    let mut d = crate::object::PyDict::new();
+                    let d = crate::object::PyDict::new();
                     let result = PyObjectRef::new(PyObject::Dict(Box::new(d)));
                     if let PyObject::Instance { dict, .. } = &mut *obj.borrow_mut() {
                         dict.insert_str("traps", result.clone());
@@ -846,6 +846,69 @@ pub fn build_context_type() -> PyObjectRef {
             deleter: None,
             doc: None,
         }))),
+    );
+    type_dict.insert_str(
+        "flags",
+        PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+            getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "flags".to_string(),
+                func: |args| {
+                    if args.is_empty() {
+                        return Err(PyError::type_error("flags requires self"));
+                    }
+                    // Lazily-created per-instance flags dict (signal->bool).
+                    // Starts empty; real signal keys are filled by operations
+                    // that set them. Empty is enough for module-level
+                    // `tuple(ctx.flags.keys())` at test_decimal import.
+                    let obj = &args[0];
+                    let existing = if let PyObject::Instance { dict, .. } = &*obj.borrow() {
+                        dict.get_str("flags").cloned()
+                    } else {
+                        None
+                    };
+                    if let Some(v) = existing {
+                        return Ok(v);
+                    }
+                    let d = crate::object::PyDict::new();
+                    let result = PyObjectRef::new(PyObject::Dict(Box::new(d)));
+                    if let PyObject::Instance { dict, .. } = &mut *obj.borrow_mut() {
+                        dict.insert_str("flags", result.clone());
+                    }
+                    Ok(result)
+                },
+            })),
+            setter: None,
+            deleter: None,
+            doc: None,
+        }))),
+    );
+    type_dict.insert_str(
+        "clear_flags",
+        bf!("clear_flags", |args| {
+            if args.is_empty() {
+                return Err(PyError::type_error("clear_flags requires self"));
+            }
+            // Reset all flags to False (CPython semantics); no-op when
+            // no flags have been set yet.
+            let flags_opt = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                dict.get_str("flags").cloned()
+            } else {
+                None
+            };
+            if let Some(flags) = flags_opt {
+                let keys: Vec<PyObjectRef> = if let PyObject::Dict(d) = &*flags.borrow() {
+                    d.keys()
+                } else {
+                    vec![]
+                };
+                if let PyObject::Dict(d) = &mut *flags.borrow_mut() {
+                    for k in keys {
+                        let _ = d.set(k, py_bool(false));
+                    }
+                }
+            }
+            Ok(py_none())
+        }),
     );
     PyObjectRef::new(PyObject::Type {
         name: "Context".to_string(),

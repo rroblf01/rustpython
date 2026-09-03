@@ -44,8 +44,10 @@ else
     # If test raised unittest.SkipTest (platform-specific module not
     # available, e.g. winreg on Linux, _zstd not built, etc.) it
     # correctly skipped — don't count as FAIL. CPython's regrtest
-    # counts these as SKIPPED, not FAILED.
-    if grep -q "SkipTest" "$logfile"; then
+    # counts these as SKIPPED, not FAILED. Same for ResourceDenied
+    # (test requires a resource like a terminal, network, or audio
+    # device that is unavailable in this environment, e.g. curses).
+    if grep -q "SkipTest\|ResourceDenied" "$logfile"; then
         echo "SKIP|$name|${elapsed}ms"
         # Normalize exit code so Makefile's `set -e` / failure check
         # doesn't treat a correct skip as a sweep failure.
