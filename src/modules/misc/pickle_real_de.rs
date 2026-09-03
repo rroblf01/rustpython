@@ -729,8 +729,11 @@ pub fn unpickle_real(data: &[u8]) -> PyResult<PyObjectRef> {
             }
             // memo
             b'g' => {
-                let idx = read_decimal(data, &mut pos)? as usize;
-                stack.push(StackVal::Val(memo_get(&memo, idx)?));
+                let idx = read_decimal(data, &mut pos)?;
+                if idx < 0 {
+                    return Err(unpickling_error("negative GET index"));
+                }
+                stack.push(StackVal::Val(memo_get(&memo, idx as usize)?));
             }
             b'h' => {
                 let b = take(data, &mut pos, 1)?;
@@ -738,10 +741,18 @@ pub fn unpickle_real(data: &[u8]) -> PyResult<PyObjectRef> {
             }
             b'j' => {
                 let b = take(data, &mut pos, 4)?;
-                stack.push(StackVal::Val(memo_get(&memo, le_i32(b) as usize)?));
+                let idx = le_i32(b);
+                if idx < 0 {
+                    return Err(unpickling_error("negative LONG_BINGET index"));
+                }
+                stack.push(StackVal::Val(memo_get(&memo, idx as usize)?));
             }
             b'p' => {
-                let idx = read_decimal(data, &mut pos)? as usize;
+                let idx = read_decimal(data, &mut pos)?;
+                if idx < 0 {
+                    return Err(unpickling_error("negative PUT index"));
+                }
+                let idx = idx as usize;
                 let top = match stack.last() {
                     Some(StackVal::Val(v)) => v.clone(),
                     _ => return Err(unpickling_error("PUT on empty stack")),
