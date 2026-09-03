@@ -115,6 +115,31 @@ class Formatter:
         return record.getMessage()
 
 
+class BufferingFormatter:
+    """Format multiple records (CPython API subset)."""
+
+    def __init__(self, linefmt=None):
+        if linefmt:
+            self.linefmt = linefmt
+        else:
+            self.linefmt = Formatter()
+
+    def formatHeader(self, records):
+        return ""
+
+    def formatFooter(self, records):
+        return ""
+
+    def format(self, records):
+        rv = ""
+        if len(records) > 0:
+            rv += self.formatHeader(records)
+            for record in records:
+                rv += self.linefmt.format(record)
+            rv += self.formatFooter(records)
+        return rv
+
+
 _root = None
 manager = None
 

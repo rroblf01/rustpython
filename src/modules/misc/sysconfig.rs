@@ -102,6 +102,7 @@ pub fn create_sysconfig_dict() -> HashMap<String, PyObjectRef> {
     syscfg_func!("get_path_names", |_| Ok(py_list(vec![py_str("stdlib"), py_str("platstdlib"), py_str("purelib"), py_str("platlib"), py_str("include"), py_str("platinclude"), py_str("scripts"), py_str("data")])));
     d.insert_str("_INSTALL_SCHEMES", py_dict());
     d.insert_str("_PYTHON_BUILD", py_bool(false));
+    d.insert_str("_HAS_USER_BASE", py_bool(true));
     syscfg_func!("_get_preferred_schemes", |_| {
         // Matches CPython on Linux (non-Darwin, non-Windows).
         let mut out = PyDict::new();

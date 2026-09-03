@@ -220,6 +220,38 @@ pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
         mro: vec![],
     });
     d.insert_str("TarFile", tar_file_type);
+    // Minimal TarInfo (archive member metadata holder; full tar
+    // read/write is future work — this lets attribute access and
+    // construction run instead of crashing at import).
+    {
+        let mut ti_dict: HashMap<String, PyObjectRef> = HashMap::new();
+        ti_dict.insert(
+            "__init__".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |args| {
+                    let name = args.get(1).map(|a| a.str()).unwrap_or_default();
+                    if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                        dict.insert_str("name", py_str(&name));
+                        dict.insert_str("size", py_int(0));
+                        dict.insert_str("mtime", py_int(0));
+                        dict.insert_str("mode", py_int(0o644));
+                        dict.insert_str("type", py_str("0"));
+                    }
+                    Ok(py_none())
+                },
+            }),
+        );
+        d.insert_str(
+            "TarInfo",
+            PyObjectRef::new(PyObject::Type {
+                name: "TarInfo".to_string(),
+                dict: Box::new(str_map_to_typedict(ti_dict)),
+                bases: vec![],
+                mro: vec![],
+            }),
+        );
+    }
     // GNU/ustar type + format constants (match CPython Lib/tarfile.py;
     // needed by test_tarfile which reads GNUTYPE_LONGNAME etc.).
     for (name, byte) in [
@@ -246,6 +278,46 @@ pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("PAX_FORMAT", py_int(2));
     d.insert_str("DEFAULT_FORMAT", py_int(2));
     d.insert_str("NUL", PyObjectRef::imm(PyObject::Bytes(vec![0])));
+    d.insert_str("BLOCKSIZE", py_int(512));
+    d.insert_str("RECORDSIZE", py_int(10240));
+    d.insert_str(
+        "GNU_MAGIC",
+        PyObjectRef::imm(PyObject::Bytes(b"ustar  \x00".to_vec())),
+    );
+    d.insert_str(
+        "POSIX_MAGIC",
+        PyObjectRef::imm(PyObject::Bytes(b"ustar\x0000".to_vec())),
+    );
+    d.insert_str("LENGTH_NAME", py_int(100));
+    d.insert_str("LENGTH_LINK", py_int(100));
+    d.insert_str("LENGTH_PREFIX", py_int(155));
+    // Type tuples (match CPython; needed by test_tarfile::test__all__).
+    let btype = |b: u8| PyObjectRef::imm(PyObject::Bytes(vec![b]));
+    d.insert_str(
+        "SUPPORTED_TYPES",
+        py_tuple(vec![
+            btype(b'0'),
+            btype(0),
+            btype(b'1'),
+            btype(b'2'),
+            btype(b'5'),
+            btype(b'6'),
+            btype(b'7'),
+            btype(b'3'),
+            btype(b'4'),
+            btype(b'L'),
+            btype(b'K'),
+            btype(b'S'),
+        ]),
+    );
+    d.insert_str(
+        "REGULAR_TYPES",
+        py_tuple(vec![btype(b'0'), btype(0), btype(b'7'), btype(b'S')]),
+    );
+    d.insert_str(
+        "GNU_TYPES",
+        py_tuple(vec![btype(b'L'), btype(b'K'), btype(b'S')]),
+    );
 
     d
 }

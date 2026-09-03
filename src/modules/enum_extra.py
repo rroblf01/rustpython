@@ -221,8 +221,15 @@ class EnumType(type):
     def __getitem__(cls, name):
         return cls._member_map_[name]
 
-    def __call__(cls, value, *args):
-        if not args and isinstance(value, cls):
+    def __call__(cls, value, *args, **kwargs):
+        # Functional API: Color('NAME', 'A B', module=...). Detected by a
+        # string name plus a names spec (str/list/tuple/dict) — real
+        # trigger: plistlib's `enum.Enum('PlistFormat', ..., module=...)`.
+        if isinstance(value, str) and args and isinstance(
+            args[0], (str, list, tuple, dict)
+        ):
+            return cls._create_functional(value, args[0], *args[1:], **kwargs)
+        if not args and not kwargs and isinstance(value, cls):
             return value
         try:
             return cls._value2member_map_[value]
@@ -231,6 +238,25 @@ class EnumType(type):
                 if m._value_ == value:
                     return m
             raise ValueError(f"{value!r} is not a valid {cls.__name__}")
+
+    def _create_functional(cls, name, names, *args, module=None, qualname=None, type=None, **kwargs):
+        # Parse names spec like CPython's _create_.
+        if isinstance(names, str):
+            names = names.split()
+        if isinstance(names, (list, tuple)):
+            # Auto-number from 1 (CPython behavior for bare name lists).
+            items = [(n, i + 1) for i, n in enumerate(names)]
+        else:
+            items = list(names.items())
+        ns = _EnumDict()
+        ns["__module__"] = module if module is not None else cls.__module__
+        if qualname is not None:
+            ns["__qualname__"] = qualname
+        for k, v in items:
+            ns[k] = v
+        bases = (cls,) if type is None else (type, cls)
+        # Direct metaclass construction (avoids re-entering __call__).
+        return EnumType.__new__(EnumType, name, bases, ns)
 
     @property
     def __members__(cls):

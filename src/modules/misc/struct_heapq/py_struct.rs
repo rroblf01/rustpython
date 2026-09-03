@@ -357,11 +357,23 @@ fn struct_unpack_buf(fmt: &str, buf: &[u8]) -> PyResult<Vec<PyObjectRef>> {
             }
             's' => {
                 let end = pos + item.count;
+                if end > buf.len() {
+                    return Err(struct_error(format!(
+                        "unpack requires a buffer of {} bytes",
+                        end
+                    )));
+                }
                 results.push(PyObjectRef::imm(PyObject::Bytes(buf[pos..end].to_vec())));
                 pos = end;
             }
             'p' => {
                 let end = pos + item.count;
+                if end > buf.len() {
+                    return Err(struct_error(format!(
+                        "unpack requires a buffer of {} bytes",
+                        end
+                    )));
+                }
                 let field = &buf[pos..end];
                 let data = if field.is_empty() {
                     Vec::new()
@@ -376,6 +388,12 @@ fn struct_unpack_buf(fmt: &str, buf: &[u8]) -> PyResult<Vec<PyObjectRef>> {
                 let unit = struct_code_size(item.code)?;
                 for _ in 0..item.count.max(1) {
                     let end = pos + unit;
+                    if end > buf.len() {
+                        return Err(struct_error(format!(
+                            "unpack requires a buffer of {} bytes",
+                            end
+                        )));
+                    }
                     results.push(struct_decode_scalar(order, item.code, &buf[pos..end])?);
                     pos = end;
                 }

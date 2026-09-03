@@ -87,6 +87,52 @@ class BufferingHandler(Handler):
         self.buffer.clear()
 
 
+class QueueListener:
+    """Monitor a queue for records, dispatching to handlers in a thread."""
+
+    _sentinel = object()
+
+    def __init__(self, queue, *handlers, respect_handler_level=False):
+        self.queue = queue
+        self.handlers = handlers
+        self._thread = None
+        self.respect_handler_level = respect_handler_level
+
+    def _monitor(self):
+        q = self.queue
+        while True:
+            try:
+                record = q.get()
+            except Exception:
+                break
+            if record is self._sentinel:
+                break
+            self.handle(record)
+
+    def handle(self, record):
+        for handler in self.handlers:
+            if not self.respect_handler_level:
+                handler.handle(record)
+            else:
+                if record.level >= handler.level:
+                    handler.handle(record)
+
+    def start(self):
+        import threading
+        self._thread = threading.Thread(target=self._monitor)
+        self._thread.daemon = True
+        self._thread.start()
+
+    def stop(self):
+        self.enqueue_sentinel()
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+
+    def enqueue_sentinel(self):
+        self.queue.put(self._sentinel)
+
+
 class MemoryHandler(Handler):
     def __init__(self, capacity, flushLevel=0, target=None):
         super().__init__()
