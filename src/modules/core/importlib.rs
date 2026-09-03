@@ -244,6 +244,16 @@ pub fn create_importlib_util_dict() -> HashMap<String, PyObjectRef> {
         }
         let name = args[0].str();
         let location = args.get(1).map(|a| a.str()).unwrap_or_default();
+        // CPython raises FileNotFoundError at exec_module time for missing
+        // files; test_build_details catches (FileNotFoundError, ImportError)
+        // around the whole spec_from/module_from/exec block. Raising here
+        // is caught by the same handler and is honest (file truly missing).
+        if !location.is_empty() && !std::path::Path::new(&location).exists() {
+            return Err(PyError::file_not_found_error(format!(
+                "No such file or directory: '{}'",
+                location
+            )));
+        }
         let mut spec_dict = HashMap::new();
         spec_dict.insert("name".to_string(), py_str(&name));
         spec_dict.insert("origin".to_string(), py_str(&location));
