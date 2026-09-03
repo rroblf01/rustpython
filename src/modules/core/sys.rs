@@ -83,6 +83,40 @@ thread_local! {
     static CURRENT_TRACE_FUNC: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
 }
 
+thread_local! {
+    // `sys.intern` table: value -> canonical instance. CPython interns
+    // permanently; strong refs here match that (test_marshal checks
+    // id() identity across marshal round-trips).
+    static INTERN_TABLE: std::cell::RefCell<HashMap<String, PyObjectRef>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+pub fn sys_intern_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let s = args
+        .first()
+        .ok_or_else(|| PyError::type_error("intern() missing string argument"))?;
+    let val = s.str();
+    // Only strings are internable; non-strings raise TypeError like CPython.
+    {
+        let b = s.borrow();
+        match &*b {
+            PyObject::Str(_) => {}
+            _ => {
+                return Err(PyError::type_error(
+                    "sys.intern() argument must be str",
+                ))
+            }
+        }
+    }
+    INTERN_TABLE.with(|t| {
+        if let Some(v) = t.borrow().get(&val).cloned() {
+            return Ok(v);
+        }
+        t.borrow_mut().insert(val, s.clone());
+        Ok(s.clone())
+    })
+}
+
 pub fn sys_settrace_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let func = args.first().cloned().unwrap_or_else(py_none);
     CURRENT_TRACE_FUNC.with(|f| {
@@ -347,6 +381,13 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     // sys.audit — CPython audit hook stub. No-op in this interpreter.
     sys_func!("audit", |_args| Ok(py_none()));
     sys_func!("addaudithook", |_args| Ok(py_none()));
+    d.insert(
+        "intern".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "intern".to_string(),
+            func: sys_intern_builtin,
+        }),
+    );
     sys_func!("displayhook", |args| {
         if args.is_empty() {
             return Ok(py_none());
