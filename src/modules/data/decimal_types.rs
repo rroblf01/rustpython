@@ -741,6 +741,14 @@ pub fn build_decimal_type() -> PyObjectRef {
             Ok(decval_to_instance(&float_to_decvalue(f)))
         }),
     );
+    // Real CPython's `repr(Decimal)` is `<class 'decimal.Decimal'>` — a
+    // class's repr uses its `__module__`, which every OTHER ad-hoc native
+    // type here sets explicitly (see `fractions_mod.rs`'s `Fraction` doing
+    // the same for `"fractions"`); Decimal never did, so it fell back to
+    // the builtins-style bare `<class 'Decimal'>` instead. Found via
+    // `test_statistics.py`'s `_sum`/`pvariance` doctests, which literally
+    // assert the module-qualified repr in their expected output.
+    type_dict.insert_str("__module__", py_str("decimal"));
     PyObjectRef::new(PyObject::Type {
         name: "Decimal".to_string(),
         dict: Box::new(str_map_to_typedict(type_dict)),

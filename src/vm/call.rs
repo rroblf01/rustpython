@@ -410,6 +410,48 @@ impl VirtualMachine {
             return crate::object::print_with_vm(self, args, keywords).map(Some);
         }
 
+        // `IOBase.__exit__` (inherited by every native `io` type, and by any
+        // Python subclass — e.g. `zipfile._ZipWriteFile` — that doesn't
+        // override `__exit__` itself) needs the live VM to invoke
+        // `self.close()` (see `iobase_exit_with_vm`'s own doc comment).
+        // Attribute lookup (`obj.__exit__`) auto-binds a plain
+        // `BuiltinFunction` found via the MRO into a `BuiltinMethod` with
+        // `self` already attached — so this must match BOTH the unbound
+        // and bound shapes, not just `BuiltinFunction` (mirrors the
+        // `context_run_fallback`/`BuiltinMethod` check above).
+        {
+            let unbound_hit = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::iobase_exit_marker as crate::object::BuiltinFunc));
+            if unbound_hit {
+                return crate::modules::iobase_exit_with_vm(self, args).map(Some);
+            }
+            if let PyObject::BuiltinMethod { func, self_obj, .. } = &*callable.borrow() {
+                if std::ptr::fn_addr_eq(*func, crate::modules::iobase_exit_marker as crate::object::BuiltinFunc)
+                {
+                    let mut all_args = vec![self_obj.clone()];
+                    all_args.extend_from_slice(args);
+                    return crate::modules::iobase_exit_with_vm(self, &all_args).map(Some);
+                }
+            }
+        }
+
+        // Every `zipimporter` instance method (`is_package`, `get_source`,
+        // `find_spec`, `exec_module`, ...) shares ONE marker fn
+        // (`zipimporter_method_marker`) rather than one distinct marker
+        // per method — real dispatch happens by the `name` field the
+        // `BuiltinMethod` already carries (see
+        // `zipimporter_method_with_vm`'s doc comment).
+        if let PyObject::BuiltinMethod { func, self_obj, name } = &*callable.borrow() {
+            if std::ptr::fn_addr_eq(
+                *func,
+                crate::modules::zipimporter_method_marker as crate::object::BuiltinFunc,
+            ) {
+                let method = name.clone();
+                let self_obj = self_obj.clone();
+                return crate::modules::zipimporter_method_with_vm(self, &method, &self_obj, args)
+                    .map(Some);
+            }
+        }
+
         // `contextvars.Context.run(callable, *args, **kwargs)` — needs the
         // live VM to call `callable` with its OWN real positional/keyword
         // arguments forwarded, not this project's usual "pack kwargs into a
@@ -1090,6 +1132,29 @@ impl VirtualMachine {
             if is_getmembers && !args.is_empty() {
                 let predicate = args.get(1).cloned();
                 return crate::modules::getmembers_with_vm(self, &args[0], predicate.as_ref()).map(Some);
+            }
+        }
+
+        // `pickle.loads`/`_pickle.loads`/`pickle.load`/`Unpickler.load`
+        // resolving a pickled `GLOBAL` opcode reference to a module that
+        // hasn't been imported yet (real CPython's `find_class` does
+        // `__import__(module)` then `getattr(sys.modules[module], name)` —
+        // `test_pickle.py::test_unpickle_module_race`'s
+        // `locking_import.ToBeUnpickled` is exactly this case) needs a real
+        // import, which needs the live `&mut VirtualMachine`, same
+        // reentrancy hazard as the others above.
+        {
+            let is_pickle_loads = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::pickle_loads_plain as crate::object::BuiltinFunc));
+            if is_pickle_loads && !args.is_empty() {
+                return crate::modules::pickle_loads_with_vm(self, args).map(Some);
+            }
+            let is_pickle_load = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::pickle_load_plain as crate::object::BuiltinFunc));
+            if is_pickle_load && !args.is_empty() {
+                return crate::modules::pickle_load_with_vm(self, args).map(Some);
+            }
+            let is_unpickler_load = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::unpickler_load_plain as crate::object::BuiltinFunc));
+            if is_unpickler_load && !args.is_empty() {
+                return crate::modules::unpickler_load_with_vm(self, args).map(Some);
             }
         }
 

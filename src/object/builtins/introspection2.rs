@@ -107,6 +107,25 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         return Ok(py_bool(false));
     }
+    // `classinfo` itself is an ORDINARY INSTANCE of a class that defines
+    // `__instancecheck__` (e.g. `typing`'s `Union[List, Tuple]` — a real
+    // `_UnionGenericAlias` instance, not a `type` at all). Real CPython
+    // resolves `__instancecheck__` on `type(classinfo)`'s own MRO in this
+    // case (as opposed to `classinfo`'s METACLASS, which only applies when
+    // `classinfo` is itself a `type` — handled separately above). Checked
+    // before the generic `__bases__`-duck-typing fallback just below, which
+    // would otherwise reject any such object outright.
+    let instance_instancecheck_hook = if let PyObject::Instance { typ, .. } = &*class {
+        crate::object::lookup_dunder_via_mro(typ, "__instancecheck__")
+    } else {
+        None
+    };
+    if let Some(f) = instance_instancecheck_hook {
+        drop(class);
+        drop(obj);
+        let result = call_bound_method(f, args[1].clone(), vec![args[0].clone()])?;
+        return Ok(py_bool(result.truthy()));
+    }
     // CPython's abstract-class protocol: `classinfo` need not be a real
     // `type` at all — any object exposing a `__bases__` property counts
     // (`test_isinstance.py`'s `AbstractClass`/`AbstractInstance`). Only a
@@ -620,6 +639,21 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     return Ok(result);
                 }
             }
+        }
+        // `classinfo` is an ORDINARY INSTANCE of a class defining
+        // `__subclasscheck__` (e.g. `typing`'s `Union[List, Tuple]`) —
+        // same case as `builtin_isinstance`'s matching `__instancecheck__`
+        // check, resolved on `type(classinfo)`'s own MRO rather than a
+        // metaclass (which doesn't apply here since `classinfo` isn't a
+        // `type` at all).
+        let instance_subclasscheck_hook = if let PyObject::Instance { typ, .. } = &*args[1].borrow() {
+            crate::object::lookup_dunder_via_mro(typ, "__subclasscheck__")
+        } else {
+            None
+        };
+        if let Some(f) = instance_subclasscheck_hook {
+            let result = call_bound_method(f, args[1].clone(), vec![args[0].clone()])?;
+            return Ok(result);
         }
     }
     // A genuinely bogus second argument (not a class, tuple of classes, or

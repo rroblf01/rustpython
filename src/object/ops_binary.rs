@@ -366,7 +366,19 @@ pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         if bi == 0 {
             return Err(PyError::zero_division());
         }
-        return Ok(py_float(ai as f64 / bi as f64));
+        // Only safe as a pure `f64` division when BOTH operands are exactly
+        // representable as `f64` (magnitude < 2**53) — IEEE754 division of
+        // two exactly-represented doubles is itself correctly rounded, so
+        // this reproduces CPython's correctly-rounded `int.__truediv__`
+        // exactly. Outside that range this shortcut is wrong: rounding each
+        // operand to the nearest f64 BEFORE dividing is a different
+        // (looser) operation than correctly rounding the exact ratio, and
+        // can be off by several ULPs — fall through to the correctly-
+        // rounded BigInt path below instead.
+        const SAFE: i64 = 1i64 << 53;
+        if ai.unsigned_abs() < SAFE as u64 && bi.unsigned_abs() < SAFE as u64 {
+            return Ok(py_float(ai as f64 / bi as f64));
+        }
     }
     // Float fast path including SmallFloat (e.g. 0.0 is SmallFloat, not
     // PyObject::Float, so the match below would miss it and return nan
@@ -389,12 +401,7 @@ pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     let a_obj = a.borrow();
     let b_obj = b.borrow();
     match (&*a_obj, &*b_obj) {
-        (PyObject::Int(a), PyObject::Int(b)) => {
-            if b.is_zero() {
-                return Err(PyError::zero_division());
-            }
-            Ok(py_float(a.to_f64().unwrap() / b.to_f64().unwrap()))
-        }
+        (PyObject::Int(a), PyObject::Int(b)) => Ok(py_float(correctly_rounded_int_div_f64(a, b)?)),
         (PyObject::Float(a), PyObject::Float(b)) => {
             if *b == 0.0 {
                 return Err(PyError::zero_division());
@@ -446,6 +453,121 @@ pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             b_obj.type_name()
         ))),
     }
+}
+
+// `DBL_MANT_DIG`/`DBL_MAX_EXP`/`DBL_MIN_EXP` from C's <float.h> for
+// IEEE754 binary64 (`f64`).
+const DBL_MANT_DIG: i64 = 53;
+const DBL_MAX_EXP: i64 = 1024;
+const DBL_MIN_EXP: i64 = -1021;
+
+/// Correctly-rounded (round-half-to-even) conversion of the exact rational
+/// `a/b` to the nearest `f64`, ported from CPython's `long_true_divide`
+/// (`Objects/longobject.c`) — this is what `int.__truediv__` actually does,
+/// and it is NOT the same operation as `a.to_f64() / b.to_f64()`: rounding
+/// each operand to the nearest double independently, then dividing, loses
+/// precision whenever either operand needs more than the double's 53
+/// mantissa bits, and can land several ULPs away from the correctly-rounded
+/// result of the exact ratio (verified against real CPython 3.14: over 200k
+/// random `int/int` pairs beyond 2**53, the naive approach disagreed on
+/// more than half). `Fraction.__float__`'s `frac_to_f64` (in
+/// `src/modules/data/fractions.rs`) reuses this for the same reason.
+pub fn correctly_rounded_int_div_f64(a: &BigInt, b: &BigInt) -> PyResult<f64> {
+    if b.is_zero() {
+        return Err(PyError::zero_division());
+    }
+    let negate = (a.sign() == Sign::Minus) != (b.sign() == Sign::Minus);
+    if a.is_zero() {
+        return Ok(if negate { -0.0 } else { 0.0 });
+    }
+    let a = a.abs();
+    let b = b.abs();
+
+    let a_bits = a.bits() as i64;
+    let b_bits = b.bits() as i64;
+    let diff = a_bits - b_bits;
+    if diff > DBL_MAX_EXP {
+        return Err(PyError::overflow_error(
+            "integer division result too large for a float",
+        ));
+    }
+    if diff < DBL_MIN_EXP - DBL_MANT_DIG - 1 {
+        return Ok(if negate { -0.0 } else { 0.0 });
+    }
+
+    let shift = diff.max(DBL_MIN_EXP) - DBL_MANT_DIG - 2;
+    let mut inexact = false;
+
+    // x = abs(a * 2**-shift), tracking whether any shifted-out bit was set.
+    let x: BigInt = if shift <= 0 {
+        &a << (-shift) as u64
+    } else {
+        let shift_u = shift as u64;
+        for i in 0..shift_u {
+            if a.bit(i) {
+                inexact = true;
+                break;
+            }
+        }
+        &a >> shift_u
+    };
+
+    // x //= b, remainder-nonzero also counts as inexact.
+    let q = &x / &b;
+    let r = &x % &b;
+    if !r.is_zero() {
+        inexact = true;
+    }
+
+    let x_bits = q.bits() as i64;
+    debug_assert!(x_bits > 0);
+
+    // Number of low bits of q that must be rounded away to fit DBL_MANT_DIG
+    // significant bits (always 2 or 3, per CPython's comment/assertion).
+    let extra_bits = x_bits.max(DBL_MIN_EXP - shift) - DBL_MANT_DIG;
+    let extra_bits_u = extra_bits as u64;
+
+    let guard_bit = q.bit(extra_bits_u - 1);
+    let mut sticky = inexact;
+    for i in 0..(extra_bits_u - 1) {
+        if q.bit(i) {
+            sticky = true;
+            break;
+        }
+    }
+    let kept_lsb = q.bit(extra_bits_u);
+    let round_up = guard_bit && (sticky || kept_lsb);
+
+    let dropped_mask = (BigInt::one() << extra_bits_u) - BigInt::one();
+    let truncated = &q - (&q & &dropped_mask);
+    let x_final = if round_up {
+        &truncated + (BigInt::one() << extra_bits_u)
+    } else {
+        truncated
+    };
+
+    // Conversion to f64 is exact: x_final has at most DBL_MANT_DIG
+    // significant bits (its low `extra_bits` bits are all zero).
+    let dx = x_final.to_f64().unwrap_or(f64::INFINITY);
+
+    // Check whether ldexp(dx, shift) would overflow a double (mirrors
+    // CPython's check exactly, using the PRE-rounding bit length x_bits).
+    if shift + x_bits >= DBL_MAX_EXP
+        && (shift + x_bits > DBL_MAX_EXP || dx == 2f64.powi(x_bits as i32))
+    {
+        return Err(PyError::overflow_error(
+            "integer division result too large for a float",
+        ));
+    }
+
+    // A plain `dx * 2f64.powi(shift)` is wrong here: for a result near the
+    // smallest subnormal double, `2f64.powi(shift)` alone underflows to
+    // 0.0 (shift can be far more negative than any single finite double's
+    // exponent range), silently zeroing an otherwise-representable tiny
+    // result. `ldexp_f64` scales in bounded chunks instead, so it lands on
+    // the correct (possibly subnormal) result.
+    let result = crate::object::ldexp_f64(dx, shift as i32);
+    Ok(if negate { -result } else { result })
 }
 
 pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {

@@ -118,10 +118,24 @@ impl PyObject {
                 } else if let Some(native) = dict.get(NATIVE_BACKING_KEY) {
                     native.hash()
                 } else {
-                    Err(PyError::type_error(format!(
-                        "unhashable type: '{}'",
-                        self.type_name()
-                    )))
+                    // No `__hash__` anywhere in the MRO at all. A genuine
+                    // user `class Foo: def __eq__(...): ...` without
+                    // `__hash__` already gets an explicit `__hash__ = None`
+                    // inserted into its own dict at class-creation time
+                    // (`vm/class.rs`), which the MRO lookup above would
+                    // have found and raised on already — so an `Instance`
+                    // reaching this point is a native/builtin type (e.g.
+                    // `io.BytesIO`/`io.StringIO`, built ad hoc via a
+                    // closure-constructed `PyObject::Type` with no
+                    // `__hash__` entry at all) with no `__eq__` override
+                    // either. Those are hashable BY IDENTITY in real Python
+                    // — only mutable containers opt out — so default to
+                    // identity hash instead of unconditionally raising.
+                    // Previously EVERY such Instance was unhashable (e.g.
+                    // `hash(io.BytesIO())` raised `TypeError`, breaking
+                    // `zipapp.create_archive`'s `target in files_to_add`
+                    // dict-key check whenever the target was a file object).
+                    Ok(self as *const PyObject as usize)
                 }
             }
             PyObject::Array(arr) => {

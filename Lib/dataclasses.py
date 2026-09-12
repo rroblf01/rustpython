@@ -434,7 +434,7 @@ def replace(obj, /, **changes):
 
 def make_dataclass(cls_name, fields, *, bases=(), namespace=None, init=True,
                     repr=True, eq=True, order=False, unsafe_hash=False,
-                    frozen=False, kw_only=False):
+                    frozen=False, kw_only=False, slots=False):
     namespace = dict(namespace) if namespace else {}
     annotations = {}
     for item in fields:

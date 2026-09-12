@@ -362,7 +362,25 @@ impl VirtualMachine {
                 if !has {
                     let ann_dict = crate::object::py_dict();
                     self.frames[fi].locals.insert(ann_id, ann_dict.clone());
-                    self.frames[fi].globals.borrow_mut().insert(ann_id, ann_dict);
+                    self.frames[fi]
+                        .globals
+                        .borrow_mut()
+                        .insert(ann_id, ann_dict.clone());
+                    // Dual-write into a custom `__prepare__` namespace (see
+                    // `Frame::prepared_namespace` / STORE_NAME's own
+                    // dual-write): a class built through a metaclass with a
+                    // `__prepare__` (including `type`'s own default one,
+                    // triggered by ANY explicit `metaclass=` keyword or an
+                    // inherited custom metaclass) uses THAT object as the
+                    // final class namespace, discarding the plain
+                    // `frame.globals` HashMap entirely. Without this,
+                    // `__annotations__` — created only here, never via
+                    // STORE_NAME — silently vanished from the resulting
+                    // class's `__dict__` for every annotated class body
+                    // whose metaclass has a `__prepare__`.
+                    if let Some(prep) = self.frames[fi].prepared_namespace.clone() {
+                        self.class_ns_set(&prep, "__annotations__", ann_dict)?;
+                    }
                 }
             }
 

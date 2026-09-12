@@ -29,6 +29,75 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
     }
 
     // ---- poll type helpers (disallow direct instantiation, factory returns instance) ----
+    // NOTE: real CPython's `select` module only exposes `devpoll` on Solaris
+    // (gated behind `HAVE_SYS_DEVPOLL_H` at build time) — `test_devpoll.py`
+    // itself checks `if not hasattr(select, 'devpoll'): raise
+    // unittest.SkipTest(...)` at import time, expecting to be skipped
+    // entirely on every other platform. Previously this module always
+    // registered a (nonfunctional, methodless) `select.devpoll` type, which
+    // made `hasattr` true on Linux and let the whole test file run against a
+    // stub with no `register`/`fileno`/`close` methods. So: no `devpoll`
+    // type/factory here at all, matching CPython's own Linux behavior.
+    fn poll_reg_of(self_obj: &PyObjectRef) -> Result<PyObjectRef, PyError> {
+        if let PyObject::Instance { dict, .. } = &*self_obj.borrow() {
+            if let Some(r) = dict.get("_reg") {
+                return Ok(r.clone());
+            }
+        }
+        Err(PyError::runtime_error("poll object missing registry"))
+    }
+
+    fn poll_is_int_obj(o: &PyObjectRef) -> bool {
+        matches!(o, PyObjectRef::SmallInt(_) | PyObjectRef::SmallBool(_))
+            || matches!(&*o.borrow(), PyObject::Int(_))
+    }
+
+    fn poll_convert_eventmask(o: &PyObjectRef) -> Result<i64, PyError> {
+        if !poll_is_int_obj(o) {
+            return Err(PyError::type_error("an integer is required"));
+        }
+        match o.as_i64() {
+            Some(v) if v < 0 => Err(PyError::value_error("negative event mask value")),
+            Some(v) if v > 0xFFFF => Err(PyError::overflow_error(
+                "signed short integer is greater than maximum",
+            )),
+            Some(v) => Ok(v),
+            None => Err(PyError::overflow_error(
+                "Python int too large to convert to C unsigned short",
+            )),
+        }
+    }
+
+    fn poll_convert_timeout(o: &PyObjectRef) -> Result<i32, PyError> {
+        if matches!(&*o.borrow(), PyObject::None) {
+            return Ok(-1);
+        }
+        if poll_is_int_obj(o) {
+            return match o.as_i64() {
+                Some(v) => {
+                    if v < 0 {
+                        Ok(-1)
+                    } else if v > i32::MAX as i64 {
+                        Err(PyError::overflow_error("timeout is too large"))
+                    } else {
+                        Ok(v as i32)
+                    }
+                }
+                None => Err(PyError::overflow_error("timeout is too large")),
+            };
+        }
+        if let Some(f) = o.as_f64() {
+            if f < 0.0 {
+                return Ok(-1);
+            }
+            if f > i32::MAX as f64 {
+                return Err(PyError::overflow_error("timeout is too large"));
+            }
+            return Ok(f as i32);
+        }
+        Err(PyError::type_error("timeout must be an integer or None"))
+    }
+
     fn make_poll_type(name: &str) -> PyObjectRef {
         let mut dict = HashMap::new();
         let name_owned = name.to_string();
@@ -39,6 +108,149 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
             PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(move |_args: &[PyObjectRef]| {
                 Err(PyError::type_error(format!("cannot create '{}' instances", name_clone)))
             }))),
+        );
+        dict.insert(
+            "register".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "register".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error(
+                            "register expected at least 1 argument, got 0",
+                        ));
+                    }
+                    let fd = get_fd(&args[1])?;
+                    let eventmask = if let Some(m) = args.get(2) {
+                        poll_convert_eventmask(m)?
+                    } else {
+                        (POLLIN as i64) | (POLLOUT as i64) | (POLLPRI as i64)
+                    };
+                    let reg = poll_reg_of(&args[0])?;
+                    if let PyObject::Dict(r) = &mut *reg.borrow_mut() {
+                        r.set(py_int(fd as i64), py_int(eventmask))?;
+                    }
+                    Ok(py_none())
+                },
+            }),
+        );
+        dict.insert(
+            "unregister".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "unregister".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error(
+                            "unregister expected 1 argument, got 0",
+                        ));
+                    }
+                    let fd = get_fd(&args[1])?;
+                    let reg = poll_reg_of(&args[0])?;
+                    let removed = if let PyObject::Dict(r) = &mut *reg.borrow_mut() {
+                        r.remove(&py_int(fd as i64))
+                    } else {
+                        return Err(PyError::runtime_error("poll object missing registry"));
+                    };
+                    removed?;
+                    Ok(py_none())
+                },
+            }),
+        );
+        dict.insert(
+            "modify".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "modify".to_string(),
+                func: |args| {
+                    if args.len() < 3 {
+                        return Err(PyError::type_error("modify expected 2 arguments"));
+                    }
+                    let fd = get_fd(&args[1])?;
+                    let eventmask = poll_convert_eventmask(&args[2])?;
+                    let reg = poll_reg_of(&args[0])?;
+                    let exists = if let PyObject::Dict(r) = &*reg.borrow() {
+                        r.contains(&py_int(fd as i64))?
+                    } else {
+                        false
+                    };
+                    if !exists {
+                        // Real CPython raises OSError(ENOENT) — "modify"
+                        // only touches an already-registered fd, unlike
+                        // "register" which adds one.
+                        let mut extra = std::collections::HashMap::new();
+                        extra.insert("errno".to_string(), py_int(2));
+                        extra.insert(
+                            "strerror".to_string(),
+                            py_str("No such file or directory"),
+                        );
+                        return Err(PyError::Exception(
+                            "OSError".to_string(),
+                            PyObjectRef::new(PyObject::Exception {
+                                typ: "OSError".to_string(),
+                                args: vec![py_int(2), py_str("No such file or directory")],
+                                cause: None,
+                                suppress_context: false,
+                                context: None,
+                                traceback: None,
+                                extra: Some(extra),
+                            }),
+                        ));
+                    }
+                    if let PyObject::Dict(r) = &mut *reg.borrow_mut() {
+                        r.set(py_int(fd as i64), py_int(eventmask))?;
+                    }
+                    Ok(py_none())
+                },
+            }),
+        );
+        dict.insert(
+            "poll".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "poll".to_string(),
+                func: |args| {
+                    let timeout_ms = if let Some(t) = args.get(1) {
+                        poll_convert_timeout(t)?
+                    } else {
+                        -1
+                    };
+                    let reg = poll_reg_of(&args[0])?;
+                    let entries: Vec<(i32, i16)> = if let PyObject::Dict(r) = &*reg.borrow() {
+                        r.items()
+                            .into_iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.as_i64().unwrap_or(-1) as i32,
+                                    v.as_i64().unwrap_or(0) as i16,
+                                )
+                            })
+                            .collect()
+                    } else {
+                        vec![]
+                    };
+                    let mut poll_fds: Vec<PollFd> = entries
+                        .iter()
+                        .map(|&(fd, events)| PollFd {
+                            fd,
+                            events,
+                            revents: 0,
+                        })
+                        .collect();
+                    let rc =
+                        unsafe { poll(poll_fds.as_mut_ptr(), poll_fds.len() as u32, timeout_ms) };
+                    if rc < 0 {
+                        let err = std::io::Error::last_os_error();
+                        return Err(PyError::os_error_from_io(&err));
+                    }
+                    let mut result = Vec::new();
+                    for pfd in &poll_fds {
+                        if pfd.revents != 0 {
+                            result.push(py_tuple(vec![
+                                py_int(pfd.fd as i64),
+                                py_int((pfd.revents as u16) as i64),
+                            ]));
+                        }
+                    }
+                    Ok(py_list(result))
+                },
+            }),
         );
         let typ = PyObjectRef::new(PyObject::Type {
             name: name_owned.clone(),
@@ -52,10 +264,8 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
         typ
     }
     let poll_type = make_poll_type("select.poll");
-    let devpoll_type = make_poll_type("select.devpoll");
     // for closure captures
     let poll_type_for_factory = poll_type.clone();
-    let devpoll_type_for_factory = devpoll_type.clone();
 
     // Helper to build OSError with EBADF (errno 9)
     fn ebadf_error() -> PyError {
@@ -113,7 +323,42 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
                 ))
             }
         };
-        let result = crate::object::call_bound_method(fileno_attr, obj.clone(), vec![])?;
+        // `call_bound_method`'s `BuiltinMethod` arm always prepends BOTH the
+        // method's own (placeholder) `self_obj` AND an explicit second one
+        // when that placeholder is `PyObject::None` — a convention several
+        // dunder methods (e.g. `str.__mod__`) are deliberately written
+        // around (`args[0]` is the placeholder, `args[1]` is the real
+        // self), NOT something safe to change globally (see
+        // `call_bound_method`'s own doc comment). A native `file` object's
+        // `fileno` attribute (`src/object/attrs/file.rs`) is built as
+        // exactly such a placeholder-`self_obj` `BuiltinMethod`, but its own
+        // body expects a single `args[0] = self` (matching LOAD_ATTR's
+        // rebind-in-place convention, not call_bound_method's) — so calling
+        // it through `call_bound_method` here fed it `[None, file_obj]` and
+        // it always saw the placeholder instead of the real file, raising
+        // "fileno on non-file" even for a real, open file object registered
+        // with `select.select()`/`select.poll().register()`. Rebind by hand
+        // (single self) for exactly this placeholder-`BuiltinMethod` shape,
+        // matching `call_method_rebound`'s approach but without needing a
+        // `&mut VirtualMachine` (a plain native `fn` pointer needs none) —
+        // fall back to `call_bound_method` for every other attribute shape
+        // (a real user-defined `fileno()` method, e.g. `test_poll.py`'s
+        // `Almost`/`Nope` classes, which is unaffected by this since it's a
+        // `PyObject::Function`, not a `BuiltinMethod`).
+        let is_placeholder_builtin_method = matches!(
+            &*fileno_attr.borrow(),
+            PyObject::BuiltinMethod { self_obj, .. } if matches!(&*self_obj.borrow(), PyObject::None)
+        );
+        let result = if is_placeholder_builtin_method {
+            let func = if let PyObject::BuiltinMethod { func, .. } = &*fileno_attr.borrow() {
+                *func
+            } else {
+                unreachable!()
+            };
+            func(&[obj.clone()])?
+        } else {
+            crate::object::call_bound_method(fileno_attr, obj.clone(), vec![])?
+        };
         if let Some(i) = result.as_i64() {
             if i < 0 || i > i32::MAX as i64 {
                 return Err(PyError::value_error("filedescriptor out of range in select()"));
@@ -305,20 +550,9 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
                 } else {
                     return Err(PyError::type_error("poll() takes no arguments"));
                 }
-                Ok(PyObjectRef::new(PyObject::Instance { typ: pt.clone(), dict: AttrMap::new() }))
-            }))),
-        );
-    }
-    {
-        let pt = devpoll_type_for_factory.clone();
-        d.insert(
-            "devpoll".to_string(),
-            PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(move |args: &[PyObjectRef]| {
-                if args.is_empty() {
-                } else if args.len() == 1 {
-                    if let PyObject::Dict(d) = &*args[0].borrow() { if !d.is_empty() { return Err(PyError::type_error("devpoll() takes no arguments")); } } else { return Err(PyError::type_error("devpoll() takes no arguments")); }
-                } else { return Err(PyError::type_error("devpoll() takes no arguments")); }
-                Ok(PyObjectRef::new(PyObject::Instance { typ: pt.clone(), dict: AttrMap::new() }))
+                let mut inst_dict = AttrMap::new();
+                inst_dict.insert_str("_reg", py_dict());
+                Ok(PyObjectRef::new(PyObject::Instance { typ: pt.clone(), dict: inst_dict }))
             }))),
         );
     }

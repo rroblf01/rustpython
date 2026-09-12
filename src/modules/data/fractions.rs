@@ -400,28 +400,34 @@ pub fn frac_to_f64(num: &BigInt, den: &BigInt) -> f64 {
     if den.is_zero() {
         return f64::INFINITY;
     }
-    let sign = if (num.sign() == num_bigint::Sign::Minus) != (den.sign() == num_bigint::Sign::Minus)
-    {
-        -1.0
-    } else {
-        1.0
-    };
-    let n = num.abs();
-    let d = den.abs();
-    // Keep ~54 bits of precision and scale both sides DOWN to fit in f64,
-    // so huge numerators/denominators don't overflow to inf before dividing
-    // (CPython's `int / int` true division semantics for
-    // `Fraction.__float__` — `float(F(2*10**400, 3*10**400))` must round
-    // to 2/3, not NaN).
-    let prec = 54u64;
-    let nbits = n.bits();
-    let dbits = d.bits();
-    let shift_n = nbits.saturating_sub(prec);
-    let shift_d = dbits.saturating_sub(prec);
-    let n2 = n >> shift_n;
-    let d2 = d >> shift_d;
-    let ratio = n2.to_f64().unwrap_or(f64::INFINITY) / d2.to_f64().unwrap_or(f64::INFINITY);
-    sign * ratio * 2f64.powf(shift_n as f64 - shift_d as f64)
+    // Delegates to the correctly-rounded (round-half-to-even) int/int
+    // division ported from CPython's `long_true_divide` — this call site
+    // used to independently right-shift (truncate, not round) numerator
+    // and denominator down to ~54 bits before dividing, which is a
+    // DIFFERENT operation from correctly rounding the exact ratio and could
+    // land several ULPs off (e.g. `float(Fraction(63, 20))`-shaped ratios
+    // computed from a real big numerator/denominator pair, as hit by
+    // `statistics.pvariance`/`pstdev` disagreeing on population variance
+    // for the same data). See `correctly_rounded_int_div_f64`'s own doc
+    // comment in `src/object/ops_binary.rs`.
+    match crate::object::correctly_rounded_int_div_f64(num, den) {
+        Ok(v) => v,
+        Err(_) => {
+            // Overflow: the exact ratio's magnitude exceeds the largest
+            // finite double (real CPython raises OverflowError for
+            // `float(Fraction(10**400, 1))`; this call site predates a
+            // fallible signature here, so saturate to +-inf instead of
+            // threading a PyResult through every caller).
+            let sign =
+                if (num.sign() == num_bigint::Sign::Minus) != (den.sign() == num_bigint::Sign::Minus)
+                {
+                    -1.0
+                } else {
+                    1.0
+                };
+            sign * f64::INFINITY
+        }
+    }
 }
 
 /// Exact comparison of `num/den` against an `f64` (CPython's Fraction/float

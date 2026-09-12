@@ -8,6 +8,48 @@ use std::rc::Rc;
 mod buffered;
 use self::buffered::register_buffered_classes;
 
+/// `IOBase.__exit__` marker — real logic lives in `iobase_exit_with_vm`
+/// below and is dispatched to from `src/vm/call.rs` via `fn_addr_eq`
+/// (needs a live `&mut VirtualMachine` to invoke `self.close()`, which the
+/// plain `fn(&[PyObjectRef])` builtin calling convention can't provide —
+/// see the `with_vm_mut`-is-unsound-from-live-bytecode gotcha). This bare
+/// function must never actually run: reaching it means some caller invoked
+/// `__exit__` through a path that skipped the `call.rs` interception.
+pub fn iobase_exit_marker(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // Deliberately distinct code from every other trivial stub in this file
+    // (a bare `Ok(py_bool(false))` body is identical to several other
+    // stubs and gets folded onto the SAME address by thin-LTO in the
+    // `release` profile — a known hazard here, see the
+    // `cpython_test_suite_compat` notes on "LTO identical-code-folding" —
+    // which would make `fn_addr_eq` in `call.rs` false-negative-match this
+    // against an unrelated stub and vice versa).
+    Err(PyError::runtime_error(
+        "IOBase.__exit__ marker reached directly (interception in call.rs missing)",
+    ))
+}
+
+/// Real `IOBase.__exit__` body: call `self.close()` (through normal
+/// attribute lookup, so a Python subclass's OVERRIDDEN `close()` —
+/// e.g. `zipfile._ZipWriteFile.close()`, which flushes the compressor and
+/// writes the final header/CRC — actually runs) and swallow no exception
+/// (return `False`), matching CPython's `IOBase.__exit__`.
+pub fn iobase_exit_with_vm(
+    vm: &mut crate::vm::VirtualMachine,
+    args: &[PyObjectRef],
+) -> PyResult<PyObjectRef> {
+    let this = args
+        .first()
+        .ok_or_else(|| PyError::type_error("__exit__ missing 'self'"))?;
+    // `get_attribute` alone returns `close` UNBOUND (a bare
+    // `PyObject::BuiltinFunction`/`Function`, no `self` attached) — calling
+    // it directly the way `LOAD_ATTR`'s normal dot-call syntax would raised
+    // "close() missing 1 required positional argument: 'self'". Reuse the
+    // same rebind-to-`target` helper `print()`'s own `flush()`/`write()`
+    // calls use instead of hand-rolling attribute binding again here.
+    crate::object::call_method_rebound(vm, this, "close", vec![])?;
+    Ok(py_bool(false))
+}
+
 pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     d.insert_str("SEEK_SET", py_int(0));
@@ -476,7 +518,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         "__exit__",
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__exit__".to_string(),
-            func: |_: &[PyObjectRef]| Ok(py_none()),
+            func: iobase_exit_marker,
         }),
     );
     let iobase_cls = PyObjectRef::new(PyObject::Type {

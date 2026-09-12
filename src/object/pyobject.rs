@@ -562,6 +562,37 @@ impl PyObject {
                     many.iter().map(|a| a.repr()).collect::<Vec<_>>().join(", ")
                 ),
             },
+            // Real `BaseExceptionGroup.__str__` is a SHALLOW one-line
+            // summary (`f"{msg} ({len(excs)} sub-exception{'s' if ... }"`)
+            // — it does NOT recursively format nested sub-exceptions at
+            // all (that expansion only happens in `traceback.py`'s dedicated
+            // tree-drawing formatter, which applies real depth/width
+            // limits). Falling through to the generic `self.repr()` default
+            // below (which DOES recurse fully into every arg and every
+            // sub-exception, with no depth limit) turned any deeply-nested
+            // ExceptionGroup's plain `str(eg)` into unbounded recursion —
+            // confirmed real: `test_traceback.py`'s
+            // `test_exception_group_depth_limit` builds a 1000-level-deep
+            // group specifically to test real CPython's depth-limited tree
+            // formatter, and merely stringifying it here (as part of this
+            // project's own exception-message formatting) allocated
+            // gigabytes and got OOM-killed before ever reaching that
+            // formatter.
+            PyObject::ExceptionGroup { typ, args, exceptions } => {
+                // `args` here is `(message, exceptions_tuple)`, matching
+                // real CPython's own `BaseExceptionGroup.args` shape — ONLY
+                // `args[0]` (the message) belongs in `__str__`. Using the
+                // generic multi-arg `Exception` formatting above (which
+                // `.repr()`s every element of `args`, including the
+                // exceptions tuple) was the actual bug: for a 1000-level
+                // deep group it re-triggered exactly the same unbounded
+                // recursive repr this whole fix exists to avoid, just one
+                // call site further down.
+                let msg = args.first().map(|a| a.str()).unwrap_or_default();
+                let n = exceptions.len();
+                let _ = typ;
+                format!("{} ({} sub-exception{})", msg, n, if n == 1 { "" } else { "s" })
+            }
             _ => self.repr(),
         }
     }

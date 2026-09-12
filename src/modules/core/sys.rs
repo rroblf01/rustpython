@@ -81,6 +81,34 @@ thread_local! {
     // 'settrace'` on every single test in the file, rather than crashing
     // before even reaching whatever the test itself checks.
     static CURRENT_TRACE_FUNC: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+
+    // `sys.setprofile`/`getprofile`: same get/set-only stub shape as
+    // `CURRENT_TRACE_FUNC` above (no real 'call'/'return'/'c_call'/
+    // 'c_return' event dispatch — that needs the same deep VM
+    // instrumentation `settrace` already documents as out of scope). Exists
+    // so `Lib/profile.py`'s pure-Python `Profile.runctx`/`runcall`
+    // (`sys.setprofile(self.dispatcher)` / `sys.setprofile(None)`) don't
+    // raise `AttributeError: module 'sys' has no attribute 'setprofile'`
+    // before even reaching the statement being profiled.
+    static CURRENT_PROFILE_FUNC: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
+
+pub fn sys_setprofile_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let func = args.first().cloned().unwrap_or_else(py_none);
+    CURRENT_PROFILE_FUNC.with(|f| {
+        *f.borrow_mut() = if matches!(&*func.borrow(), PyObject::None) {
+            None
+        } else {
+            Some(func)
+        };
+    });
+    Ok(py_none())
+}
+
+pub fn sys_getprofile_builtin(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    Ok(CURRENT_PROFILE_FUNC
+        .with(|f| f.borrow().clone())
+        .unwrap_or_else(py_none))
 }
 
 thread_local! {
@@ -477,7 +505,20 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     d.insert_str("path", py_list(vec![]));
     d.insert_str("modules", py_dict());
     d.insert_str("warnoptions", py_list(vec![]));
-    d.insert_str("version", py_str("3.12.0 (RustPython 0.1.0)"));
+    // Real CPython's `sys.version` has a specific, stable, parseable shape
+    // (`<version> (<branch>, <build date>) [<compiler>]`) that real stdlib
+    // code parses via regex — `Lib/platform.py`'s `_sys_version()`, used by
+    // `platform.python_version()`/`platform.platform()`, real trigger:
+    // `test_wsgiref.py` (which calls `platform.python_version()` at import
+    // time) crashed entirely on the old, non-matching
+    // `"3.12.0 (RustPython 0.1.0)"` shape. Keeps "RustPython" visible (in
+    // the compiler bracket) so every `'rustpython' in sys.version.lower()`
+    // test-skip marker across the corpus still matches, and keeps the
+    // version number consistent with `sys.version_info` below (unchanged).
+    d.insert_str(
+        "version",
+        py_str("3.12.0 (main, Sep 12 2026, 00:00:00) [RustPython 0.1.0]"),
+    );
     // sys.version_info — structseq (tuple + attributes) like
     // time.struct_time: supports both v[0] and v.major. Plain tuple
     // broke attribute access (`'tuple' object has no attribute
@@ -1217,6 +1258,8 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     });
     sys_func!("settrace", sys_settrace_builtin);
     sys_func!("gettrace", sys_gettrace_builtin);
+    sys_func!("setprofile", sys_setprofile_builtin);
+    sys_func!("getprofile", sys_getprofile_builtin);
     sys_func!("_getframe", sys_getframe_builtin);
     sys_func!("is_remote_debug_enabled", |_args| Ok(py_bool(false)));
     sys_func!("get_int_max_str_digits", |_| {

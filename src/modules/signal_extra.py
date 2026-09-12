@@ -44,3 +44,12 @@ class Handlers(IntEnum):
     """An enumeration of signal handler values."""
     SIG_DFL = 0
     SIG_IGN = 1
+
+
+def default_int_handler(signum, frame):
+    """The default handler for SIGINT installed by Python: raises KeyboardInterrupt.
+
+    Real CPython's default_int_handler is the actual C-level function bound
+    as the default SIGINT handler; matches its exact signature/behavior.
+    """
+    raise KeyboardInterrupt()

@@ -688,9 +688,33 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     "expandtabs" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "expandtabs".to_string(),
                         func: |args| {
+                            if args.len() > 2 && !matches!(&*args[1].borrow(), PyObject::Dict(_))
+                            {
+                                return Err(PyError::type_error(format!(
+                                    "expandtabs() takes at most 1 argument ({} given)",
+                                    args.len() - 1,
+                                )));
+                            }
                             let s = args[0].str();
+                            // `expandtabs(tabsize=N)` is a common calling
+                            // style (see `test_expandtabs`'s "check keyword
+                            // args" cases) — kwargs are packed as a trailing
+                            // dict appended to `args` (see the calling-
+                            // convention gotcha documented project-wide),
+                            // so a bare `args[1].as_i64()` silently treated
+                            // that dict as "not an int" and fell back to the
+                            // default tabsize of 8, ignoring the caller's
+                            // explicit value entirely.
                             let tabsize = if args.len() > 1 {
-                                args[1].as_i64().unwrap_or(8) as usize
+                                if let PyObject::Dict(d) = &*args[1].borrow() {
+                                    d.get(&py_str("tabsize"))
+                                        .ok()
+                                        .flatten()
+                                        .and_then(|v| v.as_i64())
+                                        .unwrap_or(8) as usize
+                                } else {
+                                    args[1].as_i64().unwrap_or(8) as usize
+                                }
                             } else {
                                 8
                             };

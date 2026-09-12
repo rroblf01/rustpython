@@ -12,7 +12,7 @@ impl VirtualMachine {
     /// disposable one (class bodies can execute during interpreter
     /// bootstrap, where a fresh VM would recurse; same hazard documented
     /// on `STORE_SUBSCR`).
-    fn class_ns_set(
+    pub(crate) fn class_ns_set(
         &mut self,
         prepared: &PyObjectRef,
         name: &str,

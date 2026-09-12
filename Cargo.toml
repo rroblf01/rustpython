@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [profile.release]
-opt-level = 3       # Optimizar por velocidad (test/benchmark throughput)
-lto = "thin"        # Thin LTO (less RAM than full LTO)
-codegen-units = 4   # Fewer units = better optimization
-strip = "symbols"   # Strip debug symbols
-panic = "abort"     # Abort on panic (less code)
+opt-level = 3       # throughput máx. (microbench + test_cpython)
+lto = true          # fat LTO — +5-15% vs thin a costa de RAM de build
+codegen-units = 1   # una unidad = mejor inline/LTO (build más lento, runtime más rápido)
+strip = "symbols"
+panic = "abort"
 
 [profile.release-lite]
 inherits = "release"

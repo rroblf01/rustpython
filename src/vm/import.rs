@@ -250,6 +250,23 @@ impl VirtualMachine {
                                 break 'outer;
                             }
                             }
+                            // Neither `child.py` nor `child/__init__.py` exists
+                            // as a real file under this `base` — `base` may
+                            // itself be (a directory prefix ending inside) a
+                            // zip archive on `sys.path`, e.g. a package
+                            // living inside a `.zip` whose `__path__` entry
+                            // is `archive.zip/pkgname`. Real filesystem
+                            // lookups above always miss those since
+                            // `read_module_source` is a plain `std::fs::read`.
+                            if let Some(module) =
+                                self.try_zip_import(base_trimmed, &full_name, child)?
+                            {
+                                found_child = true;
+                                current_name = full_name;
+                                parent_path = None;
+                                let _ = module;
+                                break 'outer;
+                            }
                             }
                         if !found_child {
                             // Neither `child.py` nor `child/__init__.py` exists
@@ -299,10 +316,14 @@ impl VirtualMachine {
                 if let Some(sys_mod) = self.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                         if let Some(mod_dict) = dict.get_str("modules").cloned() {
-                            mod_dict
-                                .borrow_mut()
-                                .set_attribute(name, empty_mod.clone())
-                                .ok();
+                            // `sys.modules` is a plain `dict` — setting a KEY
+                            // needs `PyDict::set`, not `set_attribute` (which
+                            // only supports attribute-style access and always
+                            // fails, silently via the `.ok()` this replaced,
+                            // for a bare `PyObject::Dict`).
+                            if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                                let _ = d.set(py_str(name), empty_mod.clone());
+                            }
                         }
                     }
                 }
@@ -329,14 +350,15 @@ impl VirtualMachine {
                     }
                 };
                 self.modules.insert(name.to_string(), module.clone());
-                // Wire submodule into parent module namespace and update sys.modules
+                // Wire submodule into parent module namespace and update
+                // sys.modules (see the matching comment above: `set_attribute`
+                // is a no-op on a plain `dict` — use `PyDict::set`).
                 if let Some(sys_mod) = self.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                         if let Some(mod_dict) = dict.get_str("modules").cloned() {
-                            mod_dict
-                                .borrow_mut()
-                                .set_attribute(name, module.clone())
-                                .ok();
+                            if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                                let _ = d.set(py_str(name), module.clone());
+                            }
                         }
                     }
                 }
@@ -370,10 +392,11 @@ impl VirtualMachine {
                 if let Some(sys_mod) = self.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                         if let Some(mod_dict) = dict.get_str("modules").cloned() {
-                            mod_dict
-                                .borrow_mut()
-                                .set_attribute(name, empty_mod.clone())
-                                .ok();
+                            // See the matching comment above: `set_attribute`
+                            // is a no-op on a plain `dict` — use `PyDict::set`.
+                            if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                                let _ = d.set(py_str(name), empty_mod.clone());
+                            }
                         }
                     }
                 }
@@ -394,17 +417,27 @@ impl VirtualMachine {
                     }
                 };
                 self.modules.insert(name.to_string(), module.clone());
-                // Update sys.modules with the loaded module (overwrites empty stub)
+                // Update sys.modules with the loaded module (overwrites empty
+                // stub). See the matching comment above: `set_attribute` is
+                // a no-op on a plain `dict` — use `PyDict::set`.
                 if let Some(sys_mod) = self.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                         if let Some(mod_dict) = dict.get_str("modules").cloned() {
-                            mod_dict
-                                .borrow_mut()
-                                .set_attribute(name, module.clone())
-                                .ok();
+                            if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                                let _ = d.set(py_str(name), module.clone());
+                            }
                         }
                     }
                 }
+                return Ok(module);
+            }
+            // Neither `<name>.py` nor `<name>/__init__.py` exists as a real
+            // file directly under this `sys.path` entry — `base` may itself
+            // be (a directory prefix ending inside) a zip archive, e.g.
+            // `sys.path.insert(0, "archive.zip/pre/fix")` (zipimport's own
+            // test suite does exactly this). Real filesystem lookups above
+            // always miss those.
+            if let Some(module) = self.try_zip_import(base, name, &py_name)? {
                 return Ok(module);
             }
             // Try loading as a .so C extension (requires the "ffi" feature)
@@ -466,6 +499,238 @@ impl VirtualMachine {
             }
         }
         vec![]
+    }
+
+    /// If `path` is (a directory prefix ending inside) a real ZIP archive
+    /// on disk — e.g. `"archive.zip/pre/fix"` — return
+    /// `(archive_file_path, intra_archive_prefix)`. Walks from the full
+    /// path upward, trimming trailing path components, until a prefix
+    /// that exists on disk as a regular FILE (not a directory) is found;
+    /// that's the archive boundary CPython's own zipimport uses (a `.zip`
+    /// need not even have that extension — any file zipimport can open as
+    /// a zip archive works, matched here by "is a file", with the actual
+    /// zip-format validation deferred to the real `zipfile.ZipFile` this
+    /// delegates to in `read_zip_member`).
+    pub(crate) fn split_zip_archive(path: &str) -> Option<(String, String)> {
+        let all: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+        let mut consumed = all.len();
+        while consumed > 0 {
+            let candidate = all[..consumed].join("/");
+            if candidate.is_empty() {
+                break;
+            }
+            if let Ok(meta) = std::fs::metadata(&candidate) {
+                if meta.is_file() {
+                    let prefix = all[consumed..].join("/");
+                    return Some((candidate, prefix));
+                }
+            }
+            consumed -= 1;
+        }
+        None
+    }
+
+    /// Read one member's raw bytes out of a real ZIP archive by delegating
+    /// to the actual (vendored, pure-Python) `zipfile.ZipFile` — rather
+    /// than hand-rolling a ZIP central-directory/deflate reader in Rust —
+    /// since a working implementation already exists and this only needs
+    /// read access. Returns `None` on ANY failure (archive doesn't parse,
+    /// member doesn't exist, etc.) so callers can treat it exactly like a
+    /// missing file and keep searching.
+    pub(crate) fn read_zip_member(&mut self, archive: &str, member: &str) -> Option<Vec<u8>> {
+        // `import_module_from_file` (unlike the normal `IMPORT_NAME`
+        // opcode path) does NOT check `sys.modules`/`self.modules` first —
+        // callers are expected to. Skipping that check here caused
+        // `zipfile` to be fully re-executed on EVERY zip lookup, and since
+        // `zipfile.py` itself does `import bz2`/`import lzma` (uncached
+        // when those C-extension modules aren't available), each
+        // re-execution re-triggered a full sys.path search that came back
+        // through this exact zip archive and reimported `zipfile` again —
+        // an unbounded reentrant blow-up (hit the `import recursion too
+        // deep` guard within milliseconds, and without it would hang).
+        let dbg = std::env::var("RPY_DEBUG_IMPORT").is_ok();
+        let zipfile_mod = match self.modules.get("zipfile").cloned() {
+            Some(m) => m,
+            None => match self.import_module_from_file("zipfile") {
+                Ok(m) => m,
+                Err(e) => {
+                    if dbg { eprintln!("ZIP_READ: import zipfile failed: {}", e); }
+                    return None;
+                }
+            },
+        };
+        let zipfile_cls = match zipfile_mod.borrow().get_attribute("ZipFile") {
+            Ok(c) => c,
+            Err(e) => {
+                if dbg { eprintln!("ZIP_READ: get ZipFile attr failed: {}", e); }
+                return None;
+            }
+        };
+        let zf = match self.call_function(zipfile_cls, vec![py_str(archive)], vec![]) {
+            Ok(z) => z,
+            Err(e) => {
+                if dbg { eprintln!("ZIP_READ: ZipFile({}) failed: {}", archive, e); }
+                return None;
+            }
+        };
+        // `get_attribute` alone (as opposed to `call_method_rebound`) hands
+        // back an UNBOUND method for a plain Python `Function` attribute —
+        // calling it directly left `self` unfilled and `name` bound to
+        // what should've been `self`, raising "read() missing 1 required
+        // positional argument: 'name'".
+        let data = match crate::object::call_method_rebound(self, &zf, "read", vec![py_str(member)])
+        {
+            Ok(d) => d,
+            Err(e) => {
+                if dbg { eprintln!("ZIP_READ: read({}) failed: {}", member, e); }
+                let _ = crate::object::call_method_rebound(self, &zf, "close", vec![]);
+                return None;
+            }
+        };
+        let bytes = if let PyObject::Bytes(b) = &*data.borrow() {
+            Some(b.clone())
+        } else {
+            None
+        };
+        // Best-effort close; a leaked file handle here doesn't affect
+        // correctness of what we already read.
+        let _ = crate::object::call_method_rebound(self, &zf, "close", vec![]);
+        bytes
+    }
+
+    /// Try importing `full_name` as `<py_name_slash>` found inside a ZIP
+    /// archive reachable through the `sys.path`/`__path__` entry `base`
+    /// (see `split_zip_archive`). On success, fully registers the module
+    /// (empty stub + `sys.modules` + parent-package wiring) exactly like
+    /// the plain-filesystem branches above, then executes it and returns
+    /// it; on "not found here" returns `Ok(None)` so the caller's search
+    /// continues to the next `sys.path` entry.
+    fn try_zip_import(
+        &mut self,
+        base: &str,
+        full_name: &str,
+        py_name_slash: &str,
+    ) -> PyResult<Option<PyObjectRef>> {
+        let (archive, prefix) = match Self::split_zip_archive(base) {
+            Some(x) => x,
+            None => return Ok(None),
+        };
+        let prefix_norm = if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", prefix)
+        };
+        // Order matches real CPython's `_zip_searchorder` in
+        // `Lib/zipimport.py`: package `__init__` before a plain module,
+        // and bytecode (`.pyc`) before source (`.py`) at each tier — so
+        // when a zip has BOTH `x.py` and `x.pyc`, the `.pyc` one wins
+        // (confirmed by the test suite's own `testBoth`, which expects
+        // the `.pyc` extension when both are present).
+        let candidates = [
+            (
+                format!("{}{}/__init__.pyc", prefix_norm, py_name_slash),
+                true,
+            ),
+            (format!("{}{}/__init__.py", prefix_norm, py_name_slash), true),
+            (format!("{}{}.pyc", prefix_norm, py_name_slash), false),
+            (format!("{}{}.py", prefix_norm, py_name_slash), false),
+        ];
+        for (member, _is_pkg) in candidates.iter() {
+            let data = match self.read_zip_member(&archive, member) {
+                Some(d) => d,
+                None => continue,
+            };
+            let virtual_path = format!("{}/{}", archive, member);
+            let code = if member.ends_with(".pyc") {
+                if data.len() < 16 {
+                    continue;
+                }
+                match crate::modules::code_object_from_marshal_bytes(&data[16..]) {
+                    Some(c) => c,
+                    None => continue,
+                }
+            } else {
+                let source = match crate::object::import_builtin::decode_source_bytes(&data) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let mut parser = crate::parser::Parser::new(&source);
+                let program = match parser.parse_program() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                let mut compiler = crate::compiler::Compiler::new();
+                match compiler.compile(&program, &virtual_path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                }
+            };
+
+            let is_pkg = virtual_path.ends_with("__init__.py") || virtual_path.ends_with("__init__.pyc");
+            let empty_dict = if is_pkg {
+                if let Some(pkg_dir) = std::path::Path::new(&virtual_path).parent() {
+                    HashMap::from([
+                        (
+                            "__path__".to_string(),
+                            py_list(vec![py_str(&pkg_dir.to_string_lossy().to_string())]),
+                        ),
+                        ("__package__".to_string(), py_str(full_name)),
+                    ])
+                } else {
+                    HashMap::new()
+                }
+            } else {
+                HashMap::new()
+            };
+            let empty_mod = create_module(full_name, empty_dict);
+            self.modules.insert(full_name.to_string(), empty_mod.clone());
+            if let Some(sys_mod) = self.modules.get("sys") {
+                if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                    if let Some(mod_dict) = dict.get_str("modules").cloned() {
+                        if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                            let _ = d.set(py_str(full_name), empty_mod.clone());
+                        }
+                    }
+                }
+            }
+            let module = match self.exec_module_code(code, &virtual_path, full_name) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.modules.remove(full_name);
+                    if let Some(sys_mod) = self.modules.get("sys").cloned() {
+                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                            if let Some(mod_dict) = dict.get_str("modules").cloned() {
+                                if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                                    let _ = d.remove(&py_str(full_name));
+                                }
+                            }
+                        }
+                    }
+                    return Err(e);
+                }
+            };
+            self.modules.insert(full_name.to_string(), module.clone());
+            if let Some(sys_mod) = self.modules.get("sys") {
+                if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                    if let Some(mod_dict) = dict.get_str("modules").cloned() {
+                        if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                            let _ = d.set(py_str(full_name), module.clone());
+                        }
+                    }
+                }
+            }
+            if let Some(dot_pos) = full_name.rfind('.') {
+                let parent_name = full_name[..dot_pos].to_string();
+                let child_name = full_name[dot_pos + 1..].to_string();
+                if let Some(parent_mod) = self.modules.get(&parent_name).cloned() {
+                    if let PyObject::Module { dict, .. } = &mut *parent_mod.borrow_mut() {
+                        dict.insert_str(&child_name, module.clone());
+                    }
+                }
+            }
+            return Ok(Some(module));
+        }
+        Ok(None)
     }
 
     /// Read a `.py` source file off disk and decode it as real Python would:
@@ -589,6 +854,91 @@ impl VirtualMachine {
             }
         };
 
+        self.exec_module_code(code, path, name)
+    }
+
+    /// Shared tail of `exec_module_source` (and of zip-archive import —
+    /// see `try_import_from_zip_path` — which obtains its `CodeObject`
+    /// straight from a `.pyc` member's marshalled bytes instead of
+    /// compiling `.py` source, so it can't go through
+    /// `exec_module_source` itself): builds the module globals, registers
+    /// in `sys.modules`, executes the code object, and returns the
+    /// finished module.
+    /// Execute `code` INTO an already-existing module object (as opposed to
+    /// `exec_module_code`, which always builds and returns a brand new
+    /// one) — needed for PEP 451 `Loader.exec_module(module)`, where
+    /// `importlib.util.module_from_spec` has already created the module
+    /// object (setting `__name__`/`__file__`/`__loader__`/`__spec__`) and
+    /// the caller expects THAT SAME object to be mutated in place, not a
+    /// second, disconnected one (`zipimporter.exec_module`, see
+    /// `zipimporter_method_with_vm` in `src/modules/dev/language.rs`).
+    pub(crate) fn exec_code_into_existing_module(
+        &mut self,
+        module_obj: &PyObjectRef,
+        code: CodeObject,
+        path: &str,
+        name: &str,
+        is_package: bool,
+        pkg_path: Option<String>,
+    ) -> PyResult<()> {
+        let builtins_module = self.modules.get("builtins").cloned().unwrap_or_else(|| {
+            create_module(
+                "builtins",
+                self.builtins
+                    .iter()
+                    .map(|(k, v)| (interner::lookup_str(*k).to_string(), v.clone()))
+                    .collect(),
+            )
+        });
+        let mut globals_map: HashMap<StrId, PyObjectRef> = HashMap::new();
+        if let PyObject::Module { dict, .. } = &*module_obj.borrow() {
+            for (k, v) in dict.iter() {
+                globals_map.insert(*k, v.clone());
+            }
+        }
+        globals_map
+            .entry(interner::intern("__name__"))
+            .or_insert_with(|| py_str(name));
+        globals_map.insert(interner::intern("__file__"), py_str(path));
+        globals_map
+            .entry(interner::intern("__builtins__"))
+            .or_insert(builtins_module);
+        if is_package {
+            if let Some(p) = pkg_path {
+                globals_map.insert(interner::intern("__path__"), py_list(vec![py_str(&p)]));
+            }
+            globals_map
+                .entry(interner::intern("__package__"))
+                .or_insert_with(|| py_str(name));
+        } else {
+            let pkg = name.rfind('.').map(|d| &name[..d]).unwrap_or("");
+            globals_map
+                .entry(interner::intern("__package__"))
+                .or_insert_with(|| py_str(pkg));
+        }
+        let module_globals = Rc::new(RefCell::new(globals_map));
+        crate::object::register_module_globals(name, Rc::clone(&module_globals));
+        if let PyObject::Module { dict, .. } = &mut *module_obj.borrow_mut() {
+            for (k, v) in module_globals.borrow().iter() {
+                dict.insert(*k, v.clone());
+            }
+        }
+        self.exec_code_with_module(code, Some(Rc::clone(&module_globals)), Some(module_obj.clone()))?;
+        let globals_copy = module_globals.borrow().clone();
+        if let PyObject::Module { dict, .. } = &mut *module_obj.borrow_mut() {
+            for (k, v) in globals_copy {
+                dict.insert(k, v);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn exec_module_code(
+        &mut self,
+        code: CodeObject,
+        path: &str,
+        name: &str,
+    ) -> PyResult<PyObjectRef> {
         let is_package = path.ends_with("__init__.py");
         // `__builtins__` must be the SAME shared `builtins` module that
         // `import builtins` returns and that `LOAD_GLOBAL` consults — not a

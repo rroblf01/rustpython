@@ -3,6 +3,138 @@ use std::collections::HashMap;
 use crate::modules::misc::pickle_ser::pickle_serialize;
 use crate::modules::misc::pickle_de::{pickle_deserialize, try_unpickle_rangeiter_compat};
 
+/// Shared `pickle.loads`/`_pickle.loads` implementation. `vm` is `Some` only
+/// when reached through the `fn_addr_eq` interception in `src/vm/call.rs`
+/// (see the `with_vm_mut`-is-unsound gotcha) — it lets a pickled `GLOBAL`
+/// opcode reference to a module that hasn't been imported yet (e.g.
+/// `test_pickle.py::test_unpickle_module_race`'s
+/// `locking_import.ToBeUnpickled`) trigger a real import instead of only
+/// checking the already-populated class registry / `sys.modules`.
+pub(crate) fn pickle_loads_impl(
+    args: &[PyObjectRef],
+    vm: Option<&mut crate::vm::VirtualMachine>,
+) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("loads() missing required argument"));
+    }
+    let data: Vec<u8> = match &*args[0].borrow() {
+        PyObject::Bytes(b) => b.clone(),
+        PyObject::Str(s) => s.as_bytes().to_vec(),
+        _ => {
+            return Err(PyError::type_error(
+                "loads() argument must be bytes or string",
+            ))
+        }
+    };
+    // CPython compat: historical range_iterator pickles (protocols 0-4,
+    // including Python 2 `xrange`) are a different wire format from our
+    // own custom pickle. Try that first so `trailing bytes` doesn't fire.
+    if let Some(v) = try_unpickle_rangeiter_compat(&data) {
+        return Ok(v);
+    }
+    // Real-protocol bytes (CPython or our pure-Python pickle.py): try
+    // the stack-machine parser first; fall back to the legacy custom
+    // format on clean failure.
+    if !data.is_empty() {
+        if let Ok(v) = crate::modules::misc::unpickle_real(&data, vm) {
+            return Ok(v);
+        }
+    }
+    let mut pos = 0;
+    let mut memo: Vec<PyObjectRef> = Vec::new();
+    let result = pickle_deserialize(&data, &mut pos, &mut memo)?;
+    // Skip protocol 0 stop marker (.) if present
+    if pos < data.len() && data[pos] == b'.' {
+        pos += 1;
+    }
+    if pos != data.len() {
+        return Err(PyError::type_error(format!(
+            "pickle data has trailing bytes after value (pos={}, len={})",
+            pos,
+            data.len()
+        )));
+    }
+    Ok(result)
+}
+
+/// Plain (no-VM) entry point — registered as the actual `BuiltinFunction`
+/// for `loads`/`_loads` so its address is stable and matchable via
+/// `fn_addr_eq` in `src/vm/call.rs`.
+pub(crate) fn pickle_loads_plain(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    pickle_loads_impl(args, None)
+}
+
+/// VM-aware entry point, called from `src/vm/call.rs`'s
+/// `try_handle_special_builtin` interception with the real, live
+/// `&mut VirtualMachine` (never through `with_vm_mut`).
+pub(crate) fn pickle_loads_with_vm(
+    vm: &mut crate::vm::VirtualMachine,
+    args: &[PyObjectRef],
+) -> PyResult<PyObjectRef> {
+    pickle_loads_impl(args, Some(vm))
+}
+
+/// Shared `pickle.load(file)` implementation (reads the whole file then
+/// delegates to `pickle_loads_impl`) — same `vm`-threading rationale.
+fn pickle_load_impl(
+    args: &[PyObjectRef],
+    vm: Option<&mut crate::vm::VirtualMachine>,
+) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("load() missing required argument"));
+    }
+    let file = &args[0];
+    let read_m = file
+        .borrow()
+        .get_attribute("read")
+        .map_err(|_| PyError::type_error("load() file must have a read() method"))?;
+    let data = crate::object::builtin_call(&read_m, &[])?;
+    pickle_loads_impl(&[data], vm)
+}
+
+pub(crate) fn pickle_load_plain(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    pickle_load_impl(args, None)
+}
+
+pub(crate) fn pickle_load_with_vm(
+    vm: &mut crate::vm::VirtualMachine,
+    args: &[PyObjectRef],
+) -> PyResult<PyObjectRef> {
+    pickle_load_impl(args, Some(vm))
+}
+
+/// Shared `Unpickler.load()` (bound method) implementation. `args[0]` is
+/// `self` (the `Unpickler` instance) — same `vm`-threading rationale.
+fn unpickler_load_impl(
+    args: &[PyObjectRef],
+    vm: Option<&mut crate::vm::VirtualMachine>,
+) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("load() missing self"));
+    }
+    let file = args[0]
+        .borrow()
+        .get_attribute("file")
+        .map_err(|_| PyError::type_error("Unpickler has no file"))?;
+    let read_m = file
+        .borrow()
+        .get_attribute("read")
+        .map_err(|_| PyError::type_error("load() file must have read()"))?;
+    let data = crate::object::builtin_call(&read_m, &[])?;
+    pickle_loads_impl(&[data], vm)
+}
+
+pub(crate) fn unpickler_load_plain(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    unpickler_load_impl(args, None)
+}
+
+pub(crate) fn unpickler_load_with_vm(
+    vm: &mut crate::vm::VirtualMachine,
+    args: &[PyObjectRef],
+) -> PyResult<PyObjectRef> {
+    unpickler_load_impl(args, Some(vm))
+}
+
 pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! pickle_func {
@@ -286,52 +418,8 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::imm(PyObject::Bytes(buf)))
     });
 
-    fn pickle_loads_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-        if args.is_empty() {
-            return Err(PyError::type_error("loads() missing required argument"));
-        }
-        let data: Vec<u8> = match &*args[0].borrow() {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => {
-                return Err(PyError::type_error(
-                    "loads() argument must be bytes or string",
-                ))
-            }
-        };
-        // CPython compat: historical range_iterator pickles (protocols 0-4,
-        // including Python 2 `xrange`) are a different wire format from our
-        // own custom pickle. Try that first so `trailing bytes` doesn't fire.
-        if let Some(v) = try_unpickle_rangeiter_compat(&data) {
-            return Ok(v);
-        }
-        // Real-protocol bytes (CPython or our pure-Python pickle.py): try
-        // the stack-machine parser first; fall back to the legacy custom
-        // format on clean failure.
-        if !data.is_empty() {
-            match crate::modules::misc::unpickle_real(&data) {
-                Ok(v) => return Ok(v),
-                Err(_) => {}
-            }
-        }
-        let mut pos = 0;
-        let mut memo: Vec<PyObjectRef> = Vec::new();
-        let result = pickle_deserialize(&data, &mut pos, &mut memo)?;
-        // Skip protocol 0 stop marker (.) if present
-        if pos < data.len() && data[pos] == b'.' {
-            pos += 1;
-        }
-        if pos != data.len() {
-            return Err(PyError::type_error(format!(
-                "pickle data has trailing bytes after value (pos={}, len={})",
-                pos,
-                data.len()
-            )));
-        }
-        Ok(result)
-    }
-    pickle_func!("loads", pickle_loads_impl);
-    pickle_func!("_loads", pickle_loads_impl);
+    pickle_func!("loads", pickle_loads_plain);
+    pickle_func!("_loads", pickle_loads_plain);
 
     // Module-level dump/load (file variants). Needed so
     // `from _pickle import dump, ...` (test_pickle's CPickleTests) works.
@@ -365,17 +453,7 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
         crate::object::builtin_call(&write_m, &[data])?;
         Ok(py_none())
     });
-    pickle_func!("load", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("load() missing required argument"));
-        }
-        let file = &args[0];
-        let read_m = file.borrow().get_attribute("read").map_err(|_| {
-            PyError::type_error("load() file must have a read() method")
-        })?;
-        let data = crate::object::builtin_call(&read_m, &[])?;
-        pickle_loads_impl(&[data])
-    });
+    pickle_func!("load", pickle_load_plain);
 
     // Minimal Pickler/Unpickler classes delegating to the functions above.
     // Full protocol semantics (memo exposure, framing, persistent_id)
@@ -488,19 +566,7 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
             "load".to_string(),
             PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "load".to_string(),
-                func: |args| {
-                    if args.is_empty() {
-                        return Err(PyError::type_error("load() missing self"));
-                    }
-                    let file = args[0].borrow().get_attribute("file").map_err(|_| {
-                        PyError::type_error("Unpickler has no file")
-                    })?;
-                    let read_m = file.borrow().get_attribute("read").map_err(|_| {
-                        PyError::type_error("load() file must have read()")
-                    })?;
-                    let data = crate::object::builtin_call(&read_m, &[])?;
-                    pickle_loads_impl(&[data])
-                },
+                func: unpickler_load_plain,
             }),
         );
         d.insert_str(

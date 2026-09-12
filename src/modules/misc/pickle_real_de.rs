@@ -219,7 +219,17 @@ fn unescape_unicode(body: &[u8]) -> String {
 }
 
 /// Resolve `module.name` to a callable (builtins + registered classes).
-fn resolve_global(module: &str, name: &str) -> PyResult<PyObjectRef> {
+/// `vm` is `Some` only when reached through the `pickle.loads`/`pickle.load`/
+/// `Unpickler.load` `fn_addr_eq` interception in `src/vm/call.rs` (never
+/// through `with_vm_mut`) — it lets a module that hasn't been imported yet
+/// get a REAL import (matching CPython's own `find_class`, which does
+/// `__import__(module)` then `getattr(sys.modules[module], name)`) instead
+/// of only checking the already-populated class registry / `sys.modules`.
+fn resolve_global(
+    module: &str,
+    name: &str,
+    vm: Option<&mut crate::vm::VirtualMachine>,
+) -> PyResult<PyObjectRef> {
     // Synthesized `_codecs.encode/decode` FIRST (before find_class, which
     // returns bogus hits for these): protocol 0-2 pickles bytes via
     // `REDUCE(_codecs.encode, (str, 'latin1'))`.
@@ -322,8 +332,18 @@ fn resolve_global(module: &str, name: &str) -> PyResult<PyObjectRef> {
             return Ok(v);
         }
     }
-    // Last resort: import machinery is unreliable from this context
-    // (thread-local VM state); unresolvable names are honest errors.
+    // Real, live VM available: do a genuine import before giving up. This
+    // is what `test_pickle.py::test_unpickle_module_race` actually
+    // exercises: the target module (`locking_import`) is not yet imported
+    // when `pickle.loads` runs and must be imported for real, not merely
+    // looked up in an already-populated `sys.modules`.
+    if let Some(vm) = vm {
+        if let Ok(m) = import_impl(vm, module, module.contains('.'), false) {
+            if let Ok(v) = m.borrow().get_attribute(name) {
+                return Ok(v);
+            }
+        }
+    }
     Err(unpickling_error(format!(
         "cannot resolve global {module}.{name}"
     )))
@@ -359,7 +379,10 @@ fn memo_get(memo: &[PyObjectRef], idx: usize) -> PyResult<PyObjectRef> {
 
 /// Parse real-protocol pickle bytes with a stack machine.
 /// Returns the value at STOP. All reads are bounds-checked.
-pub fn unpickle_real(data: &[u8]) -> PyResult<PyObjectRef> {
+pub fn unpickle_real(
+    data: &[u8],
+    mut vm: Option<&mut crate::vm::VirtualMachine>,
+) -> PyResult<PyObjectRef> {
     let mut pos = 0usize;
     let mut stack: Vec<StackVal> = Vec::new();
     let mut memo: Vec<PyObjectRef> = Vec::new();
@@ -597,6 +620,20 @@ pub fn unpickle_real(data: &[u8]) -> PyResult<PyObjectRef> {
             }
             // containers
             b'(' => stack.push(StackVal::Mark),
+            b')' => {
+                // EMPTY_TUPLE: pushes `()` directly (no MARK involved) —
+                // real CPython's own pickler emits this for any
+                // zero-argument NEWOBJ/REDUCE args tuple, the overwhelmingly
+                // common case (any class pickled via `__reduce__`/
+                // `__getnewargs__` returning no args). Was entirely
+                // unhandled here, falling through to the generic "unknown
+                // opcode" error and silently discarding whatever this whole
+                // `unpickle_real` parse had already built (confirmed via
+                // `test_pickle.py::test_unpickle_module_race`'s
+                // `b'\x80\x03clocking_import\nToBeUnpickled\nq\x00)\x81q\x01.'`
+                // — the `)` right before NEWOBJ).
+                stack.push(StackVal::Val(py_tuple(vec![])));
+            }
             b']' => stack.push(StackVal::Val(py_list(vec![]))),
             b'}' => stack.push(StackVal::Val(py_dict())),
             0x8f => stack.push(StackVal::Val(PyObjectRef::new(PyObject::Set(
@@ -806,7 +843,11 @@ pub fn unpickle_real(data: &[u8]) -> PyResult<PyObjectRef> {
                 // GLOBAL: module\nname\n
                 let module = read_global_str(data, &mut pos)?;
                 let name = read_global_str(data, &mut pos)?;
-                stack.push(StackVal::Val(resolve_global(&module, &name)?));
+                stack.push(StackVal::Val(resolve_global(
+                    &module,
+                    &name,
+                    vm.as_mut().map(|v| &mut **v),
+                )?));
             }
             0x93 => {
                 // STACK_GLOBAL: pops name then module name.
@@ -815,6 +856,7 @@ pub fn unpickle_real(data: &[u8]) -> PyResult<PyObjectRef> {
                 stack.push(StackVal::Val(resolve_global(
                     &module_v.str(),
                     &name_v.str(),
+                    vm.as_mut().map(|v| &mut **v),
                 )?));
             }
             b'R' => {

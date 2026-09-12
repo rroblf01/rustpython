@@ -75,7 +75,16 @@ pub fn run_weakref_callbacks() {
         for k in keys {
             let mut live_entries = Vec::new();
             if let Some(vec) = m.get(&k) {
-                for e in vec {
+                // CPython fires weakref callbacks for the same target in the
+                // REVERSE of their creation order (see `weakref.ref` docs:
+                // "If there are multiple weak references to the same object,
+                // the callbacks are called in the order shown" — that order
+                // being most-recently-created first). `weakref.finalize`
+                // relies on this exact ordering (`test_weakref.py`'s
+                // `test_order`): finalizers registered later must run before
+                // ones registered earlier when their shared target dies.
+                let mut dead_calls = Vec::new();
+                for e in vec.iter().rev() {
                     if let Some(rc) = e.weakref.upgrade() {
                         let target_alive = {
                             let b = rc.borrow();
@@ -85,15 +94,16 @@ pub fn run_weakref_callbacks() {
                             }
                         };
                         if target_alive {
-                            live_entries.push(WeakEntry { weakref: std::rc::Rc::downgrade(&rc), callback: e.callback.clone() });
-                        } else {
-                            if let Some(cb) = e.callback.clone() {
-                                let wr_obj = PyObjectRef::Imm(rc.clone());
-                                to_call.push((wr_obj, cb));
-                            }
+                            // Preserve original (creation) order for entries
+                            // that survive this pass.
+                            live_entries.insert(0, WeakEntry { weakref: std::rc::Rc::downgrade(&rc), callback: e.callback.clone() });
+                        } else if let Some(cb) = e.callback.clone() {
+                            let wr_obj = PyObjectRef::Imm(rc.clone());
+                            dead_calls.push((wr_obj, cb));
                         }
                     }
                 }
+                to_call.extend(dead_calls);
             }
             if live_entries.is_empty() {
                 m.remove(&k);

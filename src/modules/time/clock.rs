@@ -912,6 +912,35 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_float(now.as_secs_f64()))
     });
 
+    // process_time() -> float (CPU time consumed by this process, both
+    // user and system, excluding sleep — real POSIX `clock_gettime(
+    // CLOCK_PROCESS_CPUTIME_ID)`). Was missing entirely (`get_clock_info`
+    // referenced the NAME "process_time" in its info string, but no
+    // `time.process_time` function existed at all), breaking anything
+    // using it as a default timer — e.g. `profile.Profile()`'s pure-Python
+    // implementation (`Lib/profile.py`) defaults to `time.process_time`
+    // when no explicit timer is passed.
+    time_func!("process_time", |_args| {
+        #[repr(C)]
+        struct Timespec {
+            tv_sec: i64,
+            tv_nsec: i64,
+        }
+        extern "C" {
+            fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32;
+        }
+        const CLOCK_PROCESS_CPUTIME_ID: i32 = 2;
+        let mut ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let rc = unsafe { clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
+        if rc != 0 {
+            return Err(PyError::os_error_from_io(&std::io::Error::last_os_error()));
+        }
+        Ok(py_float(ts.tv_sec as f64 + ts.tv_nsec as f64 / 1_000_000_000.0))
+    });
+
     // Constants
     d.insert_str("altzone", py_int(0));
     d.insert_str("daylight", py_int(0));

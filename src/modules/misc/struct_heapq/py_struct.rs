@@ -43,6 +43,25 @@ struct StructFmtItem {
     count: usize,
 }
 
+/// Real `struct.pack`/`unpack`/etc. accept the format as EITHER `str` or
+/// `bytes` (CPython's `_struct.c` decodes a bytes format ascii-wise before
+/// parsing). Call sites here previously used the generic `.str()` helper
+/// unconditionally, which for a `bytes` argument returns its Python `repr`
+/// (`"b'<4s4H2LH'"`, quotes/prefix and all) rather than decoding it — so
+/// any caller passing a bytes format string (e.g. `Lib/zipfile`'s own
+/// `structEndArchive = b"<4s4H2LH"`) got a mangled format string and a
+/// nonsensical `TypeError` deep in the packer instead of packing
+/// correctly. Mirrors the pattern `calcsize` already used correctly below.
+fn fmt_to_str(v: &PyObjectRef) -> PyResult<String> {
+    match &*v.borrow() {
+        PyObject::Str(s) => Ok(s.to_string()),
+        PyObject::Bytes(b) => std::str::from_utf8(b)
+            .map(|s| s.to_string())
+            .map_err(|_| PyError::type_error("struct format requires a string or bytes")),
+        _ => Ok(v.str()),
+    }
+}
+
 fn parse_struct_format(fmt: &str) -> PyResult<(StructByteOrder, Vec<StructFmtItem>)> {
     let mut chars = fmt.chars().peekable();
     let mut order = StructByteOrder::Little;
@@ -301,7 +320,7 @@ fn struct_pack_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             "pack() missing required argument: 'format'",
         ));
     }
-    let fmt = args[0].str();
+    let fmt = fmt_to_str(&args[0])?;
     let (order, items) = parse_struct_format(&fmt)?;
     let mut out = Vec::new();
     let mut arg_idx = 1usize;
@@ -470,7 +489,7 @@ fn struct_unpack_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             "unpack() requires format string and buffer",
         ));
     }
-    let fmt = args[0].str();
+    let fmt = fmt_to_str(&args[0])?;
     let buf =
         arg_bytes(&args[1]).ok_or_else(|| PyError::type_error("unpack() arg 2 must be bytes"))?;
     let values = struct_unpack_buf(&fmt, &buf)?;
@@ -483,7 +502,7 @@ fn struct_unpack_from_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             "unpack_from() requires format string and buffer",
         ));
     }
-    let fmt = args[0].str();
+    let fmt = fmt_to_str(&args[0])?;
     let buf = arg_bytes(&args[1])
         .ok_or_else(|| PyError::type_error("unpack_from() arg 2 must be bytes"))?;
     let offset = if args.len() > 2 {
@@ -513,7 +532,7 @@ fn struct_pack_into_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             "pack_into() requires format, buffer, offset",
         ));
     }
-    let fmt = args[0].str();
+    let fmt = fmt_to_str(&args[0])?;
     let offset = if args.len() > 2 {
         args[2].as_i64().unwrap_or(0)
     } else {
@@ -555,7 +574,7 @@ fn struct_iter_unpack_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             "iter_unpack() requires format string and buffer",
         ));
     }
-    let fmt = args[0].str();
+    let fmt = fmt_to_str(&args[0])?;
     let buf = arg_bytes(&args[1])
         .ok_or_else(|| PyError::type_error("iter_unpack() arg 2 must be bytes"))?;
     let unit = struct_calcsize(&fmt)?;

@@ -251,7 +251,7 @@ impl VirtualMachine {
             vm.install_source_defined_stdlib(
                 "signal",
                 crate::modules::SIGNAL_EXTRA_SOURCE,
-                &["Signals", "Handlers"],
+                &["Signals", "Handlers", "default_int_handler"],
             );
             vm.install_source_defined_stdlib(
                 "asyncio",
@@ -634,7 +634,7 @@ impl VirtualMachine {
         vm.install_source_defined_stdlib(
             "signal",
             crate::modules::SIGNAL_EXTRA_SOURCE,
-            &["Signals", "Handlers"],
+            &["Signals", "Handlers", "default_int_handler"],
         );
         vm.install_source_defined_stdlib(
             "asyncio",

@@ -474,6 +474,20 @@ pub fn call_function_disposable(
             let mut vm = crate::vm::VirtualMachine::new();
             vm.call_function(func.clone(), args, keywords)
         }
+        PyObject::Instance { .. } => {
+            // A plain instance of a user-defined class used as a callable
+            // (e.g. `weakref.finalize`'s `__call__`, or any object with a
+            // `__call__` method) reached through a native/disposable path —
+            // real trigger: weakref callbacks invoked from
+            // `run_weakref_callbacks` (gc.collect()-triggered) can be
+            // arbitrary callables, not just plain functions, since
+            // `weakref.ref(obj, self)` passes `self` (a `finalize` instance)
+            // as the callback. Route through a fresh VM so `__call__` is
+            // looked up via the normal MRO/descriptor path.
+            let _guard = crate::object::NativeDispatchRecursionGuard::enter()?;
+            let mut vm = crate::vm::VirtualMachine::new();
+            vm.call_function(func.clone(), args, keywords)
+        }
         _ => Err(PyError::type_error(format!(
             "'{}' object is not callable",
             func.borrow().type_name()

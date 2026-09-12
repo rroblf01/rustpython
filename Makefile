@@ -44,8 +44,8 @@ build:
 	@echo -e "$(GREEN)✔  $(RUSTPYTHON)$(RESET)"
 
 release:
-	@echo -e "$(CYAN)==> Building (release, LTO)...$(RESET)"
-	cargo build --release
+	@echo -e "$(CYAN)==> Building (release, LTO fat)...$(RESET)"
+	RUSTFLAGS="-C target-cpu=native" cargo build --release
 	@echo -e "$(GREEN)✔  $(RUSTPYTHON_REL)$(RESET)"
 	@echo -e "    Binary size: $$(stat --printf='%s' $(RUSTPYTHON_REL) 2>/dev/null | numfmt --to=iec || echo '?')"
 
@@ -105,7 +105,7 @@ test-rust:
 
 build-test:
 	@echo -e "$(CYAN)==> Building test binary (features: $(RUSTPYTHON_TEST_FEATURES))...$(RESET)"
-	cargo build --release --features $(RUSTPYTHON_TEST_FEATURES) --bin rustpython
+	RUSTFLAGS="-C target-cpu=native" cargo build --release --features $(RUSTPYTHON_TEST_FEATURES) --bin rustpython
 	@cp target/release/rustpython $(RUSTPYTHON_TEST)
 
 test-python: build-test
@@ -141,6 +141,15 @@ test-python-verbose: build-test
 	done
 
 # Test a specific Python test file (uses debug binary without sqlite3)
+# TIMEOUT defaults to 60s here (overridable: `make test-one FILE=... TIMEOUT=300`)
+# and always uses `--kill-after=10` — a bare, unwrapped ad-hoc run had NO
+# time or memory backstop at all, unlike the full `make test-cpython` sweep's
+# own runner (`tests/cpython_runner.sh`). A single hung/runaway-memory file
+# run this way took the whole system down via the kernel OOM-killer (real
+# incident: a `sys.settrace`-dependent infinite loop this interpreter's
+# incomplete tracing support failed to interrupt, confirmed via `ulimit -v`-
+# bounded reproduction — see that fix's own comment in cpython_runner.sh).
+TIMEOUT ?= 60
 test-one:
 	@if [ -z "$(FILE)" ]; then \
 		echo "Usage: make test-one FILE=tests/test_name.py"; \
@@ -151,7 +160,7 @@ test-one:
 	testfile="$$(cd "$$(dirname "$(FILE)")" && pwd)/$$(basename "$(FILE)")"; \
 	scratch_dir="$$(mktemp -d "/tmp/rustpython-test-one-scratch.XXXXXX")"; \
 	export PYTHONPATH=$(TEST_VENV_SITE):$${PYTHONPATH:-}; \
-	(cd "$$scratch_dir" && "$$binary" "$$testfile") 2>&1; \
+	(cd "$$scratch_dir" && timeout --kill-after=10 $(TIMEOUT) "$$binary" "$$testfile") 2>&1; \
 	exit_code=$$?; \
 	rm -rf "$$scratch_dir"; \
 	echo "exit code: $$exit_code"

@@ -724,60 +724,504 @@ pub fn create_unittest_dict() -> HashMap<String, PyObjectRef> {
 }
 
 
+/// `zipimporter` method marker — every real zipimporter method (see
+/// `zipimporter_method_with_vm`) is registered under this SAME bare fn
+/// (never actually invoked; reaching it means the `call.rs`/`op_call.rs`
+/// interception was skipped), distinguished purely by the `name` field
+/// `PyObject::BuiltinFunction`/`BuiltinMethod` already carries — avoiding
+/// needing one distinct marker fn (and matching `fn_addr_eq` registration)
+/// per method. Deliberately unique code (not a bare `Ok(py_none())`, which
+/// would get folded onto some OTHER trivial stub's address by thin-LTO —
+/// see the `iobase_exit_marker` doc comment for the concrete hazard this
+/// mirrors) via the panic-style message baked into the `Err`.
+pub fn zipimporter_method_marker(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    Err(PyError::runtime_error(
+        "zipimporter method marker reached directly (interception missing)",
+    ))
+}
+
+fn zi_get_str_attr(self_obj: &PyObjectRef, attr: &str) -> PyResult<String> {
+    if let PyObject::Instance { dict, .. } = &*self_obj.borrow() {
+        if let Some(v) = dict.get_str(attr) {
+            return Ok(v.str());
+        }
+    }
+    Err(PyError::attribute_error(format!(
+        "zipimporter object has no attribute '{}'",
+        attr
+    )))
+}
+
+fn zi_arg_str(args: &[PyObjectRef], idx: usize, method: &str) -> PyResult<String> {
+    args.get(idx).map(|a| a.str()).ok_or_else(|| {
+        PyError::type_error(format!(
+            "{}() missing required positional argument",
+            method
+        ))
+    })
+}
+
+fn zi_zip_import_error(fullname: &str) -> PyError {
+    PyError::Exception(
+        "ZipImportError".to_string(),
+        PyObjectRef::new(PyObject::Exception {
+            typ: "ZipImportError".to_string(),
+            args: vec![py_str(&format!("can't find module {:?}", fullname))],
+            cause: None,
+            suppress_context: false,
+            context: None,
+            traceback: None,
+            extra: None,
+        }),
+    )
+}
+
+/// `self.prefix + fullname.rpartition('.')[2]` (real CPython's
+/// `_get_module_path`) — note this takes only the part after the LAST
+/// dot, or the WHOLE string unchanged if there's no dot at all (which is
+/// how the test suite gets away with passing a `/`-joined path like
+/// `"pkg/__init__"` as `fullname`: no dot means it passes through as-is).
+fn zi_module_base(prefix: &str, fullname: &str) -> String {
+    let last = fullname.rsplit('.').next().unwrap_or(fullname);
+    format!("{}{}", prefix, last)
+}
+
+/// Real CPython's `_zip_searchorder`: package `__init__` (bytecode then
+/// source) before a plain module (bytecode then source).
+fn zi_module_info(
+    vm: &mut crate::vm::VirtualMachine,
+    archive: &str,
+    base: &str,
+) -> Option<(bool, String, Vec<u8>)> {
+    let candidates: [(String, bool); 4] = [
+        (format!("{}/__init__.pyc", base), true),
+        (format!("{}/__init__.py", base), true),
+        (format!("{}.pyc", base), false),
+        (format!("{}.py", base), false),
+    ];
+    for (member, is_pkg) in candidates.iter() {
+        if let Some(data) = vm.read_zip_member(archive, member) {
+            return Some((*is_pkg, member.clone(), data));
+        }
+    }
+    None
+}
+
+fn zi_code_from_member(member: &str, data: &[u8], virtual_path: &str) -> Option<CodeObject> {
+    if member.ends_with(".pyc") {
+        if data.len() < 16 {
+            return None;
+        }
+        crate::modules::code_object_from_marshal_bytes(&data[16..])
+    } else {
+        let source = crate::object::import_builtin::decode_source_bytes(data).ok()?;
+        let mut parser = crate::parser::Parser::new(&source);
+        let program = parser.parse_program().ok()?;
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.compile(&program, virtual_path).ok()
+    }
+}
+
+/// Real logic behind every `zipimporter` instance method — dispatched
+/// here (rather than as separate native fns) via `call.rs`'s
+/// `fn_addr_eq`-on-`zipimporter_method_marker` interception, since all of
+/// these need live `&mut VirtualMachine` access to call into the real
+/// (vendored) `zipfile.ZipFile` for actual archive reads (see
+/// `VirtualMachine::read_zip_member`).
+pub(crate) fn zipimporter_method_with_vm(
+    vm: &mut crate::vm::VirtualMachine,
+    method: &str,
+    self_obj: &PyObjectRef,
+    args: &[PyObjectRef],
+) -> PyResult<PyObjectRef> {
+    let archive = zi_get_str_attr(self_obj, "archive")?;
+    let prefix = zi_get_str_attr(self_obj, "prefix")?;
+    match method {
+        "is_package" => {
+            let fullname = zi_arg_str(args, 0, "is_package")?;
+            let base = zi_module_base(&prefix, &fullname);
+            match zi_module_info(vm, &archive, &base) {
+                Some((is_pkg, _, _)) => Ok(py_bool(is_pkg)),
+                None => Err(zi_zip_import_error(&fullname)),
+            }
+        }
+        "get_source" => {
+            let fullname = zi_arg_str(args, 0, "get_source")?;
+            let base = zi_module_base(&prefix, &fullname);
+            match zi_module_info(vm, &archive, &base) {
+                Some((_, member, data)) => {
+                    if member.ends_with(".py") {
+                        match crate::object::import_builtin::decode_source_bytes(&data) {
+                            Ok(s) => Ok(py_str(&s)),
+                            Err(_) => Ok(py_none()),
+                        }
+                    } else {
+                        Ok(py_none())
+                    }
+                }
+                None => Err(zi_zip_import_error(&fullname)),
+            }
+        }
+        "get_code" => {
+            let fullname = zi_arg_str(args, 0, "get_code")?;
+            let base = zi_module_base(&prefix, &fullname);
+            match zi_module_info(vm, &archive, &base) {
+                Some((_, member, data)) => {
+                    let virtual_path = format!("{}/{}", archive, member);
+                    match zi_code_from_member(&member, &data, &virtual_path) {
+                        Some(code) => Ok(PyObjectRef::new(PyObject::Code(Rc::new(code)))),
+                        None => Err(zi_zip_import_error(&fullname)),
+                    }
+                }
+                None => Err(zi_zip_import_error(&fullname)),
+            }
+        }
+        "get_filename" => {
+            let fullname = zi_arg_str(args, 0, "get_filename")?;
+            let base = zi_module_base(&prefix, &fullname);
+            match zi_module_info(vm, &archive, &base) {
+                Some((_, member, _)) => Ok(py_str(&format!("{}/{}", archive, member))),
+                None => Err(zi_zip_import_error(&fullname)),
+            }
+        }
+        "get_data" => {
+            let pathname = zi_arg_str(args, 0, "get_data")?;
+            let key = pathname
+                .strip_prefix(&format!("{}/", archive))
+                .unwrap_or(&pathname)
+                .to_string();
+            match vm.read_zip_member(&archive, &key) {
+                Some(data) => Ok(PyObjectRef::imm(PyObject::Bytes(data))),
+                None => Err(PyError::Exception(
+                    "OSError".to_string(),
+                    PyObjectRef::new(PyObject::Exception {
+                        typ: "OSError".to_string(),
+                        args: vec![py_int(0), py_str(""), py_str(&key)],
+                        cause: None,
+                        suppress_context: false,
+                        context: None,
+                        traceback: None,
+                        extra: None,
+                    }),
+                )),
+            }
+        }
+        "find_spec" => {
+            let fullname = zi_arg_str(args, 0, "find_spec")?;
+            let base = zi_module_base(&prefix, &fullname);
+            match zi_module_info(vm, &archive, &base) {
+                Some((is_pkg, member, _)) => {
+                    let origin = format!("{}/{}", archive, member);
+                    let search_loc = format!("{}/{}", archive, base);
+                    let spec =
+                        zi_build_spec(vm, &fullname, self_obj, &origin, is_pkg, &search_loc)?;
+                    Ok(spec)
+                }
+                None => Ok(py_none()),
+            }
+        }
+        "exec_module" => {
+            if args.is_empty() {
+                return Err(PyError::type_error("exec_module() missing module argument"));
+            }
+            let module_obj = args[0].clone();
+            let fullname = if let PyObject::Module { dict, .. } = &*module_obj.borrow() {
+                dict.get(&interner::intern("__name__"))
+                    .map(|v| v.str())
+                    .unwrap_or_default()
+            } else {
+                return Err(PyError::type_error("exec_module() argument must be a module"));
+            };
+            let base = zi_module_base(&prefix, &fullname);
+            match zi_module_info(vm, &archive, &base) {
+                Some((is_pkg, member, data)) => {
+                    let virtual_path = format!("{}/{}", archive, member);
+                    let code = zi_code_from_member(&member, &data, &virtual_path)
+                        .ok_or_else(|| zi_zip_import_error(&fullname))?;
+                    let pkg_path = if is_pkg {
+                        Some(format!("{}/{}", archive, base))
+                    } else {
+                        None
+                    };
+                    vm.exec_code_into_existing_module(
+                        &module_obj,
+                        code,
+                        &virtual_path,
+                        &fullname,
+                        is_pkg,
+                        pkg_path,
+                    )?;
+                    Ok(py_none())
+                }
+                None => Err(zi_zip_import_error(&fullname)),
+            }
+        }
+        "load_module" => {
+            let fullname = zi_arg_str(args, 0, "load_module")?;
+            let base = zi_module_base(&prefix, &fullname);
+            let (is_pkg, member, data) =
+                zi_module_info(vm, &archive, &base).ok_or_else(|| zi_zip_import_error(&fullname))?;
+            let virtual_path = format!("{}/{}", archive, member);
+            let code = zi_code_from_member(&member, &data, &virtual_path)
+                .ok_or_else(|| zi_zip_import_error(&fullname))?;
+            // Reuse an already-registered module under this name if there
+            // is one (mirrors real `load_module`'s `sys.modules.get`
+            // reuse), otherwise build a fresh one.
+            let module_obj = vm
+                .modules
+                .get(&fullname)
+                .cloned()
+                .unwrap_or_else(|| create_module(&fullname, HashMap::new()));
+            vm.modules.insert(fullname.clone(), module_obj.clone());
+            if let Some(sys_mod) = vm.modules.get("sys").cloned() {
+                if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                    if let Some(mod_dict) = dict.get_str("modules").cloned() {
+                        if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                            let _ = d.set(py_str(&fullname), module_obj.clone());
+                        }
+                    }
+                }
+            }
+            let pkg_path = if is_pkg {
+                Some(format!("{}/{}", archive, base))
+            } else {
+                None
+            };
+            match vm.exec_code_into_existing_module(
+                &module_obj,
+                code,
+                &virtual_path,
+                &fullname,
+                is_pkg,
+                pkg_path,
+            ) {
+                Ok(()) => Ok(module_obj),
+                Err(e) => {
+                    vm.modules.remove(&fullname);
+                    Err(e)
+                }
+            }
+        }
+        "invalidate_caches" => Ok(py_none()),
+        "_get_files" => {
+            let names = zi_list_archive_names(vm, &archive)?;
+            let d = Box::new(PyDict::new());
+            let dict_ref = PyObjectRef::imm(PyObject::Dict(d));
+            if let PyObjectRef::Imm(rc) = &dict_ref {
+                if let PyObject::Dict(d) = &mut *rc.borrow_mut() {
+                    for n in names {
+                        let _ = d.set(py_str(&n), py_bool(true));
+                    }
+                }
+            }
+            Ok(dict_ref)
+        }
+        _ => Err(PyError::attribute_error(format!(
+            "zipimporter object has no attribute '{}'",
+            method
+        ))),
+    }
+}
+
+fn zi_list_archive_names(
+    vm: &mut crate::vm::VirtualMachine,
+    archive: &str,
+) -> PyResult<Vec<String>> {
+    let zipfile_mod = match vm.modules.get("zipfile").cloned() {
+        Some(m) => m,
+        None => vm.import_module_from_file("zipfile")?,
+    };
+    let zipfile_cls = zipfile_mod.borrow().get_attribute("ZipFile")?;
+    let zf = vm.call_function(zipfile_cls, vec![py_str(archive)], vec![])?;
+    let namelist = crate::object::call_method_rebound(vm, &zf, "namelist", vec![])?;
+    let names = if let PyObject::List(items) = &*namelist.borrow() {
+        items.iter().map(|i| i.str()).collect()
+    } else {
+        vec![]
+    };
+    let _ = crate::object::call_method_rebound(vm, &zf, "close", vec![]);
+    Ok(names)
+}
+
+/// Builds a real `importlib.machinery.ModuleSpec` (the vendored,
+/// Python-level class in `Lib/importlib/machinery.py`) rather than
+/// hand-rolling a spec-shaped native object, so `importlib.util
+/// .module_from_spec` (also real Python code) works on it unmodified.
+fn zi_build_spec(
+    vm: &mut crate::vm::VirtualMachine,
+    fullname: &str,
+    loader: &PyObjectRef,
+    origin: &str,
+    is_package: bool,
+    search_loc: &str,
+) -> PyResult<PyObjectRef> {
+    let machinery_mod = match vm.modules.get("importlib.machinery").cloned() {
+        Some(m) => m,
+        None => vm.import_module_from_file("importlib.machinery")?,
+    };
+    let spec_cls = machinery_mod.borrow().get_attribute("ModuleSpec")?;
+    let kwargs = vec![
+        ("origin".to_string(), py_str(origin)),
+        ("is_package".to_string(), py_bool(is_package)),
+    ];
+    let spec = vm.call_function(spec_cls, vec![py_str(fullname), loader.clone()], kwargs)?;
+    if is_package {
+        let search_locs = py_list(vec![py_str(search_loc)]);
+        if let PyObject::Instance { dict, .. } = &mut *spec.borrow_mut() {
+            dict.insert_str("submodule_search_locations", search_locs);
+        }
+    }
+    Ok(spec)
+}
+
 pub fn create_zipimport_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
-    macro_rules! zip_func {
-        ($name:expr, $func:expr) => {
-            d.insert(
-                $name.to_string(),
-                PyObjectRef::new(PyObject::BuiltinFunction {
-                    name: $name.to_string(),
-                    func: $func,
-                }),
-            );
-        };
+
+    // `zipimport.ZipImportError` — same shape as `binascii.Error`: a bare
+    // `PyObject::BuiltinFunction` building a `PyObject::Exception`
+    // directly (see the matching entry added to
+    // `is_builtin_exception_class_name`/`is_exception_subclass`).
+    d.insert_str(
+        "ZipImportError",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "ZipImportError".to_string(),
+            func: |args| {
+                let msg = args.first().map(|a| a.str()).unwrap_or_default();
+                Ok(PyObjectRef::new(PyObject::Exception {
+                    typ: "ZipImportError".to_string(),
+                    args: if args.is_empty() { vec![] } else { vec![py_str(&msg)] },
+                    cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
+                    extra: None,
+                }))
+            },
+        }),
+    );
+
+    // The `zipimporter` type: a real `PyObject::Type` (methods dispatched
+    // through the MRO, auto-binding to `BuiltinMethod` exactly like
+    // `io.IOBase` — see that class for the same pattern) rather than
+    // per-instance closures, since every method needs the SAME live-VM
+    // detour (`zipimporter_method_with_vm`) and per-instance closures
+    // can't be matched by `fn_addr_eq` (each construction gets a distinct
+    // vtable pointer).
+    let mut zi_dict = HashMap::new();
+    zi_dict.insert_str(
+        "__doc__",
+        py_str("zipimporter(archivepath) -> zipimporter object"),
+    );
+    for m in [
+        "is_package",
+        "get_source",
+        "get_code",
+        "get_filename",
+        "get_data",
+        "find_spec",
+        "exec_module",
+        "load_module",
+        "invalidate_caches",
+        "_get_files",
+    ] {
+        zi_dict.insert_str(
+            m,
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: m.to_string(),
+                func: zipimporter_method_marker,
+            }),
+        );
     }
-    zip_func!("zipimporter", |args| {
-        let _path = if !args.is_empty() {
-            args[0].str()
-        } else {
-            String::new()
-        };
-        let mut inst_dict = AttrMap::new();
-        inst_dict.insert_str(
-            "find_spec",
-            PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "find_spec".to_string(),
-                func: |_| Ok(py_none()),
-            }),
-        );
-        inst_dict.insert_str(
-            "find_module",
-            PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "find_module".to_string(),
-                func: |_| Ok(py_none()),
-            }),
-        );
-        inst_dict.insert_str(
-            "get_code",
-            PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "get_code".to_string(),
-                func: |_| Ok(py_none()),
-            }),
-        );
-        inst_dict.insert_str(
-            "get_source",
-            PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "get_source".to_string(),
-                func: |_| Ok(py_none()),
-            }),
-        );
-        Ok(PyObjectRef::new(PyObject::Instance {
-            typ: py_str("zipimporter"),
-            dict: inst_dict,
-        }))
+    let zi_cls = PyObjectRef::new(PyObject::Type {
+        name: "zipimporter".to_string(),
+        dict: Box::new(str_map_to_typedict(zi_dict)),
+        bases: vec![],
+        mro: vec![],
     });
+    // The actual CALLABLE bound to `zipimport.zipimporter` is a `Closure`
+    // capturing `zi_cls` directly (so instances get the real type, and
+    // hence real bound methods, attached) — NOT the bare `PyObject::Type`
+    // itself, and NOT a plain non-capturing `BuiltinFunction` needing a
+    // live-VM lookup of "the zipimporter type" (which would need the
+    // unsound-from-live-bytecode `with_vm_mut`, see `zipimporter_new`'s
+    // old doc comment history). A `Closure` needs no VM access at all
+    // here since `split_zip_archive` is a pure filesystem check.
+    d.insert_str(
+        "zipimporter",
+        PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+            zipimporter_new(args, zi_cls.clone())
+        }))),
+    );
+
     d.insert_str("_zip_directory_cache", py_dict());
     d
+}
+
+/// The `zipimporter(archivepath)` constructor, called from the `Closure`
+/// registered under `zipimport.zipimporter` in `create_zipimport_dict`
+/// (which supplies `zi_cls`, the real `PyObject::Type`, so instances get
+/// real bound methods via the MRO). Deliberately NOT the type's own
+/// `__init__`/`__new__` — building the archive/prefix split needs to
+/// VALIDATE the path and can legitimately raise before any instance
+/// exists (`ZipImportError`/`TypeError`), simplest as one self-contained
+/// constructor function.
+pub fn zipimporter_new(args: &[PyObjectRef], zi_cls: PyObjectRef) -> PyResult<PyObjectRef> {
+    let path_str = match args.first() {
+        Some(a) => match &*a.borrow() {
+            PyObject::Str(s) => s.to_string(),
+            _ => {
+                return Err(PyError::type_error(
+                    "zipimporter() argument path must be str, not bytes/None/other",
+                ))
+            }
+        },
+        None => {
+            return Err(PyError::type_error(
+                "zipimporter() missing required argument 'path'",
+            ))
+        }
+    };
+    if path_str.is_empty() {
+        return Err(PyError::Exception(
+            "ZipImportError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "ZipImportError".to_string(),
+                args: vec![py_str("archive path is empty")],
+                cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
+                extra: None,
+            }),
+        ));
+    }
+    match crate::vm::VirtualMachine::split_zip_archive(&path_str) {
+        Some((archive, prefix)) => {
+            let prefix_slash = if prefix.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", prefix)
+            };
+            let mut inst_dict = AttrMap::new();
+            inst_dict.insert_str("archive", py_str(&archive));
+            inst_dict.insert_str("prefix", py_str(&prefix_slash));
+            Ok(PyObjectRef::new(PyObject::Instance {
+                typ: zi_cls,
+                dict: inst_dict,
+            }))
+        }
+        None => Err(PyError::Exception(
+            "ZipImportError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "ZipImportError".to_string(),
+                args: vec![py_str(&format!("not a Zip file: '{}'", path_str))],
+                cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
+                extra: None,
+            }),
+        )),
+    }
 }
 

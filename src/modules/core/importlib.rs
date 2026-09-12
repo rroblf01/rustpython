@@ -38,9 +38,16 @@ fn resolve_name(name: &str, package: Option<&str>) -> Result<String, PyError> {
 
 /// Helper: import a dotted module chain, ensuring parents are loaded first
 fn import_dotted(vm: &mut crate::vm::VirtualMachine, name: &str) -> PyResult<PyObjectRef> {
-    // If it's already loaded, return it
-    if let Some(module) = vm.modules.get(name) {
-        return Ok(module.clone());
+    // If it's already loaded, return it — `import_cached_or_fresh` (not a
+    // bare `vm.modules.get`) so a module that was `del sys.modules[name]`'d
+    // (e.g. `test.support.import_helper.import_fresh_module`/`CleanImport`,
+    // used all over the CPython test corpus) actually gets re-executed
+    // instead of silently handing back the same stale cached object —
+    // `vm.modules` is this interpreter's own internal fast-path cache and
+    // is never touched by a plain Python `del sys.modules[x]`, which only
+    // mutates the real (Python-visible) `sys.modules` dict.
+    if let Some(module) = vm.import_cached_or_fresh(name) {
+        return Ok(module);
     }
     // For dotted names, load the chain step by step
     if name.contains('.') {
@@ -55,11 +62,17 @@ fn import_dotted(vm: &mut crate::vm::VirtualMachine, name: &str) -> PyResult<PyO
             if !vm.modules.contains_key(&current) {
                 let module = vm.import_module_from_file(&current)?;
                 vm.modules.insert(current.clone(), module.clone());
-                // Also sync to sys.modules
+                // Also sync to sys.modules. `sys.modules` is a plain `dict`
+                // — setting a KEY needs `PyDict::set`, not `set_attribute`
+                // (which only supports attribute-style access and always
+                // fails, silently via the `.ok()` this replaced, for a bare
+                // `PyObject::Dict`).
                 if let Some(sys_mod) = vm.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                         if let Some(mod_dict) = dict.get_str("modules") {
-                            mod_dict.borrow_mut().set_attribute(&current, module).ok();
+                            if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                                let _ = d.set(py_str(&current), module);
+                            }
                         }
                     }
                 }
@@ -76,13 +89,14 @@ fn import_dotted(vm: &mut crate::vm::VirtualMachine, name: &str) -> PyResult<PyO
     // Simple name
     let module = vm.import_module_from_file(name)?;
     vm.modules.insert(name.to_string(), module.clone());
+    // See the matching comment above: `set_attribute` is a no-op on a plain
+    // `dict` — use `PyDict::set`.
     if let Some(sys_mod) = vm.modules.get("sys") {
         if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
             if let Some(mod_dict) = dict.get_str("modules") {
-                mod_dict
-                    .borrow_mut()
-                    .set_attribute(name, module.clone())
-                    .ok();
+                if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                    let _ = d.set(py_str(name), module.clone());
+                }
             }
         }
     }

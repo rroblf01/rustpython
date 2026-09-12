@@ -330,6 +330,23 @@ impl PyObjectRef {
                     | PyObject::Set(_)
                     | PyObject::FrozenSet(_)
                     | PyObject::Deque { .. }
+                    // `ExceptionGroup`'s repr recurses into its own `args`/
+                    // `exceptions` fields (pyobject/repr.rs), just like a
+                    // list recurses into its elements — a self-referential
+                    // group (`eg.exceptions = (eg,)`, or a real `__cause__`/
+                    // `__context__` cycle back to the same group, both
+                    // legal at runtime since exception chaining isn't
+                    // acyclic-checked) was completely unguarded here: no
+                    // identity tracking meant it fell through to the
+                    // numeric-only depth cap below, which still allows up
+                    // to 200 levels of recursion before stopping — enough
+                    // for `test_traceback.py`'s cyclic-exception-group case
+                    // to build gigabytes of nested repr strings and get
+                    // OOM-killed before ever reaching that cap. Matches
+                    // real CPython's own `Py_ReprEnter` identity tracking,
+                    // which covers ANY object type, not just built-in
+                    // containers.
+                    | PyObject::ExceptionGroup { .. }
             );
         if is_container {
             let id = self.get_id();

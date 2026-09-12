@@ -70,13 +70,34 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_str(&format!("PurePosixPath('{}')", s)))
     });
 
-    // __init__: Path(path_str) stores the path string
+    // __init__: Path(path_str) stores the path string. Real pathlib
+    // accepts any `os.PathLike` (an object with `__fspath__`), not just a
+    // plain `str`/`Path` — `.str()` on such an object (e.g. `test_zipapp`'s
+    // `os_helper.FakePath`) would stringify its `repr()`/generic object
+    // string, not the actual path, so `__fspath__` must be tried first.
     path_func!("__init__", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("__init__() missing path argument"));
         }
         let path_val = if args.len() > 1 {
-            py_str(&args[1].str())
+            let arg = &args[1];
+            let s = match &*arg.borrow() {
+                PyObject::Str(s) => s.to_string(),
+                _ => {
+                    // `get_attribute` (unlike bytecode `LOAD_ATTR`) returns
+                    // the raw, UNBOUND method — self must be passed
+                    // explicitly regardless of whether the target is our
+                    // own native `Path.__fspath__` (`args[0]`-as-self
+                    // convention) or a genuine Python-defined `__fspath__`
+                    // (a real `def __fspath__(self)`).
+                    if let Ok(fspath) = arg.borrow().get_attribute("__fspath__") {
+                        crate::object::builtin_call(&fspath, &[arg.clone()])?.str()
+                    } else {
+                        arg.str()
+                    }
+                }
+            };
+            py_str(&s)
         } else {
             py_str(".")
         };
@@ -421,6 +442,384 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
             Ok(data) => Ok(PyObjectRef::imm(PyObject::Bytes(data))),
             Err(e) => Err(PyError::os_error_from_io(&e)),
         }
+    });
+
+    fn new_path_instance(s: &str) -> PyResult<PyObjectRef> {
+        let path_type = PATH_TYPE
+            .with(|cell| cell.borrow().clone())
+            .ok_or_else(|| PyError::runtime_error("Path type not initialized".to_string()))?;
+        let mut instance_dict = AttrMap::new();
+        instance_dict.insert_str("_path", py_str(s));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: path_type,
+            dict: instance_dict,
+        }))
+    }
+
+    // A trailing dict argument may be packed kwargs (see the calling-
+    // convention gotcha in CLAUDE.md) — pull a named bool option out of it
+    // (or a plain trailing positional bool, for the rare call site that
+    // used one) without misreading either.
+    fn bool_option(args: &[PyObjectRef], name: &str) -> bool {
+        if let Some(last) = args.last() {
+            if let PyObject::Dict(d) = &*last.borrow() {
+                if let Ok(Some(v)) = d.get(&py_str(name)) {
+                    return v.truthy();
+                }
+            }
+        }
+        false
+    }
+
+    // .mkdir(mode=0o777, parents=False, exist_ok=False)
+    path_func!("mkdir", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("mkdir() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        let parents = bool_option(args, "parents");
+        let exist_ok = bool_option(args, "exist_ok");
+        let path = std::path::Path::new(&s);
+        let result = if parents {
+            std::fs::create_dir_all(path)
+        } else {
+            std::fs::create_dir(path)
+        };
+        match result {
+            Ok(()) => Ok(py_none()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && exist_ok => Ok(py_none()),
+            Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
+
+    // .touch(mode=0o666, exist_ok=True)
+    path_func!("touch", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("touch() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        let path = std::path::Path::new(&s);
+        if path.exists() {
+            // exist_ok defaults to True in real pathlib; only raise if the
+            // caller explicitly passed exist_ok=False.
+            let explicit_no = args.iter().any(|a| {
+                if let PyObject::Dict(d) = &*a.borrow() {
+                    matches!(d.get(&py_str("exist_ok")), Ok(Some(v)) if !v.truthy())
+                } else {
+                    false
+                }
+            });
+            if explicit_no {
+                return Err(PyError::os_error_from_io(&std::io::Error::from(
+                    std::io::ErrorKind::AlreadyExists,
+                )));
+            }
+            return Ok(py_none());
+        }
+        match std::fs::File::create(path) {
+            Ok(_) => Ok(py_none()),
+            Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
+
+    // .unlink(missing_ok=False)
+    path_func!("unlink", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("unlink() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        let missing_ok = bool_option(args, "missing_ok");
+        match std::fs::remove_file(&s) {
+            Ok(()) => Ok(py_none()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && missing_ok => Ok(py_none()),
+            Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
+
+    // .rmdir()
+    path_func!("rmdir", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("rmdir() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        std::fs::remove_dir(&s).map(|_| py_none()).map_err(|e| PyError::os_error_from_io(&e))
+    });
+
+    // .chmod(mode)
+    path_func!("chmod", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("chmod() missing mode argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        let mode = args[1].as_i64().unwrap_or(0o755) as u32;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(mode);
+            std::fs::set_permissions(&s, perms).map_err(|e| PyError::os_error_from_io(&e))?;
+        }
+        Ok(py_none())
+    });
+
+    // .stat() -> stat_result-like module (mirrors os.stat's own return shape)
+    path_func!("stat", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("stat() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        match std::fs::metadata(&s) {
+            Ok(meta) => Ok(create_module(
+                "stat_result",
+                crate::modules::stat_to_dict(&meta),
+            )),
+            Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
+
+    // .with_suffix(suffix) -> new Path with the extension replaced
+    path_func!("with_suffix", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("with_suffix() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        let suffix = args[1].str();
+        let path = std::path::Path::new(&s);
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let new_name = format!("{}{}", stem, suffix);
+        let result = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => {
+                parent.join(&new_name).to_string_lossy().to_string()
+            }
+            _ => new_name,
+        };
+        new_path_instance(&result)
+    });
+
+    // .relative_to(other) -> new Path
+    path_func!("relative_to", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("relative_to() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        let other = path_instance_str(&args[1]);
+        match std::path::Path::new(&s).strip_prefix(&other) {
+            Ok(rel) => new_path_instance(&rel.to_string_lossy()),
+            Err(_) => Err(PyError::value_error(format!(
+                "{:?} is not in the subpath of {:?}",
+                s, other
+            ))),
+        }
+    });
+
+    // .as_posix() -> str with '/' separators
+    path_func!("as_posix", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("as_posix() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        Ok(py_str(&s.replace('\\', "/")))
+    });
+
+    // .open(mode='r', ...) -> file object (delegates to the builtin open())
+    path_func!("open", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("open() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        let mut open_args = vec![py_str(&s)];
+        open_args.extend_from_slice(&args[1..]);
+        crate::object::builtin_open(&open_args)
+    });
+
+    // .is_absolute() -> bool
+    path_func!("is_absolute", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("is_absolute() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        Ok(py_bool(std::path::Path::new(&s).is_absolute()))
+    });
+
+    // Small manual glob-style matcher (`*`/`?`), no external regex crate
+    // needed — same subset real `fnmatch` supports for these callers.
+    fn glob_component_match(name: &str, pattern: &str) -> bool {
+        fn rec(n: &[char], p: &[char]) -> bool {
+            match p.first() {
+                None => n.is_empty(),
+                Some('*') => rec(n, &p[1..]) || (!n.is_empty() && rec(&n[1..], p)),
+                Some('?') => !n.is_empty() && rec(&n[1..], &p[1..]),
+                Some(c) => n.first() == Some(c) && rec(&n[1..], &p[1..]),
+            }
+        }
+        let n: Vec<char> = name.chars().collect();
+        let p: Vec<char> = pattern.chars().collect();
+        rec(&n, &p)
+    }
+
+    // .match(pattern) -> bool (matches trailing path components against
+    // the pattern's own components, real pathlib semantics)
+    path_func!("match", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("match() missing pattern argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        let pattern = args[1].str();
+        let path_parts: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
+        let pat_parts: Vec<&str> = pattern.split('/').filter(|p| !p.is_empty()).collect();
+        if pat_parts.len() > path_parts.len() {
+            return Ok(py_bool(false));
+        }
+        let offset = path_parts.len() - pat_parts.len();
+        let matched = pat_parts
+            .iter()
+            .zip(&path_parts[offset..])
+            .all(|(pat, name)| glob_component_match(name, pat));
+        Ok(py_bool(matched))
+    });
+
+    // .parts -> tuple of path components (property getter)
+    {
+        let getter = PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "parts".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error("parts getter missing argument"));
+                }
+                let s = path_instance_str(&args[0]);
+                let path = std::path::Path::new(&s);
+                let mut parts = vec![];
+                for comp in path.components() {
+                    parts.push(py_str(&comp.as_os_str().to_string_lossy()));
+                }
+                Ok(py_tuple(parts))
+            },
+        });
+        path_type_dict.insert_str(
+            "parts",
+            PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+                getter: Some(getter),
+                setter: None,
+                deleter: None,
+                doc: None,
+            }))),
+        );
+    }
+
+    // .__fspath__() -> str (so `open(path)`/`os.*` functions taking
+    // PathLike objects can consume a Path directly).
+    path_func!("__fspath__", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("__fspath__() missing argument"));
+        }
+        Ok(py_str(&path_instance_str(&args[0])))
+    });
+
+    // .iterdir() -> iterator of child Paths
+    path_func!("iterdir", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("iterdir() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        let mut entries = vec![];
+        let read = std::fs::read_dir(&s).map_err(|e| PyError::os_error_from_io(&e))?;
+        for entry in read.flatten() {
+            entries.push(new_path_instance(&entry.path().to_string_lossy())?);
+        }
+        crate::object::builtin_iter(&[py_list(entries)])
+    });
+
+    // .glob(pattern) -> list[Path] (shallow: only "*"/plain-name patterns
+    // and a leading "**/" are handled; enough for the common recursive-glob
+    // idiom, not full fnmatch-on-every-component).
+    fn collect_glob(base: &std::path::Path, pattern: &str, recursive_all: bool) -> Vec<std::path::PathBuf> {
+        let mut out = vec![];
+        let entries = match std::fs::read_dir(base) {
+            Ok(e) => e,
+            Err(_) => return out,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let matches = pattern == "*" || pattern == "**" || name == pattern;
+            if matches {
+                out.push(path.clone());
+            }
+            if recursive_all && path.is_dir() {
+                out.extend(collect_glob(&path, pattern, recursive_all));
+            }
+        }
+        out
+    }
+
+    path_func!("rglob", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("rglob() missing pattern argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        let pattern = args[1].str();
+        let base = std::path::Path::new(&s);
+        let mut results = collect_glob(base, &pattern, true);
+        results.sort();
+        let mut out = vec![];
+        for p in results {
+            out.push(new_path_instance(&p.to_string_lossy())?);
+        }
+        Ok(py_list(out))
+    });
+
+    path_func!("glob", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("glob() missing pattern argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        let pattern = args[1].str();
+        let base = std::path::Path::new(&s);
+        let mut results = collect_glob(base, &pattern, false);
+        results.sort();
+        let mut out = vec![];
+        for p in results {
+            out.push(new_path_instance(&p.to_string_lossy())?);
+        }
+        Ok(py_list(out))
+    });
+
+    // __eq__ / __hash__ / __lt__: compare/hash by the normalized path
+    // string. Needed for `target in files_to_add` (a dict keyed by Path)
+    // in `zipapp.create_archive` and for `sorted(source.rglob('*'))`.
+    path_func!("__eq__", |args| {
+        if args.len() < 2 {
+            return Ok(py_bool(false));
+        }
+        if !matches!(&*args[1].borrow(), PyObject::Instance { .. }) {
+            return Ok(py_bool(false));
+        }
+        let a = path_instance_str(&args[0]);
+        let b = path_instance_str(&args[1]);
+        Ok(py_bool(a == b))
+    });
+
+    path_func!("__hash__", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("__hash__() missing argument"));
+        }
+        let s = path_instance_str(&args[0]);
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        s.hash(&mut hasher);
+        Ok(py_int(hasher.finish() as i64))
+    });
+
+    path_func!("__lt__", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error("__lt__() missing argument"));
+        }
+        let a = path_instance_str(&args[0]);
+        let b = path_instance_str(&args[1]);
+        Ok(py_bool(a < b))
     });
 
     // Create the Path Type object

@@ -204,6 +204,33 @@ pub(crate) fn resolve_str_slice_bounds(
     (s, e.max(s))
 }
 
+/// Like `resolve_str_slice_bounds`, but for `find`/`rfind`/`count`/
+/// `startswith`/`endswith` — methods where a `start` that lands PAST the
+/// end of the string (after negative-index normalization) must report "no
+/// match" (`-1`/`0`/`False`) rather than silently clamping `start` down to
+/// `len` and reporting a bogus match against the resulting empty slice.
+/// Real CPython examples this fixes: `'abc'.find('', 4)` -> `-1` (not `3`,
+/// which is what clamping `start` to `len=3` produces), `'aaa'.count('',
+/// 10)` -> `0` (not `1`), `''.endswith('', 1, 0)` -> `False` (not `True`).
+/// Plain slicing (`s[100:]`) does NOT go through this — clamping to an
+/// empty result is correct there, so `resolve_str_slice_bounds` above is
+/// unchanged and still used for that.
+pub(crate) fn resolve_match_bounds(
+    len: usize,
+    start: Option<i64>,
+    end: Option<i64>,
+) -> Option<(usize, usize)> {
+    let norm = |v: i64| -> i64 { if v < 0 { (v + len as i64).max(0) } else { v } };
+    let s_raw = start.map(norm).unwrap_or(0);
+    if s_raw > len as i64 {
+        return None;
+    }
+    let s = s_raw as usize;
+    let e_raw = end.map(norm).unwrap_or(len as i64).min(len as i64).max(0);
+    let e = (e_raw as usize).max(s);
+    Some((s, e))
+}
+
 /// Extract an optional integer argument, treating a missing arg OR an
 /// explicit `None` the same way (both mean "not given" — real CPython's
 /// `str.find(sub, start=None)` etc. accept `None` as a valid stand-in for
@@ -246,14 +273,14 @@ pub(crate) fn char_slice_with_start(
     s: &str,
     start: Option<i64>,
     end: Option<i64>,
-) -> (usize, String) {
+) -> Option<(usize, String)> {
     if s.is_ascii() {
-        let (st, en) = resolve_str_slice_bounds(s.len(), start, end);
-        (st, s[st..en].to_string())
+        let (st, en) = resolve_match_bounds(s.len(), start, end)?;
+        Some((st, s[st..en].to_string()))
     } else {
         let chars: Vec<char> = s.chars().collect();
-        let (st, en) = resolve_str_slice_bounds(chars.len(), start, end);
-        (st, chars[st..en].iter().collect())
+        let (st, en) = resolve_match_bounds(chars.len(), start, end)?;
+        Some((st, chars[st..en].iter().collect()))
     }
 }
 
@@ -264,7 +291,7 @@ pub(crate) fn str_find_impl(
     end: Option<i64>,
     reverse: bool,
 ) -> Option<usize> {
-    let (s, sub) = char_slice_with_start(haystack, start, end);
+    let (s, sub) = char_slice_with_start(haystack, start, end)?;
     let found = if reverse {
         sub.rfind(needle)
     } else {

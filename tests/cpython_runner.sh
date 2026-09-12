@@ -29,7 +29,23 @@ scratch_dir="$(mktemp -d "/tmp/rustpython-cpython-scratch.XXXXXX")"
 export PYTHONPATH="${VENV_SITE}${PYTHONPATH:+:$PYTHONPATH}"
 
 start=$(date +%s%N)
-(cd "$scratch_dir" && timeout "$TIMEOUT" "$BINARY" "$TEST_FILE") > "$logfile" 2>&1
+# `--kill-after=10`: plain `timeout N` sends SIGTERM at N seconds and then
+# waits INDEFINITELY for the child to actually exit — a process stuck deep
+# inside a single huge allocator call (a runaway Vec/String growing without
+# bound, e.g. an interpreter-level infinite loop that a missing/incomplete
+# feature failed to interrupt) may not respond to SIGTERM promptly, and can
+# keep growing memory well past the nominal timeout until it either
+# eventually notices the signal or gets OOM-killed by the kernel first —
+# confirmed real: a `sys.settrace`-dependent test (`test_sys_settrace.py`'s
+# `test_no_jump_infinite_while_loop`, relying on a debugger line-jump this
+# interpreter's `sys.settrace` doesn't actually support — a real, separate,
+# larger gap, not fixed here) ran for several MINUTES past its 180s budget
+# and got the whole system's kernel OOM-killer involved, taking other
+# unrelated processes down with it. `--kill-after=10` forces an
+# UNCATCHABLE SIGKILL 10s after the initial SIGTERM if the process hasn't
+# exited by then, giving every single test file a hard, unconditional
+# memory/runtime backstop regardless of what specific bug causes a runaway.
+(cd "$scratch_dir" && timeout --kill-after=10 "$TIMEOUT" "$BINARY" "$TEST_FILE") > "$logfile" 2>&1
 exit_code=$?
 end=$(date +%s%N)
 elapsed=$(( (end - start) / 1000000 ))

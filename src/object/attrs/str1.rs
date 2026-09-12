@@ -622,8 +622,28 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 ));
                             }
 
+                            if args.len() == 2
+                                && !matches!(&*args[1].borrow(), PyObject::Str(_) | PyObject::None)
+                            {
+                                return Err(PyError::type_error(format!(
+                                    "lstrip() argument must be str or None, not {}",
+                                    args[1].borrow().type_name(),
+                                )));
+                            }
+                            // `lstrip(None)` (explicit `None`, not just a
+                            // missing arg) must fall back to the default
+                            // whitespace set — same as `strip()`'s own
+                            // handling just above. This previously called
+                            // `.str()` on the `None` object directly,
+                            // yielding the literal text "None" as the strip
+                            // charset (so e.g. `'   hello   '.lstrip(None)`
+                            // stripped nothing, since 'h' isn't in "None").
                             let chars = if args.len() > 1 {
-                                args[1].str()
+                                if let PyObject::None = &*args[1].borrow() {
+                                    " \t\n\r\x0b\x0c".to_string()
+                                } else {
+                                    args[1].str()
+                                }
                             } else {
                                 " \t\n\r\x0b\x0c".to_string()
                             };
@@ -646,8 +666,23 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 ));
                             }
 
+                            if args.len() == 2
+                                && !matches!(&*args[1].borrow(), PyObject::Str(_) | PyObject::None)
+                            {
+                                return Err(PyError::type_error(format!(
+                                    "rstrip() argument must be str or None, not {}",
+                                    args[1].borrow().type_name(),
+                                )));
+                            }
+                            // See `lstrip`'s matching comment: `rstrip(None)`
+                            // must use the default whitespace set, not the
+                            // literal text "None".
                             let chars = if args.len() > 1 {
-                                args[1].str()
+                                if let PyObject::None = &*args[1].borrow() {
+                                    " \t\n\r\x0b\x0c".to_string()
+                                } else {
+                                    args[1].str()
+                                }
                             } else {
                                 " \t\n\r\x0b\x0c".to_string()
                             };
@@ -669,11 +704,33 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     "startswith() takes at least 1 argument",
                                 ));
                             }
+                            if args.len() > 4 {
+                                return Err(PyError::type_error(format!(
+                                    "startswith() takes at most 3 arguments ({} given)",
+                                    args.len() - 1,
+                                )));
+                            }
                             let start = opt_i64_arg(args.get(2));
                             let end = opt_i64_arg(args.get(3));
                             let prefixes: Vec<String> = match &*args[1].borrow() {
-                                PyObject::Tuple(items) => items.iter().map(|x| x.str()).collect(),
-                                _ => vec![args[1].str()],
+                                PyObject::Tuple(items) => {
+                                    for it in items.iter() {
+                                        if !matches!(&*it.borrow(), PyObject::Str(_)) {
+                                            return Err(PyError::type_error(format!(
+                                                "tuple for startswith must only contain str, not {}",
+                                                it.borrow().type_name(),
+                                            )));
+                                        }
+                                    }
+                                    items.iter().map(|x| x.str()).collect()
+                                }
+                                PyObject::Str(_) => vec![args[1].str()],
+                                other => {
+                                    return Err(PyError::type_error(format!(
+                                        "startswith first arg must be str or a tuple of str, not {}",
+                                        other.type_name(),
+                                    )));
+                                }
                             };
                             // Borrow the haystack's content directly instead of
                             // `.str()` (which always returns a freshly-cloned
@@ -686,7 +743,9 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 PyObject::Str(cs) => cs.as_str(),
                                 _ => return Err(PyError::runtime_error("startswith on non-str")),
                             };
-                            let (_, sub) = char_slice_with_start(s, start, end);
+                            let Some((_, sub)) = char_slice_with_start(s, start, end) else {
+                                return Ok(py_bool(false));
+                            };
                             Ok(py_bool(
                                 prefixes.iter().any(|p| sub.starts_with(p.as_str())),
                             ))
@@ -701,18 +760,42 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     "endswith() takes at least 1 argument",
                                 ));
                             }
+                            if args.len() > 4 {
+                                return Err(PyError::type_error(format!(
+                                    "endswith() takes at most 3 arguments ({} given)",
+                                    args.len() - 1,
+                                )));
+                            }
                             let start = opt_i64_arg(args.get(2));
                             let end = opt_i64_arg(args.get(3));
                             let suffixes: Vec<String> = match &*args[1].borrow() {
-                                PyObject::Tuple(items) => items.iter().map(|x| x.str()).collect(),
-                                _ => vec![args[1].str()],
+                                PyObject::Tuple(items) => {
+                                    for it in items.iter() {
+                                        if !matches!(&*it.borrow(), PyObject::Str(_)) {
+                                            return Err(PyError::type_error(format!(
+                                                "tuple for endswith must only contain str, not {}",
+                                                it.borrow().type_name(),
+                                            )));
+                                        }
+                                    }
+                                    items.iter().map(|x| x.str()).collect()
+                                }
+                                PyObject::Str(_) => vec![args[1].str()],
+                                other => {
+                                    return Err(PyError::type_error(format!(
+                                        "endswith first arg must be str or a tuple of str, not {}",
+                                        other.type_name(),
+                                    )));
+                                }
                             };
                             let obj0 = args[0].borrow();
                             let s: &str = match &*obj0 {
                                 PyObject::Str(cs) => cs.as_str(),
                                 _ => return Err(PyError::runtime_error("endswith on non-str")),
                             };
-                            let (_, sub) = char_slice_with_start(s, start, end);
+                            let Some((_, sub)) = char_slice_with_start(s, start, end) else {
+                                return Ok(py_bool(false));
+                            };
                             Ok(py_bool(suffixes.iter().any(|p| sub.ends_with(p.as_str()))))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
@@ -724,6 +807,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 return Err(PyError::type_error(
                                     "find() takes at least 1 argument",
                                 ));
+                            }
+                            if args.len() > 4 {
+                                return Err(PyError::type_error(format!(
+                                    "find() takes at most 3 arguments ({} given)",
+                                    args.len() - 1,
+                                )));
                             }
                             let s = args[0].str();
                             if !matches!(&*args[1].borrow(), PyObject::Str(_)) {
@@ -752,6 +841,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     "rfind() takes at least 1 argument",
                                 ));
                             }
+                            if args.len() > 4 {
+                                return Err(PyError::type_error(format!(
+                                    "rfind() takes at most 3 arguments ({} given)",
+                                    args.len() - 1,
+                                )));
+                            }
                             let s = args[0].str();
                             if !matches!(&*args[1].borrow(), PyObject::Str(_)) {
                                 return Err(PyError::type_error(format!(
@@ -779,6 +874,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     "index() takes at least 1 argument",
                                 ));
                             }
+                            if args.len() > 4 {
+                                return Err(PyError::type_error(format!(
+                                    "index() takes at most 3 arguments ({} given)",
+                                    args.len() - 1,
+                                )));
+                            }
                             let s = args[0].str();
                             if !matches!(&*args[1].borrow(), PyObject::Str(_)) {
                                 return Err(PyError::type_error(format!(
@@ -803,6 +904,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 return Err(PyError::type_error(
                                     "rindex() takes at least 1 argument",
                                 ));
+                            }
+                            if args.len() > 4 {
+                                return Err(PyError::type_error(format!(
+                                    "rindex() takes at most 3 arguments ({} given)",
+                                    args.len() - 1,
+                                )));
                             }
                             let s = args[0].str();
                             if !matches!(&*args[1].borrow(), PyObject::Str(_)) {
@@ -829,6 +936,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     "count() takes at least 1 argument",
                                 ));
                             }
+                            if args.len() > 4 {
+                                return Err(PyError::type_error(format!(
+                                    "count() takes at most 3 arguments ({} given)",
+                                    args.len() - 1,
+                                )));
+                            }
                             let s = args[0].str();
                             if !matches!(&*args[1].borrow(), PyObject::Str(_)) {
                                 return Err(PyError::type_error(format!(
@@ -848,7 +961,10 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 }
                             } else {
                                 let char_count = s.chars().count();
-                                let (st, en) = resolve_str_slice_bounds(char_count, start, end);
+                                let Some((st, en)) = resolve_match_bounds(char_count, start, end)
+                                else {
+                                    return Ok(py_int(0));
+                                };
                                 if st >= en {
                                     if needle.is_empty() { 1 } else { 0 }
                                 } else {

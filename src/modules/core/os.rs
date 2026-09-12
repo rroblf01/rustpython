@@ -393,6 +393,35 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_none())
     });
 
+    // os.pipe() -> (read_fd, write_fd)
+    os_func!("pipe", |_args| {
+        extern "C" {
+            fn pipe(fds: *mut i32) -> i32;
+        }
+        let mut fds: [i32; 2] = [0, 0];
+        let ret = unsafe { pipe(fds.as_mut_ptr()) };
+        if ret != 0 {
+            return Err(PyError::os_error_from_io(&std::io::Error::last_os_error()));
+        }
+        Ok(py_tuple(vec![py_int(fds[0] as i64), py_int(fds[1] as i64)]))
+    });
+
+    // os.dup(fd) -> new fd referring to the same open file description
+    os_func!("dup", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("dup() requires at least 1 argument"));
+        }
+        let fd = args[0].as_i64().unwrap_or(-1) as i32;
+        extern "C" {
+            fn dup(fd: i32) -> i32;
+        }
+        let new_fd = unsafe { dup(fd) };
+        if new_fd < 0 {
+            return Err(PyError::os_error_from_io(&std::io::Error::last_os_error()));
+        }
+        Ok(py_int(new_fd as i64))
+    });
+
     // os.fdopen(fd, mode='r') -> file object from fd
     os_func!("fdopen", |args| {
         if args.is_empty() {

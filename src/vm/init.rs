@@ -907,8 +907,20 @@ pub(crate) fn register_native_modules(
             create_module("unicodedata", create_unicodedata_dict()),
         );
 
-        // Native profile module
-        modules.insert_str("profile", create_module("profile", create_profile_dict()));
+        // `profile` is intentionally NOT registered as a native module here
+        // (it used to be, via `create_profile_dict()`): that native version
+        // was a shallow stub (module-level `run`/`runctx` functions plus a
+        // `Profile()` factory whose instances only had `enable`/`disable`/
+        // `print_stats`/`dump_stats` — no `runctx` method at all), which
+        // permanently shadowed the real, much more complete pure-Python
+        // `Lib/profile.py` already vendored in this repo (~600 lines, a
+        // full port of CPython's own `profile` module) per the
+        // native-vs-`Lib/`-priority rule documented in `CLAUDE.md`. Letting
+        // `Lib/profile.py` load normally instead fixes `profile.Profile`
+        // actually having `run`/`runctx`/`runcall` (`test_profile.py`'s
+        // `AttributeError: 'object' object has no attribute 'runctx'`).
+        // `create_profile_dict()` is kept (used by `create_cprofile_dict()`
+        // below) but no longer registered under the `profile` name itself.
 
         // Native cProfile module
         modules.insert_str(

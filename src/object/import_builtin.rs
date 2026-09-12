@@ -59,10 +59,25 @@ pub(crate) fn import_impl(
                     if let Some(sys_mod) = vm.modules.get("sys") {
                         if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                             if let Some(mod_dict) = dict.get_str("modules") {
-                                mod_dict
-                                    .borrow_mut()
-                                    .set_attribute(&top_name, module.clone())
-                                    .ok();
+                                // `sys.modules` is a plain `dict`: setting a
+                                // KEY needs `PyDict::set`, not
+                                // `set_attribute` (which only supports
+                                // attribute-style access and always fails —
+                                // silently, via the `.ok()` that used to be
+                                // here — for a bare `PyObject::Dict`). This
+                                // left `sys.modules[name]` never actually
+                                // updated for any module reached through
+                                // `__import__()` specifically (the `import`
+                                // statement's own `IMPORT_NAME` opcode
+                                // handler does this correctly via `d.set`,
+                                // which is why only `__import__()`-driven
+                                // imports were affected) — confirmed via
+                                // `type(sys.modules[name])` reporting a
+                                // stale/wrong entry after
+                                // `__import__("name")`.
+                                if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                                    let _ = d.set(py_str(&top_name), module.clone());
+                                }
                             }
                         }
                     }
@@ -82,10 +97,11 @@ pub(crate) fn import_impl(
                 if let Some(sys_mod) = vm.modules.get("sys") {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                         if let Some(mod_dict) = dict.get_str("modules") {
-                            mod_dict
-                                .borrow_mut()
-                                .set_attribute(name, module.clone())
-                                .ok();
+                            // See the matching comment above: `set_attribute`
+                            // is a no-op on a plain `dict` — use `PyDict::set`.
+                            if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                                let _ = d.set(py_str(name), module.clone());
+                            }
                         }
                     }
                 }
@@ -113,14 +129,14 @@ pub(crate) fn import_impl(
     match vm.import_module_from_file(&resolved_name) {
         Ok(module) => {
             vm.modules.insert(resolved_name.clone(), module.clone());
-            // Also add to sys.modules
+            // Also add to sys.modules. See the matching comment further up:
+            // `set_attribute` is a no-op on a plain `dict` — use `PyDict::set`.
             if let Some(sys_mod) = vm.modules.get("sys") {
                 if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                     if let Some(mod_dict) = dict.get_str("modules") {
-                        mod_dict
-                            .borrow_mut()
-                            .set_attribute(&resolved_name, module.clone())
-                            .ok();
+                        if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                            let _ = d.set(py_str(&resolved_name), module.clone());
+                        }
                     }
                 }
             }

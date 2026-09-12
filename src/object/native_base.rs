@@ -187,6 +187,11 @@ pub(crate) fn is_builtin_exception_class_name(name: &str) -> bool {
         // check in `find_exception_base_name` doesn't need its own
         // ungated `is_exception_subclass` fallback (see that function).
         "CalledProcessError" |
+        // `zipimport.ZipImportError` — same shape as `binascii.Error`
+        // above (bare `PyObject::BuiltinFunction` building a
+        // `PyObject::Exception` directly, registered on `zipimport`'s own
+        // module dict rather than via the core `add_exc_type!` list).
+        "ZipImportError" |
         // `io.UnsupportedOperation` — same shape (bare `PyObject::Type`,
         // empty bases/mro), and `is_exception_subclass` already has a
         // dedicated multiple-inheritance special case for it (real

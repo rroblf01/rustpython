@@ -272,7 +272,7 @@ def harmonic_mean(data, weights=None):
     60 km/hr for another 5 km. What is the average speed?
 
         >>> harmonic_mean([40, 60])
-        47.99999999999999
+        48.0
 
     Suppose a car travels 40 km/hr for 5 km, and when traffic clears,
     speeds-up to 60 km/hr for the remaining 30 km of the journey. What
@@ -1127,7 +1127,7 @@ def kde_random(data, h, kernel='normal', *, seed=None):
     >>> rand = kde_random(data, h=1.5, seed=8675309)
     >>> new_selections = [rand() for i in range(10)]
     >>> [round(x, 1) for x in new_selections]
-    [-0.4, 3.5, -0.8, 0.8, 3.1, -0.2, 1.2, -3.2, 3.8, 1.1]
+    [0.7, 6.2, 1.2, 6.9, 7.0, 1.8, 2.5, -0.5, -1.8, 5.6]
 
     """
     n = len(data)
@@ -1493,12 +1493,12 @@ def _sum(data):
 
     >>> from fractions import Fraction as F
     >>> _sum([F(2, 3), F(7, 5), F(1, 4), F(5, 6)])
-    (<class 'Fraction'>, Fraction(63, 20), 4)
+    (<class 'fractions.Fraction'>, Fraction(63, 20), 4)
 
     >>> from decimal import Decimal as D
     >>> data = [D("0.1375"), D("0.2108"), D("0.3061"), D("0.0419")]
     >>> _sum(data)
-    (<class 'Decimal'>, Fraction(6963, 10000), 4)
+    (<class 'decimal.Decimal'>, Fraction(6963, 10000), 4)
 
     Mixed types are currently treated as an error, except that int is
     allowed.

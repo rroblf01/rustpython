@@ -14,7 +14,14 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let last = args.last().unwrap();
         let last_borrowed = last.borrow();
         if let PyObject::Dict(kwargs) = &*last_borrowed {
-            kwargs.get(&py_str("key")).unwrap_or(None)
+            // `key=None` is explicit "no key function" (same as omitting
+            // `key` entirely) — must not be treated as a callable, or
+            // calling it below panics/errors with "object is not
+            // callable" (see list.sort()'s identical guard just above
+            // in attrs/list.rs for the same fix pattern).
+            kwargs.get(&py_str("key")).unwrap_or(None).filter(|k| {
+                !matches!(&*k.borrow(), PyObject::None)
+            })
         } else {
             None
         }

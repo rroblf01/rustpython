@@ -283,6 +283,17 @@ pub fn create_trace_dict() -> HashMap<String, PyObjectRef> {
 
 /// Native _warnings module — CPython C extension replacement
 
+/// Shared by `marshal.loads` and by zipimport's `.pyc`-member loading path
+/// (`src/vm/import.rs`'s `try_import_from_zip_path`): decode a code object
+/// from marshal's own `c`-tagged bytes (see `dumps`' matching comment for
+/// why this isn't CPython's actual on-disk marshal code-object layout).
+pub fn code_object_from_marshal_bytes(b: &[u8]) -> Option<crate::bytecode::CodeObject> {
+    if b.first() != Some(&b'c') {
+        return None;
+    }
+    crate::bytecode::CodeObject::from_bytes(&b[1..]).ok()
+}
+
 pub fn create_marshal_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! m_func {
@@ -342,6 +353,21 @@ pub fn create_marshal_dict() -> HashMap<String, PyObjectRef> {
                         }
                     }
                 }
+                b'c' => {
+                    // Code object: reuses the same internal serialization
+                    // format the `__pycache__/*.rustpython-0.pyc` cache uses
+                    // (`CodeObject::to_bytes`/`from_bytes`) rather than
+                    // CPython's own on-disk marshal code-object layout — this
+                    // isn't byte-compatible with a real CPython .pyc, but it
+                    // gives a real, general round trip for
+                    // `marshal.loads(marshal.dumps(code_obj))` within this
+                    // interpreter, which is what zipimport (and anything
+                    // else building a synthetic .pyc at runtime, all inside
+                    // the same process) actually needs.
+                    if let Some(code) = code_object_from_marshal_bytes(b) {
+                        return Ok(PyObjectRef::new(PyObject::Code(Rc::new(code))));
+                    }
+                }
                 _ => {}
             }
         }
@@ -377,6 +403,11 @@ pub fn create_marshal_dict() -> HashMap<String, PyObjectRef> {
                 let mut v = vec![b's'];
                 v.extend_from_slice(&(s.len() as i32).to_le_bytes());
                 v.extend_from_slice(s.as_bytes());
+                v
+            }
+            PyObject::Code(code) => {
+                let mut v = vec![b'c'];
+                v.extend_from_slice(&code.to_bytes());
                 v
             }
             _ => {

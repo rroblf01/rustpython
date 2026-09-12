@@ -115,7 +115,7 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
         "NotImplementedError" | "RecursionError" | "PythonFinalizationError" => {
             Some("RuntimeError")
         }
-        "ModuleNotFoundError" => Some("ImportError"),
+        "ModuleNotFoundError" | "ZipImportError" => Some("ImportError"),
         "UnboundLocalError" => Some("NameError"),
         "IndentationError" => Some("SyntaxError"),
         "TabError" => Some("IndentationError"),

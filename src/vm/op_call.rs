@@ -51,7 +51,31 @@ impl VirtualMachine {
                                     crate::modules::context_run_fallback as crate::object::BuiltinFunc,
                                 )
                         );
-                        if !is_special_throw && !is_context_run {
+                        // `IOBase.__exit__` (see `iobase_exit_with_vm`'s doc
+                        // comment) needs the same live-VM detour — same
+                        // exclusion class as `is_context_run`/`is_special_throw`
+                        // just above, otherwise this fast path calls the bare
+                        // marker fn directly and it always raises.
+                        let is_iobase_exit = matches!(
+                            &*callable.borrow(),
+                            PyObject::BuiltinMethod { func, .. }
+                                if std::ptr::fn_addr_eq(
+                                    *func,
+                                    crate::modules::iobase_exit_marker as crate::object::BuiltinFunc,
+                                )
+                        );
+                        // Same exclusion, same reason, for every
+                        // `zipimporter` method (see the matching `call.rs`
+                        // comment on `zipimporter_method_marker`).
+                        let is_zipimporter_method = matches!(
+                            &*callable.borrow(),
+                            PyObject::BuiltinMethod { func, .. }
+                                if std::ptr::fn_addr_eq(
+                                    *func,
+                                    crate::modules::zipimporter_method_marker as crate::object::BuiltinFunc,
+                                )
+                        );
+                        if !is_special_throw && !is_context_run && !is_iobase_exit && !is_zipimporter_method {
                             if let PyObject::BuiltinMethod { name, func, self_obj } =
                                 &*callable.borrow()
                             {
