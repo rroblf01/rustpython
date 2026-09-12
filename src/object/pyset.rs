@@ -5,19 +5,28 @@ use super::*;
 
 #[derive(Clone)]
 pub struct PySet {
-    entries: Vec<Option<PyObjectRef>>,
-    indices: Vec<u32>,
+    entries: Rc<Vec<Option<PyObjectRef>>>,
+    indices: Rc<Vec<u32>>,
     size: usize,
 }
 
 impl PySet {
     pub fn new() -> Self {
         PySet {
-            entries: Vec::new(),
-            indices: Vec::new(),
+            entries: Rc::new(Vec::new()),
+            indices: Rc::new(Vec::new()),
             size: 0,
         }
     }
+
+    fn entries_mut(&mut self) -> &mut Vec<Option<PyObjectRef>> {
+        Rc::make_mut(&mut self.entries)
+    }
+
+    fn indices_mut(&mut self) -> &mut Vec<u32> {
+        Rc::make_mut(&mut self.indices)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.size == 0
     }
@@ -25,8 +34,8 @@ impl PySet {
         self.size
     }
     pub fn clear(&mut self) {
-        self.entries.clear();
-        self.indices.clear();
+        self.entries_mut().clear();
+        self.indices_mut().clear();
         self.size = 0;
     }
 
@@ -35,21 +44,21 @@ impl PySet {
         if cap > 8 && self.size * 4 < cap {
             let new_cap = (cap / 2).max(8);
             let mut new_entries: Vec<Option<PyObjectRef>> = Vec::with_capacity(self.size);
-            for e in self.entries.drain(..) {
+            for e in self.entries_mut().drain(..) {
                 if e.is_some() {
                     new_entries.push(e);
                 }
             }
-            self.entries = new_entries;
+            self.entries = Rc::new(new_entries);
             self.rehash(new_cap);
         } else if self.entries.len() > self.size * 2 + 8 {
             let mut new_entries: Vec<Option<PyObjectRef>> = Vec::with_capacity(self.size);
-            for e in self.entries.drain(..) {
+            for e in self.entries_mut().drain(..) {
                 if e.is_some() {
                     new_entries.push(e);
                 }
             }
-            self.entries = new_entries;
+            self.entries = Rc::new(new_entries);
             self.rehash(self.indices.len());
         }
     }
@@ -72,11 +81,13 @@ impl PySet {
             }
             let entry_idx = (idx_val - 1) as usize;
             if let Some(k) = &self.entries[entry_idx] {
-                let eq = if let (PyObject::Int(a), PyObject::Int(b)) = (&*k.borrow(), &*key.borrow()) {
-                    a == b
-                } else if let (PyObject::Str(a), PyObject::Str(b)) = (&*k.borrow(), &*key.borrow()) {
-                    a == b
-                } else {
+                let eq = 'eq: {
+                    if let (PyObject::Int(a), PyObject::Int(b)) = (&*k.borrow(), &*key.borrow()) {
+                        break 'eq a == b;
+                    }
+                    if let (PyObject::Str(a), PyObject::Str(b)) = (&*k.borrow(), &*key.borrow()) {
+                        break 'eq a == b;
+                    }
                     k.is(key) || k.equals(key).unwrap_or(false)
                 };
                 if eq {
@@ -109,11 +120,13 @@ impl PySet {
                     first_tomb = Some(i);
                 }
             } else if let Some(k) = &self.entries[entry_idx] {
-                let eq = if let (PyObject::Int(a), PyObject::Int(b)) = (&*k.borrow(), &*key.borrow()) {
-                    a == b
-                } else if let (PyObject::Str(a), PyObject::Str(b)) = (&*k.borrow(), &*key.borrow()) {
-                    a == b
-                } else {
+                let eq = 'eq: {
+                    if let (PyObject::Int(a), PyObject::Int(b)) = (&*k.borrow(), &*key.borrow()) {
+                        break 'eq a == b;
+                    }
+                    if let (PyObject::Str(a), PyObject::Str(b)) = (&*k.borrow(), &*key.borrow()) {
+                        break 'eq a == b;
+                    }
                     k.is(key) || k.equals(key).unwrap_or(false)
                 };
                 if eq {
@@ -130,7 +143,7 @@ impl PySet {
     fn ensure_capacity(&mut self, additional: usize) {
         let needed = self.size + additional;
         if self.indices.is_empty() {
-            self.indices = vec![0u32; 8];
+            self.indices = Rc::new(vec![0u32; 8]);
         } else if needed * 3 > self.indices.len() * 2 {
             self.rehash(self.indices.len() * 2);
         }
@@ -150,7 +163,7 @@ impl PySet {
                 }
             }
         }
-        self.indices = new_idx;
+        self.indices = Rc::new(new_idx);
     }
 
     pub fn contains(&self, key: &PyObjectRef) -> PyResult<bool> {
@@ -166,8 +179,8 @@ impl PySet {
             return Ok(());
         }
         let entry_idx = self.entries.len();
-        self.entries.push(Some(key));
-        self.indices[slot] = (entry_idx + 1) as u32;
+        self.entries_mut().push(Some(key));
+        self.indices_mut()[slot] = (entry_idx + 1) as u32;
         self.size += 1;
         Ok(())
     }
@@ -199,8 +212,8 @@ impl PySet {
             }
         };
         let entry_idx = self.entries.len();
-        self.entries.push(Some(key));
-        self.indices[slot] = (entry_idx + 1) as u32;
+        self.entries_mut().push(Some(key));
+        self.indices_mut()[slot] = (entry_idx + 1) as u32;
         self.size += 1;
     }
 
@@ -209,14 +222,14 @@ impl PySet {
         let existing = self
             .find(key, h)
             .ok_or_else(|| PyError::key_error(key.str()))?;
-        let removed = self.entries[existing].take().unwrap();
+        let removed = self.entries_mut()[existing].take().unwrap();
         self.size -= 1;
         self.maybe_shrink();
         Ok(removed)
     }
 
     pub fn pop(&mut self) -> Option<PyObjectRef> {
-        for entry in self.entries.iter_mut().rev() {
+        for entry in self.entries_mut().iter_mut().rev() {
             if let Some(val) = entry.take() {
                 self.size -= 1;
                 self.maybe_shrink();
@@ -253,6 +266,27 @@ impl PySet {
 
     pub fn is_subset(&self, other: &PySet) -> bool {
         other.is_superset(self)
+    }
+
+    pub fn symmetric_difference(&self, other: &PySet) -> PyResult<PySet> {
+        let mut result = self.clone();
+        for item in other.iter() {
+            let h = item.hash()?;
+            result.ensure_capacity(1);
+            let (slot, existing) = result.probe(item, h);
+            if let Some(entry_idx) = existing {
+                // Item was in self (and thus in result), remove it
+                result.entries_mut()[entry_idx].take();
+                result.size -= 1;
+            } else {
+                // Item not in self, add it using the probed slot
+                let entry_idx = result.entries.len();
+                result.entries_mut().push(Some(item.clone()));
+                result.indices_mut()[slot] = (entry_idx + 1) as u32;
+                result.size += 1;
+            }
+        }
+        Ok(result)
     }
 }
 

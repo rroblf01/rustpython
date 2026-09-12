@@ -354,26 +354,35 @@ fn bytes_result_to_bytearray(v: PyObjectRef) -> PyObjectRef {
 /// `bytes_result_to_bytearray`'s doc comment. See `bytearray`'s dispatch
 /// arms below — one line each, all funneling through this.
 pub(crate) fn bytearray_delegate(method_name: &str, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if let PyObject::ByteArray(b) = &*args[0].borrow() {
-        let temp = PyObjectRef::imm(PyObject::Bytes(b.clone()));
-        let method = temp.borrow().get_attribute(method_name)?;
-        let result = if let PyObject::BuiltinMethod { func, .. } = &*method.borrow() {
-            let mut new_args = vec![temp.clone()];
-            new_args.extend_from_slice(&args[1..]);
-            func(&new_args)?
-        } else {
-            return Err(PyError::runtime_error(format!(
-                "{}: bad method",
-                method_name
-            )));
-        };
-        Ok(bytes_result_to_bytearray(result))
+    // Snapshot the bytearray's CONTENT first and drop the borrow on
+    // `args[0]` before forwarding to the delegated `bytes` method — that
+    // call can run arbitrary Python (e.g. `join()`'s argument iterable may
+    // be a generator whose body mutates `args[0]` itself, real CPython
+    // regression `test_bytearray_join_with_misbehaving_iterator`). Holding
+    // `args[0]`'s own borrow across it previously panicked ("RefCell
+    // already borrowed") the moment that reentrant code tried to
+    // `.borrow_mut()` the very bytearray this function was still borrowing.
+    let snapshot = if let PyObject::ByteArray(b) = &*args[0].borrow() {
+        b.clone()
     } else {
-        Err(PyError::runtime_error(format!(
+        return Err(PyError::runtime_error(format!(
             "{} on non-bytearray",
             method_name
-        )))
-    }
+        )));
+    };
+    let temp = PyObjectRef::imm(PyObject::Bytes(snapshot));
+    let method = temp.borrow().get_attribute(method_name)?;
+    let result = if let PyObject::BuiltinMethod { func, .. } = &*method.borrow() {
+        let mut new_args = vec![temp.clone()];
+        new_args.extend_from_slice(&args[1..]);
+        func(&new_args)?
+    } else {
+        return Err(PyError::runtime_error(format!(
+            "{}: bad method",
+            method_name
+        )));
+    };
+    Ok(bytes_result_to_bytearray(result))
 }
 
 /// Byte-slice analogue of `str_find_impl` — no unicode decoding needed

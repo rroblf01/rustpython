@@ -7,21 +7,31 @@ impl Compiler {
     pub(crate) fn compile_expr(&mut self, expr: &Expr) -> Result<(), String> {
         match expr {
             Expr::Constant(c) => {
-                let const_value = match c {
-                    Constant::None => ConstValue::None,
-                    Constant::Bool(b) => ConstValue::Bool(*b),
-                    Constant::Int(s) => ConstValue::Int(s.clone()),
-                    Constant::Float(s) => ConstValue::Float(s.clone()),
-                    Constant::String(s) => ConstValue::String(s.clone()),
-                    Constant::Ellipsis => ConstValue::String("...".to_string()),
-                    Constant::Bytes(b) => ConstValue::Bytes(b.clone()),
-                    Constant::Complex { real, imag } => ConstValue::Complex {
-                        real: real.clone(),
-                        imag: imag.clone(),
-                    },
-                };
-                let idx = self.get_const_index(const_value) as u32;
-                self.emit(Opcode::LOAD_CONST, idx);
+                if matches!(c, Constant::Ellipsis) {
+                    // Ellipsis singleton via LOAD_GLOBAL (the ellipsis
+                    // type/instance lives in builtins). Using a dedicated
+                    // ConstValue::Ellipsis would require a new PyObject
+                    // variant and touching ~100 exhaustive matches; LOAD_GLOBAL
+                    // reuses the existing builtins plumbing.
+                    let idx = self.get_name_index("Ellipsis") as u32;
+                    self.emit(Opcode::LOAD_GLOBAL, idx);
+                } else {
+                    let const_value = match c {
+                        Constant::None => ConstValue::None,
+                        Constant::Bool(b) => ConstValue::Bool(*b),
+                        Constant::Int(s) => ConstValue::Int(s.clone()),
+                        Constant::Float(s) => ConstValue::Float(s.clone()),
+                        Constant::String(s) => ConstValue::String(s.clone()),
+                        Constant::Bytes(b) => ConstValue::Bytes(b.clone()),
+                        Constant::Complex { real, imag } => ConstValue::Complex {
+                            real: real.clone(),
+                            imag: imag.clone(),
+                        },
+                        Constant::Ellipsis => unreachable!(),
+                    };
+                    let idx = self.get_const_index(const_value) as u32;
+                    self.emit(Opcode::LOAD_CONST, idx);
+                }
             }
             Expr::Name(name) => {
                 // Private-name mangling (`mangle_name`) applies to EVERY
@@ -409,13 +419,28 @@ impl Compiler {
                     }
                     self.emit(Opcode::LIST_TO_TUPLE, 0);
                     self.emit(Opcode::BUILD_MAP, 0);
+                    // Explicit keywords are added via a fresh single-pair
+                    // dict merged with DICT_MERGE (mirroring real CPython's
+                    // own emission: grouping explicits into a BUILD_MAP
+                    // merged via DICT_MERGE) — NOT via MAP_ADD directly into
+                    // the kwargs dict. A call's `**` unpacking must raise on
+                    // ANY duplicate key (`f(**d, a=1)` with 'a' in d), while
+                    // MAP_ADD silently overwrites, losing the duplicate
+                    // before the call ever sees it. DICT_MERGE already
+                    // implements the raising check. Evaluation order is
+                    // unchanged (each value compiled in source position).
                     for kw in keywords {
                         if let Some(name) = &kw.arg {
                             let name_idx =
                                 self.get_const_index(ConstValue::String(name.clone())) as u32;
+                            self.emit(Opcode::BUILD_MAP, 0);
                             self.emit(Opcode::LOAD_CONST, name_idx);
                             self.compile_expr(&kw.value)?;
+                            // MAP_ADD 0: the fresh single-pair dict is right
+                            // on top (peek(0)) — NOT arg 1 (that's the dict-
+                            // display shape with its DUP_TOP'd map below).
                             self.emit(Opcode::MAP_ADD, 0);
+                            self.emit(Opcode::DICT_MERGE, 0);
                         } else {
                             self.compile_expr(&kw.value)?;
                             self.emit(Opcode::DICT_MERGE, 0);
@@ -472,7 +497,18 @@ impl Compiler {
             }
             Expr::Subscript { value, slice } => {
                 self.compile_expr(value)?;
-                self.compile_expr(slice)?;
+                // PEP 646: starred unpacking inside subscript (e.g. A[*b])
+                // must build a tuple via list-extend dance, not just push
+                // the bare iterable. CPython compiles `A[*b]` as
+                // BUILD_LIST, LIST_EXTEND, LIST_TO_TUPLE, SUBSCR.
+                if let Expr::Starred(inner) = slice.as_ref() {
+                    self.emit(Opcode::BUILD_LIST, 0);
+                    self.compile_expr(inner)?;
+                    self.emit(Opcode::LIST_EXTEND, 0);
+                    self.emit(Opcode::LIST_TO_TUPLE, 0);
+                } else {
+                    self.compile_expr(slice)?;
+                }
                 self.emit(Opcode::BINARY_OP, 13); // SUBSCR = 13
             }
             Expr::List(elts) => {
@@ -577,6 +613,27 @@ impl Compiler {
                 self.compile_comprehension(elt, generators, true)?;
             }
             Expr::GeneratorExp { elt, generators } => {
+                // NOTE: `compile_genexp` (src/compiler/comprehension.rs)
+                // implements a genexp as a REAL, lazy generator function
+                // (matching CPython's actual desugaring, needed for
+                // `gi_running`/`gi_frame`/late-vs-early-binding fidelity)
+                // but is missing closure/freevar wiring for names the
+                // genexp body references from the ENCLOSING scope — it
+                // compiles the synthetic function body without running
+                // whatever free-variable analysis pass normally runs on
+                // real user-written `def`s first. Confirmed regression:
+                // broke `Lib/unittest/loader.py`'s `any(fnmatchcase(
+                // fullName, pattern) for pattern in ...)` — `fullName`,
+                // assigned in the enclosing scope just above, came back
+                // `NameError` inside the genexp body — which broke
+                // unittest test discovery for nearly every file in the
+                // CPython test corpus (a session sweep went from 125 to
+                // 11 PASS). Reverted to the eager-inline-then-wrap-in-
+                // iterator approach below (loses real generator-object
+                // semantics for genexps specifically — `gi_running` etc.
+                // won't be real for these — but is safe) until the
+                // freevar-wiring gap is actually closed as its own
+                // dedicated, carefully-verified effort.
                 self.compile_comprehension(elt, generators, false)?;
                 self.emit(Opcode::GET_ITER, 0);
             }
@@ -603,6 +660,13 @@ impl Compiler {
             }
             Expr::Starred(expr) => {
                 self.compile_expr(expr)?;
+                // PEP 646: `*b` as an ANNOTATION (e.g. `def f(*args: *b)`)
+                // unpacks exactly one element (CPython emits
+                // UNPACK_SEQUENCE there). Everywhere else keeps the legacy
+                // evaluate-inner behavior.
+                if self.in_annotation {
+                    self.emit(Opcode::UNPACK_SEQUENCE, 1);
+                }
             }
             Expr::Yield(Some(expr)) => {
                 if self.scope != ScopeType::Function {

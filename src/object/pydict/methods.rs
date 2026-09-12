@@ -241,10 +241,21 @@ pub fn builtin_dict_setitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             "dict.__setitem__() requires at least 2 arguments",
         ));
     };
+    // Real key object — NOT stringified. A previous version called
+    // `.str()` here unconditionally, which silently turned every non-string
+    // key (`1`, `(1, 2)`, an object with a custom `__hash__`, ...) into its
+    // string repr for genuine dict/dict-subclass storage (confirmed via
+    // `dict.__setitem__({}, 1, "x")` producing `{'1': 'x'}` instead of
+    // `{1: 'x'}` — a real trigger: `Lib/copy.py`'s reduce-fallback path for
+    // dict subclasses without a working `__reduce_ex__` calls exactly this
+    // to reconstruct a deep/shallow copy, corrupting every non-string key).
+    // Only the `PyObject::Instance` branch below (a dict subclass with no
+    // native backing, tracked via its attribute map) genuinely needs a
+    // string, since that map is name-keyed — converted locally there.
     let key = if args.len() >= 4 {
-        args[2].str()
+        args[2].clone()
     } else if args.len() >= 3 {
-        args[1].str()
+        args[1].clone()
     } else {
         return Err(PyError::type_error(
             "dict.__setitem__() requires at least 2 arguments",
@@ -268,14 +279,14 @@ pub fn builtin_dict_setitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Only fall back to treating the instance's own attribute dict as "the
     // dict" when there's no native backing at all.
     if let Some(native) = native_backing_of(instance) {
-        py_setitem(&native, &py_str(&key), value)?;
+        py_setitem(&native, &key, value)?;
         return Ok(py_none());
     }
     let mut obj = instance.borrow_mut();
     if let PyObject::Instance { dict, .. } = &mut *obj {
-        dict.insert(key, value);
+        dict.insert(key.str(), value);
     } else if let PyObject::Dict(pd) = &mut *obj {
-        pd.set(py_str(&key), value).ok();
+        pd.set(key, value).ok();
     } else {
         drop(obj);
         // Fall back to py_setitem for non-Instance types

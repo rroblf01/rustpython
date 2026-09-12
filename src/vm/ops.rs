@@ -82,13 +82,28 @@ impl VirtualMachine {
                     let left = f.fast_locals.get(a).cloned().flatten().ok_or_else(|| crate::vm::helpers::unbound_local_msg(f, a))?;
                     (left, right)
                 };
-                let result = if op_u >= 100 {
-                    match crate::vm::helpers::inplace_binary_op(&left, &right, op_u - 100)? {
+                // Same-slot string accumulation (`s = s + t` with z == a, or
+                // the `+=` form): CPython's `_BINARY_OP_INPLACE_ADD_UNICODE`
+                // grows the string in place only for this exact pattern —
+                // never for a bare refcount check (see `try_inplace_str_grow`).
+                // NOTE: the slot is only BORROWED here — cloning it for the
+                // identity check would add a third strong reference and
+                // defeat the count==2 gate (CPython checks with borrowed
+                // references for the same reason).
+                let result = if (op_u == 0 || op_u == 100) && z == a {
+                    let grown = {
+                        let f = &self.frames[fi];
+                        match f.fast_locals.get(a).and_then(|s| s.as_ref()) {
+                            Some(slot_val) => crate::object::try_inplace_str_grow(slot_val, &left, &right)?,
+                            None => None,
+                        }
+                    };
+                    match grown {
                         Some(v) => v,
-                        None => crate::vm::helpers::plain_binary_op(&left, &right, op_u - 100)?,
+                        None => crate::vm::helpers::plain_or_inplace(&left, &right, op_u)?,
                     }
                 } else {
-                    crate::vm::helpers::plain_binary_op(&left, &right, op_u)?
+                    crate::vm::helpers::plain_or_inplace(&left, &right, op_u)?
                 };
                 let f = &mut self.frames[fi];
                 if z < f.fast_locals.len() {
@@ -109,7 +124,26 @@ impl VirtualMachine {
                 };
                 let cval = self.frames[fi].code.consts.get(c).cloned().ok_or_else(|| PyError::runtime_error("bad const index"))?;
                 let right = crate::vm::helpers::eval_const_value(cval)?;
-                let result = crate::vm::helpers::plain_binary_op(&left, &right, op_u)?;
+                // The fuser only emits this for `a = a op const` (same-slot
+                // store, `superinstr.rs` Pattern B) — the exact pattern where
+                // CPython's `_BINARY_OP_INPLACE_ADD_UNICODE` grows strings in
+                // place. Anything else falls back to a fresh copy.
+                // (Slot borrowed, not cloned — see the note above.)
+                let result = if op_u == 0 {
+                    let grown = {
+                        let f = &self.frames[fi];
+                        match f.fast_locals.get(a).and_then(|s| s.as_ref()) {
+                            Some(slot_val) => crate::object::try_inplace_str_grow(slot_val, &left, &right)?,
+                            None => None,
+                        }
+                    };
+                    match grown {
+                        Some(v) => v,
+                        None => crate::vm::helpers::plain_binary_op(&left, &right, op_u)?,
+                    }
+                } else {
+                    crate::vm::helpers::plain_binary_op(&left, &right, op_u)?
+                };
                 let f = &mut self.frames[fi];
                 if a < f.fast_locals.len() {
                     f.fast_locals[a] = Some(result);
@@ -179,7 +213,22 @@ impl VirtualMachine {
             }
             Opcode::UNARY_INVERT => {
                 let val = self.frames[fi].pop()?;
-                let result = {
+                // A user-defined class (e.g. `enum.Flag`'s `__invert__`,
+                // needed for `~SomeFlag.MEMBER`) overriding `__invert__` was
+                // never consulted here — every OTHER unary operator
+                // (`UNARY_NEGATIVE`/`UNARY_POSITIVE` just above) already
+                // checks `lookup_dunder_via_mro` on `PyObject::Instance`
+                // before falling back to the native-value cases; `~` alone
+                // skipped straight to the native match and raised a bogus
+                // `TypeError: bad operand type for unary ~` for ANY
+                // Instance, even one that legitimately implements
+                // `__invert__`.
+                let invert_method = if let PyObject::Instance { typ, .. } = &*val.borrow() {
+                    crate::object::lookup_dunder_via_mro(typ, "__invert__")
+                } else { None };
+                let result = if let Some(f) = invert_method {
+                    call_bound_method(f, val.clone(), vec![])?
+                } else {
                     let obj = val.borrow();
                     match &*obj {
                         PyObject::Int(i) => py_int(!i),

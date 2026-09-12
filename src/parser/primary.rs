@@ -252,6 +252,8 @@ impl Parser {
                             upper: u,
                             step: s,
                         });
+                    } else if self.eat(&Token::Star) {
+                        elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
                     } else {
                         let e = self.parse_expr()?;
                         if self.eat(&Token::Colon) {
@@ -305,11 +307,61 @@ impl Parser {
                 if self.at(&Token::RightBracket) {
                     break;
                 }
-                if self.at(&Token::Star) {
+                if self.eat(&Token::Colon) {
+                    // Slice with omitted lower, e.g. X[a, :1]
+                    let upper = if !self.at(&Token::RightBracket)
+                        && !self.at(&Token::Comma)
+                        && !self.at(&Token::Colon)
+                    {
+                        Some(Box::new(self.parse_expr()?))
+                    } else {
+                        None
+                    };
+                    let step = if self.eat(&Token::Colon) {
+                        if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
+                            Some(Box::new(self.parse_expr()?))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    elts.push(Expr::Slice {
+                        lower: None,
+                        upper,
+                        step,
+                    });
+                } else if self.at(&Token::Star) {
                     self.next();
                     elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
                 } else {
-                    elts.push(self.parse_expr()?);
+                    let e = self.parse_expr()?;
+                    if self.eat(&Token::Colon) {
+                        let upper = if !self.at(&Token::RightBracket)
+                            && !self.at(&Token::Comma)
+                            && !self.at(&Token::Colon)
+                        {
+                            Some(Box::new(self.parse_expr()?))
+                        } else {
+                            None
+                        };
+                        let step = if self.eat(&Token::Colon) {
+                            if !self.at(&Token::RightBracket) && !self.at(&Token::Comma) {
+                                Some(Box::new(self.parse_expr()?))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        elts.push(Expr::Slice {
+                            lower: Some(Box::new(e)),
+                            upper,
+                            step,
+                        });
+                    } else {
+                        elts.push(e);
+                    }
                 }
                 if !self.eat(&Token::Comma) {
                     break;
@@ -353,6 +405,9 @@ impl Parser {
                     if self.at(&Token::RightBracket) {
                         break;
                     }
+                    if std::env::var("RPY_DEBUG_PEP646").is_ok() {
+                        eprintln!("DEBUG pep646 loop token {:?} at {:?}", self.current, self.lexer.get_line_col());
+                    }
                     // Each element may itself be a slice (a:b)
                     if self.eat(&Token::Colon) {
                         let u = if !self.at(&Token::RightBracket)
@@ -381,8 +436,14 @@ impl Parser {
                             step: s,
                         });
                     } else if self.eat(&Token::Star) {
+                        if std::env::var("RPY_DEBUG_PEP646").is_ok() {
+                            eprintln!("DEBUG pep646 Star branch taken");
+                        }
                         elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
                     } else {
+                        if std::env::var("RPY_DEBUG_PEP646").is_ok() {
+                            eprintln!("DEBUG pep646 else branch token {:?} at {:?}", self.current, self.lexer.get_line_col());
+                        }
                         let e = self.parse_expr()?;
                         // Expression followed by : means it's a slice: 3:4
                         if self.eat(&Token::Colon) {

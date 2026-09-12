@@ -151,6 +151,11 @@ pub enum Opcode {
     // them; see the compiler emit sites for which is used where.
     DICT_MERGE = 202, // Pop TOS (source mapping) and merge into dict at TOS1, raising on duplicate keys
     DICT_UPDATE = 204, // Pop TOS (source mapping) and merge into dict at TOS1, silently overriding on duplicate keys
+    // Pop TOS; if not None, print its repr() to the current sys.stdout
+    // (CPython's `PRINT_EXPR`, i.e. `CALL_INTRINSIC_1(INTRINSIC_PRINT)`).
+    // Emitted for expression STATEMENTS only when compiling in `single`
+    // (REPL/doctest) mode — never in `exec`/`eval` output.
+    PRINT_EXPR = 205,
 
     // Pop TOS (a list) and push a tuple with the same elements — used to
     // build a tuple literal containing starred unpacking, e.g. (*a, *b),
@@ -291,6 +296,7 @@ impl Opcode {
             261 => LOAD_CLOSURE,
             202 => DICT_MERGE,
             204 => DICT_UPDATE,
+            205 => PRINT_EXPR,
             218 => UNPACK_SEQUENCE_TWO_TUPLE,
             120 => CHECK_EXC_MATCH_STAR,
             124 => SUPER_FAST2_BIN,

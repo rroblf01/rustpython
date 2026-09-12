@@ -91,12 +91,74 @@ pub fn try_dunder_ternop(
     Ok(None)
 }
 
-/// CPython's `unicode_concatenate`-style in-place string growth is NOT
-/// reliably possible here: the VM clones references through the eval stack,
-/// so a `s = s + "x"` left operand arrives with strong_count 3 (local +
-/// popped value + frame), never 1. A refcount heuristic would corrupt
-/// strings that genuinely have other live references. Repeated `+` stays
-/// quadratic; `''.join(...)` is the fast path (already ~CPython speed).
+/// Exact-`str` fresh-copy fast path for `+` (never mutates).
+/// Skipping dunder dispatch for exact `str` pairs is semantics-preserving:
+/// `str` defines neither `__add__` nor `__radd__` (see `attrs/str1.rs`/
+/// `str2.rs` — only `__mul__`/`__mod__`), exact strs carry no instance dict,
+/// and subclass instances are `Instance`, never `PyObject::Str`, so no
+/// override can exist on either side. Returns `Ok(None)` when either side is
+/// not exactly a `str`.
+///
+/// NOTE: in-place growth is deliberately NOT done here. A bare
+/// `strong_count() == 2` check is unsound in the general handler: `y = x +
+/// "b"` also presents count 2 (local `x` + operand) but the local survives,
+/// so growing in place corrupts `x` (caught by `test_format`'s
+/// `test_better_error_message_format`). CPython restricts in-place growth to
+/// its `_BINARY_OP_INPLACE_ADD_UNICODE` super-instruction, which fires only
+/// for `x = x + y` / `x += y` (STORE_FAST to the same slot, verified by
+/// object identity). The same restriction applies here: in-place growth
+/// lives only in the fused `SUPER_FASTC_BIN` / `SUPER_FAST2_BIN` handlers in
+/// `src/vm/ops.rs` (which the fuser in `src/superinstr.rs` only emits for
+/// same-slot store patterns), via `try_inplace_str_grow` below.
+pub fn fast_str_add(left: &PyObjectRef, right: &PyObjectRef) -> PyResult<Option<PyObjectRef>> {
+    let rb = right.borrow();
+    let PyObject::Str(r) = &*rb else {
+        return Ok(None);
+    };
+    let lb = left.borrow();
+    if let PyObject::Str(l) = &*lb {
+        let mut out = String::with_capacity(l.len() + r.len());
+        out.push_str(l.as_str());
+        out.push_str(r.as_str());
+        return Ok(Some(py_str(&out)));
+    }
+    Ok(None)
+}
+
+/// CPython-style in-place string growth for the fused same-slot handlers
+/// (`x = x + y` / `x += y` where the store target is the load slot).
+/// Sound iff ALL hold (checked here, mirroring CPython's DEOPT_IF identity
+/// check plus the refcount reasoning in `_BINARY_OP_INPLACE_ADD_UNICODE`):
+/// - `slot_val` (current content of the store slot) is the SAME allocation
+///   as `left` (`Rc::ptr_eq`),
+/// - that allocation has exactly 2 strong refs (the slot + the operand),
+///   so no third party can observe the mutation,
+/// - the `RefCell` is unborrowed right now (else fall back to a copy).
+///
+/// On success returns the (same, grown) object for the handler to store back
+/// into the slot; on any doubt returns `Ok(None)` for the fresh-copy path.
+pub fn try_inplace_str_grow(
+    slot_val: &PyObjectRef,
+    left: &PyObjectRef,
+    right: &PyObjectRef,
+) -> PyResult<Option<PyObjectRef>> {
+    let rb = right.borrow();
+    let PyObject::Str(r) = &*rb else {
+        return Ok(None);
+    };
+    if let (PyObjectRef::Imm(slot_rc), PyObjectRef::Imm(left_rc)) = (slot_val, left) {
+        if std::rc::Rc::ptr_eq(slot_rc, left_rc) && left.strong_count() == 2 {
+            if let Ok(mut guard) = left_rc.try_borrow_mut() {
+                if let PyObject::Str(l) = &mut *guard {
+                    l.reserve(r.len());
+                    l.push_str(r.as_str());
+                    return Ok(Some(left.clone()));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
 
 pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
@@ -109,6 +171,9 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         if let (Some(af), Some(bf)) = (a.as_f64(), b.as_f64()) {
             return Ok(py_float(af + bf));
         }
+    }
+    if let Some(r) = fast_str_add(a, b)? {
+        return Ok(r);
     }
     if let Some(r) = try_dunder_binop(a, b, "__add__")? {
         return Ok(r);
@@ -719,18 +784,7 @@ fn set_difference(a: &PySet, b: &PySet, as_frozen: bool) -> PyResult<PyObjectRef
     Ok(wrap_set_result(result, as_frozen))
 }
 fn set_symmetric_diff(a: &PySet, b: &PySet, as_frozen: bool) -> PyResult<PyObjectRef> {
-    let mut result = PySet::new();
-    for item in a.to_vec() {
-        if !b.contains(&item)? {
-            result.add(item)?;
-        }
-    }
-    for item in b.to_vec() {
-        if !a.contains(&item)? {
-            result.add(item)?;
-        }
-    }
-    Ok(wrap_set_result(result, as_frozen))
+    Ok(wrap_set_result(a.symmetric_difference(b)?, as_frozen))
 }
 
 fn i64_binop(
@@ -863,22 +917,53 @@ pub fn py_bit_and(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 /// straightforward merge sort only ever does pairwise comparisons and
 /// never relies on any total-order invariant to stay memory-safe, so it
 /// can't panic regardless of what the predicate returns.
-pub(crate) fn py_stable_sort_by<F>(mut items: Vec<PyObjectRef>, is_less: &F) -> Vec<PyObjectRef>
+pub(crate) fn py_stable_sort_by<F>(items: Vec<PyObjectRef>, is_less: &F) -> PyResult<Vec<PyObjectRef>>
 where
-    F: Fn(&PyObjectRef, &PyObjectRef) -> bool,
+    F: Fn(&PyObjectRef, &PyObjectRef) -> PyResult<bool>,
+{
+    py_stable_sort_by_generic(items, is_less)
+}
+
+/// Generic form of [`py_stable_sort_by`] — same panic-tolerant merge sort,
+/// but over an arbitrary element type `T` rather than only `PyObjectRef`.
+/// Needed for `list.sort(key=...)`/`sorted(key=...)`'s decorate-sort-
+/// undecorate path, which sorts `(key, original_item)` pairs rather than
+/// bare `PyObjectRef`s — that path used to call `Vec::sort_by` directly and
+/// inherited the same "user-provided comparison function does not
+/// correctly implement a total order" panic this generic helper exists to
+/// avoid (see `py_stable_sort_by`'s own doc comment; confirmed via
+/// `test_sort.py`'s `cmp_to_key`-wrapped intentionally-inconsistent
+/// comparator).
+///
+/// `is_less` returns `PyResult<bool>`, not a bare `bool` — a comparison can
+/// genuinely raise (e.g. `int < str` -> `TypeError`, or a hostile `__lt__`
+/// that raises `ValueError`), and real CPython's `list.sort()` aborts the
+/// sort and propagates that exception rather than silently treating a
+/// raising comparison as "not less than" (confirmed via `test_sort.py`'s
+/// `TestOptimizedCompares` — `test_not_all_tuples`, `test_safe_object_
+/// compare`, `test_unsafe_object_compare` all rely on the `TypeError`/
+/// `ValueError` from an incompatible/hostile comparison actually reaching
+/// the caller). This is independent from the "panic-tolerant" property
+/// above: an inconsistent-but-non-raising comparator (returns `Ok(bool)`
+/// values that don't form a total order) is still tolerated exactly as
+/// before, we just no longer swallow a genuine `Err`.
+pub(crate) fn py_stable_sort_by_generic<T, F>(mut items: Vec<T>, is_less: &F) -> PyResult<Vec<T>>
+where
+    T: Clone,
+    F: Fn(&T, &T) -> PyResult<bool>,
 {
     let n = items.len();
     if n <= 1 {
-        return items;
+        return Ok(items);
     }
     let right = items.split_off(n / 2);
-    let left = py_stable_sort_by(items, is_less);
-    let right = py_stable_sort_by(right, is_less);
+    let left = py_stable_sort_by_generic(items, is_less)?;
+    let right = py_stable_sort_by_generic(right, is_less)?;
     let mut merged = Vec::with_capacity(left.len() + right.len());
     let mut li = 0;
     let mut ri = 0;
     while li < left.len() && ri < right.len() {
-        if is_less(&right[ri], &left[li]) {
+        if is_less(&right[ri], &left[li])? {
             merged.push(right[ri].clone());
             ri += 1;
         } else {
@@ -888,5 +973,5 @@ where
     }
     merged.extend_from_slice(&left[li..]);
     merged.extend_from_slice(&right[ri..]);
-    merged
+    Ok(merged)
 }

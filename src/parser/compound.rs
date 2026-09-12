@@ -140,11 +140,20 @@ impl Parser {
         };
         let mut bases = Vec::new();
         let mut keywords = Vec::new();
+        // Duplicate literal keywords are a compile-time SyntaxError
+        // (mirrors the call-args parser) — `**` splats don't count.
+        let mut seen_kw_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         if self.eat(&Token::LeftParen) {
             if !self.at(&Token::RightParen) {
                 loop {
                     if matches!(&self.current, Token::Name(_)) && self.peek() == &Token::Equal {
                         let arg = Some(self.expect_name()?);
+                        if let Some(name) = &arg {
+                            if !seen_kw_names.insert(name.clone()) {
+                                return Err(format!("keyword argument repeated: {}", name));
+                            }
+                        }
                         self.expect(&Token::Equal)?;
                         let value = self.parse_expr()?;
                         keywords.push(Keyword {
@@ -153,6 +162,9 @@ impl Parser {
                         });
                     } else if self.at(&Token::Underscore) && self.peek() == &Token::Equal {
                         self.next();
+                        if !seen_kw_names.insert("_".to_string()) {
+                            return Err("keyword argument repeated: _".to_string());
+                        }
                         self.expect(&Token::Equal)?;
                         let value = self.parse_expr()?;
                         keywords.push(Keyword {

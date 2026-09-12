@@ -53,6 +53,13 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     return Ok(py_str(type_name));
                 }
                 if name == "__qualname__" {
+                    // An explicitly assigned `__qualname__` in the class
+                    // body wins (real CPython honors it as the type's
+                    // qualname); otherwise the type's own name (correct for
+                    // every module-level class).
+                    if let Some(v) = dict.get_str("__qualname__") {
+                        return Ok(v.clone());
+                    }
                     return Ok(py_str(type_name));
                 }
                 if name == "__annotations__" {

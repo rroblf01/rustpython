@@ -155,17 +155,13 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
         let (dialect_arg, kwargs) = extract_kwargs(args, 1);
         let dialect = build_dialect(dialect_arg, &kwargs)?;
         let is_file = iterable.borrow().get_attribute("readline").is_ok() || iterable.borrow().get_attribute("_file").and_then(|f| f.borrow().get_attribute("readline")).is_ok();
-        let mut rows: Vec<PyObjectRef> = Vec::new();
+        let rows: Vec<PyObjectRef> = Vec::new();
         let mut is_file_flag = false;
         if is_file {
             is_file_flag = true;
-        } else {
-            let lines = collect_lines(&iterable)?;
-            let parsed_rows = parse_csv_lines(lines, &dialect)?;
-            for r in parsed_rows {
-                rows.push(py_list(r));
-            }
         }
+        // Non-file iterables stay lazy (parsed in __next__); nothing to
+        // precompute here.
         let reader_type = PyObjectRef::new(PyObject::Type{ name: "reader".to_string(), dict: Box::new(str_map_to_typedict(StdHashMap::new())), bases: vec![], mro: vec![] });
         let mut dict = crate::object::AttrMap::new();
         {
@@ -207,7 +203,18 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
             dict.insert_str("_rows", py_list(vec![]));
             dict.insert_str("_index", py_int(0));
         } else {
-            dict.insert_str("_rows", py_list(rows));
+            // Lazy list/iterable path: do NOT pull anything here (CPython
+            // readers are lazy; eager pulling breaks re-entrant iterators
+            // like test_reader's ReentrantIter, whose first __next__ calls
+            // back into a not-yet-existing reader). Parse incrementally in
+            // __next__ below, guarded by _in_next.
+            let iter = crate::object::builtin_iter(&[iterable.clone()])?;
+            dict.insert_str("_iter", iter);
+            dict.insert_str("_st_quotes", py_bool(false));
+            dict.insert_str("_st_field", py_str(""));
+            dict.insert_str("_st_row", py_list(vec![]));
+            dict.insert_str("_in_next", py_bool(false));
+            dict.insert_str("_rows", py_list(vec![]));
             dict.insert_str("_index", py_int(0));
             dict.insert_str("_is_file", py_bool(false));
         }
@@ -381,18 +388,357 @@ pub fn create_csv_dict() -> HashMap<String, PyObjectRef> {
                         }
                     }
                 } else {
-                    let rows = self_obj.borrow().get_attribute("_rows").map_err(|_| PyError::runtime_error("no _rows"))?;
-                    let idx_obj = self_obj.borrow().get_attribute("_index").map_err(|_| PyError::runtime_error("no _index"))?;
-                    let idx = idx_obj.as_i64().unwrap_or(0) as usize;
-                    let rows_b = rows.borrow();
-                    if let PyObject::List(items) = &*rows_b {
-                        if idx >= items.len() { return Err(PyError::StopIteration); }
-                        let row = items[idx].clone();
-                        drop(rows_b);
-                        self_obj.borrow_mut().set_attribute("_index", py_int((idx+1) as i64)).ok();
-                        self_obj.borrow_mut().set_attribute("line_num", py_int((idx+1) as i64)).ok();
-                        Ok(row)
-                    } else { Err(PyError::StopIteration) }
+                    // Lazy list/iterable path: parse incrementally so the
+                    // reader exists before anything is pulled (re-entrant
+                    // iterators, gh-145105) and so embedded newlines are
+                    // visible (they must raise, not be silently stripped).
+                    // Re-entrancy guard: a next() inside next() is an Error.
+                    let in_next = self_obj
+                        .borrow()
+                        .get_attribute("_in_next")
+                        .map(|v| v.truthy())
+                        .unwrap_or(false);
+                    if in_next {
+                        return Err(dialect_error(
+                            "reader referenced from within iterator".to_string(),
+                        ));
+                    }
+                    let set_flag = |val: bool| {
+                        self_obj
+                            .borrow_mut()
+                            .set_attribute("_in_next", py_bool(val))
+                            .ok();
+                    };
+                    set_flag(true);
+                    let result = (|| -> PyResult<PyObjectRef> {
+                        let dialect_obj = self_obj
+                            .borrow()
+                            .get_attribute("dialect")
+                            .map_err(|_| PyError::runtime_error("no dialect"))?;
+                        let (delim, qc, ec, dq, sis, q, strict) = {
+                            let db = dialect_obj.borrow();
+                            if let PyObject::Instance{ dict, .. } = &*db {
+                                (
+                                    dict.get("delimiter").map(|v| v.str().chars().next().unwrap_or(',')).unwrap_or(','),
+                                    dict.get("quotechar").and_then(|v| {
+                                        if matches!(&*v.borrow(), PyObject::None) { None }
+                                        else { Some(v.str().chars().next().unwrap()) }
+                                    }),
+                                    dict.get("escapechar").and_then(|v| {
+                                        if matches!(&*v.borrow(), PyObject::None) { None }
+                                        else { Some(v.str().chars().next().unwrap()) }
+                                    }),
+                                    dict.get("doublequote").map(|v| v.truthy()).unwrap_or(true),
+                                    dict.get("skipinitialspace").map(|v| v.truthy()).unwrap_or(false),
+                                    dict.get("quoting").and_then(|v| v.as_i64()).unwrap_or(0),
+                                    dict.get("strict").map(|v| v.truthy()).unwrap_or(false),
+                                )
+                            } else {
+                                (',', Some('"'), None, true, false, 0, false)
+                            }
+                        };
+                        let quotechar = if q == 3 { None } else { qc };
+                        // Restore live parse state.
+                        let mut in_quotes = self_obj
+                            .borrow()
+                            .get_attribute("_st_quotes")
+                            .map(|v| v.truthy())
+                            .unwrap_or(false);
+                        let mut field: String = self_obj
+                            .borrow()
+                            .get_attribute("_st_field")
+                            .map(|v| v.str())
+                            .unwrap_or_default();
+                        let mut row: Vec<String> = self_obj
+                            .borrow()
+                            .get_attribute("_st_row")
+                            .map(|v| {
+                                if let PyObject::List(items) = &*v.borrow() {
+                                    items.iter().map(|i| i.str()).collect()
+                                } else {
+                                    Vec::new()
+                                }
+                            })
+                            .unwrap_or_default();
+                        let iter = self_obj
+                            .borrow()
+                            .get_attribute("_iter")
+                            .map_err(|_| PyError::runtime_error("no _iter"))?;
+                        let save_state = |in_quotes: bool, field: &str, row: &[String]| {
+                            self_obj
+                                .borrow_mut()
+                                .set_attribute("_st_quotes", py_bool(in_quotes))
+                                .ok();
+                            self_obj
+                                .borrow_mut()
+                                .set_attribute("_st_field", py_str(field))
+                                .ok();
+                            let rl: Vec<PyObjectRef> =
+                                row.iter().map(|s| py_str(s)).collect();
+                            self_obj
+                                .borrow_mut()
+                                .set_attribute("_st_row", py_list(rl))
+                                .ok();
+                        };
+                        let finish_row =
+                            |row: Vec<String>, field: String| -> PyResult<PyObjectRef> {
+                                let mut full = row;
+                                full.push(field);
+                                let limit = CSV_FIELD_LIMIT.with(|c| *c.borrow());
+                                for f in &full {
+                                    if f.len() > limit {
+                                        return Err(dialect_error(
+                                            "field larger than field limit".to_string(),
+                                        ));
+                                    }
+                                }
+                                let mut out: Vec<PyObjectRef> = Vec::new();
+                                for f in full {
+                                    let conv = if q == 2 {
+                                        if f.is_empty() {
+                                            py_str(&f)
+                                        } else {
+                                            match f.parse::<f64>() {
+                                                Ok(n) => py_float(n),
+                                                Err(_) => py_str(&f),
+                                            }
+                                        }
+                                    } else if q == 5 {
+                                        if f.is_empty() {
+                                            py_none()
+                                        } else {
+                                            py_str(&f)
+                                        }
+                                    } else if q == 4 {
+                                        if f.is_empty() {
+                                            py_none()
+                                        } else {
+                                            match f.parse::<f64>() {
+                                                Ok(n) => py_float(n),
+                                                Err(_) => py_str(&f),
+                                            }
+                                        }
+                                    } else {
+                                        py_str(&f)
+                                    };
+                                    out.push(conv);
+                                }
+                                let prev = self_obj
+                                    .borrow()
+                                    .get_attribute("line_num")
+                                    .ok()
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
+                                self_obj
+                                    .borrow_mut()
+                                    .set_attribute("line_num", py_int(prev + 1))
+                                    .ok();
+                                Ok(py_list(out))
+                            };
+                        let newline_err = || {
+                            dialect_error(
+                                "new-line character seen in unquoted field - do you need to open the file with newline=''?"
+                                    .to_string(),
+                            )
+                        };
+                        loop {
+                            // Pull next chunk (None on exhaustion).
+                            let chunk: Option<String> =
+                                match crate::object::builtin_next(&[iter.clone()]) {
+                                    Ok(val) => {
+                                        if matches!(&*val.borrow(), PyObject::Bytes(_)) {
+                                            return Err(dialect_error(
+                                                "iterator should return strings, not bytes"
+                                                    .to_string(),
+                                            ));
+                                        }
+                                        Some(val.str())
+                                    }
+                                    Err(PyError::StopIteration) => None,
+                                    Err(e) => return Err(e),
+                                };
+                            let eof = chunk.is_none();
+                            let s: String = chunk.unwrap_or_default();
+                            let chars: Vec<char> = s.chars().collect();
+                            let n = chars.len();
+                            // Blank/all-space fast paths (only when starting
+                            // fresh: nothing pending).
+                            if !eof
+                                && !in_quotes
+                                && field.is_empty()
+                                && row.is_empty()
+                            {
+                                // Truly empty chunk => empty row [].
+                                if s.is_empty() {
+                                    save_state(false, "", &[]);
+                                    let prev = self_obj
+                                        .borrow()
+                                        .get_attribute("line_num")
+                                        .ok()
+                                        .and_then(|v| v.as_i64())
+                                        .unwrap_or(0);
+                                    self_obj
+                                        .borrow_mut()
+                                        .set_attribute("line_num", py_int(prev + 1))
+                                        .ok();
+                                    return Ok(py_list(vec![]));
+                                }
+                                if sis {
+                                    // Skip leading spaces for the check.
+                                    let mut tmp = 0;
+                                    while tmp < n && chars[tmp] == ' ' {
+                                        tmp += 1;
+                                    }
+                                    if tmp == n {
+                                        // All spaces (non-empty): single ''.
+                                        save_state(false, "", &[]);
+                                        let prev = self_obj
+                                            .borrow()
+                                            .get_attribute("line_num")
+                                            .ok()
+                                            .and_then(|v| v.as_i64())
+                                            .unwrap_or(0);
+                                        self_obj
+                                            .borrow_mut()
+                                            .set_attribute("line_num", py_int(prev + 1))
+                                            .ok();
+                                        return Ok(py_list(vec![py_str("")]));
+                                    }
+                                }
+                            }
+                            if eof {
+                                if in_quotes {
+                                    if strict {
+                                        return Err(dialect_error(
+                                            "unexpected end of data".to_string(),
+                                        ));
+                                    }
+                                    // else: fall through, flush pending below
+                                } else if field.is_empty() && row.is_empty() {
+                                    return Err(PyError::StopIteration);
+                                }
+                                save_state(false, "", &[]);
+                                return finish_row(row.clone(), field.clone());
+                            }
+                            let mut i = 0;
+                            let mut row_done = false;
+                            while i < n {
+                                let c = chars[i];
+                                let at_end = i + 1 == n;
+                                let is_crlf_end =
+                                    c == '\r' && i + 2 == n && chars[i + 1] == '\n';
+                                if in_quotes {
+                                    if Some(c) == ec {
+                                        if i + 1 < n {
+                                            field.push(chars[i + 1]);
+                                            i += 2;
+                                            continue;
+                                        } else {
+                                            // Trailing escape at chunk end:
+                                            // keep literal (multi-chunk
+                                            // escape splits are vanishingly
+                                            // rare; file path differs).
+                                            field.push(c);
+                                            i += 1;
+                                            continue;
+                                        }
+                                    } else if Some(c) == quotechar {
+                                        if dq && i + 1 < n && chars[i + 1] == c {
+                                            field.push(c);
+                                            i += 2;
+                                            continue;
+                                        } else {
+                                            in_quotes = false;
+                                            if i + 1 < n {
+                                                let nx = chars[i + 1];
+                                                if nx != delim {
+                                                    if strict {
+                                                        return Err(dialect_error(format!(
+                                                            "'{}' expected after '\"'",
+                                                            delim
+                                                        )));
+                                                    }
+                                                }
+                                            }
+                                            i += 1;
+                                            continue;
+                                        }
+                                    } else {
+                                        field.push(c);
+                                        i += 1;
+                                        continue;
+                                    }
+                                } else {
+                                    if Some(c) == ec {
+                                        if i + 1 < n {
+                                            field.push(chars[i + 1]);
+                                            i += 2;
+                                            continue;
+                                        } else {
+                                            // Trailing escape: escapes the
+                                            // implicit line break -> newline
+                                            // (test_read_eof ['^'] case).
+                                            field.push('\n');
+                                            i += 1;
+                                            continue;
+                                        }
+                                    } else if Some(c) == quotechar {
+                                        if field.is_empty() {
+                                            in_quotes = true;
+                                            i += 1;
+                                            continue;
+                                        } else if strict {
+                                            return Err(dialect_error(
+                                                "unexpected quote".to_string(),
+                                            ));
+                                        } else {
+                                            field.push(c);
+                                            i += 1;
+                                            continue;
+                                        }
+                                    } else if c == delim {
+                                        row.push(std::mem::take(&mut field));
+                                        if sis {
+                                            while i + 1 < n && chars[i + 1] == ' ' {
+                                                i += 1;
+                                            }
+                                        }
+                                        i += 1;
+                                        continue;
+                                    } else if c == '\r' || c == '\n' {
+                                        // Newline mid-chunk (unquoted) is an
+                                        // error; at chunk end it's the row
+                                        // terminator.
+                                        if is_crlf_end || at_end {
+                                            // consume terminator (\r\n or \n or \r)
+                                            row_done = true;
+                                            break;
+                                        } else {
+                                            return Err(newline_err());
+                                        }
+                                    } else {
+                                        field.push(c);
+                                        i += 1;
+                                        continue;
+                                    }
+                                }
+                            }
+                            if row_done || (!in_quotes && i >= n) {
+                                // Chunk exhausted outside quotes: row done
+                                // (for terminator or plain end).
+                                save_state(false, "", &[]);
+                                return finish_row(
+                                    std::mem::take(&mut row),
+                                    std::mem::take(&mut field),
+                                );
+                            }
+                            // Still quoted (or escape pending): persist
+                            // partials, pull next chunk (no separator added).
+                            save_state(in_quotes, &field, &row);
+                        }
+                    })();
+                    set_flag(false);
+                    result
                 }
             }}));
             m

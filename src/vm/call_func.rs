@@ -1,29 +1,83 @@
-use crate::interner::{self, StrId};
+use crate::interner;
 use crate::object::*;
 use crate::vm::helpers::formal_param_index;
 use crate::vm::VirtualMachine;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
+
+/// Write a JIT compile result back to the live function object.
+/// `handle_py_function_call` works on a detached per-call snapshot of the
+/// function (it must not hold a borrow across user-code execution), so the
+/// `jit_ptr`/`SENTINEL_FAILED` marker it computes would otherwise die with
+/// the call and every invocation would recompile. The `Cell` fields exist
+/// precisely for this interior mutability; `try_borrow_mut` (not the
+/// `PyObjectRef` API, which refuses `Imm`) reaches the `Rc` directly. On a
+/// borrow conflict the write is skipped — the call still uses its local
+/// value and a later call retries. No user code runs between the initial
+/// snapshot borrow's release and the compile finishing, so reaching this
+/// point with the cell borrowed would be a bug elsewhere, not here.
+fn persist_jit_ptr(callable: &PyObjectRef, val: usize) {
+    let rc_opt = match callable {
+        PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => Some(rc),
+        _ => None,
+    };
+    if let Some(rc) = rc_opt {
+        if let Ok(mut guard) = rc.try_borrow_mut() {
+            if let PyObject::Function(f) = &mut *guard {
+                f.jit_ptr.set(val);
+            }
+        }
+    }
+}
 
 impl VirtualMachine {
     pub(crate) fn handle_py_function_call(
         &mut self,
         callable: &PyObjectRef,
-        args: Vec<PyObjectRef>,
-        keywords: Vec<(String, PyObjectRef)>,
+        args: &[PyObjectRef],
+        keywords: &[(String, PyObjectRef)],
     ) -> Option<PyResult<PyObjectRef>> {
-        let inner_f = match &*callable.borrow() {
-            PyObject::Function(ref inner_f) => inner_f.clone(),
-            _ => return None,
+        // Snapshot only the fields every call needs. The borrow must not
+        // survive into user-code execution below, but cloning the whole
+        // `PyFunction` (attribute-dict `HashMap` with `String` keys,
+        // precomputed JIT consts) on every call was pure overhead for
+        // plain calls: `dict` (live `__kwdefaults__`, kwonly functions
+        // only) and the JIT cells are re-borrowed lazily on the paths
+        // that actually use them.
+        let (code_rc, func_globals_rc, defaults_vec, closure_vec) = {
+            let b = callable.borrow();
+            let PyObject::Function(f) = &*b else {
+                return None;
+            };
+            (
+                Rc::clone(&f.code),
+                Rc::clone(&f.globals),
+                f.defaults.clone(),
+                f.closure.clone(),
+            )
         };
         let result: PyResult<PyObjectRef> = (|| {
-            let code = &inner_f.code;
-            let func_globals = &inner_f.globals;
-            let defaults = &inner_f.defaults;
-            let closure = &inner_f.closure;
-            let jit_ptr = &inner_f.jit_ptr;
-            let jit_consts = &inner_f.jit_consts;
+            let code = &*code_rc;
+            let func_globals = &func_globals_rc;
+            let defaults = &defaults_vec;
+            let closure = &closure_vec;
+            // Detached JIT cells: the old owned `inner_f` clone's cells
+            // never aliased the live function object across user-code
+            // execution (a reentrant call borrowing the same `RefCell`
+            // would panic) — these locals preserve exactly that.
+            // `SENTINEL_FAILED` fallback is unreachable (no user code runs
+            // between the entry snapshot and here) but keeps this total.
+            let (jit_ptr_snapshot, jit_consts_snapshot) = {
+                let b = callable.borrow();
+                match &*b {
+                    PyObject::Function(f) => (f.jit_ptr.get(), f.jit_consts.borrow().clone()),
+                    _ => (1, Vec::new()),
+                }
+            };
+            let jit_ptr_cell = std::cell::Cell::new(jit_ptr_snapshot);
+            let jit_ptr = &jit_ptr_cell;
+            let jit_consts_cell = RefCell::new(jit_consts_snapshot);
+            let jit_consts = &jit_consts_cell;
             // Try JIT compiled execution (fast path for hot functions)
             #[cfg(feature = "jit")]
             if defaults.is_empty()
@@ -45,9 +99,23 @@ impl VirtualMachine {
                         match compiled_fn {
                             Some(compiled_fn) => {
                                 jit_ptr.set(compiled_fn as usize);
+                                // Persist to the REAL function object: `jit_ptr`
+                                // above is this call's detached snapshot (see
+                                // below), so without this write-through every
+                                // call recompiled from scratch (~1ms+ of
+                                // Cranelift per call, observed on any
+                                // repeatedly-called loop function).
+                                persist_jit_ptr(callable, compiled_fn as usize);
+                                if std::env::var("RPY_DEBUG_JIT").is_ok() { eprintln!("JIT-OK persisted"); }
                             }
                             None => {
                                 jit_ptr.set(SENTINEL_FAILED);
+                                // Same persistence for the failure marker —
+                                // otherwise uncompilable functions (e.g. any
+                                // function without a loop) re-ran the
+                                // compile scan on every call.
+                                persist_jit_ptr(callable, SENTINEL_FAILED);
+                                if std::env::var("RPY_DEBUG_JIT").is_ok() { eprintln!("JIT-FAIL persisted"); }
                             }
                         }
                     }
@@ -129,21 +197,27 @@ impl VirtualMachine {
             }
             let func_globals = func_globals.clone();
             let defaults = defaults.clone();
-            let code_rc = Rc::new(code.clone());
             let mut new_frame = self.acquire_frame(
                 Rc::clone(&code_rc),
                 func_globals,
                 Rc::clone(&self.builtins),
                 None,
             );
-            new_frame.closure = Box::new(closure.clone());
+            if !closure.is_empty() {
+                new_frame.closure = Box::new(closure.clone());
+            }
             let code = code;
 
             let npos = args.len();
             let named_params = code.arg_count;
+            // Display name for call TypeErrors — LAZY: the eager version
+            // cost every call two attribute lookups, several string allocs
+            // and an env scan, all for messages only raised on arity errors.
+            // Every use site returns immediately, so this runs at most once
+            // per call, on the cold path.
             // Two variants: one without test. prefix for simple helpers like f(),
             // one with test.test_extcall. prefix for g/h/e when expected.
-            let (fname, fname_with_test) = {
+            let fname_for_err = || -> (String, String) {
                 let b = callable.borrow();
                 let qname = b
                     .get_attribute("__qualname__")
@@ -234,6 +308,7 @@ impl VirtualMachine {
                 } else {
                     0
                 };
+                let (fname, _) = fname_for_err();
                 let msg = if kwonly_given > 0 && num_defaults == 0 {
                     // CPython 3.14: "takes X positional arguments but Y positional arguments (and Z keyword-only arguments) were given"
                     format!(
@@ -285,10 +360,13 @@ impl VirtualMachine {
                 return Err(PyError::type_error(msg));
             }
 
-            // Assign positional args to named parameters
+            // Assign positional args to named parameters. The varname is
+            // already an interned StrId — insert it directly instead of
+            // round-tripping through String + re-intern (one alloc + one
+            // hash-table op saved per arg per call).
             for i in 0..npos.min(named_params) {
-                let name_clone = new_frame.code.varnames[i].to_string();
-                new_frame.insert_local(&name_clone, args[i].clone());
+                let sid = new_frame.code.varnames[i];
+                new_frame.locals.insert(sid, args[i].clone());
                 if i < new_frame.fast_locals.len() {
                     new_frame.fast_locals[i] = Some(args[i].clone());
                 }
@@ -324,13 +402,13 @@ impl VirtualMachine {
                 for i in npos..named_params {
                     if i >= first_default {
                         let default_idx = i - first_default;
-                        let name_clone = new_frame.code.varnames[i].to_string();
+                        let sid = new_frame.code.varnames[i];
                         let val = if default_idx < defaults.len() {
                             defaults[default_idx].clone()
                         } else {
                             py_none()
                         };
-                        new_frame.insert_local(&name_clone, val.clone());
+                        new_frame.locals.insert(sid, val.clone());
                         if i < new_frame.fast_locals.len() {
                             new_frame.fast_locals[i] = Some(val);
                         }
@@ -343,7 +421,7 @@ impl VirtualMachine {
             let positional_filled = npos.min(named_params);
             if let Some(kwarg_name) = &code.kwarg_name {
                 let kw_dict = py_dict();
-                for (key, value) in &keywords {
+                for (key, value) in keywords.iter() {
                     if let Some(idx) = formal_param_index(
                         &new_frame.code.varnames,
                         code.arg_count,
@@ -367,6 +445,7 @@ impl VirtualMachine {
                         // '...'`, previously silently overwritten.
                         if idx < positional_filled {
                             self.release_frame(new_frame);
+                            let (fname, _) = fname_for_err();
                             return Err(PyError::type_error(format!(
                                 "{}() got multiple values for argument '{}'",
                                 fname, key
@@ -386,6 +465,7 @@ impl VirtualMachine {
                             if dict.get(&py_str(key)).ok().flatten().is_some() {
                                 
                                 self.release_frame(new_frame);
+                                let (_, fname_with_test) = fname_for_err();
                                 return Err(PyError::type_error(format!(
                                     "{}() got multiple values for keyword argument '{}'",
                                     fname_with_test, key
@@ -439,6 +519,7 @@ impl VirtualMachine {
                     .collect();
                 if !posonly_keywords.is_empty() {
                     self.release_frame(new_frame);
+                    let (fname, _) = fname_for_err();
                     let names = posonly_keywords
                         .iter()
                         .map(|k| k.as_str())
@@ -449,7 +530,7 @@ impl VirtualMachine {
                         fname, names
                     )));
                 }
-                for (key, value) in &keywords {
+                for (key, value) in keywords.iter() {
                     match formal_param_index(
                         &new_frame.code.varnames,
                         code.arg_count,
@@ -461,10 +542,12 @@ impl VirtualMachine {
                         Some(idx) if idx < code.posonlyarg_count => {
                             // Unreachable (pre-scanned above) — keep for safety.
                             self.release_frame(new_frame);
+                            let (fname, _) = fname_for_err();
                             return Err(PyError::type_error(format!("{}() got some positional-only arguments passed as keyword arguments: '{}'", fname, key)));
                         }
                         Some(idx) if idx < positional_filled => {
                             self.release_frame(new_frame);
+                            let (fname, _) = fname_for_err();
                             return Err(PyError::type_error(format!(
                                 "{}() got multiple values for argument '{}'",
                                 fname, key
@@ -478,6 +561,7 @@ impl VirtualMachine {
                         }
                         None => {
                             self.release_frame(new_frame);
+                            let (fname, _) = fname_for_err();
                             return Err(PyError::type_error(format!(
                                 "{}() got an unexpected keyword argument '{}'",
                                 fname, key
@@ -499,14 +583,19 @@ impl VirtualMachine {
                 // must affect subsequent calls, test_keywordonlyarg's
                 // testKwDefaults) is the source of truth for kwonly defaults,
                 // overriding the compiled-in ones.
-                let live_kwdefaults: Option<Box<crate::object::PyDict>> =
-                    inner_f.dict.get("__kwdefaults__").and_then(|v| {
-                        if let PyObject::Dict(d) = &*v.borrow() {
-                            Some(d.clone())
-                        } else {
-                            None
-                        }
-                    });
+                let live_kwdefaults: Option<Box<crate::object::PyDict>> = {
+                    let b = callable.borrow();
+                    match &*b {
+                        PyObject::Function(f) => f.dict.get("__kwdefaults__").and_then(|v| {
+                            if let PyObject::Dict(d) = &*v.borrow() {
+                                Some(d.clone())
+                            } else {
+                                None
+                            }
+                        }),
+                        _ => None,
+                    }
+                };
                 let kwonly_start = code.arg_count + if code.vararg_name.is_some() { 1 } else { 0 };
                 // Build the name -> default map FIRST by consuming the
                 // compiled-in defaults list sequentially over the FULL
@@ -556,16 +645,18 @@ impl VirtualMachine {
                 }
             }
 
-            // Any formal positional/keyword-only parameter still unbound at
-            // this point has no value at all — real Python's `TypeError:
-            // ...() missing N required positional/keyword-only argument(s):
-            // '...'`, previously never checked.
-            let missing_positional: Vec<String> = (0..named_params)
-                .filter(|&i| i >= new_frame.fast_locals.len() || new_frame.fast_locals[i].is_none())
-                .map(|i| interner::lookup_str(new_frame.code.varnames[i]).to_string())
-                .collect();
-            if !missing_positional.is_empty() {
+            // Any formal positional parameter still unbound at this point has
+            // no value at all — real Python's `TypeError`. Scan allocation-
+            // free first (`any`); only a failing call builds the message.
+            let has_missing = (0..named_params)
+                .any(|i| i >= new_frame.fast_locals.len() || new_frame.fast_locals[i].is_none());
+            if has_missing {
+                let missing_positional: Vec<String> = (0..named_params)
+                    .filter(|&i| i >= new_frame.fast_locals.len() || new_frame.fast_locals[i].is_none())
+                    .map(|i| interner::lookup_str(new_frame.code.varnames[i]).to_string())
+                    .collect();
                 self.release_frame(new_frame);
+                let (fname, _) = fname_for_err();
                 let n = missing_positional.len();
                 return Err(PyError::type_error(format!(
                     "{}() missing {} required positional argument{}: {}",
@@ -581,6 +672,7 @@ impl VirtualMachine {
                 .collect();
             if !missing_kwonly.is_empty() {
                 self.release_frame(new_frame);
+                let (fname, _) = fname_for_err();
                 let n = missing_kwonly.len();
                 return Err(PyError::type_error(format!(
                     "{}() missing {} required keyword-only argument{}: {}",
@@ -925,7 +1017,26 @@ impl VirtualMachine {
                 .map(|t| mro.iter().any(|b| t.is(b)))
                 .unwrap_or(false)
         );
-        if !callable_is_bare_type && callable_is_metaclass {
+        // A metaclass with its OWN custom `__new__` (e.g. `typing.py`'s
+        // `_TypedDictMeta`, whose `__new__(cls, name, bases, ns, total=True)`
+        // must consume `total` itself and build the class via its own
+        // internal `type.__new__(...)` call) must NOT be shortcut through
+        // here — this whole fast path exists for the common case of calling
+        // a metaclass with no override at all (equivalent to plain
+        // `type(name, bases, ns)`), and unconditionally routing EVERY
+        // metaclass call through generic `type_new_impl` skipped that
+        // override entirely, so `total=True` (never consumed by anything)
+        // ended up forwarded straight into `__init_subclass__` — which
+        // rejects any keyword arguments (`object.__init_subclass__() takes
+        // no keyword arguments`). Confirmed real: `typing.TypedDict('Label',
+        // [('label', str)])` — real CPython's own functional-syntax path —
+        // crashed on exactly this. If a real override is found here, fall
+        // through (`None`) to the normal dispatch (`handle_type_call`),
+        // which already correctly looks up and calls a custom `__new__`.
+        let has_custom_new = crate::object::lookup_dunder_via_mro(callable, "__new__")
+            .map(|f| matches!(&*f.borrow(), PyObject::Function(_)))
+            .unwrap_or(false);
+        if !callable_is_bare_type && callable_is_metaclass && !has_custom_new {
             let mut new_args = vec![callable.clone()];
             new_args.extend(args.iter().cloned());
             if !keywords.is_empty() {

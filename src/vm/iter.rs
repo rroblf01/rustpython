@@ -1,6 +1,7 @@
 use crate::bytecode::Opcode;
 use crate::object::*;
 use crate::vm::VirtualMachine;
+use num_traits::ToPrimitive;
 
 impl VirtualMachine {
     pub(crate) fn handle_iter(&mut self, fi: usize, op: Opcode, arg: u32) -> PyResult<bool> {
@@ -473,9 +474,23 @@ impl VirtualMachine {
                                     stop: _,
                                     step,
                                 } => {
-                                    let v = py_int(current.clone());
-                                    *current += &*step;
-                                    v
+                                    // Fast path: counter fits in i64 (every
+                                    // realistic `range(N)` loop) — emit the
+                                    // inline SmallInt directly instead of
+                                    // cloning the BigInt through `py_int`
+                                    // (a throwaway heap alloc per iteration
+                                    // just to produce an inline int). The
+                                    // in-place `+=` below already reuses the
+                                    // digit vec without allocating.
+                                    if let Some(c) = current.to_i64() {
+                                        let v = PyObjectRef::SmallInt(c);
+                                        *current += &*step;
+                                        v
+                                    } else {
+                                        let v = py_int(current.clone());
+                                        *current += &*step;
+                                        v
+                                    }
                                 }
                                 // `EnumerateIter` no longer reaches this arm at
                                 // all — it moved to the earlier "delegate to

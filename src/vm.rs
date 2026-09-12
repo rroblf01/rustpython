@@ -185,7 +185,7 @@ impl VirtualMachine {
             vm.install_source_defined_stdlib(
                 "functools",
                 crate::modules::FUNCTOOLS_EXTRA_SOURCE,
-                &["lru_cache", "cache"],
+                &["lru_cache", "cache", "cached_property"],
             );
             vm.install_source_defined_stdlib(
                 "enum",
@@ -203,6 +203,16 @@ impl VirtualMachine {
                     "unique",
                     "_simple_enum",
                     "_test_simple_enum",
+                    "Flag",
+                    "IntFlag",
+                    "FlagBoundary",
+                    "STRICT",
+                    "CONFORM",
+                    "EJECT",
+                    "KEEP",
+                    "global_enum",
+                    "ReprEnum",
+                    "EnumDict",
                 ],
             );
             vm.install_source_defined_stdlib(
@@ -237,6 +247,21 @@ impl VirtualMachine {
                 "json",
                 crate::modules::JSON_EXTRA_SOURCE,
                 &["JSONEncoder", "dumps"],
+            );
+            vm.install_source_defined_stdlib(
+                "signal",
+                crate::modules::SIGNAL_EXTRA_SOURCE,
+                &["Signals", "Handlers"],
+            );
+            vm.install_source_defined_stdlib(
+                "asyncio",
+                crate::modules::ASYNCIO_RUNNER_SOURCE,
+                &["Runner"],
+            );
+            vm.install_source_defined_stdlib(
+                "_thread",
+                crate::modules::THREAD_LOCAL_SOURCE,
+                &["_local"],
             );
             return vm;
         }
@@ -548,7 +573,7 @@ impl VirtualMachine {
         vm.install_source_defined_stdlib(
             "functools",
             crate::modules::FUNCTOOLS_EXTRA_SOURCE,
-            &["lru_cache", "cache"],
+            &["lru_cache", "cache", "cached_property"],
         );
         vm.install_source_defined_stdlib(
             "enum",
@@ -566,6 +591,16 @@ impl VirtualMachine {
                 "unique",
                 "_simple_enum",
                 "_test_simple_enum",
+                "Flag",
+                "IntFlag",
+                "FlagBoundary",
+                "STRICT",
+                "CONFORM",
+                "EJECT",
+                "KEEP",
+                "global_enum",
+                "ReprEnum",
+                "EnumDict",
             ],
         );
         vm.install_source_defined_stdlib(
@@ -595,6 +630,21 @@ impl VirtualMachine {
             "json",
             crate::modules::JSON_EXTRA_SOURCE,
             &["JSONEncoder", "dumps"],
+        );
+        vm.install_source_defined_stdlib(
+            "signal",
+            crate::modules::SIGNAL_EXTRA_SOURCE,
+            &["Signals", "Handlers"],
+        );
+        vm.install_source_defined_stdlib(
+            "asyncio",
+            crate::modules::ASYNCIO_RUNNER_SOURCE,
+            &["Runner"],
+        );
+        vm.install_source_defined_stdlib(
+            "_thread",
+            crate::modules::THREAD_LOCAL_SOURCE,
+            &["_local"],
         );
         vm
     }
@@ -765,7 +815,7 @@ impl VirtualMachine {
             return self.call_function(func, all_args, keywords);
         }
 
-        if let Some(result) = self.handle_py_function_call(&callable, args.clone(), keywords.clone()) {
+        if let Some(result) = self.handle_py_function_call(&callable, &args, &keywords) {
             return result;
         }
 

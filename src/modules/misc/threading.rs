@@ -151,5 +151,84 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
 
     thr_func!("get_native_id", |_| { Ok(py_int(1)) });
 
+    // threading.Condition — synchronization primitive built on Lock.
+    // Real `Condition(lock=None)`: when no lock is given, one is created
+    // (an `RLock()`) rather than leaving `self._lock` unset — a bare
+    // `with Condition(): ...` (extremely common) used to store `lock:
+    // None`, which `sync::get`'s Condition arms have nothing to
+    // acquire/release/delegate to.
+    thr_func!("Condition", |args| {
+        let lock = match args.first() {
+            Some(l) if !matches!(&*l.borrow(), PyObject::Dict(_) | PyObject::None) => l.clone(),
+            _ => PyObjectRef::new(PyObject::RLock(std::sync::Arc::new(
+                std::sync::Mutex::new(RLockInner {
+                    owner: None,
+                    count: 0,
+                }),
+            ))),
+        };
+        Ok(PyObjectRef::new(PyObject::ThreadCondition {
+            lock: Some(lock),
+            notified: std::sync::Arc::new(std::sync::Mutex::new(false)),
+            condvar: std::sync::Arc::new(std::sync::Condvar::new()),
+        }))
+    });
+
+    // threading.Semaphore — counting semaphore
+    thr_func!("Semaphore", |args| {
+        let value = args.first().and_then(|a| a.as_i64()).unwrap_or(1) as u32;
+        Ok(PyObjectRef::new(PyObject::ThreadSemaphore {
+            value: std::sync::Arc::new(std::sync::Mutex::new(value)),
+            initial: value,
+            bounded: false,
+            condvar: std::sync::Arc::new(std::sync::Condvar::new()),
+        }))
+    });
+
+    // threading.BoundedSemaphore — bounded counting semaphore: `release()`
+    // raises `ValueError` if the count would exceed the initial value.
+    thr_func!("BoundedSemaphore", |args| {
+        let value = args.first().and_then(|a| a.as_i64()).unwrap_or(1) as u32;
+        Ok(PyObjectRef::new(PyObject::ThreadSemaphore {
+            value: std::sync::Arc::new(std::sync::Mutex::new(value)),
+            initial: value,
+            bounded: true,
+            condvar: std::sync::Arc::new(std::sync::Condvar::new()),
+        }))
+    });
+
+    // threading.Barrier — synchronization primitive for N threads
+    thr_func!("Barrier", |args| {
+        let parties = args.first().and_then(|a| a.as_i64()).unwrap_or(2) as u32;
+        Ok(PyObjectRef::new(PyObject::ThreadBarrier {
+            parties,
+            count: std::sync::Arc::new(std::sync::Mutex::new(0u32)),
+            broken: std::sync::Arc::new(std::sync::Mutex::new(false)),
+            generation: std::sync::Arc::new(std::sync::Mutex::new(0u64)),
+            condvar: std::sync::Arc::new(std::sync::Condvar::new()),
+        }))
+    });
+
+    // threading.Timer — delayed function execution
+    thr_func!("Timer", |args| {
+        let interval = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
+        let func = args.get(1).cloned().unwrap_or_else(py_none);
+        Ok(PyObjectRef::new(PyObject::ThreadTimer {
+            interval,
+            func,
+            args: args.get(2..).map(|a| {
+                a.iter().map(|a| a.clone()).collect()
+            }).unwrap_or_default(),
+            cancelled: std::sync::Arc::new(std::sync::Mutex::new(false)),
+            started: std::sync::Arc::new(std::sync::Mutex::new(false)),
+            finished: std::sync::Arc::new(std::sync::Mutex::new(false)),
+        }))
+    });
+
+    // `threading.BrokenBarrierError` is patched in by the caller (see
+    // `vm/init.rs`, right after this dict is built) — real builtins aren't
+    // resolvable from inside this function yet (this runs before
+    // `set_builtins_ref`), the same reason `select`'s `error` alias is
+    // patched in at the call site rather than here.
     d
 }

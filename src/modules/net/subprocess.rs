@@ -394,8 +394,39 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
                 instance,
             ));
         }
-        // Return stdout as bytes
-        Ok(PyObjectRef::imm(PyObject::Bytes(output.stdout)))
+        // Real CPython decodes stdout to `str` when `text=True` /
+        // `universal_newlines=True` / a truthy `encoding=`/`errors=` is
+        // given (any one of these enables "text mode" — check all four,
+        // matching `Popen.__init__`'s own `text is encoding is errors is
+        // None` no-text-mode test). Returning raw bytes unconditionally
+        // broke any caller expecting a real string back (real trigger:
+        // `Lib/platform.py`'s `_Processor.from_subprocess()`, which calls
+        // `subprocess.check_output([...], text=True, encoding="utf8")`
+        // and then does `.strip()` on the result — `TypeError: sequence
+        // item ...: expected str instance, bytes found` once that `str`
+        // got embedded in another string-join downstream).
+        let wants_text = kwarg_bool(&args, "text")
+            || kwarg_bool(&args, "universal_newlines")
+            || matches!(args.last(), Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)))
+                && {
+                    if let PyObject::Dict(d) = &*args.last().unwrap().borrow() {
+                        ["encoding", "errors"].iter().any(|k| {
+                            d.get(&py_str(k))
+                                .ok()
+                                .flatten()
+                                .map(|v| !matches!(&*v.borrow(), PyObject::None))
+                                .unwrap_or(false)
+                        })
+                    } else {
+                        false
+                    }
+                };
+        if wants_text {
+            let text = String::from_utf8_lossy(&output.stdout).into_owned();
+            Ok(py_str(&text))
+        } else {
+            Ok(PyObjectRef::imm(PyObject::Bytes(output.stdout)))
+        }
     });
 
     // Real CPython's internal `subprocess._cleanup()` reaps any finished

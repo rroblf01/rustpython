@@ -107,7 +107,7 @@ impl VirtualMachine {
         }
         let metacls = args[0].clone();
         let name_str = args[1].str();
-        let bases_vec = match &*args[2].borrow() {
+        let mut bases_vec = match &*args[2].borrow() {
             PyObject::Tuple(t) => t.clone(),
             PyObject::None => vec![],
             _ => vec![args[2].clone()],
@@ -133,6 +133,15 @@ impl VirtualMachine {
                 "type.__new__() takes no keyword arguments",
             ));
         }
+        // Real CPython's `type.__new__` always adds `object` as the
+        // implicit base when no explicit bases are given (empty tuple
+        // or `None`). Without this, the class's MRO is missing `object`
+        // and `__init_subclass__` never fires.
+        if bases_vec.is_empty() {
+            if let Some(object_type) = self.builtins.get(&interner::intern("object")) {
+                bases_vec.push(object_type.clone());
+            }
+        }
         let metatype = if is_bare_type { None } else { Some(metacls) };
         self.default_build_class(name_str, bases_vec, namespace_dict, kwargs, metatype)
     }
@@ -155,6 +164,23 @@ impl VirtualMachine {
         metatype: Option<PyObjectRef>,
     ) -> PyResult<PyObjectRef> {
         namespace_dict.remove("__annotation_tmp__");
+        // Real `type.__new__` consumes `__qualname__` from the namespace
+        // (it becomes the type's qualname slot, NOT a `__dict__` entry) —
+        // real CPython class `__dict__`s never contain it (verified: plain
+        // classes and typing.Protocol classes alike). The class body always
+        // seeds the implicit `__qualname__ = <bare class name>` first, so
+        // strip exactly that seed; an EXPLICIT `__qualname__ = "X"` in the
+        // body (which real CPython honors as the type's qualname) is left
+        // in place, preserving today's behavior for it. Without this,
+        // typing's `_get_protocol_attrs` collects the spurious entry (a
+        // plain string, non-callable) and every `isinstance(x,
+        // SupportsInt)`-style check raises `TypeError: Protocols with
+        // non-method members...` (test_fractions).
+        if let Some(qn) = namespace_dict.get("__qualname__") {
+            if qn.str() == name_str {
+                namespace_dict.remove("__qualname__");
+            }
+        }
         // Real CPython disallows subclassing `bool` outright (`TypeError:
         // type 'bool' is not an acceptable base type`) — unlike every other
         // migrated native type, `bool` is a real `PyObject::Type` (fixing
@@ -257,6 +283,59 @@ impl VirtualMachine {
             *mro_field = mro;
         }
         crate::object::register_class(&class);
+        // Custom metaclass `mro()` hook (gh-127773): real CPython calls
+        // `metaclass.mro(new_class)` ONCE at class creation (only when the
+        // metaclass is customized, never for bare `type`) and adopts the
+        // result as the effective MRO — later attribute access uses the
+        // cached MRO without re-invoking it. Only a Python-level `def`
+        // override counts: the lookup is a raw MRO-dict walk (never
+        // `get_attribute`, whose synthesized builtin `mro` fallback
+        // ignores its argument and would install a wrong MRO).
+        if metatype.is_some() {
+            let custom_mro_fn: Option<PyObjectRef> = (|| {
+                // Walk the metaclass's own MRO for a Python-level `mro`.
+                let mc = metatype.as_ref()?;
+                let mc_borrow = mc.borrow();
+                let PyObject::Type { mro: mc_mro, .. } = &*mc_borrow else {
+                    return None;
+                };
+                for base in mc_mro {
+                    if let PyObject::Type { dict: bdict, .. } = &*base.borrow() {
+                        if let Some(f) = bdict.get_str("mro") {
+                            if matches!(&*f.borrow(), PyObject::Function(_)) {
+                                return Some(f.clone());
+                            }
+                        }
+                    }
+                }
+                None
+            })();
+            if let Some(mro_fn) = custom_mro_fn {
+                let result = self.call_function(mro_fn, vec![class.clone()], vec![])?;
+                let items: Vec<PyObjectRef> = match &*result.borrow() {
+                    PyObject::Tuple(t) => t.clone(),
+                    PyObject::List(l) => l.clone(),
+                    _ => {
+                        return Err(PyError::type_error("mro() must return a tuple"));
+                    }
+                };
+                if items.is_empty() {
+                    return Err(PyError::type_error("type MRO must not be empty"));
+                }
+                let first_is_cls = items
+                    .first()
+                    .map(|f| f.is(&class))
+                    .unwrap_or(false);
+                if !first_is_cls {
+                    return Err(PyError::type_error(
+                        "mro() must return the class itself first",
+                    ));
+                }
+                if let PyObject::Type { mro: mro_field, .. } = &mut *class.borrow_mut() {
+                    *mro_field = items;
+                }
+            }
+        }
 
         // PEP 560: inject __orig_bases__ into class dict BEFORE __init_subclass__
         // so typing.py's Generic.__init_subclass__ can inspect the original bases.
@@ -534,6 +613,13 @@ impl VirtualMachine {
         metaclass: PyObjectRef,
         init_subclass_kwargs: Vec<(String, PyObjectRef)>,
         prepared_namespace: Option<PyObjectRef>,
+        // Bases tuple for the metaclass protocol (`__new__`/`__init__`/
+        // direct metaclass calls): the resolved bases, but EMPTY (not
+        // `(object,)`) when no bases were written — real CPython passes
+        // `()` there while still defaulting the created class to
+        // `(object,)`. Computed by the caller, which knows original
+        // emptiness (already normalized away in `bases_vec`).
+        protocol_bases: PyObjectRef,
     ) -> PyResult<PyObjectRef> {
         namespace_dict.remove("__annotation_tmp__");
         // Ordered PyDict — class/metaclass namespace order is user-visible
@@ -562,7 +648,7 @@ impl VirtualMachine {
             }
             PyObjectRef::new(PyObject::Dict(Box::new(pd)))
         };
-        let bases_tuple = PyObjectRef::imm(PyObject::Tuple(bases_vec.clone()));
+        let bases_tuple = protocol_bases;
 
         // `__new__` may be wrapped in StaticMethod (as `type.__new__` is,
         // and as a user metaclass's own `__new__` implicitly is too, since
@@ -577,6 +663,22 @@ impl VirtualMachine {
             };
             unwrapped.unwrap_or(v)
         });
+
+        // A non-type metaclass (plain function): real CPython just calls
+        // `meta(name, bases, namespace, **kwds)` and uses whatever it
+        // returns as the class object (often the namespace itself) — no
+        // `__new__`/`__init__` protocol at all.
+        if !matches!(&*metaclass.borrow(), PyObject::Type { .. }) {
+            return self.call_function(
+                metaclass.clone(),
+                vec![
+                    name_obj.clone(),
+                    bases_tuple.clone(),
+                    namespace_py_dict.clone(),
+                ],
+                init_subclass_kwargs.clone(),
+            );
+        }
 
         let cls = if let Some(new_fn) = new_fn {
             if std::env::var("RPY_DEBUG_METACLASS").is_ok() {

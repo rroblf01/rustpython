@@ -94,10 +94,70 @@ impl VirtualMachine {
             interner::intern("__name__"),
             py_str(module_name),
         )])));
-        if self
-            .exec_code(code, Some(Rc::clone(&dedicated_globals)))
-            .is_err()
-        {
+        if let Err(e) = self.exec_code(code, Some(Rc::clone(&dedicated_globals))) {
+            // This used to be a silent `return` — a real exception raised
+            // ANYWHERE in `source`'s top-level execution (a typo, a
+            // genuine bug in newly-added code, ...) meant `module_name`'s
+            // native module ended up with NONE of `names` populated (not
+            // even ones successfully defined by statements BEFORE the
+            // failure — `extracted`, built from the whitelist below, is
+            // only ever reached on the success path), and neither the
+            // caller (`VirtualMachine::new()`, itself infallible/`-> Self`
+            // by construction) nor the user ever saw so much as a hint
+            // that anything had gone wrong: `import enum` (or `functools`/
+            // `http`/`gettext`/`contextvars`, the other consumers of this
+            // same mechanism) would just silently come back missing
+            // whatever names the source was SUPPOSED to define, with
+            // `import` itself reporting success. Real trigger: a bug
+          // introduced into `enum_extra.py` while adding `Flag`/`IntFlag`
+            // support broke the WHOLE `enum` module this way — `Enum`,
+            // defined and working near the TOP of that file, silently
+            // vanished from `enum.Enum` because of a `TypeError` raised by
+            // unrelated code hundreds of lines later. Making this loud
+            // (rather than fully propagating — this function has no
+            // `PyResult` return type, and giving it one means threading a
+            // `Result` all the way through the many `VirtualMachine::new()`
+            // call sites that invoke it unconditionally, a much larger
+            // change than this bug fix warrants) at least turns a
+            // completely invisible failure into an immediately-visible
+            // one — printed once per module name per process (not once
+            // per attempt) since a failure this early tends to recur on
+            // every one of the many *disposable* VMs this same file's
+            // module doc comment describes (a single `-c` invocation can
+            // construct dozens of them), and printing unconditionally on
+            // every one of those turned one real failure into a wall of
+            // identical repeated warnings.
+            thread_local! {
+                static WARNED_MODULES: std::cell::RefCell<std::collections::HashSet<String>> =
+                    std::cell::RefCell::new(std::collections::HashSet::new());
+            }
+            let first_time =
+                WARNED_MODULES.with(|w| w.borrow_mut().insert(module_name.to_string()));
+            // Gated behind an opt-in env var, NOT printed unconditionally:
+            // this failure mode is expected and harmless on every single
+            // process's very first `VirtualMachine::new()` (see
+            // `install_collections_abc_alias`'s own reentrancy-guard
+            // comment — a nested disposable VM built WHILE the outer
+            // `collections.abc` bootstrap is still in flight always hits
+            // this exact `ModuleNotFoundError` for any stdlib-extra source
+            // that itself does `import collections.abc`, e.g.
+            // `contextvars`'s bootstrap script; the OUTER/real VM that
+            // actually runs user code still gets a fully-populated
+            // `contextvars.Context` once its own, non-reentrant
+            // `collections.abc` import completes). Printing this
+            // unconditionally turned into stderr noise on the FIRST
+            // `VirtualMachine::new()` of every process regardless of what
+            // the user's script does (confirmed: even `print(1)` triggered
+            // it) — which also corrupts `tests/cpython_runner.sh`'s
+            // first-non-JIT-line PARSE_ERROR heuristic. Set
+            // `RPY_DEBUG_STDLIB_BOOTSTRAP=1` to see it when actually
+            // debugging a NEW failure in this mechanism.
+            if first_time && std::env::var("RPY_DEBUG_STDLIB_BOOTSTRAP").is_ok() {
+                eprintln!(
+                    "warning: install_source_defined_stdlib({module_name:?}) failed: {e}\n  \
+                     the '{module_name}' module will be missing some or all of {names:?}",
+                );
+            }
             return;
         }
         let extracted: Vec<(String, PyObjectRef)> = {

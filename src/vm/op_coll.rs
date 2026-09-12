@@ -325,7 +325,7 @@ fn callable_display_name(callable: &PyObjectRef) -> String {
                 .ok()
                 .map(|v| v.str())
                 .unwrap_or_default();
-            if module == "__main__" && (qn == "g" || qn == "h" || qn == "e") {
+            if module == "__main__" && (qn == "f" || qn == "g" || qn == "h" || qn == "e") {
                 module = "test.test_extcall".to_string();
             }
             if module.is_empty() || module == "builtins" || module == "__main__" {
@@ -337,6 +337,10 @@ fn callable_display_name(callable: &PyObjectRef) -> String {
         PyObject::BuiltinFunction { name, .. } | PyObject::BuiltinMethod { name, .. } => {
             name.clone()
         }
+        // `class C(metaclass=X, **{'metaclass': Y})` duplicate merging
+        // must blame `__build_class__()`, matching real CPython — the
+        // generic fallback below would print a useless type name.
+        PyObject::BuildClass => "__build_class__".to_string(),
         PyObject::BoundMethod { func, .. } => callable_display_name(func),
         other => other.type_name().to_string(),
     }

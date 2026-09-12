@@ -1,15 +1,48 @@
 """Real `enum` module implementation (Enum/IntEnum/StrEnum/EnumType/auto/
-unique/nonmember), loaded as Python source via
+unique/nonmember/Flag/IntFlag/FlagBoundary), loaded as Python source via
 VirtualMachine::install_source_defined_stdlib — see that function's doc
 comment for why. Deliberately scoped to what's needed for real-world use
 (including Django's `Choices`/`IntegerChoices`/`TextChoices`, which build a
-custom metaclass on top of `EnumType`): no Flag/IntFlag, no `__prepare__`-based duplicate-name
+custom metaclass on top of `EnumType`): no `__prepare__`-based duplicate-name
 detection (this interpreter's class namespace is already delivered here in
 definition order — see Frame::name_order / PyDict::order — which is the
 part CPython's `_EnumDict` needs `__prepare__` for; strict duplicate
-rejection is not).
+rejection is not), and `Flag`'s repr/str/decomposition logic is a
+pragmatic reimplementation rather than a byte-for-byte port of CPython's
+own (considerably more elaborate) `Lib/enum.py` `Flag` class.
+
+Deliberately NOT included: `EnumCheck`/`verify` (the `@verify(CONTINUOUS,
+...)` class-decorator validation feature). An earlier attempt to add them
+here — including via real CPython's own `@_simple_enum(StrEnum)` class
+decorator AND via a plain `class EnumCheck(StrEnum): ...` statement paired
+with `CONTINUOUS, NAMED_FLAGS, UNIQUE = EnumCheck` (tuple-unpacking
+iteration) — caused this module's OWN bootstrap (this source runs via
+`VirtualMachine::install_source_defined_stdlib` on every fresh
+`VirtualMachine::new()`, before that function's own process-wide result
+cache exists yet) to either hang forever or leave the entire `enum` module
+empty, depending on the exact shape. Root cause: something in that
+combination needs a disposable VM (the same "nested Python-level calls
+from Rust builtin code" pattern documented elsewhere in this codebase,
+e.g. `call_bound_method`), and constructing one DURING this module's own
+first-ever bootstrap re-enters this same not-yet-finished bootstrap.
+`install_collections_abc_alias` has an explicit reentrancy guard for
+exactly this class of hazard; `install_source_defined_stdlib` itself does
+not, and giving it one is a separate, more involved fix than adding
+`verify`/`EnumCheck` warrants on its own — left for a future, dedicated
+pass rather than worked around here with something fragile.
 """
 import sys
+
+# Forward-reference sentinel (mirrors real CPython's own `Lib/enum.py`,
+# which does the same for the same reason): `EnumType.__call__` below
+# references the global name `Flag` to detect composite-value lookups on a
+# Flag subclass, but `Flag` itself is defined much later in this same
+# module — by the time any real `SomeFlag(value)` call happens (well after
+# the whole module has finished loading), the real class has replaced this
+# `None` placeholder, but the name must still exist for that lookup to be
+# valid syntax during the (very unlikely, but not impossible) case of an
+# early call before this module finishes executing.
+Flag = None
 
 
 class auto:
@@ -92,6 +125,12 @@ class _EnumDict(dict):
         super().__setitem__(key, value)
 
 
+# Public alias — CPython 3.13 renamed the internal `_EnumDict` to the
+# public `EnumDict` (real trigger: CPython's own `test_enum.py` does
+# `from enum import ... EnumDict`).
+EnumDict = _EnumDict
+
+
 class EnumType(type):
     @classmethod
     def __prepare__(metacls, name, bases, **kwds):
@@ -105,7 +144,14 @@ class EnumType(type):
         if kwds.pop("_simple", False):
             kwds.pop("boundary", None)
             return super().__new__(metacls, name, bases, namespace)
-        kwds.pop("boundary", None)
+        # `class SomeFlags(Flag, boundary=CONFORM): ...` — stash the
+        # requested boundary as a real (sunder, so never misclassified as
+        # a member) class attribute instead of silently discarding it, so
+        # `Flag.__new__`'s composite-value handling (added below) can find
+        # it via normal attribute/MRO lookup on `cls._boundary_`.
+        boundary = kwds.pop("boundary", None)
+        if boundary is not None:
+            namespace["_boundary_"] = boundary
         member_names = getattr(namespace, "_member_names", None)
         if member_names is None:
             # No __prepare__-provided _EnumDict (shouldn't normally happen
@@ -237,6 +283,16 @@ class EnumType(type):
             for m in cls:
                 if m._value_ == value:
                     return m
+            # Flag/IntFlag: a value not matching any single canonical
+            # member may still be a valid COMBINATION of them (e.g.
+            # `Color(Color.RED | Color.BLUE)`) — `Flag` is defined further
+            # down this same module and is a plain global by the time any
+            # real `SomeFlag(value)` call happens (well after module load),
+            # so this simple name lookup is safe despite the forward
+            # reference. `Flag.__new__` (not this `__call__`) does the
+            # actual decomposition/boundary handling.
+            if Flag is not None and issubclass(cls, Flag):
+                return cls.__new__(cls, value)
             raise ValueError(f"{value!r} is not a valid {cls.__name__}")
 
     def _create_functional(cls, name, names, *args, module=None, qualname=None, type=None, **kwargs):
@@ -287,6 +343,16 @@ class Enum(metaclass=EnumType):
         return count
 
 
+class ReprEnum(Enum):
+    """Only changes the repr(), leaving str() and format() to the mixed-in
+    type. Real CPython's `IntEnum`/`StrEnum` actually subclass this rather
+    than `Enum` directly — kept as a standalone class here (not spliced
+    into `IntEnum`/`StrEnum`'s own bases below) to avoid touching their
+    already-working, separately-tuned behavior; this exists so code that
+    imports/references `enum.ReprEnum` directly (real trigger: CPython's
+    own `test_enum.py`) finds a real class rather than an ImportError."""
+
+
 class IntEnum(int, Enum):
     pass
 
@@ -304,6 +370,203 @@ class StrEnum(str, Enum):
     @staticmethod
     def _generate_next_value_(name, start, count, last_values):
         return name.lower()
+
+
+class FlagBoundary(StrEnum):
+    """How to handle out-of-range/extra bits in a Flag value — matches
+    real CPython's `enum.FlagBoundary` member names/semantics."""
+
+    STRICT = "strict"
+    CONFORM = "conform"
+    EJECT = "eject"
+    KEEP = "keep"
+
+
+STRICT = FlagBoundary.STRICT
+CONFORM = FlagBoundary.CONFORM
+EJECT = FlagBoundary.EJECT
+KEEP = FlagBoundary.KEEP
+
+
+def _high_bit(value):
+    return value.bit_length() - 1
+
+
+def _is_single_bit(num):
+    """True if only one bit is set in num (should be an int)."""
+    if num == 0:
+        return False
+    num &= num - 1
+    return num == 0
+
+
+def _iter_bits_lsb(num):
+    # num must be a positive integer (or a Flag/IntFlag member, whose
+    # `.value` is used).
+    original = num
+    if isinstance(num, Flag):
+        num = num._value_
+    if num < 0:
+        raise ValueError(f"{original!r} is not a positive integer")
+    while num:
+        b = num & (~num + 1)
+        yield b
+        num ^= b
+
+
+def _decompose_flag_bits(cls, value):
+    """Split `value` into the canonical (already-defined) single/multi-bit
+    members it's covered by, plus whatever bits remain unaccounted for.
+    Real CPython's `_decompose` is considerably more elaborate (handles
+    single-bit-only decomposition preference, pseudo-member caching
+    details, etc.) — this is a pragmatic version sufficient for ordinary
+    Flag usage (membership tests, iteration, repr)."""
+    members = []
+    remaining = value
+    for m in cls._member_map_.values():
+        mv = m._value_
+        if mv and (mv & value) == mv and (remaining & mv):
+            members.append(m)
+            remaining &= ~mv
+    return members, remaining
+
+
+class Flag(Enum):
+    """Members combine via `|`/`&`/`^`/`~`; a value that isn't an exact
+    canonical member is decomposed into the canonical members whose bits
+    it covers (or rejected/masked/passed-through/kept, per `_boundary_`)."""
+
+    _boundary_ = STRICT
+
+    @staticmethod
+    def _generate_next_value_(name, start, count, last_values):
+        # Real CPython: `auto()` inside a Flag picks the next power of two
+        # after the highest bit used so far (1, 2, 4, 8, ...), not a plain
+        # sequential count — members are meant to be independently
+        # combinable bits.
+        if not count:
+            return 1
+        for last_value in reversed(last_values):
+            try:
+                high_bit = _high_bit(last_value)
+                break
+            except (AttributeError, TypeError):
+                raise TypeError(f"Invalid Flag value: {last_value!r}") from None
+        else:
+            return 1
+        return 2 ** (high_bit + 1)
+
+    def __new__(cls, value):
+        # Looking up (or building a pseudo-member for) a possibly-composite
+        # value — real member creation during class-body processing always
+        # goes through `object.__new__` directly (see `EnumType.__new__`
+        # above), never through here.
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, int):
+            raise ValueError(f"{value!r} is not a valid {cls.__name__}")
+        try:
+            return cls._value2member_map_[value]
+        except (KeyError, TypeError):
+            pass
+        members, extra = _decompose_flag_bits(cls, value)
+        boundary = getattr(cls, "_boundary_", STRICT)
+        if extra:
+            if boundary is STRICT:
+                raise ValueError(
+                    f"{value!r} is not a valid {cls.__name__}"
+                )
+            elif boundary is CONFORM:
+                value = value & ~extra
+                extra = 0
+            elif boundary is EJECT:
+                return value
+            # KEEP: fall through, keeping the extra bits in the pseudo-member
+        # Always pass `value` through to `object.__new__` — same convention
+        # `EnumType.__new__` uses for regular member creation above; the
+        # Rust side ignores the extra arg when `cls` doesn't transparently
+        # subclass a native type.
+        pseudo = object.__new__(cls, value)
+        name_parts = [m._name_ for m in members]
+        if extra:
+            # Real CPython's own KEEP-boundary repr/str includes the
+            # leftover, not-covered-by-any-member bits as a plain decimal
+            # suffix (e.g. `Loose.RED|8`), not just the canonical member
+            # names — folding it into `_name_` here (rather than only in
+            # `__repr__`/`__str__` below) keeps both consistent for free.
+            name_parts.append(str(extra))
+        pseudo._name_ = "|".join(name_parts) if name_parts else None
+        pseudo._value_ = value
+        cls._value2member_map_[value] = pseudo
+        return pseudo
+
+    def __or__(self, other):
+        cls = self.__class__
+        other_val = other._value_ if isinstance(other, cls) else other
+        return cls(self._value_ | other_val)
+
+    def __and__(self, other):
+        cls = self.__class__
+        other_val = other._value_ if isinstance(other, cls) else other
+        return cls(self._value_ & other_val)
+
+    def __xor__(self, other):
+        cls = self.__class__
+        other_val = other._value_ if isinstance(other, cls) else other
+        return cls(self._value_ ^ other_val)
+
+    __ror__ = __or__
+    __rand__ = __and__
+    __rxor__ = __xor__
+
+    def __invert__(self):
+        cls = self.__class__
+        all_bits = 0
+        for m in cls._member_map_.values():
+            all_bits |= m._value_
+        return cls(all_bits ^ self._value_)
+
+    def __bool__(self):
+        return bool(self._value_)
+
+    def __contains__(self, other):
+        cls = self.__class__
+        if not isinstance(other, cls):
+            raise TypeError(
+                f"unsupported operand type(s) for 'in': '{other.__class__.__name__}' and '{cls.__name__}'"
+            )
+        if other._value_ == 0:
+            return self._value_ == 0
+        return (other._value_ & self._value_) == other._value_
+
+    def __iter__(self):
+        members, _ = _decompose_flag_bits(self.__class__, self._value_)
+        return iter(members)
+
+    def __len__(self):
+        members, _ = _decompose_flag_bits(self.__class__, self._value_)
+        return len(members)
+
+    def __repr__(self):
+        cls_name = self.__class__.__name__
+        # `_name_` is set (`Flag.__new__` above) for every value, whether a
+        # single canonical member, a composite of several ("RED|BLUE"), or
+        # one with leftover KEEP-boundary bits ("RED|8") — `None` only for
+        # the zero/no-bits-matched value.
+        label = self._name_ if self._name_ is not None else "0"
+        return f"<{cls_name}.{label}: {self._value_!r}>"
+
+    def __str__(self):
+        cls_name = self.__class__.__name__
+        label = self._name_ if self._name_ is not None else str(self._value_)
+        return f"{cls_name}.{label}"
+
+
+class IntFlag(int, Flag):
+    """Members are also real ints (bitwise ops on plain ints against an
+    IntFlag member work directly via the native int backing)."""
+
+    _boundary_ = KEEP
 
 
 def unique(enumeration):
@@ -610,4 +873,3 @@ def global_enum(cls, update_str=False):
             setattr(mod, k, v)
     except Exception:
         pass
-    return cls

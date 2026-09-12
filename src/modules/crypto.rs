@@ -133,6 +133,66 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
     });
 
+    // `_hashlib.openssl_md5`/`openssl_sha1`/`openssl_sha256`/`openssl_sha512`
+    // — real CPython's OpenSSL-backed `_hashlib` C extension exposes these
+    // as aliases alongside the pure-Python-visible `hashlib.md5` etc. (this
+    // project shares ONE dict between `hashlib` and `_hashlib`, so adding
+    // them here puts them in both, harmlessly). Real signature is
+    // `openssl_md5(data=b'', *, usedforsecurity=True)` — the `data`
+    // argument is OPTIONAL (constructs an empty/fresh hash, matching a
+    // real hash object before any `.update()`), and `usedforsecurity` is a
+    // FIPS-mode opt-out this project doesn't enforce either way (accepted
+    // and ignored). Real trigger: `test_hashlib.py` calls
+    // `_hashlib.openssl_md5(usedforsecurity=True)` — a keyword-only call
+    // with NO positional data, packed per this project's own kwargs-as-
+    // trailing-dict convention (see CLAUDE.md), so `args` here can be
+    // empty, `[data]`, or `[kwargs_dict]` (data omitted, only kwargs
+    // given) — must distinguish the last case from a real bytes/str
+    // argument before defaulting to `b""`.
+    macro_rules! openssl_alias {
+        ($name:expr, $digest:ty) => {
+            hl_func!($name, |args| {
+                let is_kwargs_dict =
+                    |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::Dict(_));
+                let data_arg = args.last().filter(|a| !is_kwargs_dict(a));
+                let bytes = match data_arg {
+                    Some(a) => match &*a.borrow() {
+                        PyObject::Bytes(b) => b.clone(),
+                        PyObject::Str(s) => s.as_bytes().to_vec(),
+                        _ => {
+                            return Err(PyError::type_error(concat!(
+                                $name,
+                                "() argument must be bytes or str"
+                            )))
+                        }
+                    },
+                    None => vec![],
+                };
+                use sha2::digest::Digest;
+                let hash = <$digest>::digest(&bytes);
+                Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+            });
+        };
+    }
+    openssl_alias!("openssl_md5", md5::Md5);
+    openssl_alias!("openssl_sha256", sha2::Sha256);
+    openssl_alias!("openssl_sha512", sha2::Sha512);
+    hl_func!("openssl_sha1", |args| {
+        let is_kwargs_dict = |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::Dict(_));
+        let data_arg = args.last().filter(|a| !is_kwargs_dict(a));
+        let bytes = match data_arg {
+            Some(a) => match &*a.borrow() {
+                PyObject::Bytes(b) => b.clone(),
+                PyObject::Str(s) => s.as_bytes().to_vec(),
+                _ => return Err(PyError::type_error("openssl_sha1() argument must be bytes or str")),
+            },
+            None => vec![],
+        };
+        use sha1::Digest;
+        let hash = sha1::Sha1::digest(&bytes);
+        Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+    });
+
     d.insert(
         "sha3_224".to_string(),
         PyObjectRef::new(PyObject::BuiltinFunction {
@@ -226,6 +286,78 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
                 use sha3::Digest;
                 let hash = sha3::Sha3_512::digest(&bytes);
                 Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+            },
+        }),
+    );
+
+    // shake_128/shake_256 — SHA-3's variable-length (XOF) variants. Real
+    // CPython's `hashlib.shake_128(data).hexdigest(length)`/`.digest(length)`
+    // take the output length at DIGEST time, not construction time, but
+    // this module's whole `hl_func!` family (see `sha256`/`sha3_224` etc.
+    // above) already takes the same shortcut of returning the digest bytes
+    // directly from the constructor call instead of a real hash object with
+    // `.update()`/`.hexdigest()` methods — so there's no length parameter to
+    // thread through here either. Picks a fixed, real-CPython-consistent
+    // default output length (32 bytes / 256 bits for shake_128, 64 bytes /
+    // 512 bits for shake_256 — matching each variant's security strength,
+    // same convention as SHA-256/SHA-512) since some output has to be
+    // produced. This unblocks `getattr(hashlib, 'shake_128')` (real gap:
+    // it didn't exist as a module attribute at all) though callers relying
+    // on the real `.hexdigest(length)` variable-length API still won't get
+    // real CPython's exact behavior.
+    d.insert(
+        "shake_128".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "shake_128".to_string(),
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(PyError::type_error("shake_128() takes exactly one argument"));
+                }
+                let data = args[0].borrow();
+                let bytes = match &*data {
+                    PyObject::Bytes(b) => b.clone(),
+                    PyObject::Str(s) => s.as_bytes().to_vec(),
+                    _ => {
+                        return Err(PyError::type_error(
+                            "shake_128() argument must be bytes or str",
+                        ))
+                    }
+                };
+                use sha3::digest::{ExtendableOutput, Update, XofReader};
+                let mut hasher = sha3::Shake128::default();
+                hasher.update(&bytes);
+                let mut reader = hasher.finalize_xof();
+                let mut out = vec![0u8; 32];
+                reader.read(&mut out);
+                Ok(PyObjectRef::imm(PyObject::Bytes(out)))
+            },
+        }),
+    );
+    d.insert(
+        "shake_256".to_string(),
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "shake_256".to_string(),
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(PyError::type_error("shake_256() takes exactly one argument"));
+                }
+                let data = args[0].borrow();
+                let bytes = match &*data {
+                    PyObject::Bytes(b) => b.clone(),
+                    PyObject::Str(s) => s.as_bytes().to_vec(),
+                    _ => {
+                        return Err(PyError::type_error(
+                            "shake_256() argument must be bytes or str",
+                        ))
+                    }
+                };
+                use sha3::digest::{ExtendableOutput, Update, XofReader};
+                let mut hasher = sha3::Shake256::default();
+                hasher.update(&bytes);
+                let mut reader = hasher.finalize_xof();
+                let mut out = vec![0u8; 64];
+                reader.read(&mut out);
+                Ok(PyObjectRef::imm(PyObject::Bytes(out)))
             },
         }),
     );

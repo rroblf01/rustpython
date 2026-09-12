@@ -262,7 +262,51 @@ def _frozen_delattr(self, name):
     object.__delattr__(self, name)
 
 
-def _process_class(cls, init, repr, eq, order, unsafe_hash, frozen, kw_only):
+def _get_slots(cls):
+    """Names already claimed by a base class's own __slots__ (so a subclass
+    doesn't redeclare them, which CPython rejects with a layout conflict)."""
+    slots = cls.__dict__.get("__slots__")
+    if slots is None:
+        return
+    if isinstance(slots, str):
+        yield slots
+    else:
+        yield from slots
+
+
+def _add_slots(cls, fields_list):
+    # __slots__ can't be added to an already-created class, so rebuild it
+    # via type() with __slots__ set, copying over everything else (the
+    # __init__/__repr__/etc. _process_class already generated).
+    if "__slots__" in cls.__dict__:
+        raise TypeError("%s already specifies __slots__" % (cls.__name__,))
+
+    cls_dict = dict(cls.__dict__)
+    field_names = tuple(f.name for f in fields_list)
+    inherited_slots = set()
+    for base in cls.__mro__[1:-1]:
+        inherited_slots.update(_get_slots(base))
+
+    cls_dict["__slots__"] = tuple(
+        name for name in field_names if name not in inherited_slots
+    )
+    for name in field_names:
+        cls_dict.pop(name, None)
+    # A plain class body implicitly carries a __dict__/__weakref__ slot
+    # descriptor once __slots__ is introduced on the rebuild; drop the stale
+    # entries so type() doesn't choke on redefinition.
+    cls_dict.pop("__dict__", None)
+    cls_dict.pop("__weakref__", None)
+
+    qualname = getattr(cls, "__qualname__", None)
+    newcls = type(cls)(cls.__name__, cls.__bases__, cls_dict)
+    if qualname is not None:
+        newcls.__qualname__ = qualname
+    return newcls
+
+
+def _process_class(cls, init, repr, eq, order, unsafe_hash, frozen, kw_only,
+                    slots=False):
     fields_dict = _collect_fields(cls)
     if kw_only:
         for f in fields_dict.values():
@@ -302,6 +346,9 @@ def _process_class(cls, init, repr, eq, order, unsafe_hash, frozen, kw_only):
         # unhashable, matching real dataclasses (mutable-by-default).
         cls.__hash__ = None
 
+    if slots:
+        cls = _add_slots(cls, fields_list)
+
     return cls
 
 
@@ -316,9 +363,10 @@ class _DataclassParams:
 
 
 def dataclass(cls=None, /, *, init=True, repr=True, eq=True, order=False,
-              unsafe_hash=False, frozen=False, kw_only=False):
+              unsafe_hash=False, frozen=False, kw_only=False, slots=False):
     def wrap(c):
-        return _process_class(c, init, repr, eq, order, unsafe_hash, frozen, kw_only)
+        return _process_class(c, init, repr, eq, order, unsafe_hash, frozen,
+                               kw_only, slots)
 
     if cls is None:
         return wrap
@@ -403,4 +451,5 @@ def make_dataclass(cls_name, fields, *, bases=(), namespace=None, init=True,
     namespace["__annotations__"] = annotations
     cls = type(cls_name, bases, namespace)
     return dataclass(cls, init=init, repr=repr, eq=eq, order=order,
-                      unsafe_hash=unsafe_hash, frozen=frozen, kw_only=kw_only)
+                      unsafe_hash=unsafe_hash, frozen=frozen, kw_only=kw_only,
+                      slots=slots)

@@ -56,6 +56,16 @@ pub struct Compiler {
     // are evaluated for side effects only, never stored anywhere).
     annotations_initialized: bool,
     comprehension_depth: usize,
+    /// `compile(src, f, "single")` (REPL/doctest) mode: expression
+    /// STATEMENTS print their value instead of discarding it (via
+    /// `PRINT_EXPR`). Off for everything else; set by the `compile()`
+    /// builtin (the only producer of single-mode code objects).
+    pub(crate) single_mode: bool,
+    /// True while compiling PEP 649 `__annotate__` bodies (annotation
+    /// VALUES). A bare `*b` there must unpack exactly one element
+    /// (CPython emits UNPACK_SEQUENCE for it); everywhere else a bare
+    /// starred keeps legacy evaluate-inner behavior.
+    pub(crate) in_annotation: bool,
 }
 
 impl Compiler {
@@ -76,6 +86,8 @@ impl Compiler {
             current_line: 1,
             annotations_initialized: false,
             comprehension_depth: 0,
+            single_mode: false,
+            in_annotation: false,
         }
     }
 

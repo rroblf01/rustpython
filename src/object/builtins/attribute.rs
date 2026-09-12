@@ -257,12 +257,28 @@ pub fn builtin_input(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 pub fn builtin_exit(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let code = if args.is_empty() {
-        0
-    } else if let PyObject::Int(i) = &*args[0].borrow() {
-        i.to_i32().unwrap_or(0)
-    } else {
-        0
-    };
-    Err(PyError::SystemExit(code))
+    if args.is_empty() {
+        return Err(PyError::SystemExit(0));
+    }
+    if let Some(i) = args[0].as_i64() {
+        return Err(PyError::SystemExit(i as i32));
+    }
+    if matches!(&*args[0].borrow(), PyObject::None) {
+        return Err(PyError::SystemExit(0));
+    }
+    // Non-int / non-None: raise SystemExit with the object so the
+    // top-level handler can print it and exit 1 (matches CPython's
+    // sys.exit("error") behaviour and fixes exit(False)/exit(True)).
+    Err(PyError::Exception(
+        "SystemExit".to_string(),
+        PyObjectRef::new(PyObject::Exception {
+            typ: "SystemExit".to_string(),
+            args: vec![args[0].clone()],
+            cause: None,
+            suppress_context: false,
+            context: None,
+            traceback: None,
+            extra: None,
+        }),
+    ))
 }

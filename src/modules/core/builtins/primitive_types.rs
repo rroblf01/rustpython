@@ -570,6 +570,19 @@ pub fn register_primitive_types(builtins: &mut HashMap<String, PyObjectRef>, obj
             }),
         }),
     );
+    // `type.__prepare__()` returns a fresh empty namespace mapping (real
+    // CPython requires every metaclass lookup chain to bottom out here —
+    // without it, `lookup_dunder_via_mro` finds nothing and class bodies
+    // silently run against an ad-hoc namespace instead).
+    type_dict.insert_str(
+        "__prepare__",
+        PyObjectRef::new(PyObject::StaticMethod {
+            func: PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__prepare__".to_string(),
+                func: |_| Ok(py_dict()),
+            }),
+        }),
+    );
     let type_type = PyObjectRef::new(PyObject::Type {
         name: "type".to_string(),
         dict: Box::new(str_map_to_typedict(type_dict)),

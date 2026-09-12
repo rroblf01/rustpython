@@ -4,6 +4,113 @@ use crate::object::*;
 use crate::vm::VirtualMachine;
 
 impl VirtualMachine {
+    /// Write through to a custom `__prepare__` namespace (class-body
+    /// frames only; see `Frame::prepared_namespace`). Plain `Dict`
+    /// namespaces take a direct-set fast path (identical semantics to
+    /// the frame-globals write, just observable); anything else goes
+    /// through its real `__setitem__` looked up on the live VM — never a
+    /// disposable one (class bodies can execute during interpreter
+    /// bootstrap, where a fresh VM would recurse; same hazard documented
+    /// on `STORE_SUBSCR`).
+    fn class_ns_set(
+        &mut self,
+        prepared: &PyObjectRef,
+        name: &str,
+        val: PyObjectRef,
+    ) -> PyResult<()> {
+        let key = py_str(name);
+        // `prepared` is whatever a custom `__prepare__` returned — it need
+        // not be a heap-allocated mutable (`Mut`) object at all (a bogus
+        // `__prepare__` can hand back an int, a string, `None`, ...), so use
+        // the fallible `try_borrow_mut()` here rather than `borrow_mut()`:
+        // the latter panics outright on a non-`Mut` value instead of falling
+        // through to the `__setitem__`/native-backing/TypeError paths below.
+        if let Ok(mut guard) = prepared.try_borrow_mut() {
+            if let PyObject::Dict(d) = &mut *guard {
+                d.set(key, val)?;
+                return Ok(());
+            }
+        }
+        let setitem_fn = if let PyObject::Instance { typ, .. } = &*prepared.borrow() {
+            crate::object::lookup_dunder_via_mro(typ, "__setitem__")
+        } else {
+            None
+        };
+        if let Some(f) = setitem_fn {
+            self.call_function(f, vec![prepared.clone(), key, val], vec![])?;
+            return Ok(());
+        }
+        if let Some(native) = crate::object::native_backing_of(prepared) {
+            if let PyObject::Dict(d) = &mut *native.borrow_mut() {
+                d.set(key, val)?;
+                return Ok(());
+            }
+        }
+        Err(PyError::type_error(format!(
+            "'{}' object is not a mapping (missing __setitem__)",
+            prepared.borrow().type_name()
+        )))
+    }
+
+    /// Read through a custom `__prepare__` namespace. Returns `Ok(None)`
+    /// on a miss (absent key) so the caller falls through to the rest of
+    /// the LOAD_NAME chain exactly like a frame-globals miss; any other
+    /// error propagates.
+    fn class_ns_get(
+        &mut self,
+        prepared: &PyObjectRef,
+        name: &str,
+    ) -> PyResult<Option<PyObjectRef>> {
+        let key = py_str(name);
+        if let PyObject::Dict(d) = &*prepared.borrow() {
+            return d.get(&key);
+        }
+        if let PyObject::Instance { typ, .. } = &*prepared.borrow() {
+            if let Some(f) = crate::object::lookup_dunder_via_mro(typ, "__getitem__") {
+                match self.call_function(f, vec![prepared.clone(), key], vec![]) {
+                    Ok(v) => return Ok(Some(v)),
+                    Err(PyError::KeyError(_)) => return Ok(None),
+                    Err(e) => return Err(e),
+                }
+            }
+            if let Some(native) = crate::object::native_backing_of(prepared) {
+                if let PyObject::Dict(d) = &*native.borrow() {
+                    return d.get(&key);
+                }
+            }
+            return Ok(None);
+        }
+        Ok(None)
+    }
+
+    /// Delete through a custom `__prepare__` namespace. Mirrors the
+    /// existing DELETE_NAME leniency (missing names are silently
+    /// ignored); any other error propagates.
+    fn class_ns_del(&mut self, prepared: &PyObjectRef, name: &str) -> PyResult<()> {
+        let key = py_str(name);
+        if let PyObject::Dict(d) = &mut *prepared.borrow_mut() {
+            let _ = d.remove(&key);
+            return Ok(());
+        }
+        if let PyObject::Instance { typ, .. } = &*prepared.borrow() {
+            if let Some(f) = crate::object::lookup_dunder_via_mro(typ, "__delitem__") {
+                match self.call_function(f, vec![prepared.clone(), key], vec![]) {
+                    Ok(_) => return Ok(()),
+                    Err(PyError::KeyError(_)) => return Ok(()),
+                    Err(e) => return Err(e),
+                }
+            }
+            if let Some(native) = crate::object::native_backing_of(prepared) {
+                if let PyObject::Dict(d) = &mut *native.borrow_mut() {
+                    let _ = d.remove(&key);
+                    return Ok(());
+                }
+            }
+            return Ok(());
+        }
+        Ok(())
+    }
+
     pub(crate) fn handle_var(&mut self, fi: usize, op: Opcode, arg: u32) -> PyResult<bool> {
         match op {
             Opcode::NOP => { return Ok(true); }
@@ -58,12 +165,31 @@ impl VirtualMachine {
                             }
                         })
                         .or_else(|| f.globals.borrow().get(&interner::intern(name)).cloned())
-                        .or_else(|| {
-                            f.module_globals
-                                .as_ref()
-                                .and_then(|mg| mg.borrow().get(&interner::intern(name)).cloned())
-                        })
-                        .or_else(|| f.builtins.get(&interner::intern(name)).cloned())
+                };
+                // A custom `__prepare__` namespace IS the class body's
+                // locals: names it pre-populated (before any body store)
+                // must resolve here, shadowed by real body stores above
+                // (which live in frame.globals too via dual-write) but
+                // ahead of module globals/builtins.
+                let val = match val {
+                    Some(v) => Some(v),
+                    None => {
+                        if let Some(prep) = self.frames[fi].prepared_namespace.clone() {
+                            self.class_ns_get(&prep, name)?
+                        } else {
+                            None
+                        }
+                    }
+                };
+                let val = match val {
+                    Some(v) => Some(v),
+                    None => {
+                        let f = &self.frames[self.frames.len() - 1];
+                        f.module_globals
+                            .as_ref()
+                            .and_then(|mg| mg.borrow().get(&interner::intern(name)).cloned())
+                            .or_else(|| f.builtins.get(&interner::intern(name)).cloned())
+                    }
                 };
                 match val {
                     Some(v) => self.frames[fi].push(v),
@@ -88,6 +214,12 @@ impl VirtualMachine {
                 }
                 let sid = interner::intern(&name);
                 self.frames[fi].globals.borrow_mut().insert(sid, val.clone());
+                // Dual-write into a custom `__prepare__` namespace (see
+                // `Frame::prepared_namespace`): every body store must be
+                // observable there one call at a time.
+                if let Some(prep) = self.frames[fi].prepared_namespace.clone() {
+                    self.class_ns_set(&prep, &name, val.clone())?;
+                }
                 if self.frames[fi].name_order.is_none() {
                     let mod_name_opt = self.frames[fi]
                         .globals
@@ -185,16 +317,21 @@ impl VirtualMachine {
                     self.frames[fi].push(cached);
                 } else {
                     let name_idx = arg as usize;
-                    let name = crate::interner::lookup_str(self.frames[fi].code.names[name_idx]);
+                    // `code.names` already holds the interned StrId — use it
+                    // directly for every dict probe instead of round-tripping
+                    // through `lookup_str` + re-`intern` (a hash-table op per
+                    // probe, up to 4 per miss). The `&str` is only materialized
+                    // for the cold NameError path.
+                    let sid = self.frames[fi].code.names[name_idx];
                     let mut val = None;
                     {
                         let f = &self.frames[self.frames.len() - 1];
-                        if let Some(v) = f.globals.borrow().get(&interner::intern(name)).cloned() {
+                        if let Some(v) = f.globals.borrow().get(&sid).cloned() {
                             val = Some(v);
                         } else if let Some(v) = f
                             .module_globals
                             .as_ref()
-                            .and_then(|mg| mg.borrow().get(&interner::intern(name)).cloned())
+                            .and_then(|mg| mg.borrow().get(&sid).cloned())
                         {
                             val = Some(v);
                         } else {
@@ -211,13 +348,13 @@ impl VirtualMachine {
                             if let Some(bmod) = builtins_mod {
                                 let b = bmod.borrow();
                                 if let PyObject::Module { dict, .. } = &*b {
-                                    if let Some(v) = dict.get(&interner::intern(name)) {
+                                    if let Some(v) = dict.get(&sid) {
                                         val = Some(v.clone());
                                     }
                                 }
                             }
                             if val.is_none() {
-                                if let Some(v) = f.builtins.get(&interner::intern(name)).cloned() {
+                                if let Some(v) = f.builtins.get(&sid).cloned() {
                                     val = Some(v);
                                     cached_from_builtins = true;
                                 }
@@ -233,16 +370,18 @@ impl VirtualMachine {
                             }
                             self.frames[fi].push(v);
                         }
-                        None => return Err(PyError::name_error_for(name)),
+                        None => {
+                            let name = crate::interner::lookup_str(self.frames[fi].code.names[name_idx]);
+                            return Err(PyError::name_error_for(name));
+                        }
                     }
                 }
             }
 
             Opcode::STORE_GLOBAL => {
                 let name_idx = arg as usize;
-                let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
+                let sid = self.frames[fi].code.names[name_idx];
                 let val = self.frames[fi].pop()?;
-                let sid = interner::intern(&name);
                 self.frames[fi].globals.borrow_mut().insert(sid, val.clone());
                 let mod_name_opt = self.frames[fi]
                     .globals
@@ -394,6 +533,9 @@ impl VirtualMachine {
                     .globals
                     .borrow_mut()
                     .remove(&interner::intern(&name));
+                if let Some(prep) = self.frames[fi].prepared_namespace.clone() {
+                    self.class_ns_del(&prep, &name)?;
+                }
                 if self.frames[fi].frame_locals_obj.is_some() {
                     self.sync_frame_locals(fi);
                 }

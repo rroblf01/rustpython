@@ -84,6 +84,7 @@ impl JitCompiler {
         if code.instructions.is_empty() || code.instructions.len() > 200 {
             return None;
         }
+        if std::env::var("RPY_DEBUG_JIT").is_ok() { eprintln!("JIT-TRY {}", crate::interner::lookup_str(code.name)); }
         // Only compile functions with loops (back edges) — JIT shines for loops
         let has_loop = code
             .instructions
@@ -153,6 +154,52 @@ impl JitCompiler {
                     eprintln!("JIT: unsupported opcode {:?} in '{}'", instr.op, code.name);
                 }
                 return None;
+            }
+            // `sys._getframe()`/`globals()`/`locals()` are special-cased in
+            // the INTERPRETER's own call path (`try_handle_special_builtin`,
+            // `src/vm/call.rs`) to run against the real, live `&mut
+            // VirtualMachine` (reading `vm.frames` directly, no aliasing) —
+            // but `jit_call`/`jit_call_kw` (`src/jit/runtime.rs`) never go
+            // through that interception at all, so a JIT-compiled function
+            // calling any of these instead falls through to their bare
+            // `with_vm_mut`-based fallback bodies. That path is ALSO
+            // architecturally wrong for JIT-compiled callers specifically:
+            // `handle_py_function_call` never pushes a `Frame` for a
+            // JIT-compiled function's own invocation (that's the whole
+            // point of skipping the interpreter for it), so `vm.frames` is
+            // always one frame short of what real CPython's frame chain
+            // would show — `sys._getframe()`'s depth arithmetic silently
+            // undercounts, and (confirmed via direct repro: a 3-deep plain
+            // interpreted call chain into a JIT-compiled `while frame is
+            // not None: frame = frame.f_back` loop) can leave the compiled
+            // loop spinning forever instead of terminating, hanging the
+            // process — real trigger: `Lib/test/support/__init__.py`'s
+            // `get_recursion_depth()` / `_testinternalcapi.
+            // get_recursion_depth()` (added to back it), both exactly this
+            // shape and called pervasively via `infinite_recursion()`.
+            // Since JIT-compiled functions fundamentally can't give these
+            // frame-stack-dependent builtins correct data (independent of
+            // any other bug), the safe and general fix is to keep any
+            // caller of them on the interpreter, which handles them
+            // correctly — checked here by literal attribute/global name
+            // since that's cheap and resolvable before knowing what the
+            // name is even bound to (a user function coincidentally named
+            // one of these only costs it JIT eligibility, never
+            // correctness).
+            if matches!(instr.op, Opcode::LOAD_ATTR | Opcode::LOAD_GLOBAL | Opcode::LOAD_NAME) {
+                let name_idx = instr.arg as usize;
+                if let Some(&name_id) = code.names.get(name_idx) {
+                    let name = crate::interner::lookup_str(name_id);
+                    if matches!(name, "_getframe" | "globals" | "locals") {
+                        if std::env::var("RPY_DEBUG_JIT").is_ok() {
+                            eprintln!(
+                                "JIT: bailing on frame-stack-dependent name '{}' in '{}'",
+                                name, code.name
+                            );
+                        }
+                        return None;
+                    }
+                }
             }
             // BINARY_OP's arg encodes: 0..=12 a plain operator (see
             // compile_expr's Expr::BinOp), 13 = BINARY_SUBSCR (see

@@ -366,14 +366,28 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
         }
         PyObject::MapIterator { func, iterator } => {
+            // Clone what's needed and drop `obj` (this iterator's OWN
+            // `borrow_mut()` guard) BEFORE calling `builtin_next`/
+            // `builtin_call` — both can run arbitrary Python (the mapping
+            // function, or the wrapped iterator's own `__next__`), which
+            // may call back into `next()` on this SAME map object (e.g.
+            // `zip(*[gen]*3)` sharing one `map()` object across multiple
+            // zip positions, each pulled from within the mapping
+            // function itself). Holding this object's own borrow across
+            // that reentrant call is the exact double-borrow panic this
+            // avoids — same class of bug as `GroupByIter`'s reentrancy
+            // fix above (real repro: test_itertools.py's
+            // `test_sf_793826`).
+            let func = func.clone();
             let iter = iterator.as_ref().clone();
+            drop(obj);
             let next = builtin_next(&[iter]);
             match next {
                 Ok(val) => {
                     if func.borrow().type_name() == "NoneType" {
                         Ok(val)
                     } else {
-                        let mapped = builtin_call(func, &[val])?;
+                        let mapped = builtin_call(&func, &[val])?;
                         Ok(mapped)
                     }
                 }
@@ -387,7 +401,10 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
         }
         PyObject::FilterIterator { func, iterator } => {
+            // Same reentrancy concern as `MapIterator` just above.
+            let func = func.clone();
             let iter = iterator.as_ref().clone();
+            drop(obj);
             loop {
                 let next = builtin_next(&[iter.clone()]);
                 match next {
@@ -403,7 +420,7 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         let should_keep = if func.borrow().type_name() == "NoneType" {
                             val.truthy()
                         } else {
-                            builtin_call(func, &[val.clone()])?.truthy()
+                            builtin_call(&func, &[val.clone()])?.truthy()
                         };
                         if should_keep {
                             return Ok(val);
@@ -434,6 +451,14 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     Err(PyError::stop_iteration())
                 };
             }
+            // Same reentrancy concern as `MapIterator` above: each
+            // sub-iterator's `__next__` may call back into THIS zip
+            // object's own `next()` (or a shared `map()` feeding it, as
+            // in `test_sf_793826`), so clone the sub-iterator list and
+            // drop this object's own borrow before pulling from any of
+            // them.
+            let iterators = iterators.clone();
+            drop(obj);
             let mut results = Vec::with_capacity(iterators.len());
             for it in iterators.iter() {
                 match builtin_next(&[it.clone()]) {

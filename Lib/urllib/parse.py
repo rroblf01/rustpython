@@ -23,8 +23,12 @@ uses_netloc = ["", "ftp", "http", "gopher", "nntp", "telnet", "imap", "wais",
                "git+ssh", "ws", "wss"]
 
 uses_relative = ["", "ftp", "http", "gopher", "nntp", "imap", "wais", "file",
-                  "https", "shttp", "mms", "prospero", "rtsp", "rtspu",
-                  "sftp", "svn", "svn+ssh", "ws", "wss"]
+                   "https", "shttp", "mms", "prospero", "rtsp", "rtspu",
+                   "sftp", "svn", "svn+ssh", "ws", "wss"]
+
+uses_params = ["", "ftp", "hdl", "prospero", "http", "imap",
+               "https", "nntp", "sftp", "rtsp", "rtspu", "sip",
+               "sips", "mms", "sftp", "tel"]
 
 _SCHEME_CHARS = ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
                  "0123456789+-.")
@@ -259,7 +263,10 @@ def _urlunsplit(scheme, netloc, url, query, fragment):
 def urlparse(url, scheme="", allow_fragments=True):
     """Parse a URL into 6 components: (scheme, netloc, path, params, query, fragment)."""
     split = urlsplit(url, scheme, allow_fragments)
-    path, params = _splitparams(split.path)
+    if split.scheme in uses_params and ";" in split.path:
+        path, params = _splitparams(split.path)
+    else:
+        path, params = split.path, ""
     return ParseResult(split.scheme, split.netloc, path, params, split.query, split.fragment)
 
 

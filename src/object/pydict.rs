@@ -40,8 +40,8 @@ pub fn update_module_globals(module_name: &str, attr_name: &str, value: PyObject
 // only the internal storage shape changed.
 #[derive(Clone)]
 pub struct PyDict {
-    entries: Vec<Option<(PyObjectRef, PyObjectRef)>>,
-    indices: Vec<u32>,
+    entries: Rc<Vec<Option<(PyObjectRef, PyObjectRef)>>>,
+    indices: Rc<Vec<u32>>,
     size: usize,
     pub instance_ref: Option<PyObjectRef>,
     /// Bumped on every structural mutation (insert/update/remove/clear/
@@ -56,13 +56,22 @@ pub struct PyDict {
 impl PyDict {
     pub fn new() -> Self {
         PyDict {
-            entries: Vec::new(),
-            indices: Vec::new(),
+            entries: Rc::new(Vec::new()),
+            indices: Rc::new(Vec::new()),
             size: 0,
             instance_ref: None,
             version: 0,
         }
     }
+
+    fn entries_mut(&mut self) -> &mut Vec<Option<(PyObjectRef, PyObjectRef)>> {
+        Rc::make_mut(&mut self.entries)
+    }
+
+    fn indices_mut(&mut self) -> &mut Vec<u32> {
+        Rc::make_mut(&mut self.indices)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.size == 0
     }
@@ -70,8 +79,8 @@ impl PyDict {
         self.size
     }
     pub fn clear(&mut self) {
-        self.entries.clear();
-        self.indices.clear();
+        self.entries_mut().clear();
+        self.indices_mut().clear();
         self.size = 0;
         self.version = self.version.wrapping_add(1);
     }
@@ -82,22 +91,22 @@ impl PyDict {
             let new_cap = (cap / 2).max(8);
             // Compact entries: remove tombstones
             let mut new_entries: Vec<Option<(PyObjectRef, PyObjectRef)>> = Vec::with_capacity(self.size);
-            for e in self.entries.drain(..) {
+            for e in self.entries_mut().drain(..) {
                 if e.is_some() {
                     new_entries.push(e);
                 }
             }
-            self.entries = new_entries;
+            self.entries = Rc::new(new_entries);
             self.rehash(new_cap);
         } else if self.entries.len() > self.size * 2 + 8 {
             // Compact tombstones without shrinking indices
             let mut new_entries: Vec<Option<(PyObjectRef, PyObjectRef)>> = Vec::with_capacity(self.size);
-            for e in self.entries.drain(..) {
+            for e in self.entries_mut().drain(..) {
                 if e.is_some() {
                     new_entries.push(e);
                 }
             }
-            self.entries = new_entries;
+            self.entries = Rc::new(new_entries);
             self.rehash(self.indices.len());
         }
     }
@@ -131,11 +140,13 @@ impl PyDict {
             }
             let entry_idx = (idx_val - 1) as usize;
             if let Some((k, _)) = &self.entries[entry_idx] {
-                let eq = if let (PyObject::Int(a), PyObject::Int(b)) = (&*k.borrow(), &*key.borrow()) {
-                    a == b
-                } else if let (PyObject::Str(a), PyObject::Str(b)) = (&*k.borrow(), &*key.borrow()) {
-                    a == b
-                } else {
+                let eq = 'eq: {
+                    if let (PyObject::Int(a), PyObject::Int(b)) = (&*k.borrow(), &*key.borrow()) {
+                        break 'eq a == b;
+                    }
+                    if let (PyObject::Str(a), PyObject::Str(b)) = (&*k.borrow(), &*key.borrow()) {
+                        break 'eq a == b;
+                    }
                     k.is(key) || k.equals(key)?
                 };
                 if eq {
@@ -170,11 +181,13 @@ impl PyDict {
                     first_tomb = Some(i);
                 }
             } else if let Some((k, _)) = &self.entries[entry_idx] {
-                let eq = if let (PyObject::Int(a), PyObject::Int(b)) = (&*k.borrow(), &*key.borrow()) {
-                    a == b
-                } else if let (PyObject::Str(a), PyObject::Str(b)) = (&*k.borrow(), &*key.borrow()) {
-                    a == b
-                } else {
+                let eq = 'eq: {
+                    if let (PyObject::Int(a), PyObject::Int(b)) = (&*k.borrow(), &*key.borrow()) {
+                        break 'eq a == b;
+                    }
+                    if let (PyObject::Str(a), PyObject::Str(b)) = (&*k.borrow(), &*key.borrow()) {
+                        break 'eq a == b;
+                    }
                     k.is(key) || k.equals(key).unwrap_or(false)
                 };
                 if eq {
@@ -242,7 +255,7 @@ impl PyDict {
     fn ensure_capacity(&mut self, additional: usize) {
         let needed = self.size + additional;
         if self.indices.is_empty() {
-            self.indices = vec![0u32; 8];
+            self.indices = Rc::new(vec![0u32; 8]);
         } else if needed * 3 > self.indices.len() * 2 {
             self.rehash(self.indices.len() * 2);
         }
@@ -262,7 +275,7 @@ impl PyDict {
                 }
             }
         }
-        self.indices = new_idx;
+        self.indices = Rc::new(new_idx);
         self.version = self.version.wrapping_add(1);
     }
     pub fn contains(&self, key: &PyObjectRef) -> PyResult<bool> {
@@ -346,12 +359,12 @@ impl PyDict {
             // iteration - confirmed via test_configparser.py, where
             // `Lib/configparser.py` doing exactly this idiom turned into
             // 182 of that file's 185 test ERRORs.
-            self.entries[entry_idx].as_mut().unwrap().1 = value;
+            self.entries_mut()[entry_idx].as_mut().unwrap().1 = value;
         } else {
             self.version = self.version.wrapping_add(1);
             let entry_idx = self.entries.len();
-            self.entries.push(Some((key.clone(), value)));
-            self.indices[slot] = (entry_idx + 1) as u32;
+            self.entries_mut().push(Some((key.clone(), value)));
+            self.indices_mut()[slot] = (entry_idx + 1) as u32;
             self.size += 1;
         }
         // Propagate to Instance dict if this is a __dict__ view
@@ -405,7 +418,7 @@ impl PyDict {
         let existing = self
             .find(key, h)?
             .ok_or_else(|| PyError::key_error_obj(key))?;
-        let removed = self.entries[existing].take().unwrap().1;
+        let removed = self.entries_mut()[existing].take().unwrap().1;
         self.size -= 1;
         self.version = self.version.wrapping_add(1);
         self.maybe_shrink();
@@ -462,13 +475,13 @@ impl PyDict {
     /// ever actually storing the entry, so the memo dict stayed
     /// permanently empty and cycle detection never worked at all.
     pub fn set_by_identity(&mut self, key: PyObjectRef, value: PyObjectRef) {
-        for entry in self.entries.iter_mut().flatten() {
+        for entry in self.entries_mut().iter_mut().flatten() {
             if entry.0.is(&key) {
                 entry.1 = value;
                 return;
             }
         }
-        self.entries.push(Some((key, value)));
+        self.entries_mut().push(Some((key, value)));
         self.size += 1;
     }
 }
@@ -626,7 +639,7 @@ pub fn pydict_safe_remove(
             PyObject::Dict(d) => {
                 if let Ok((_, existing)) = d.probe_no_reentry_risk(key, h) {
                     if let Some(entry_idx) = existing {
-                        let removed = d.entries[entry_idx].take().unwrap().1;
+                        let removed = d.entries_mut()[entry_idx].take().unwrap().1;
                         d.size -= 1;
                         d.version = d.version.wrapping_add(1);
                         d.maybe_shrink();
@@ -661,7 +674,7 @@ pub fn pydict_safe_remove(
             PyObject::Dict(d) if d.version() == snap_version => {
                 if let Some(entry_idx) = existing {
                     if d.entries.get(entry_idx).and_then(|e| e.as_ref()).is_some() {
-                        let removed = d.entries[entry_idx].take().unwrap().1;
+                        let removed = d.entries_mut()[entry_idx].take().unwrap().1;
                         d.size -= 1;
                         d.version = d.version.wrapping_add(1);
                         d.maybe_shrink();

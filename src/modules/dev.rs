@@ -637,6 +637,134 @@ macro_rules! buffered_class {
         td.insert("seekable".into(), bf("seekable", |_a| Ok(py_bool(true))));
         td.insert("__enter__".into(), bf("__enter__", |args: &[PyObjectRef]| Ok(args[0].clone())));
         td.insert("__exit__".into(), bf("__exit__", |_a| Ok(py_bool(false))));
+        // peek — delegate to raw
+        td.insert("peek".into(), bf("peek", |args: &[PyObjectRef]| {
+            crate::modules::dev::io_ensure_open(args)?;
+            let raw = crate::modules::dev::io_get_raw(args)?;
+            let n = args.get(1).cloned().unwrap_or_else(|| py_int(0));
+            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "peek", vec![n]))?
+        }));
+        // readinto1 — delegate to raw
+        td.insert("readinto1".into(), bf("readinto1", |args: &[PyObjectRef]| {
+            crate::modules::dev::io_ensure_open(args)?;
+            if args.len() > 1 {
+                match &*args[1].borrow() {
+                    PyObject::ByteArray(_) | PyObject::MemoryView { .. } => {}
+                    _ => return Err(PyError::type_error(
+                        "'int' object does not support the buffer interface",
+                    )),
+                }
+            }
+            let raw = crate::modules::dev::io_get_raw(args)?;
+            let b = args.get(1).cloned().unwrap_or_else(py_none);
+            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "readinto1", vec![b]))?
+        }));
+        // fileno — delegate to raw
+        td.insert("fileno".into(), bf("fileno", |args: &[PyObjectRef]| {
+            crate::modules::dev::io_ensure_open(args)?;
+            let raw = crate::modules::dev::io_get_raw(args)?;
+            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "fileno", vec![]))?
+        }));
+        // isatty — delegate to raw
+        td.insert("isatty".into(), bf("isatty", |args: &[PyObjectRef]| {
+            crate::modules::dev::io_ensure_open(args)?;
+            let raw = crate::modules::dev::io_get_raw(args)?;
+            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "isatty", vec![]))?
+        }));
+        // writelines — iterate and write each
+        td.insert("writelines".into(), bf("writelines", |args: &[PyObjectRef]| {
+            crate::modules::dev::io_ensure_open(args)?;
+            if args.len() < 2 {
+                return Err(PyError::type_error("writelines() takes exactly one argument"));
+            }
+            let raw = crate::modules::dev::io_get_raw(args)?;
+            let lines = &args[1];
+            let iter = crate::object::builtin_iter(&[lines.clone()])?;
+            loop {
+                match crate::object::builtin_next(&[iter.clone()]) {
+                    Ok(line) => {
+                        let _ = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "write", vec![line]))?;
+                    }
+                    Err(e) if crate::object::is_stop_iteration_error(&e) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(py_none())
+        }));
+        // closed — property
+        td.insert(
+            "closed".into(),
+            PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
+                getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "closed".to_string(),
+                    func: |args: &[PyObjectRef]| {
+                        let closed = args[0].borrow().get_attribute("_closed").ok().map(|v| v.truthy()).unwrap_or(false);
+                        Ok(py_bool(closed))
+                    },
+                })),
+                setter: None,
+                deleter: None,
+                doc: None,
+            }))),
+        );
+        // name — property (from raw)
+        td.insert(
+            "name".into(),
+            PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
+                getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "name".to_string(),
+                    func: |args: &[PyObjectRef]| {
+                        let raw = crate::modules::dev::io_get_raw(args)?;
+                        Ok(crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "name", vec![]))??)
+                    },
+                })),
+                setter: None,
+                deleter: None,
+                doc: None,
+            }))),
+        );
+        // mode — property
+        td.insert(
+            "mode".into(),
+            PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
+                getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "mode".to_string(),
+                    func: |args: &[PyObjectRef]| {
+                        let raw = crate::modules::dev::io_get_raw(args)?;
+                        Ok(crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "mode", vec![]))??)
+                    },
+                })),
+                setter: None,
+                deleter: None,
+                doc: None,
+            }))),
+        );
+        // errors — property (None for simple implementation)
+        td.insert(
+            "errors".into(),
+            PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
+                getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "errors".to_string(),
+                    func: |_args: &[PyObjectRef]| Ok(py_none()),
+                })),
+                setter: None,
+                deleter: None,
+                doc: None,
+            }))),
+        );
+        // write_through — property (False for simple implementation)
+        td.insert(
+            "write_through".into(),
+            PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
+                getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "write_through".to_string(),
+                    func: |_args: &[PyObjectRef]| Ok(py_bool(false)),
+                })),
+                setter: None,
+                deleter: None,
+                doc: None,
+            }))),
+        );
         PyObjectRef::new(PyObject::Type {
             name: $name.to_string(),
             dict: Box::new(str_map_to_typedict(td)),

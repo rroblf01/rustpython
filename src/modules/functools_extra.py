@@ -73,3 +73,71 @@ def lru_cache(maxsize=128, typed=False):
 
 def cache(func):
     return _lru_cache_wrapper(func, None)
+
+
+_NOT_FOUND = object()
+
+
+class cached_property:
+    """Real functools.cached_property, replacing the previous native
+    `cached_property` stub (`src/modules/data/functools.rs`) that just
+    returned the wrapped function UNCHANGED — a bare `def bar(self): ...`
+    decorated with `@functools.cached_property` was never replaced by a
+    descriptor at all, so `instance.bar` returned an ordinary bound method
+    instead of invoking (and caching) the computed value. Real trigger:
+    `Lib/platform.py`'s `uname_result.processor` (a `@cached_property`),
+    used by `platform.uname()`/`platform.platform()` — accessing
+    `.processor` returned `<bound method uname_result.processor ...>`
+    itself, which then broke any code trying to use it as a plain value
+    (e.g. `Lib/platform.py`'s own `_platform()`, called from `ssl.py` at
+    import time: `TypeError: object of type 'method' has no len()`).
+    Matches real CPython's own `functools.cached_property` semantics:
+    a non-data descriptor (no `__set__`/`__delete__`) that computes the
+    value once and caches it directly into `instance.__dict__` under the
+    same name, so subsequent attribute lookups find the cached value
+    directly (without even going through `__get__` again).
+    """
+
+    def __init__(self, func):
+        self.func = func
+        self.attrname = None
+        self.__doc__ = getattr(func, "__doc__", None)
+
+    def __set_name__(self, owner, name):
+        if self.attrname is None:
+            self.attrname = name
+        elif name != self.attrname:
+            raise TypeError(
+                "Cannot assign the same cached_property to two different "
+                f"names ({self.attrname!r} and {name!r})."
+            )
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self
+        if self.attrname is None:
+            raise TypeError(
+                "Cannot use cached_property instance without calling "
+                "__set_name__ on it."
+            )
+        try:
+            cache = instance.__dict__
+        except AttributeError:
+            raise TypeError(
+                f"No '__dict__' attribute on {type(instance).__name__!r} "
+                f"instance to cache {self.attrname!r} property."
+            ) from None
+        val = cache.get(self.attrname, _NOT_FOUND)
+        if val is _NOT_FOUND:
+            val = self.func(instance)
+            try:
+                cache[self.attrname] = val
+            except TypeError:
+                raise TypeError(
+                    f"The '__dict__' attribute on {type(instance).__name__!r} "
+                    f"instance does not support item assignment for caching "
+                    f"{self.attrname!r} property."
+                ) from None
+        return val
+
+    __class_getitem__ = classmethod(lambda cls, item: cls)

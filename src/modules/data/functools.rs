@@ -82,15 +82,16 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         Ok(cls)
     });
 
-    // cached_property: descriptor that caches property value on first access
-    ft_func!("cached_property", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error(
-                "cached_property requires a function argument",
-            ));
-        }
-        Ok(args[0].clone())
-    });
+    // `cached_property` — NOT registered here anymore. This used to be a
+    // no-op stub (`|args| Ok(args[0].clone())`, i.e. the decorator did
+    // nothing at all — `@functools.cached_property def x(self): ...` left
+    // `x` as a plain function, so `instance.x` returned an unbound/bound
+    // method instead of invoking+caching it). Real implementation now
+    // lives in `src/modules/functools_extra.py`, merged in via
+    // `install_source_defined_stdlib` (see `src/vm.rs`) the same way
+    // `lru_cache`/`cache` already are — a real Python class with
+    // `__set_name__`/`__get__` is far more correct than anything easily
+    // hand-rolled as a native Rust closure here.
 
     ft_func!("partial", |args| {
         if args.is_empty() {

@@ -59,6 +59,17 @@ pub struct Frame {
     /// function frames, where nothing currently depends on order and
     /// tracking it would be pure overhead.
     pub name_order: Option<Rc<RefCell<Vec<String>>>>,
+    /// The custom mapping a metaclass `__prepare__` returned for THIS
+    /// class-body frame (`Some` only then; `None` for every other frame
+    /// including class bodies with plain-dict namespaces). Real CPython
+    /// executes the class body DIRECTLY against that mapping, so every
+    /// STORE_NAME goes through its `__setitem__` (observable one call per
+    /// store, e.g. an instrumented-dict `__prepare__` logs `d['x'] = 1`
+    /// for EACH assignment, not just the final value) and every LOAD_NAME
+    /// reads through it (pre-populated entries like `d["hello"] = 42`
+    /// set inside `__prepare__` itself are visible to the body). Set by
+    /// `__build_class__` alongside `name_order`.
+    pub prepared_namespace: Option<PyObjectRef>,
     /// The PyObject::Module this frame is the top-level execution of, if any.
     /// A module's own `dict` is otherwise only synced from `globals` once
     /// the whole body finishes executing (see `exec_module_source`) — so
@@ -116,6 +127,7 @@ impl Frame {
             registers: Box::new(Vec::new()),
             module_globals,
             name_order: None,
+            prepared_namespace: None,
             live_module: None,
             yield_from_iter: None,
             back: None,

@@ -294,6 +294,24 @@ pub(crate) fn inplace_binary_op(
     Ok(None)
 }
 
+/// Dispatch shared by `BINARY_OP` and the fused `SUPER_*_BIN` handlers:
+//in-place (`op >= 100`) forms try `inplace_binary_op` first, plain forms go
+/// straight to `plain_binary_op`.
+pub(crate) fn plain_or_inplace(
+    left: &PyObjectRef,
+    right: &PyObjectRef,
+    op_u: u32,
+) -> PyResult<PyObjectRef> {
+    if op_u >= 100 {
+        match inplace_binary_op(left, right, op_u - 100)? {
+            Some(v) => Ok(v),
+            None => plain_binary_op(left, right, op_u - 100),
+        }
+    } else {
+        plain_binary_op(left, right, op_u)
+    }
+}
+
 /// The non-inplace BINARY_OP semantics shared by the `BINARY_OP` opcode
 /// handler and the fused SUPER_*_BIN superinstructions.
 pub(crate) fn plain_binary_op(
@@ -301,6 +319,13 @@ pub(crate) fn plain_binary_op(
     right: &PyObjectRef,
     op: u32,
 ) -> PyResult<PyObjectRef> {
+    // Exact-str fast path BEFORE deref_proxy: the proxy clone would be a third
+    // strong reference and defeat fast_str_add's count==2 in-place check.
+    if op == 0 {
+        if let Some(r) = crate::object::fast_str_add(left, right)? {
+            return Ok(r);
+        }
+    }
     let left_d = deref_proxy(left)?;
     let right_d = deref_proxy(right)?;
     Ok(match op {

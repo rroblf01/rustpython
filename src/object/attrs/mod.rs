@@ -104,6 +104,19 @@ impl PyObject {
                     return Ok(dict.get_str(METATYPE_KEY).unwrap().clone());
                 }
                 PyObject::Type { .. } => {
+                    // Return the SAME canonical `type` object `type(x)`
+                    // returns (not a fresh lookalike per access) so
+                    // `C.__class__ is type` holds, mirroring the
+                    // `Property`/etc. arm just below. Falls back to the
+                    // old synthesized placeholder only if neither the
+                    // builtins map nor the primitive-type cache has one
+                    // (e.g. extremely early bootstrap).
+                    if let Some(t) = crate::modules::get_builtin_class("type") {
+                        return Ok(t);
+                    }
+                    if let Some(t) = crate::object::get_primitive_type("type") {
+                        return Ok(t);
+                    }
                     return Ok(PyObjectRef::new(PyObject::Type {
                         name: "type".to_string(),
                         dict: Box::new(TypeDict::default()),
@@ -708,7 +721,7 @@ impl PyObject {
             }
             PyObject::Socket { inner: _ } => return socket::get(self, name),
             PyObject::Thread(inner_arc) => return thread::get(self, name),
-            PyObject::Lock(_) | PyObject::RLock(_) | PyObject::Event(_) | PyObject::Queue(_) => return sync::get(self, name),            PyObject::Int(_) | PyObject::Bool(_) => return int::get(self, name),
+            PyObject::Lock(_) | PyObject::RLock(_) | PyObject::Event(_) | PyObject::Queue(_) | PyObject::ThreadCondition { .. } | PyObject::ThreadSemaphore { .. } | PyObject::ThreadBarrier { .. } | PyObject::ThreadTimer { .. } => return sync::get(self, name),            PyObject::Int(_) | PyObject::Bool(_) => return int::get(self, name),
             PyObject::Float(_) => return float::get(self, name),
             PyObject::Range { .. } | PyObject::RangeIter { .. } => return range::get(self, name),
             PyObject::CompiledRegex { .. } => return compiled_regex::get(self, name),
@@ -827,11 +840,74 @@ impl PyObject {
     }
 }
 
+/// CPython resolves `x.__new__` for ANY value via its TYPE's own attribute
+/// chain (`type(x).__new__`) — e.g. `(1).__new__`, `None.__new__`,
+/// `"x".__new__`, `[].__new__` are all real, working attribute accesses in
+/// real CPython (confirmed against CPython 3.14: `(1).__new__` returns
+/// `<built-in method __new__ of type object at ...>`, same object as
+/// `int.__new__`), even though `__new__` is normally invoked implicitly by
+/// the constructor-call machinery rather than by explicit dot access on an
+/// already-built instance. The giant per-variant dispatch in
+/// `get_attribute_impl` only hand-implements the subset of attributes each
+/// native type's OWN code happens to need internally, so `__new__`
+/// specifically (genuinely resolvable via the type's real dict/MRO, built
+/// by `populate_type_registry` — e.g. `object.__new__`) fell through to a
+/// bogus `AttributeError` instead, even though `type(x).__new__` already
+/// worked fine.
+///
+/// Real trigger: CPython's own vendored `Lib/enum.py` (used to build
+/// `IntEnum`/`StrEnum`/`Flag`/`IntFlag`) does `None.__new__` inside
+/// `EnumType._find_new_`'s sentinel-comparison set literal
+/// (`{None, None.__new__, object.__new__, Enum.__new__}`) — this raised
+/// AttributeError and aborted `EnumType.__new__` (and thus, silently, the
+/// entire module body executing it) before this fix, which is why a
+/// process-wide native `enum` module bootstrap (`install_source_defined_
+/// stdlib`, see `src/vm/stdlib.rs`) exists as a hand-rolled substitute
+/// rather than running the real vendored source directly.
+///
+/// Deliberately scoped to EXACTLY `__new__` (not a general dunder
+/// fallback): a first attempt generalizing this to every `__dunder__` name
+/// caused runaway recursion through `default_build_class`'s
+/// `__abstractmethods__`/`__isabstractmethod__` bookkeeping (which already
+/// calls `.get_attribute()` on arbitrary class-body values, expecting a
+/// quick, harmless `AttributeError` for non-abstract ones) — widening this
+/// fallback again needs to account for that interaction first. `__new__`
+/// alone is what real code (`enum.py`) actually needs and is safe: it's
+/// never itself a namespace value fed through that ABC bookkeeping path.
+/// Skips objects whose OWN attribute lookup already walks a real type
+/// dict/MRO (`Type`/`Instance`/`Module`/...) — if they didn't find
+/// `__new__` there, looking it up "via type(self)" again can't find
+/// anything new. Returned UNBOUND (matching real CPython, where
+/// `(1).__new__ is int.__new__`).
+fn new_dunder_fallback_via_type(obj: &PyObject) -> Option<PyObjectRef> {
+    if matches!(
+        obj,
+        PyObject::Type { .. }
+            | PyObject::Instance { .. }
+            | PyObject::Module { .. }
+            | PyObject::Property(_)
+            | PyObject::StaticMethod { .. }
+            | PyObject::ClassMethod { .. }
+            | PyObject::Super { .. }
+    ) {
+        return None;
+    }
+    let self_ref = PyObjectRef::new(obj.clone());
+    let typ = crate::object::builtin_type_of(std::slice::from_ref(&self_ref)).ok()?;
+    let result = typ.borrow().get_attribute("__new__").ok();
+    result
+}
+
 impl ObjectAccess for PyObject {
     fn get_attribute(&self, name: &str) -> PyResult<PyObjectRef> {
         match self.get_attribute_impl(name) {
             Err(_) if name == "__doc__" => Ok(py_none()),
             Err(e) if matches!(e, PyError::AttributeError(_)) => {
+                if name == "__new__" {
+                    if let Some(v) = new_dunder_fallback_via_type(self) {
+                        return Ok(v);
+                    }
+                }
                 // Attach the attribute NAME and owning OBJECT to the raised
                 // AttributeError (CPython: `exc.name`/`exc.obj`). This is
                 // what `except AttributeError as exc: exc.name` sees after

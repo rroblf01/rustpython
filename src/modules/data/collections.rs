@@ -318,11 +318,10 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
                     .collect()
             }
         };
-        if fields.is_empty() {
-            return Err(PyError::type_error(
-                "namedtuple() requires at least 1 field name",
-            ));
-        }
+        // Real CPython's `collections.namedtuple(typename, [])` is valid —
+        // it creates a namedtuple with zero fields (`test_typing.py`
+        // constructs one this way). There is no "at least 1 field" rule to
+        // enforce here.
         // Handle keyword-only args: rename, defaults, module
         let mut rename = false;
         let mut defaults_vals: Vec<PyObjectRef> = Vec::new();

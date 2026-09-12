@@ -131,3 +131,18 @@ pub use configparser::*;
 // as real Python source instead — see ENUM_SOURCE (below) and
 // VirtualMachine::install_source_defined_stdlib.
 pub const ENUM_SOURCE: &str = include_str!("enum_extra.py");
+pub const SIGNAL_EXTRA_SOURCE: &str = include_str!("signal_extra.py");
+
+// Real `_thread._local` (fast TLS-backed class in CPython's C `_thread`
+// module) — see THREAD_LOCAL_SOURCE's own module doc comment and
+// VirtualMachine::install_source_defined_stdlib. Installed into the
+// already-registered native `_thread` module's dict, self-contained
+// (`import _thread` only) to avoid any module-bootstrap ordering risk.
+pub const THREAD_LOCAL_SOURCE: &str = include_str!("thread_local_extra.py");
+
+// Real asyncio.Runner (a context-manager wrapper around the event-loop
+// lifecycle) is far easier to express as real Python source composed on
+// top of the native `asyncio` module's already-working `run()` than as a
+// hand-written Rust closure — see ASYNCIO_RUNNER_SOURCE's own module doc
+// comment and VirtualMachine::install_source_defined_stdlib.
+pub const ASYNCIO_RUNNER_SOURCE: &str = include_str!("asyncio_runner.py");

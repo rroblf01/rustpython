@@ -459,28 +459,49 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             // "RefCell already borrowed" the instant the
                             // reentrant comparator tried its own borrow —
                             // confirmed via CPython's own `test_sort.py`.
-                            let items: Vec<PyObjectRef> = {
-                                let obj = args[0].borrow();
-                                match &*obj {
-                                    PyObject::List(list) => list.clone(),
+                            //
+                            // Real CPython goes further than just detaching a
+                            // copy: it also temporarily EMPTIES the live list
+                            // object itself for the duration of the sort (see
+                            // `list_sort_impl`'s `saved_ob_item`/`saved_
+                            // allocated` dance in `Objects/listobject.c`) so
+                            // that a comparator/key function mutating the
+                            // ORIGINAL list mid-sort can't corrupt anything —
+                            // it just mutates this now-empty stand-in. We
+                            // mirror that with `mem::take`, swapping the
+                            // live list's backing `Vec` out for a fresh
+                            // (zero-capacity) one and sorting the taken
+                            // copy. Afterward, a mutator is detected not just
+                            // by a length mismatch but by the stand-in's
+                            // backing `Vec` having been touched AT ALL —
+                            // `capacity() > 0` catches even a
+                            // cancels-out-in-length mutation like `L.append(
+                            // 3); L.pop()`, which real CPython also detects
+                            // (its equivalent check is `self->allocated !=
+                            // -1`, a sentinel meaning "no resize has
+                            // happened yet" — every `list.append`/`del`/etc.
+                            // resets it to a real value, an append-then-pop
+                            // included) — confirmed via CPython's own
+                            // `test_sort.py::test_undetected_mutation`.
+                            let (items, original_items): (Vec<PyObjectRef>, Vec<PyObjectRef>) = {
+                                let mut obj = args[0].borrow_mut();
+                                match &mut *obj {
+                                    PyObject::List(list) => {
+                                        let taken = std::mem::take(list);
+                                        let original = taken.clone();
+                                        (taken, original)
+                                    }
                                     _ => return Err(PyError::runtime_error("sort on non-list")),
                                 }
                             };
-                            let snapshot_len = items.len();
                             let check_not_modified = |live: &PyObjectRef| -> PyResult<()> {
-                                // CPython's timsort raises ValueError when the
-                                // list is modified during the sort (a
-                                // self-modifying comparator) — our detached-
-                                // copy approach wouldn't otherwise notice.
                                 let b = live.borrow();
-                                let l = match &*b {
-                                    PyObject::List(l) => l.len(),
-                                    _ => return Ok(()),
-                                };
-                                if l != snapshot_len {
-                                    return Err(PyError::value_error("list modified during sort"));
+                                match &*b {
+                                    PyObject::List(l) if !l.is_empty() || l.capacity() > 0 => {
+                                        Err(PyError::value_error("list modified during sort"))
+                                    }
+                                    _ => Ok(()),
                                 }
-                                Ok(())
                             };
                             // `sort(key=..., reverse=...)` — keyword args arrive
                             // as a trailing kwargs dict.
@@ -515,55 +536,78 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             // compute each element's key ONCE, sort the
                             // (key, original_item) pairs by key (stable),
                             // then drop the keys.
-                            let items = if let Some(keyf) = key_func {
-                                let mut decorated: Vec<(PyObjectRef, PyObjectRef)> =
-                                    Vec::with_capacity(items.len());
-                                for item in items.into_iter() {
-                                    let k = crate::object::call_function_disposable(
-                                        &keyf,
-                                        vec![item.clone()],
-                                        vec![],
-                                    )?;
-                                    decorated.push((k, item));
-                                }
-                                if reverse {
-                                    decorated.sort_by(|a, b| {
-                                        if py_compare(&b.0, &a.0, 0)
-                                            .map(|r| r.truthy())
-                                            .unwrap_or(false)
-                                        {
-                                            std::cmp::Ordering::Less
-                                        } else {
-                                            std::cmp::Ordering::Greater
-                                        }
-                                    });
-                                } else {
-                                    decorated.sort_by(|a, b| {
-                                        if py_compare(&a.0, &b.0, 0)
-                                            .map(|r| r.truthy())
-                                            .unwrap_or(false)
-                                        {
-                                            std::cmp::Ordering::Less
-                                        } else {
-                                            std::cmp::Ordering::Greater
-                                        }
-                                    });
-                                }
-                                decorated.into_iter().map(|(_, item)| item).collect()
+                            // A raising key/comparison call, or a detected
+                            // mid-sort mutation of the (temporarily emptied)
+                            // live list, no longer gets swallowed — both
+                            // propagate as a real error, matching real
+                            // CPython's `list.sort()`. Either way, the list
+                            // is restored to its PRE-SORT order (not left
+                            // empty, half-sorted, or holding whatever a
+                            // mutating comparator wrote into the stand-in) —
+                            // that's also what real CPython does on error
+                            // (see `list_sort_impl`'s `saved_ob_item`
+                            // restore, only overwritten with the sorted
+                            // result when nothing went wrong).
+                            let sort_result: PyResult<Vec<PyObjectRef>> = if let Some(keyf) =
+                                key_func
+                            {
+                                (|| -> PyResult<Vec<PyObjectRef>> {
+                                    let mut decorated: Vec<(PyObjectRef, PyObjectRef)> =
+                                        Vec::with_capacity(items.len());
+                                    for item in items.into_iter() {
+                                        let k = crate::object::call_function_disposable(
+                                            &keyf,
+                                            vec![item.clone()],
+                                            vec![],
+                                        )?;
+                                        decorated.push((k, item));
+                                    }
+                                    // Use the panic-tolerant generic merge sort
+                                    // here too — `Vec::sort_by` panics on a
+                                    // deliberately-inconsistent comparator (real
+                                    // CPython test: `test_sort.py`'s
+                                    // `test_bug453523`), and that includes this
+                                    // decorate-sort-undecorate `key=` path just
+                                    // as much as the no-key path below.
+                                    let decorated = if reverse {
+                                        crate::object::ops_binary::py_stable_sort_by_generic(
+                                            decorated,
+                                            &|a, b| py_compare(&b.0, &a.0, 0).map(|r| r.truthy()),
+                                        )?
+                                    } else {
+                                        crate::object::ops_binary::py_stable_sort_by_generic(
+                                            decorated,
+                                            &|a, b| py_compare(&a.0, &b.0, 0).map(|r| r.truthy()),
+                                        )?
+                                    };
+                                    Ok(decorated.into_iter().map(|(_, item)| item).collect())
+                                })()
+                            } else if reverse {
+                                py_stable_sort_by(items, &|a, b| {
+                                    py_compare(b, a, 0).map(|r| r.truthy())
+                                })
                             } else {
-                                if reverse {
-                                    py_stable_sort_by(items, &|a, b| {
-                                        py_compare(b, a, 0).map(|r| r.truthy()).unwrap_or(false)
-                                    })
-                                } else {
-                                    py_stable_sort_by(items, &|a, b| {
-                                        py_compare(a, b, 0).map(|r| r.truthy()).unwrap_or(false)
-                                    })
+                                py_stable_sort_by(items, &|a, b| {
+                                    py_compare(a, b, 0).map(|r| r.truthy())
+                                })
+                            };
+                            let sorted_items = match sort_result {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                        *list = original_items;
+                                    }
+                                    return Err(e);
                                 }
                             };
-                            check_not_modified(&args[0])?;
+                            if let Err(e) = check_not_modified(&args[0]) {
+                                if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                    *list = original_items;
+                                }
+                                return Err(e);
+                            }
                             if let PyObject::List(list) = &mut *args[0].borrow_mut() {
-                                *list = items;
+                                *list = sorted_items;
                             }
                             Ok(py_none())
                         },

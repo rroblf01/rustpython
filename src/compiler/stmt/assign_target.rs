@@ -52,7 +52,14 @@ impl Compiler {
                 // calling convention every caller of compile_assign_target
                 // relies on.
                 self.compile_expr(value)?;
-                self.compile_expr(slice)?;
+                if let Expr::Starred(inner) = slice.as_ref() {
+                    self.emit(Opcode::BUILD_LIST, 0);
+                    self.compile_expr(inner)?;
+                    self.emit(Opcode::LIST_EXTEND, 0);
+                    self.emit(Opcode::LIST_TO_TUPLE, 0);
+                } else {
+                    self.compile_expr(slice)?;
+                }
                 self.emit(Opcode::SWAP, 1);
                 self.emit(Opcode::SWAP, 2);
                 self.emit(Opcode::STORE_SUBSCR, 0);

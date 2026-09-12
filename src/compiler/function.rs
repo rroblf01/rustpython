@@ -369,13 +369,19 @@ impl Compiler {
             self.emit(Opcode::DUP_TOP, 0);
             // The nested function needs its own docstring-free, no-defaults
             // signature; compile_function handles the recursion.
-            self.compile_function(
+            // Flag the annotate body so bare `*b` annotations unpack one
+            // element (UNPACK_SEQUENCE); reset right after (a `?` early
+            // return aborts the whole compilation anyway).
+            self.in_annotation = true;
+            let r = self.compile_function(
                 "__annotate__".to_string(),
                 &[],
                 &annotate_body,
                 false,
                 &None,
-            )?;
+            );
+            self.in_annotation = false;
+            r?;
             let annotate_attr_idx = self.get_name_index("__annotate__") as u32;
             self.emit(Opcode::STORE_ATTR, annotate_attr_idx);
         }
@@ -518,6 +524,19 @@ impl Compiler {
             self.emit(Opcode::LOAD_CONST, qualname_const_idx);
             let qualname_attr_idx = self.get_name_index("__qualname__") as u32;
             self.emit(Opcode::STORE_NAME, qualname_attr_idx);
+
+            // Real CPython 3.14 seeds `__firstlineno__` (the `class`
+            // statement's own line) here too, right after `__qualname__`
+            // (insertion order is observable via instrumented-dict
+            // namespaces) — `__static_attributes__` comes separately at
+            // the very END of the body (see below), so a `class C:
+            // __static_attributes__ = ...` body assignment is still
+            // overwritten with `()`, exactly like real CPython.
+            let firstlineno_const_idx =
+                self.get_const_index(ConstValue::Int(old_current_line.to_string())) as u32;
+            self.emit(Opcode::LOAD_CONST, firstlineno_const_idx);
+            let firstlineno_attr_idx = self.get_name_index("__firstlineno__") as u32;
+            self.emit(Opcode::STORE_NAME, firstlineno_attr_idx);
         }
 
         // MAKE_CELL for the class body's cellvars (the `__class__` cell) so
@@ -530,6 +549,14 @@ impl Compiler {
         }
 
         self.compile_stmts(body)?;
+
+        // Trailing `__static_attributes__ = ()`, mirroring real CPython
+        // 3.14 (observable as the LAST namespace insertion with an
+        // instrumented-dict `__prepare__`, and unconditionally
+        // overwriting any same-named body assignment).
+        self.emit(Opcode::BUILD_TUPLE, 0);
+        let static_attr_idx = self.get_name_index("__static_attributes__") as u32;
+        self.emit(Opcode::STORE_NAME, static_attr_idx);
 
         let const_none = self.get_const_index(ConstValue::None) as u32;
         self.emit(Opcode::LOAD_CONST, const_none);

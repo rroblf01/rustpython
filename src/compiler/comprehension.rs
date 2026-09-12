@@ -104,6 +104,108 @@ impl Compiler {
         Ok(())
     }
 
+    /// A generator expression `(elt for t1 in it1 if ... for t2 in it2 ...)`
+    /// must produce a real, lazy generator object (`type(g) is generator`,
+    /// `next(g)` resumes exactly where it left off, `gi_running`/`gi_frame`
+    /// present, late binding of every iterable/condition but the outermost)
+    /// — unlike list/set/dict comprehensions (still eagerly inlined into the
+    /// enclosing scope above/below, a deliberate approximation since their
+    /// result is materialized immediately anyway), a genexp's laziness is
+    /// externally observable and can't be faked by just wrapping an already-
+    /// built list in an iterator. Real CPython desugars a genexp into an
+    /// anonymous generator FUNCTION taking the outermost (already-`iter()`'d)
+    /// iterable as its sole argument `.0`:
+    ///
+    ///   def <genexpr>(.0):
+    ///       for t1 in .0:
+    ///           if ...:
+    ///               for t2 in it2:
+    ///                   ...
+    ///                       yield elt
+    ///
+    /// which is then called once, immediately, with `iter(it1)` — the call
+    /// returns a suspended generator without running any of the body yet
+    /// (matching "verify the outermost for-expression makes an immediate
+    /// check for iterability" while still deferring everything else). This
+    /// reuses `compile_function` wholesale (by building the equivalent AST
+    /// out of ordinary `Stmt::For`/`Stmt::If`/`Expr::Yield` nodes) rather
+    /// than hand-rolling a second cellvar/freevar/RETURN_GENERATOR pipeline
+    /// — `compile_function` already does the right thing for any nested
+    /// `def`, and this body is indistinguishable from one a user could have
+    /// written by hand.
+    pub(crate) fn compile_genexp(
+        &mut self,
+        elt: &Expr,
+        generators: &[Comprehension],
+    ) -> Result<(), String> {
+        if generators.is_empty() {
+            return Err("Comprehension must have at least one generator".to_string());
+        }
+
+        const GENEXP_ARG: &str = ".0";
+
+        // Build the innermost `yield elt` and wrap it, generator-by-
+        // generator from the last back to the first, in `for`/`if` nodes —
+        // the outermost generator's iterable is replaced by a reference to
+        // the synthetic `.0` parameter (already an iterator by the time the
+        // function is called, see below), matching real CPython's genexp
+        // desugaring exactly.
+        let mut acc: Vec<Stmt> = vec![Stmt::Expr(Box::new(Expr::Yield(Some(Box::new(
+            elt.clone(),
+        )))))];
+        for (i, gen) in generators.iter().enumerate().rev() {
+            let mut wrapped = acc;
+            for cond in gen.ifs.iter().rev() {
+                wrapped = vec![Stmt::If {
+                    test: Box::new(cond.clone()),
+                    body: wrapped,
+                    orelse: Vec::new(),
+                }];
+            }
+            let iter_expr = if i == 0 {
+                Expr::Name(GENEXP_ARG.to_string())
+            } else {
+                (*gen.iter).clone()
+            };
+            acc = vec![Stmt::For {
+                target: gen.target.clone(),
+                iter: Box::new(iter_expr),
+                body: wrapped,
+                orelse: Vec::new(),
+                is_async: gen.is_async,
+            }];
+        }
+
+        let arg = Arg {
+            arg: GENEXP_ARG.to_string(),
+            annotation: None,
+            is_vararg: false,
+            is_kwarg: false,
+            is_posonlyarg: false,
+            is_kwonly: false,
+            default: None,
+        };
+
+        // Emit the callable FIRST (CALL expects the callable below its
+        // args on the stack), then evaluate the outermost iterable in the
+        // ENCLOSING scope and convert it to an iterator eagerly — this is
+        // the one part of a genexp that really does run immediately, both
+        // for early-binding semantics (`x=10; g=(i for i in range(x));
+        // x=5; list(g)` sees 10) and for the immediate `TypeError` when the
+        // outermost expression isn't iterable at all.
+        self.compile_function(
+            "<genexpr>".to_string(),
+            std::slice::from_ref(&arg),
+            &acc,
+            false,
+            &None,
+        )?;
+        self.compile_expr(&generators[0].iter)?;
+        self.emit(Opcode::GET_ITER, 0);
+        self.emit(Opcode::CALL, 1);
+        Ok(())
+    }
+
     pub(crate) fn compile_dict_comprehension(
         &mut self,
         key: &Expr,

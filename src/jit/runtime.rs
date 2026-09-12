@@ -516,7 +516,32 @@ pub(crate) extern "C" fn jit_load_attr(
         // LOAD_ATTR/`resolve_descriptor_attr` — `get_attribute` returns an
         // UNBOUND template (self_obj = None) for native-type methods like
         // int.bit_length, which only works once bound to `obj`.
-        let result = {
+        //
+        // NEVER do this for a `Module` object, though: a module's attribute
+        // dict holds plain free functions/values, not instance methods
+        // reached via a class's MRO — the interpreter's own LOAD_ATTR never
+        // binds a module-sourced `BuiltinFunction`/`Function` to the module
+        // as "self" (confirmed: `PyObject::Module`'s own `get_attribute`,
+        // `module_obj::get`, just does a raw dict lookup, no binding logic
+        // at all). This JIT-only rebind block used to apply unconditionally
+        // to every object type, so ANY JIT-compiled function (`has_loop`
+        // gates eligibility) that called a module-level function through a
+        // module reference — `sys._getframe()`, `sys.exc_info()`, or in
+        // principle any `some_module.some_function()` inside a hot loop —
+        // got it silently rewritten into a bound method with `self_obj` set
+        // to the MODULE itself. The corrupted callable then prepended the
+        // module object as an extra leading positional argument on every
+        // call, and any per-argument logic downstream (e.g. `sys._getframe`
+        // reading `args[0]` as the integer depth) silently misread the
+        // module object instead — real trigger: `sys._getframe()` called
+        // from inside a JIT-eligible (looping) function always returned
+        // `None`/depth 0 instead of a real frame, breaking `Lib/test/
+        // support/__init__.py`'s frame-walking fallback used by
+        // `get_recursion_depth()`.
+        let is_module = matches!(&*obj_ref.borrow(), crate::object::PyObject::Module { .. });
+        let result = if is_module {
+            result.clone()
+        } else {
             let rb = result.borrow();
             match &*rb {
                 crate::object::PyObject::BuiltinMethod { name: n, func, .. } => {

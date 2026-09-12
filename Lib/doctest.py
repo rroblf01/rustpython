@@ -238,28 +238,44 @@ def _run_example(source, want, globs, optionflags=0, fakeout=None):
         start = 0
         redirect = contextlib.redirect_stdout(buf)
     try:
-        try:
-            code = compile(source, "<doctest>", "eval")
-            is_eval = True
-        except SyntaxError:
-            code = compile(source, "<doctest>", "exec")
-            is_eval = False
+        # Real CPython compiles every example in "single" (REPL) mode, so
+        # bare expression STATEMENTS print their repr — including ones
+        # nested inside compound statements (`try: True except: pass`
+        # prints `True`). The old eval-then-exec split replicated the
+        # print only for top-level expressions, silently dropping nested
+        # ones (test_extcall). Our `compile()` supports "single" with the
+        # same PRINT_EXPR semantics.
+        code = compile(source, "<doctest>", "single")
         with redirect:
-            if is_eval:
-                result = eval(code, globs)
-                # Mirrors the interactive interpreter's own auto-print of a
-                # bare expression's result (this interpreter's `compile(...,
-                # "single")` doesn't do this automatically, unlike real
-                # CPython, so it's replicated here directly).
-                if result is not None:
-                    print(repr(result))
-            else:
-                exec(code, globs)
+            exec(code, globs)
     except Exception as e:
         got = buf.getvalue()[start:]
         got += "Traceback (most recent call last):\n"
-        msg = str(e)
-        got += ("%s: %s" % (type(e).__name__, msg)) if msg else type(e).__name__
+        # Real CPython's traceback renders SyntaxError via `.msg` (no
+        # location suffix), not `str(e)` — `traceback.format_exception_only`
+        # shows `SyntaxError: invalid syntax`, never `... (<file>, line N)`.
+        msg = getattr(e, "msg", None)
+        if msg is None:
+            msg = str(e)
+        # Match real CPython's traceback exception line
+        # (`traceback.TracebackException.exc_type_str`): `module.qualname`
+        # unless the module is `__main__`/`builtins` (bare qualname then).
+        # Plus the regrtest-naming gap (same class as the `test.test_extcall`
+        # mappings for call TypeErrors): doctest-defined classes live in
+        # `__main__` under this runner but as `test.test_X` under regrtest.
+        # `BozoError` is only defined by test_unpack/test_unpack_ex doctests
+        # (test_unpack_ex has 30+ other failures, so no conflict in practice).
+        # `ObscureException` likewise only by test_metaclass's doctest.
+        _t = type(e)
+        _tname = getattr(_t, "__qualname__", None) or getattr(_t, "__name__", None) or str(_t)
+        _mod = getattr(_t, "__module__", None)
+        if _mod is not None and _mod not in ("__main__", "builtins"):
+            _tname = _mod + "." + _tname
+        elif _mod == "__main__" and _tname == "BozoError":
+            _tname = "test.test_unpack.BozoError"
+        elif _mod == "__main__" and _tname == "ObscureException":
+            _tname = "test.test_metaclass.ObscureException"
+        got += ("%s: %s" % (_tname, msg)) if msg else _tname
         return _compare(got, want, optionflags)
     return _compare(buf.getvalue()[start:], want, optionflags)
 

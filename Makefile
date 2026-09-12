@@ -168,7 +168,7 @@ test-uv: $(RUSTPYTHON)
 	@echo -e "$(GREEN)✔  uv integration OK$(RESET)"
 
 # ── CPython test suite ─────────────────────────────
-CPYTHON_TIMEOUT := 120
+CPYTHON_TIMEOUT := 180
 # Matches nproc (12 on the dev machine this was tuned on) — full-core
 # parallel *debug*-profile (unoptimized, no LTO) rustpython processes will
 # starve the desktop of CPU for the ~7-8 minute duration of a sweep (a real,

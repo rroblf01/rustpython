@@ -3,6 +3,51 @@
 // coroutine driving: __next__/send/throw for both.
 use super::*;
 
+/// Real, general recursion-depth guard for the disposable-VM-based
+/// generator/coroutine resume functions below (`generator_next_fallback`,
+/// `coroutine_send_fallback`, `coroutine_throw_fallback`). Each resume
+/// creates a FRESH `VirtualMachine` (`take_disposable`/pooled) with its own
+/// empty `frames` stack, so the ordinary `self.frames.len() >=
+/// self.recursion_limit` check (`call_func.rs`) never sees the TRUE nesting
+/// depth across resumes — each level's "call" is a brand-new Rust call into
+/// `execute()` on a DIFFERENT VM instance, not a push onto any single VM's
+/// `frames` Vec. An unboundedly recursive `async def`/generator (confirmed
+/// via CPython's own `test_contextlib_async.py::TestAsyncContextManager
+/// .test_recursive`, a bounded-by-design recursive `await` chain that
+/// happens to recurse truly unboundedly here due to a separate closure/
+/// nonlocal-cell-sharing bug) previously overflowed the REAL native stack
+/// (`fatal runtime error: stack overflow, aborting` — a hard process abort)
+/// instead of raising a catchable `RecursionError`, exactly the class of gap
+/// `PyObjectRef::equals`'s pre-existing `EQUALS_DEPTH` guard closes for
+/// container comparison. Empirically, this exact recursive-`await` chain
+/// overflows the 64MB dedicated interpreter stack (`main.rs`) around
+/// ~3300-3600 levels deep on both debug and release-lite builds; 1000
+/// (matching CPython's own default `sys.getrecursionlimit()`) leaves
+/// generous headroom regardless of build profile.
+thread_local! {
+    static ASYNC_DRIVE_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
+}
+struct AsyncDriveGuard;
+impl AsyncDriveGuard {
+    fn enter() -> PyResult<Self> {
+        let depth = ASYNC_DRIVE_DEPTH.with(|c| {
+            let d = c.get() + 1;
+            c.set(d);
+            d
+        });
+        if depth > 1000 {
+            ASYNC_DRIVE_DEPTH.with(|c| c.set(c.get() - 1));
+            return Err(PyError::recursion_error("maximum recursion depth exceeded"));
+        }
+        Ok(AsyncDriveGuard)
+    }
+}
+impl Drop for AsyncDriveGuard {
+    fn drop(&mut self) {
+        ASYNC_DRIVE_DEPTH.with(|c| c.set(c.get() - 1));
+    }
+}
+
 // ---- generator.__next__() / generator.send() ----
 
 /// Body of `generator.__next__()`/`generator.send(value)`.
@@ -30,6 +75,7 @@ use super::*;
 /// known one; there may be others in itertools-style eager-materialization
 /// helpers) to route through real `&mut VirtualMachine` access instead.
 pub(crate) fn generator_next_fallback(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let _depth_guard = AsyncDriveGuard::enter()?;
     let frame_ptr: *const std::cell::RefCell<Option<Box<crate::vm::Frame>>> = {
         let gen = args[0].borrow();
         match &*gen {
@@ -150,6 +196,7 @@ fn wrap_stopiteration_pep479(e: PyError) -> PyError {
 /// currently known for coroutines specifically — `SEND`/`GET_AWAITABLE`
 /// opcodes and explicit `.send()` calls all route through `call_function`).
 pub(crate) fn coroutine_send_fallback(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let _depth_guard = AsyncDriveGuard::enter()?;
     let gen = args[0].borrow();
     if let PyObject::Coroutine { frame } = &*gen {
         // A coroutine resuming itself re-entrantly must raise real
@@ -209,6 +256,7 @@ pub(crate) fn coroutine_send_fallback(args: &[PyObjectRef]) -> PyResult<PyObject
 
 /// Body of `coroutine.throw(value)` — see `coroutine_send_fallback` above.
 pub(crate) fn coroutine_throw_fallback(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let _depth_guard = AsyncDriveGuard::enter()?;
     if args.len() < 2 {
         return Err(PyError::type_error(
             "throw() missing required argument 'value'",

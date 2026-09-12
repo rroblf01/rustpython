@@ -157,21 +157,71 @@ impl VirtualMachine {
         let inherited_metaclass = bases_vec.iter().find_map(crate::object::metatype_of);
         let effective_metaclass = explicit_metaclass.or(inherited_metaclass);
 
+        // `__prepare__(name, bases_tuple, **kwds)` — real CPython always
+        // passes bases as a TUPLE (empty `()` when there are none, never
+        // None or a bare base) and forwards every class keyword except
+        // `metaclass` itself.
+        let prepare_bases = if original_bases_vec.is_empty() {
+            PyObjectRef::new(PyObject::Tuple(vec![]))
+        } else {
+            PyObjectRef::new(PyObject::Tuple(bases_vec.clone()))
+        };
         let prepared_namespace: Option<PyObjectRef> = if let Some(mc) = &effective_metaclass {
-            crate::object::lookup_dunder_via_mro(mc, "__prepare__").and_then(|prep_fn| {
-                let unwrapped = match &*prep_fn.borrow() {
-                    PyObject::ClassMethod { func } => func.clone(),
-                    PyObject::StaticMethod { func } => func.clone(),
-                    _ => prep_fn.clone(),
-                };
-                let is_classmethod = matches!(&*prep_fn.borrow(), PyObject::ClassMethod { .. });
-                let call_args = if is_classmethod {
-                    vec![mc.clone(), name.clone(), bases.clone()]
+            // A non-type metaclass (plain function) can still carry a
+            // `__prepare__` in its own `__dict__` (`meta.__prepare__ =
+            // prepare`) — the MRO dunder walk only covers real types.
+            let prep_lookup = crate::object::lookup_dunder_via_mro(mc, "__prepare__").or_else(|| {
+                if matches!(&*mc.borrow(), PyObject::Type { .. }) {
+                    None
                 } else {
-                    vec![name.clone(), bases.clone()]
-                };
-                self.call_function(unwrapped, call_args, vec![]).ok()
-            })
+                    mc.borrow().get_attribute("__prepare__").ok()
+                }
+            });
+            match prep_lookup {
+                Some(prep_fn) => {
+                    // A descriptor instance (not directly callable) must be
+                    // bound via `__get__(None, metaclass)` exactly like
+                    // `type.__getattribute__` does — e.g. FailDescr whose
+                    // `__get__` raises must fail class creation (never be
+                    // silently swallowed into a default namespace).
+                    let prep_fn = match &*prep_fn.borrow() {
+                        PyObject::Function(_)
+                        | PyObject::BuiltinFunction { .. }
+                        | PyObject::BuiltinMethod { .. }
+                        | PyObject::BoundMethod { .. }
+                        | PyObject::Closure(_)
+                        | PyObject::Type { .. }
+                        | PyObject::StaticMethod { .. }
+                        | PyObject::ClassMethod { .. } => prep_fn.clone(),
+                        _ => match prep_fn.borrow().get_attribute("__get__") {
+                            Ok(get) => self.call_function(
+                                get,
+                                vec![prep_fn.clone(), py_none(), mc.clone()],
+                                vec![],
+                            )?,
+                            Err(_) => prep_fn.clone(),
+                        },
+                    };
+                    let unwrapped = match &*prep_fn.borrow() {
+                        PyObject::ClassMethod { func } => func.clone(),
+                        PyObject::StaticMethod { func } => func.clone(),
+                        _ => prep_fn.clone(),
+                    };
+                    let is_classmethod =
+                        matches!(&*prep_fn.borrow(), PyObject::ClassMethod { .. });
+                    let call_args = if is_classmethod {
+                        vec![mc.clone(), name.clone(), prepare_bases.clone()]
+                    } else {
+                        vec![name.clone(), prepare_bases.clone()]
+                    };
+                    Some(self.call_function(
+                        unwrapped,
+                        call_args,
+                        init_subclass_kwargs.clone(),
+                    )?)
+                }
+                None => None,
+            }
         } else {
             None
         };
@@ -205,6 +255,11 @@ impl VirtualMachine {
                 );
                 new_frame.closure = Box::new(closure);
                 new_frame.name_order = Some(name_order.clone());
+                // Route the body directly against a custom `__prepare__`
+                // mapping (see `Frame::prepared_namespace`): every
+                // STORE_NAME goes through its `__setitem__` as it happens
+                // and LOAD_NAME reads pre-populated entries.
+                new_frame.prepared_namespace = prepared_namespace.clone();
                 self.push_frame(new_frame);
                 let result = self.execute();
                 class_cell = {
@@ -242,49 +297,15 @@ impl VirtualMachine {
         }
         let order = name_order.borrow().clone();
 
-        if let Some(prepared) = &prepared_namespace {
-            let setitem_fn = if let PyObject::Instance { typ, .. } = &*prepared.borrow() {
-                crate::object::lookup_dunder_via_mro(typ, "__setitem__")
-            } else {
-                None
-            };
-            if std::env::var("RPY_DEBUG_METACLASS").is_ok() {
-                eprintln!(
-                    "prepare-replay: name={} order={:?} has_setitem={}",
-                    name_str,
-                    order,
-                    setitem_fn.is_some()
-                );
-            }
-            for k in &order {
-                if let Some(v) = namespace_dict.get(k) {
-                    if std::env::var("RPY_DEBUG_METACLASS").is_ok() {
-                        eprintln!("  replaying key={} value={}", k, v.repr());
-                    }
-                    if let Some(f) = &setitem_fn {
-                        self.call_function(
-                            f.clone(),
-                            vec![prepared.clone(), py_str(k), v.clone()],
-                            vec![],
-                        )?;
-                    } else if let Some(native) = crate::object::native_backing_of(prepared) {
-                        if let PyObject::Dict(pd) = &mut *native.borrow_mut() {
-                            pd.set(py_str(k), v.clone())?;
-                        }
-                    }
-                }
-            }
-            if std::env::var("RPY_DEBUG_METACLASS").is_ok() {
-                if let Some(native) = crate::object::native_backing_of(prepared) {
-                    if let PyObject::Dict(pd) = &*native.borrow() {
-                        eprintln!(
-                            "  final native dict keys: {:?}",
-                            pd.keys().iter().map(|k| k.str()).collect::<Vec<_>>()
-                        );
-                    }
-                }
-            }
-        }
+        // NOTE: no post-execution replay into `prepared` is needed (or
+        // wanted) anymore: with `Frame::prepared_namespace` set above,
+        // every body STORE_NAME already went through its `__setitem__`
+        // AS IT HAPPENED (and reads saw pre-populated entries). Replaying
+        // here would apply every store a SECOND time — observably wrong
+        // for instrumented-dict namespaces. The old replay block lived
+        // here and is intentionally gone; `prepared` itself (holding all
+        // body stores plus its pre-populated content) is what
+        // `build_class_with_metaclass` hands to `__new__` below.
 
         let class_result = if let Some(mc) = effective_metaclass {
             self.build_class_with_metaclass(
@@ -296,6 +317,9 @@ impl VirtualMachine {
                 mc,
                 init_subclass_kwargs,
                 prepared_namespace,
+                // Same tuple the `__prepare__` call above received:
+                // resolved bases, empty when none were written.
+                prepare_bases.clone(),
             )
         } else {
             self.default_build_class(

@@ -385,7 +385,18 @@ impl VirtualMachine {
                                 suppress_context: ref mut suppress_field,
                                 ..
                             } => {
-                                let is_none = matches!(&*cause.borrow(), PyObject::None);
+                                // NOTE: `cause_is_none` (computed above, BEFORE
+                                // `exc.borrow_mut()` was taken) is what's
+                                // actually used below — a redundant
+                                // `matches!(&*cause.borrow(), PyObject::None)`
+                                // used to be recomputed right here, which
+                                // panicked ("RefCell already mutably
+                                // borrowed") whenever `cause` aliases `exc`
+                                // itself (`raise e from e`, or any exception
+                                // chained to its own cause), since `exc`'s
+                                // `borrow_mut()` guard above is still held
+                                // while this would `.borrow()` the same
+                                // RefCell.
                                 *cause_field = if cause_is_none {
                                     None
                                 } else {

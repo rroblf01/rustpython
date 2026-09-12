@@ -80,6 +80,7 @@ impl VirtualMachine {
             }
 
             Opcode::POP_TOP
+            | Opcode::PRINT_EXPR
             | Opcode::DUP_TOP
             | Opcode::COPY
             | Opcode::SWAP

@@ -26,7 +26,7 @@ def _format_exception_only_lines(exc_type, value):
     return lines
 
 
-def format_exception_only(exc_type, value=None):
+def format_exception_only(exc_type, value=None, *, show_group=False, **kwargs):
     parts = _format_exception_only_lines(exc_type, value)
     return "".join(parts)
 
@@ -44,10 +44,30 @@ class FrameSummary:
         self.colno = colno
 
     def __eq__(self, other):
-        return (self.filename, self.lineno, self.name) == (other.filename, other.lineno, other.name)
+        if isinstance(other, FrameSummary):
+            return (self.filename, self.lineno, self.name) == (other.filename, other.lineno, other.name)
+        if isinstance(other, tuple):
+            return (self.filename, self.lineno, self.name, self.line) == other
+        return NotImplemented
 
     def __hash__(self):
         return hash((self.filename, self.lineno, self.name))
+
+    # Real CPython's FrameSummary supports 4-tuple unpacking/indexing
+    # (filename, lineno, name, line) for backward compatibility with the
+    # old `traceback.extract_tb()`/`extract_stack()` plain-tuple return
+    # value — e.g. `f, lno, n, line = extract_tb(tb, 1)[0]`
+    # (test_zipimport.py's `doTraceback`). Without these, unpacking a
+    # FrameSummary raises "TypeError: cannot unpack non-iterable
+    # FrameSummary object".
+    def __getitem__(self, pos):
+        return (self.filename, self.lineno, self.name, self.line)[pos]
+
+    def __iter__(self):
+        return iter((self.filename, self.lineno, self.name, self.line))
+
+    def __len__(self):
+        return 4
 
 
 def _get_line(filename, lineno):
@@ -181,6 +201,63 @@ def extract_tb(tb, limit=None):
     return result
 
 
+def walk_stack(f):
+    """Walk a stack yielding the frame and line number for each frame.
+
+    This will follow `f.f_back` from the given frame, or from
+    `sys._getframe().f_back` if `f` is None, walking from the most
+    recent (innermost) frame outward.
+    """
+    if f is None:
+        f = sys._getframe().f_back
+    while f is not None:
+        yield f, f.f_lineno
+        f = f.f_back
+
+
+def extract_stack(f=None, limit=None):
+    """Extract the raw traceback from the current stack frame.
+
+    The return value has the same format as for extract_tb(): a list of
+    FrameSummary objects, oldest (outermost) frame first. `f` and `limit`
+    have the same meaning as for extract_tb(): `f` defaults to the
+    caller's frame, and `limit` (if given) caps the number of MOST
+    RECENT frames returned (real CPython applies the cap on the
+    innermost side before reversing to oldest-first order).
+    """
+    if f is None:
+        f = sys._getframe().f_back
+    frames = []
+    for frame, lineno in walk_stack(f):
+        if limit is not None and len(frames) >= limit:
+            break
+        code = getattr(frame, "f_code", None)
+        if code is not None:
+            filename = getattr(code, "co_filename", None) or "<unknown>"
+            name = getattr(code, "co_name", None) or "?"
+        else:
+            filename = "<unknown>"
+            name = "?"
+        raw_line = _get_line(filename, lineno) if lineno else None
+        line = raw_line.strip() if raw_line else None
+        frames.append(FrameSummary(filename, lineno or 0, name, line))
+    frames.reverse()
+    return frames
+
+
+def format_stack(f=None, limit=None):
+    return format_list(extract_stack(f, limit))
+
+
+def print_stack(f=None, limit=None, file=None):
+    if f is None:
+        f = sys._getframe().f_back
+    if file is None:
+        file = sys.stderr
+    for line in format_stack(f, limit):
+        print(line, file=file, end="")
+
+
 def format_list(extracted_list):
     """Format a list of FrameSummary/tuples into lines."""
     result = []
@@ -300,7 +377,7 @@ class TracebackException:
         return format_exception(self.exc_type, self.exc_value, self.exc_traceback,
                                 limit=self.limit, chain=chain)
 
-    def format_exception_only(self):
+    def format_exception_only(self, *, show_group=False, **kwargs):
         return _format_exception_only_lines(self.exc_type, self.exc_value)
 
     def format_summary(self):
@@ -308,7 +385,8 @@ class TracebackException:
 
 
 __all__ = [
-    "FrameSummary", "TracebackException", "clear_frames", "extract_tb",
-    "format_exc", "format_exception", "format_exception_only", "format_list",
-    "format_tb", "print_exc", "print_exception", "print_tb",
+    "FrameSummary", "TracebackException", "clear_frames", "extract_stack",
+    "extract_tb", "format_exc", "format_exception", "format_exception_only",
+    "format_list", "format_stack", "format_tb", "print_exc",
+    "print_exception", "print_stack", "print_tb", "walk_stack",
 ]

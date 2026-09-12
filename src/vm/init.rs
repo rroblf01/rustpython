@@ -136,7 +136,25 @@ pub(crate) fn register_native_modules(
         let pathlib_dict = create_pathlib_dict();
         modules.insert_str("pathlib", create_module("pathlib", pathlib_dict));
 
-        // Native urllib package (urllib.request, urllib.parse)
+        // Native urllib package (urllib.request, urllib.parse) — attributes
+        // of the "urllib" package module only (`import urllib;
+        // urllib.request.foo`). Deliberately NOT also pre-registered as
+        // flat `self.modules["urllib.request"]`/`["urllib.parse"]` entries:
+        // both have real, more complete pure-Python files
+        // (`Lib/urllib/request.py`, `Lib/urllib/parse.py`) that a plain
+        // `import urllib.request`/`import urllib.parse` is SUPPOSED to
+        // load instead (this project's own priority rule — Lib/ wins over
+        // a same-named native module, see CLAUDE.md). Pre-seeding
+        // `self.modules` under those exact dotted names short-circuits
+        // that: the import system finds the key already cached and never
+        // loads the real files at all, silently losing `urlsplit`/
+        // `SplitResult`/etc. from `urllib.parse` and everything
+        // `Lib/urllib/request.py` defines beyond the tiny native stub
+        // (confirmed regression: `test_urlparse.py`/`test_urllib2.py`/
+        // `test_genericalias.py` all broke this way when this was tried).
+        // `OpenerDirector` & co. (originally the motivation for the flat
+        // entries) are ported directly INTO `Lib/urllib/request.py`
+        // instead, so the normal Lib/-file import path already has them.
         let urllib_dict = create_urllib_dict();
         modules.insert_str("urllib", create_module("urllib", urllib_dict));
 
@@ -232,7 +250,19 @@ pub(crate) fn register_native_modules(
         // Native timeit module
         modules.insert_str("_timeit", create_module("_timeit", create_timeit_dict()));
 
-        let threading_dict = create_threading_dict();
+        let mut threading_dict = create_threading_dict();
+        // `threading.BrokenBarrierError` — real CPython defines this as a
+        // dedicated `RuntimeError` subclass. Aliasing it directly to the
+        // real `RuntimeError` class object (rather than standing up a
+        // whole new exception class + MRO wiring, a much larger change)
+        // means `except threading.BrokenBarrierError:` / `assertRaises(
+        // threading.BrokenBarrierError, ...)` both still work correctly
+        // against errors `Barrier`'s own wait/abort/reset paths raise via
+        // `PyError::runtime_error`, since they compare against this same
+        // class object.
+        if let Some(rte) = builtins.get(&crate::interner::intern("RuntimeError")).cloned() {
+            threading_dict.insert("BrokenBarrierError".to_string(), rte);
+        }
         modules.insert_str("threading", create_module("threading", threading_dict));
 
         // Native _thread module (CPython C extension replacement)
@@ -496,11 +526,21 @@ pub(crate) fn register_native_modules(
             create_module("fractions", create_fractions_dict()),
         );
 
-        // Native platform module
-        modules.insert_str(
-            "platform",
-            create_module("platform", create_platform_dict()),
-        );
+        // `platform` is NOT pre-registered here (unlike most other native
+        // modules in this function) — deliberately, so a plain `import
+        // platform` resolves through the normal import system to the real,
+        // comprehensive `Lib/platform.py` (1500+ lines, vendored from real
+        // CPython) instead. `create_platform_dict` (`src/modules/misc/
+        // platform.rs`) is a ~186-line native subset with nothing Lib/
+        // platform.py can't already get from `os`/`sys` — pre-seeding
+        // `self.modules["platform"]` with it here would permanently shadow
+        // the real file (confirmed regression, same class of bug as the
+        // one already fixed for `urllib.request`/`urllib.parse` — see that
+        // fix's own comment above): `platform.mac_ver`/`win32_ver`/`win32_
+        // edition`/etc. all silently missing. `create_platform_dict` is
+        // kept (not deleted) only in case some other native module still
+        // references it directly; it's simply never installed as the
+        // `platform` module itself anymore.
 
         // `getopt` — the real CPython Lib/getopt.py (vendored) is loaded
         // from disk instead: it exposes the internals CPython's own

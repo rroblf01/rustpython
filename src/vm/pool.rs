@@ -37,6 +37,7 @@ impl VirtualMachine {
             frame.global_cache.resize(instr_len, None);
             frame.registers.clear();
             frame.name_order = None;
+            frame.prepared_namespace = None;
             frame.live_module = None;
             frame.yield_from_iter = None;
             frame.frame_object = None;
@@ -68,6 +69,7 @@ impl VirtualMachine {
             frame.global_cache.clear();
             frame.registers.clear();
             frame.name_order = None;
+            frame.prepared_namespace = None;
             frame.live_module = None;
             frame.yield_from_iter = None;
             frame.frame_object = None;

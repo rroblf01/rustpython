@@ -9,11 +9,13 @@ use std::collections::HashMap;
 // its own int). Found via CPython's own `test_struct.py`: out-of-range
 // integers silently wrapped instead of raising `struct.error`
 // (`test_issue98248`), and multi-byte/float round-trips were simply wrong.
-// Scope: standard-size b/B/h/H/i/I/l/L/q/Q/n/N/f/d/?/c/s/p/x codes with
+// Scope: standard-size b/B/h/H/i/I/l/L/q/Q/n/N/f/d/F/D/?/c/s/p/x codes with
 // </>/!/=/@ byte-order prefixes, all treated as standard (no native
 // alignment/padding — `@`/`=` behave like `<` on this little-endian target).
-// Deliberately NOT implemented: `F`/`D` (complex) and `e` (half-float)
-// format codes, a real `Struct` class — flagged as a smaller remaining gap.
+// `F`/`D` pack/unpack a Python `complex` as two consecutive floats
+// (real, imag) of the matching width, matching CPython's `_struct.c`.
+// Deliberately NOT implemented: `e` (half-float) format code, a real
+// `Struct` class — flagged as a smaller remaining gap.
 // ---------------------------------------------------------------------------
 
 fn struct_error(msg: impl Into<String>) -> PyError {
@@ -92,6 +94,12 @@ fn struct_code_size(code: char) -> PyResult<usize> {
         'h' | 'H' => 2,
         'i' | 'I' | 'l' | 'L' | 'f' => 4,
         'q' | 'Q' | 'n' | 'N' | 'd' | 'P' => 8,
+        // Complex numbers: 'F' = 2x float (real, imag), 'D' = 2x double —
+        // real CPython's _struct.c supports these (`nu_float_complex`/
+        // `nu_double_complex` et al.), packing/unpacking real then imag as
+        // consecutive same-width floats in the format's byte order.
+        'F' => 8,
+        'D' => 16,
         _ => {
             return Err(struct_error(format!(
                 "bad char in struct format: '{}'",
@@ -213,6 +221,17 @@ fn struct_pack_one(
                 .as_f64()
                 .ok_or_else(|| struct_error("required argument is not a float"))?;
             let v = f as f32;
+            // Real CPython (`Objects/floatobject.c`'s `PyFloat_Pack4`) raises
+            // `OverflowError` — not `struct.error` — when a finite f64 is too
+            // large to represent as f32 (rounds to +/-inf on the narrowing
+            // cast). A value that was ALREADY +/-inf (or NaN) in the input is
+            // fine to pack as-is; only newly-created infinities from an
+            // in-range-for-f64-but-not-f32 magnitude are the overflow case.
+            if v.is_infinite() && f.is_finite() {
+                return Err(PyError::overflow_error(
+                    "float too large to pack with f format",
+                ));
+            }
             struct_push_bytes(out, order, &v.to_le_bytes(), &v.to_be_bytes());
         }
         'd' => {
@@ -220,6 +239,18 @@ fn struct_pack_one(
                 .as_f64()
                 .ok_or_else(|| struct_error("required argument is not a float"))?;
             struct_push_bytes(out, order, &f.to_le_bytes(), &f.to_be_bytes());
+        }
+        'F' | 'D' => {
+            let (re, im) = as_complex_parts(&val.borrow())
+                .ok_or_else(|| struct_error("required argument is not a complex"))?;
+            if code == 'F' {
+                let (re, im) = (re as f32, im as f32);
+                struct_push_bytes(out, order, &re.to_le_bytes(), &re.to_be_bytes());
+                struct_push_bytes(out, order, &im.to_le_bytes(), &im.to_be_bytes());
+            } else {
+                struct_push_bytes(out, order, &re.to_le_bytes(), &re.to_be_bytes());
+                struct_push_bytes(out, order, &im.to_le_bytes(), &im.to_be_bytes());
+            }
         }
         'b' | 'B' | 'h' | 'H' | 'i' | 'I' | 'l' | 'L' | 'q' | 'n' | 'Q' | 'N' => {
             let n = struct_pack_arg_bigint(val)?;
@@ -330,6 +361,36 @@ fn struct_decode_scalar(order: StructByteOrder, code: char, field: &[u8]) -> PyR
         'Q' | 'N' => py_int(widen(le)),
         'f' => py_float(f32::from_bits(widen(le) as u32) as f64),
         'd' => py_float(f64::from_bits(widen(le))),
+        'F' => {
+            let widen_sub = |sub: &[u8]| -> u64 {
+                let mut arr = [0u8; 8];
+                if le {
+                    arr[..sub.len()].copy_from_slice(sub);
+                    u64::from_le_bytes(arr)
+                } else {
+                    arr[8 - sub.len()..].copy_from_slice(sub);
+                    u64::from_be_bytes(arr)
+                }
+            };
+            let re = f32::from_bits(widen_sub(&field[0..4]) as u32) as f64;
+            let im = f32::from_bits(widen_sub(&field[4..8]) as u32) as f64;
+            PyObjectRef::imm(PyObject::Complex(re, im))
+        }
+        'D' => {
+            let widen_sub = |sub: &[u8]| -> u64 {
+                let mut arr = [0u8; 8];
+                if le {
+                    arr.copy_from_slice(sub);
+                    u64::from_le_bytes(arr)
+                } else {
+                    arr.copy_from_slice(sub);
+                    u64::from_be_bytes(arr)
+                }
+            };
+            let re = f64::from_bits(widen_sub(&field[0..8]));
+            let im = f64::from_bits(widen_sub(&field[8..16]));
+            PyObjectRef::imm(PyObject::Complex(re, im))
+        }
         _ => {
             return Err(struct_error(format!(
                 "bad char in struct format: '{}'",

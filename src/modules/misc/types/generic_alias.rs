@@ -88,6 +88,41 @@ fn build_generic_alias_type() -> PyObjectRef {
             },
         }),
     );
+    // __iter__ (PEP 646: `*tuple[int]` / `(*tuple[int],)[0]` star-unpacks a
+    // GenericAlias at runtime, which calls `iter()` on it like any other
+    // starred value). Missing entirely before — with no `__iter__` AND no
+    // real sequence `__getitem__` (the one above is for re-parameterizing,
+    // e.g. `list[int][str]`, and never raises `IndexError`), the
+    // old-style `__getitem__`-based iteration fallback looped forever
+    // calling `__getitem__(0)`, `__getitem__(1)`, ... (same bug class as
+    // this project's previously-fixed "UNPACK_SEQUENCE infinite-looping on
+    // __getitem__ iterables that never raise IndexError", just a
+    // different call site: `iter()`/star-unpacking, not `UNPACK_SEQUENCE`
+    // directly). Real trigger: `test_genericalias.py`'s module-level
+    // `_UNPACKED_TUPLES` list construction hung the whole file. Matches
+    // real CPython's actual semantics closely enough to stop the hang:
+    // yields exactly one item then stops, by building a real one-element
+    // list and delegating to the already-correct list iterator rather
+    // than hand-rolling a new iterator type. Real CPython's item is a
+    // "starred" copy of the alias (repr `*tuple[int]`); this yields a
+    // plain (non-starred-marked) copy instead — the repr/identity nuance
+    // is a known, minor gap, not the thing that was hanging.
+    td.insert_str(
+        "__iter__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__iter__".to_string(),
+            func: |args: &[PyObjectRef]| {
+                if args.is_empty() {
+                    return Err(PyError::type_error("missing argument"));
+                }
+                let origin = generic_alias_origin(&args[0])
+                    .ok_or_else(|| PyError::type_error("GenericAlias has no origin"))?;
+                let gargs = generic_alias_args(&args[0]);
+                let item = make_generic_alias(origin, gargs);
+                crate::object::builtin_iter(&[py_list(vec![item])])
+            },
+        }),
+    );
     td.insert_str(
         "__eq__",
         PyObjectRef::new(PyObject::BuiltinFunction {
@@ -127,7 +162,21 @@ fn build_generic_alias_type() -> PyObjectRef {
                 if args.is_empty() {
                     return Err(PyError::type_error("missing self"));
                 }
-                Ok(py_int(args[0].hash()? as i64))
+                // Real CPython's `ga_hash`: `hash(origin) ^ hash(args-tuple)`.
+                // The previous implementation called `args[0].hash()` — i.e.
+                // `self.hash()` — which re-enters `PyObjectRef::hash()`'s
+                // MRO dispatch, finds THIS SAME `__hash__` again (there is no
+                // "fall back to identity hash" step once a type defines its
+                // own `__hash__`), and recurses forever: a real, unbounded
+                // native-stack overflow (`fatal runtime error: stack
+                // overflow`), not a Python-level `RecursionError` — reachable
+                // from plain `hash(list[int])`, no subclassing needed.
+                let origin = generic_alias_origin(&args[0])
+                    .ok_or_else(|| PyError::type_error("GenericAlias has no origin"))?;
+                let gargs = generic_alias_args(&args[0]);
+                let h0 = origin.hash()?;
+                let h1 = py_tuple(gargs).hash()?;
+                Ok(py_int((h0 ^ h1) as i64))
             },
         }),
     );
@@ -205,11 +254,28 @@ fn build_generic_alias_type() -> PyObjectRef {
                 .ok_or_else(|| PyError::type_error("GenericAlias has no origin"))?;
                 let origin_repr = match &*origin.borrow() {
                     PyObject::Type { name, .. } => name.clone(),
-                    _ => origin.borrow().repr(),
+                    // `origin.repr()` (the reentrancy-safe `PyObjectRef`
+                    // method, which clones a container's elements and drops
+                    // its own borrow before recursing) — NOT
+                    // `origin.borrow().repr()`, which keeps `origin`'s
+                    // borrow alive across the whole nested repr call. See
+                    // the `arg_reprs` fix just below for the real repro.
+                    _ => origin.repr(),
                 };
+                // `a.repr()`, not `a.borrow().repr()`: `__args__` can hold a
+                // single non-tuple argument (e.g. `GenericAlias(int, some_list)`)
+                // whose own repr recurses into a user `__repr__` that mutates
+                // that SAME list (real CPython regression test_genericalias.py's
+                // `test_evil_repr3`: an element's `__repr__` calls `lst.clear()`
+                // on the very list being repr'd). `a.borrow().repr()` keeps a
+                // live borrow on `a` for the whole nested repr, which then
+                // panics ("RefCell already borrowed") the moment that
+                // `__repr__` tries to `.borrow_mut()` the same list to clear
+                // it. `PyObjectRef::repr()` already clones-then-drops before
+                // recursing into elements, so it doesn't have this problem.
                 let arg_reprs: Vec<String> = generic_alias_args(&args[0])
                     .iter()
-                    .map(|a| a.borrow().repr())
+                    .map(|a| a.repr())
                     .collect();
                 Ok(py_str(&format!(
                     "{}[{}]",

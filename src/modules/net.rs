@@ -377,7 +377,15 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
             0
         };
         if family != 2 {
-            return Err(PyError::runtime_error("Only AF_INET sockets are supported"));
+            // Real CPython raises OSError (errno EAFNOSUPPORT) when a
+            // platform/build lacks a given address family — e.g.
+            // `test_socket.py`'s `requireSocket()` helper creates a probe
+            // socket at class-decoration time and expects `except OSError`
+            // to catch an unsupported family, skipping the test instead of
+            // crashing the whole module. A bare RuntimeError isn't an
+            // OSError subclass, so it propagated uncaught here.
+            let io_err = std::io::Error::from_raw_os_error(97); // EAFNOSUPPORT (Linux)
+            return Err(PyError::os_error_from_io(&io_err));
         }
         Ok(PyObjectRef::new(PyObject::Socket {
             inner: std::rc::Rc::new(std::cell::RefCell::new(SocketInner::Uninitialized)),
@@ -414,6 +422,15 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     // catches), crashing instead of cleanly falling back to "no IPv6".
     d.insert_str("_GLOBAL_DEFAULT_TIMEOUT", py_none());
     d.insert_str("has_ipv6", py_bool(false));
+    // Real CPython's `socket.has_dualstack_ipv6()` is a FUNCTION (not a
+    // plain attribute) that probes whether the platform can create a
+    // single SOCK_STREAM socket handling both AF_INET and AF_INET6 (real
+    // CPython's own implementation opens an AF_INET6 socket and tries
+    // clearing `IPV6_V6ONLY`) — since this interpreter's `socket()` only
+    // ever supports AF_INET at all (see `has_ipv6 = False` right above),
+    // dual-stack is unconditionally unavailable, so this always answers
+    // `False` rather than attempting a real IPv6 probe.
+    sock_func!("has_dualstack_ipv6", |_args| Ok(py_bool(false)));
     d.insert_str("AF_INET", py_int(2));
     d.insert_str("AF_INET6", py_int(10));
     d.insert_str("SOCK_STREAM", py_int(1));

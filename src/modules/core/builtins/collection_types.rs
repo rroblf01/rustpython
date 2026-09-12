@@ -1,4 +1,6 @@
 use crate::object::*;
+use num_bigint::{BigInt, Sign};
+use num_traits::ToPrimitive;
 use std::collections::HashMap;
 
 pub fn register_collection_types(builtins: &mut HashMap<String, PyObjectRef>, object_type: &PyObjectRef) {
@@ -29,6 +31,507 @@ pub fn register_collection_types(builtins: &mut HashMap<String, PyObjectRef>, ob
             func: crate::object::builtin_list_repr as BuiltinFunc,
         }),
     );
+    // Unbound CLASS-level access to list methods (`list.append`,
+    // `map(list.append, ...)`, `list.__len__(a)` — test_descrtut). Same
+    // delegating-closure shape as `str_unbound!` in primitive_types.rs,
+    // with one crucial difference: `str`'s method bodies read the receiver
+    // through the universal `.str()` conversion (which sees through
+    // subclass instances), while `list`'s bodies match `PyObject::List`
+    // exactly — so the receiver is first normalized to its native backing
+    // (a no-op for exact lists). Without this, every subclass-instance
+    // call fails with "append on non-list", and resolving through the
+    // instance's own MRO instead would hand right back THIS closure and
+    // recurse forever. Instance-level `a.append` keeps resolving via
+    // attrs/list.rs untouched — these entries only fire for type-level
+    // access and subclass instances.
+    macro_rules! list_unbound {
+        ($name:literal) => {
+            list_dict.insert_str(
+                $name,
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: |args: &[PyObjectRef]| {
+                        if args.is_empty() {
+                            return Err(PyError::type_error(concat!(
+                                $name,
+                                "() missing required argument: 'self'"
+                            )));
+                        }
+                        let recv = crate::object::native_backing_of(&args[0])
+                            .unwrap_or_else(|| args[0].clone());
+                        let method = recv.borrow().get_attribute($name)?;
+                        // Two native calling conventions coexist: most
+                        // methods are `BuiltinMethod`s taking the receiver
+                        // as `args[0]`, but a few (`__len__`,
+                        // `__getitem__`, `__contains__`, `__iter__`) are
+                        // `Closure`s with the receiver already captured —
+                        // those take only the REMAINING args (passing the
+                        // receiver again would shift every parameter).
+                        match &*method.borrow() {
+                            PyObject::BuiltinMethod { func, .. } => {
+                                let mut all = vec![recv];
+                                all.extend_from_slice(&args[1..]);
+                                return func(&all);
+                            }
+                            PyObject::Closure(f) => {
+                                return f(&args[1..]);
+                            }
+                            PyObject::BuiltinFunction { func, .. } => {
+                                let mut all = vec![recv];
+                                all.extend_from_slice(&args[1..]);
+                                return func(&all);
+                            }
+                            _ => {}
+                        }
+                        let mut all = vec![recv];
+                        all.extend_from_slice(&args[1..]);
+                        crate::object::call_function_disposable(&method, all, vec![])
+                    },
+                }),
+            );
+        };
+    }
+    list_unbound!("append");
+    list_unbound!("clear");
+    list_unbound!("copy");
+    list_unbound!("count");
+    list_unbound!("extend");
+    list_unbound!("index");
+    list_unbound!("insert");
+    list_unbound!("pop");
+    list_unbound!("remove");
+    list_unbound!("reverse");
+    list_unbound!("sort");
+    list_unbound!("__len__");
+    list_unbound!("__getitem__");
+    list_unbound!("__setitem__");
+    list_unbound!("__delitem__");
+    list_unbound!("__iter__");
+    list_unbound!("__contains__");
+    list_unbound!("__reversed__");
+    list_unbound!("__sizeof__");
+    // `__getstate__`/`__reduce_ex__` are REAL here (not best-effort):
+    // `Lib/copy.py`'s `copy`/`deepcopy` consult `__reduce_ex__` (falling
+    // back to `__reduce__`) and `__getstate__` on the INSTANCE — a stub
+    // that merely fails would shadow a user-defined `__reduce__` and
+    // break `test_copy.py` outright. `__reduce_ex__` mirrors CPython's
+    // `object.__reduce_ex__`: defer to a user `__reduce__` override when
+    // one exists anywhere in the MRO except `object` itself, else return
+    // `(reconstructor, (cls,), state, iter(items), None)` — a shape the
+    // vendored `copy._reconstruct` consumes directly (verified: it calls
+    // `func(*args)`, applies state, extends from listiter, deepcopying
+    // each when memo is set). State itself comes from the (possibly
+    // custom) `__getstate__`, resolved bound. `__getstate__` alone is the
+    // instance `__dict__` copy, or None when empty (matches CPython
+    // exactly, probed).
+    list_dict.insert_str(
+        "__getstate__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__getstate__".to_string(),
+            func: list_getstate,
+        }),
+    );
+    list_dict.insert_str(
+        "__reduce_ex__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__reduce_ex__".to_string(),
+            func: |args: &[PyObjectRef]| {
+                if args.len() < 2 {
+                    return Err(PyError::type_error(
+                        "__reduce_ex__() missing required arguments",
+                    ));
+                }
+                let receiver = args[0].clone();
+                let typ = match &*receiver.borrow() {
+                    PyObject::Instance { typ, .. } => typ.clone(),
+                    _ => crate::object::get_primitive_type("list")
+                        .expect("list type must be registered"),
+                };
+                // User-defined `__reduce__` anywhere in the MRO (other
+                // than `object`'s own default) wins, exactly like real
+                // CPython's `object.__reduce_ex__` delegating to it.
+                if let Some(custom) = find_custom_reduce(&receiver) {
+                    return call_user_override(&custom, &receiver, &typ);
+                }
+                let cls = typ;
+                // State via the (possibly custom) `__getstate__`, exactly
+                // like real CPython's `object.__reduce_ex__` does — this is
+                // what makes a user `__getstate__` override (e.g.
+                // test_descr's C3 returning `cls.ARGS`) flow into the tuple
+                // instead of the raw `__dict__`. Raw MRO entries are never
+                // pre-bound (binding happens at LOAD_ATTR, not in
+                // `get_attribute`), so invocation uses the explicit
+                // per-shape convention — never a bare bound call. Falls
+                // back to the `__dict__`-or-None default when absent
+                // (exact lists).
+                let state = match find_custom_getstate(&receiver) {
+                    Some((gs, gs_typ)) => call_user_override(&gs, &receiver, &gs_typ)?,
+                    None => list_instance_state(&receiver).unwrap_or_else(py_none),
+                };
+                let items = list_items_of(&receiver).unwrap_or_default();
+                let iter = PyObjectRef::new(PyObject::ListIter { list: items, index: 0 });
+                Ok(py_tuple(vec![
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "list__reduce_new__".to_string(),
+                        func: list_reduce_new,
+                    }),
+                    py_tuple(vec![cls]),
+                    state,
+                    iter,
+                    py_none(),
+                ]))
+            },
+        }),
+    );
+    /// `func` slot of the `__reduce_ex__` tuple above: `y = func(cls)`
+    /// must yield an empty instance WITHOUT running `__init__`, WITH
+    /// native backing attached (plain `cls.__new__(cls)` returns a
+    /// backing-less instance for native subclasses).
+    fn list_reduce_new(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+        let cls = args.first().ok_or_else(|| {
+            PyError::type_error("list reconstruction missing class argument")
+        })?;
+        if crate::object::get_primitive_type("list").map_or(false, |t| cls.is(&t)) {
+            return Ok(py_list(vec![]));
+        }
+        match crate::object::native_base_of_type(cls).as_deref() {
+            Some("list") => Ok(crate::object::make_subclass_instance(cls, py_list(vec![]))),
+            _ => Err(PyError::type_error(
+                "list reconstruction of non-list class",
+            )),
+        }
+    }
+    // In-place operators return the SAME object (identity!), including a
+    // subclass instance (never its backing) — so they get direct
+    // implementations, not delegation (delegating `__iadd__` would return
+    // the backing and silently slice off the subclass).
+    list_dict.insert_str(
+        "__iadd__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__iadd__".to_string(),
+            func: |args: &[PyObjectRef]| {
+                if args.len() != 2 {
+                    return Err(PyError::type_error("__iadd__() takes exactly one argument"));
+                }
+                let items = crate::object::collect_iterable(&args[1])?;
+                let myself = args[0].clone();
+                // Immutable probe FIRST: an `if let ... borrow_mut()`
+                // scrutinee temporary outlives into its own `else` branch,
+                // so probing mutably and then falling back to the native
+                // backing panics with "already mutably borrowed". (And the
+                // borrow must end before `myself` moves into the return.)
+                let mut done = false;
+                if matches!(&*myself.borrow(), PyObject::List(_)) {
+                    if let PyObject::List(list) = &mut *myself.borrow_mut() {
+                        list.extend(items);
+                        done = true;
+                    }
+                } else if let Some(native) = crate::object::native_backing_of(&myself) {
+                    if let PyObject::List(list) = &mut *native.borrow_mut() {
+                        list.extend(items);
+                        done = true;
+                    }
+                }
+                if done {
+                    return Ok(myself);
+                }
+                Err(PyError::type_error("expected a list"))
+            },
+        }),
+    );
+    list_dict.insert_str(
+        "__imul__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__imul__".to_string(),
+            func: |args: &[PyObjectRef]| {
+                if args.len() != 2 {
+                    return Err(PyError::type_error("__imul__() takes exactly one argument"));
+                }
+                let n = list_repeat_count(&args[1])?;
+                let myself = args[0].clone();
+                // Immutable probe first (see `__iadd__` above for why a
+                // direct `borrow_mut()` scrutinee panics on the fallback).
+                let mut done = false;
+                if matches!(&*myself.borrow(), PyObject::List(_)) {
+                    if let PyObject::List(list) = &mut *myself.borrow_mut() {
+                        repeat_list_in_place(list, &n)?;
+                        done = true;
+                    }
+                } else if let Some(native) = crate::object::native_backing_of(&myself) {
+                    if let PyObject::List(list) = &mut *native.borrow_mut() {
+                        repeat_list_in_place(list, &n)?;
+                        done = true;
+                    }
+                }
+                if done {
+                    return Ok(myself);
+                }
+                Err(PyError::type_error("expected a list"))
+            },
+        }),
+    );
+    // Binary operators MUST unwrap to natives first and construct directly:
+    // routing through `py_add`/`py_mul` would re-enter dunder dispatch,
+    // find THIS VERY entry via the mro, and recurse forever on subclass
+    // instances (exact lists never consult type dicts, so they would be
+    // safe — but the entry can't tell; unwrap unconditionally).
+    fn list_items_of(v: &PyObjectRef) -> Option<Vec<PyObjectRef>> {
+        match &*v.borrow() {
+            PyObject::List(items) => Some(items.clone()),
+            _ => crate::object::native_backing_of(v).and_then(|n| match &*n.borrow() {
+                PyObject::List(items) => Some(items.clone()),
+                _ => None,
+            }),
+        }
+    }
+    /// Instance `__dict__` state for `__getstate__`: a fresh `Dict` copy
+    /// minus the internal native-backing bookkeeping key, or `None` when
+    /// there is nothing (exact lists have no dict at all). Returns `None`
+    /// (not an error) when the value isn't list-shaped, mirroring lookup
+    /// failure — the caller decides.
+    fn list_instance_state(v: &PyObjectRef) -> Option<PyObjectRef> {
+        let b = v.borrow();
+        let PyObject::Instance { dict, .. } = &*b else {
+            return None;
+        };
+        let mut pd = crate::object::PyDict::new();
+        for (k, val) in dict.iter() {
+            if k == crate::object::NATIVE_BACKING_KEY {
+                continue;
+            }
+            let _ = pd.set(py_str(k), val.clone());
+        }
+        if pd.len() == 0 {
+            None
+        } else {
+            Some(PyObjectRef::new(PyObject::Dict(Box::new(pd))))
+        }
+    }
+    /// A user-defined `__reduce__` override in the receiver's MRO (other
+    /// than `object`'s own default, which is the "no override" signal).
+    /// Exact lists can't have one (no per-value dict); subclass instances
+    /// can (test_copy.py's `test_reduce_4tuple`).
+    fn find_custom_reduce(v: &PyObjectRef) -> Option<PyObjectRef> {
+        find_mro_override(v, "__reduce__")
+    }
+    /// A user-defined `__getstate__` override in the receiver's MRO.
+    /// `list`'s own dict entry (this module's `list_getstate` below) is
+    /// skipped by identity — it IS the default being defined here, not an
+    /// override. Returns the raw (never pre-bound) dict entry plus the
+    /// receiver's type, so the caller can invoke it with the convention
+    /// matching its shape (see `call_user_override`).
+    fn find_custom_getstate(v: &PyObjectRef) -> Option<(PyObjectRef, PyObjectRef)> {
+        let b = v.borrow();
+        let PyObject::Instance { typ, .. } = &*b else {
+            return None;
+        };
+        let tb = typ.borrow();
+        let PyObject::Type { mro, .. } = &*tb else {
+            return None;
+        };
+        for base in mro {
+            if let PyObject::Type { dict, .. } = &*base.borrow() {
+                if let Some(f) = dict.get_str("__getstate__") {
+                    let is_ours = matches!(&*f.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, list_getstate as BuiltinFunc));
+                    if !is_ours {
+                        return Some((f.clone(), typ.clone()));
+                    }
+                }
+            }
+        }
+        None
+    }
+    /// The `__getstate__` dict entry above, as a NAMED function (not a
+    /// closure) so `find_custom_getstate` can recognize it by identity
+    /// and skip it when hunting user overrides.
+    fn list_getstate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+        if args.is_empty() {
+            return Err(PyError::type_error(
+                "__getstate__() missing required argument: 'self'",
+            ));
+        }
+        Ok(list_instance_state(&args[0]).unwrap_or_else(py_none))
+    }
+    /// Raw MRO-dict override lookup shared by `find_custom_reduce`
+    /// (skips `object`'s default) — dict entries come back NEVER
+    /// pre-bound (binding happens at the LOAD_ATTR opcode level, not in
+    /// `get_attribute`), so invocation conventions below are explicit.
+    fn find_mro_override(v: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
+        let b = v.borrow();
+        let PyObject::Instance { typ, .. } = &*b else {
+            return None;
+        };
+        let tb = typ.borrow();
+        let PyObject::Type { mro, .. } = &*tb else {
+            return None;
+        };
+        for base in mro {
+            if let PyObject::Type { name: bname, dict, .. } = &*base.borrow() {
+                if bname == "object" {
+                    continue;
+                }
+                if let Some(f) = dict.get_str(name) {
+                    return Some(f.clone());
+                }
+            }
+        }
+        None
+    }
+    /// Invoke a raw MRO-dict override with the convention matching its
+    /// shape: plain functions take the receiver, classmethods take the
+    /// class, staticmethods take nothing. (Anything else falls back to
+    /// receiver-first, matching the unbound-function convention.)
+    fn call_user_override(
+        func_val: &PyObjectRef,
+        receiver: &PyObjectRef,
+        typ: &PyObjectRef,
+    ) -> PyResult<PyObjectRef> {
+        match &*func_val.borrow() {
+            PyObject::Function(_) => {
+                crate::object::call_function_disposable(func_val, vec![receiver.clone()], vec![])
+            }
+            PyObject::ClassMethod { func } => {
+                crate::object::call_function_disposable(func, vec![typ.clone()], vec![])
+            }
+            PyObject::StaticMethod { func } => {
+                crate::object::call_function_disposable(func, vec![], vec![])
+            }
+            _ => crate::object::call_function_disposable(func_val, vec![receiver.clone()], vec![]),
+        }
+    }
+    /// Repeat count shared by `__mul__`/`__rmul__`/`__imul__`, mirroring
+    /// `py_mul`'s own overflow discipline (`test_list.py`'s
+    /// `test_overflow`/`test_list_resize_overflow` expect
+    /// `(MemoryError, OverflowError)` for gigantic counts, empty for
+    /// negatives).
+    fn list_repeat_count(v: &PyObjectRef) -> PyResult<BigInt> {
+        match &*v.borrow() {
+            PyObject::Int(n) => Ok(n.clone()),
+            _ => Err(PyError::type_error("can't multiply sequence by non-int")),
+        }
+    }
+    fn repeat_list_new(v: Vec<PyObjectRef>, n: &BigInt) -> PyResult<Vec<PyObjectRef>> {
+        if let Some(n) = n.to_usize() {
+            let mut result = Vec::new();
+            match v.len().checked_mul(n) {
+                Some(total) if result.try_reserve_exact(total).is_ok() => {
+                    for _ in 0..n {
+                        result.extend(v.iter().cloned());
+                    }
+                    return Ok(result);
+                }
+                _ => return Err(PyError::memory_error("could not allocate list")),
+            }
+        } else if n.sign() == Sign::Minus {
+            return Ok(Vec::new());
+        }
+        Err(PyError::memory_error("could not allocate list"))
+    }
+    fn repeat_list_in_place(list: &mut Vec<PyObjectRef>, n: &BigInt) -> PyResult<()> {
+        if let Some(n) = n.to_usize() {
+            let orig = list.clone();
+            list.clear();
+            for _ in 0..n {
+                list.extend(orig.iter().cloned());
+            }
+            return Ok(());
+        } else if n.sign() == Sign::Minus {
+            list.clear();
+            return Ok(());
+        }
+        Err(PyError::memory_error("could not allocate list"))
+    }
+    list_dict.insert_str(
+        "__add__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__add__".to_string(),
+            func: |args: &[PyObjectRef]| {
+                if args.len() != 2 {
+                    return Err(PyError::type_error("__add__() takes exactly one argument"));
+                }
+                match (list_items_of(&args[0]), list_items_of(&args[1])) {
+                    (Some(mut v), Some(w)) => {
+                        v.extend(w);
+                        Ok(py_list(v))
+                    }
+                    _ => Err(PyError::type_error("can only concatenate list (not other) to list")),
+                }
+            },
+        }),
+    );
+    list_dict.insert_str(
+        "__mul__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__mul__".to_string(),
+            func: |args: &[PyObjectRef]| {
+                if args.len() != 2 {
+                    return Err(PyError::type_error("__mul__() takes exactly one argument"));
+                }
+                match list_items_of(&args[0]) {
+                    Some(v) => Ok(py_list(repeat_list_new(v, &list_repeat_count(&args[1])?)?)),
+                    None => Err(PyError::type_error("can't multiply sequence by non-int")),
+                }
+            },
+        }),
+    );
+    list_dict.insert_str(
+        "__rmul__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__rmul__".to_string(),
+            func: |args: &[PyObjectRef]| {
+                if args.len() != 2 {
+                    return Err(PyError::type_error("__rmul__() takes exactly one argument"));
+                }
+                // Same orientation as `__mul__`: the reflected dispatch
+                // (`try_dunder_binop(b, a, "__rmul__")`) already passes the
+                // list as `args[0]`, so `2 * [1]` and explicit
+                // `list.__rmul__([1], 2)` share this shape.
+                match list_items_of(&args[0]) {
+                    Some(v) => Ok(py_list(repeat_list_new(v, &list_repeat_count(&args[1])?)?)),
+                    None => Err(PyError::type_error("can't multiply sequence by non-int")),
+                }
+            },
+        }),
+    );
+    // Rich comparisons via the real centralized machinery, on unwrapped
+    // natives (same anti-recursion reasoning as `__add__` above).
+    // Codes match COMPARE_OP: 0:< 1:<= 3:>= 4:> (`__eq__`/`__ne__` already
+    // come from `object`, untouched).
+    macro_rules! list_richcmp {
+        ($name:literal, $op:literal) => {
+            list_dict.insert_str(
+                $name,
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: |args: &[PyObjectRef]| {
+                        if args.len() != 2 {
+                            return Err(PyError::type_error(concat!(
+                                $name,
+                                "() takes exactly one argument"
+                            )));
+                        }
+                        let a = match list_items_of(&args[0]) {
+                            Some(v) => py_list(v),
+                            None => return Err(PyError::type_error("expected a list")),
+                        };
+                        let b = match list_items_of(&args[1]) {
+                            Some(v) => py_list(v),
+                            None => return Err(PyError::type_error("expected a list")),
+                        };
+                        crate::object::py_compare(&a, &b, $op)
+                    },
+                }),
+            );
+        };
+    }
+    list_richcmp!("__lt__", 0);
+    list_richcmp!("__le__", 1);
+    list_richcmp!("__ge__", 3);
+    list_richcmp!("__gt__", 4);
+    // `__doc__` as plain None (consistent with every other native type
+    // today): the KEY is what `dir(list)` needs; access behavior is
+    // unchanged (the `__doc__`→None fallback already produced None).
+    list_dict.insert_str("__doc__", py_none());
     // `list.__hash__ = None` (real CPython's own convention for every
     // mutable builtin: `list`/`dict`/`set`/`bytearray`) — the actual
     // unhashability ENFORCEMENT already happens elsewhere (`hash()`

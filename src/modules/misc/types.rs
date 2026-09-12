@@ -274,15 +274,18 @@ pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     // object `type(x)` returns for that kind (see
     // `get_or_create_primitive_type`) instead of a lookalike.
     d.insert_str("FunctionType", get_or_create_primitive_type("function"));
-    // Real `types.DynamicClassAttribute` differs from plain `property` only
-    // in a narrow metaclass-interop edge case (raising `AttributeError` on
-    // class-level access so a metaclass's own `__getattr__` can take over —
-    // `enum.py`'s own `Enum.name`/`Enum.value` use this internally). Aliased
-    // to `property` directly rather than modeling that edge case: covers
-    // the overwhelming majority of real usage (structural
-    // getter/setter/deleter behavior), and unblocks the `ImportError:
-    // cannot import name 'DynamicClassAttribute' from 'types'` that
-    // otherwise hits any code merely importing it.
+    // Real `types.DynamicClassAttribute` is its own pure-Python descriptor
+    // class (see CPython's `Lib/types.py`), not the native `property` type —
+    // notably its `__isabstractmethod__` is a plain settable instance
+    // attribute (set directly in `__init__`), while native `property`
+    // exposes `__isabstractmethod__` as a computed, read-only getset. A
+    // bare alias to `property` therefore breaks `abc.abstractmethod` applied
+    // to a `DynamicClassAttribute` (`funcobj.__isabstractmethod__ = True`
+    // raises `AttributeError: cannot set attribute` on `property`). This
+    // native alias is only a fallback in case `Lib/types.py` isn't loaded;
+    // the real implementation is the pure-Python `DynamicClassAttribute`
+    // class defined there, which shadows this one on `from types import *`
+    // (defined after `from _types_native import *`, so it wins the name).
     t_func!("DynamicClassAttribute", builtin_property);
     // Real CPython: `types.LambdaType is types.FunctionType` (literally the
     // same object — a lambda IS a function). See `FunctionType` above for

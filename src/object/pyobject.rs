@@ -319,6 +319,59 @@ pub enum PyObject {
     Lock(std::sync::Arc<std::sync::Mutex<LockInner>>),
     RLock(std::sync::Arc<std::sync::Mutex<RLockInner>>),
     Event(std::sync::Arc<EventInner>),
+    ThreadCondition {
+        lock: Option<PyObjectRef>,
+        notified: std::sync::Arc<std::sync::Mutex<bool>>,
+        condvar: std::sync::Arc<std::sync::Condvar>,
+    },
+    ThreadSemaphore {
+        value: std::sync::Arc<std::sync::Mutex<u32>>,
+        // Initial value + a `bounded` flag distinguish `Semaphore` from
+        // `BoundedSemaphore`: real CPython's `BoundedSemaphore.release()`
+        // raises `ValueError` if releasing would push the count above the
+        // value it was constructed with — plain `Semaphore` has no such
+        // ceiling. Both are backed by this one variant (small scope
+        // addition, not a whole new `PyObject` variant).
+        initial: u32,
+        bounded: bool,
+        condvar: std::sync::Arc<std::sync::Condvar>,
+    },
+    ThreadBarrier {
+        parties: u32,
+        count: std::sync::Arc<std::sync::Mutex<u32>>,
+        // Sticky "broken" state (real CPython's `Barrier._state == -2`,
+        // simplified to a single flag since this interpreter never has
+        // more than one logical flow actually blocked in the barrier at
+        // once): set by `abort()` or when a `wait()` round can't complete
+        // and there is nothing left in the cooperative scheduler that
+        // could ever complete it.
+        broken: std::sync::Arc<std::sync::Mutex<bool>>,
+        // Bumped every time a round completes (the arrival that makes
+        // `count` reach `parties`). Lets an EARLIER arrival, after its own
+        // `coop_threads_drain()` call, tell "the round I'm part of already
+        // completed (via a LATER arrival that ran during that same drain)"
+        // apart from "genuinely nothing left can ever complete it" — both
+        // look identical from `coop_blocked_forever()` alone (empty queue),
+        // but only the second should break the barrier. Confirmed via a
+        // 3-party repro: without this, the 2nd-to-arrive call incorrectly
+        // saw an empty queue right after the LAST arrival's nested drain
+        // resolved everything, and broke a barrier that had, in fact, just
+        // completed successfully.
+        generation: std::sync::Arc<std::sync::Mutex<u64>>,
+        condvar: std::sync::Arc<std::sync::Condvar>,
+    },
+    ThreadTimer {
+        interval: f64,
+        func: PyObjectRef,
+        args: Vec<PyObjectRef>,
+        // `Timer` is a `Thread` subclass in real CPython but is dispatched
+        // through this separate variant (see `sync::get`), so it needs its
+        // own minimal start/cancel/join/is_alive state rather than reusing
+        // `ThreadInner`.
+        cancelled: std::sync::Arc<std::sync::Mutex<bool>>,
+        started: std::sync::Arc<std::sync::Mutex<bool>>,
+        finished: std::sync::Arc<std::sync::Mutex<bool>>,
+    },
     Queue(std::sync::Arc<std::sync::Mutex<QueueInner>>),
     Super {
         cls: PyObjectRef,
@@ -461,6 +514,10 @@ impl PyObject {
             PyObject::Lock(_) => "lock",
             PyObject::RLock(_) => "RLock",
             PyObject::Event(_) => "Event",
+            PyObject::ThreadCondition { .. } => "Condition",
+            PyObject::ThreadSemaphore { .. } => "Semaphore",
+            PyObject::ThreadBarrier { .. } => "Barrier",
+            PyObject::ThreadTimer { .. } => "Timer",
             PyObject::Queue(_) => "Queue",
             PyObject::Super { .. } => "super",
             PyObject::Property(_) => "property",

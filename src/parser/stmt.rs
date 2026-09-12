@@ -646,6 +646,12 @@ impl Parser {
                     let annotation = if self.eat(&Token::Colon) {
                         if self.eat(&Token::Star) {
                             let inner = self.parse_expr()?;
+                            // `def f(*args: *b = ...)` is plain "invalid
+                            // syntax" in CPython (a starred annotation
+                            // can't take a default).
+                            if self.at(&Token::Equal) {
+                                return Err("invalid syntax".to_string());
+                            }
                             Some(Box::new(Expr::Starred(Box::new(inner))))
                         } else {
                             Some(Box::new(self.parse_expr()?))

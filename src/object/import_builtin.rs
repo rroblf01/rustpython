@@ -604,6 +604,9 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         program
     };
     let mut compiler = crate::compiler::Compiler::new();
+    if mode == "single" {
+        compiler.single_mode = true;
+    }
     let code = compiler
         .compile(&program, &filename)
         .map_err(|e| PyError::syntax_error_with_filename(e, &filename, &source))?;

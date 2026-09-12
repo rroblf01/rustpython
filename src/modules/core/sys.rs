@@ -326,20 +326,55 @@ pub(crate) fn build_excepthook_report(args: &[PyObjectRef]) -> PyResult<String> 
         drop(eb);
 
         if let (Some(offset), Some(ref text)) = (offset, text) {
-            if offset >= 1 && !text.is_empty() {
+            // Mirrors CPython's `TracebackException._format_syntax_error`'s
+            // offset-clamping formula (see `Lib/traceback.py` upstream):
+            // clamp `offset`/`end_offset` against the source text's length
+            // and against each other BEFORE turning them into 0-based
+            // column indices. The previous version cast `offset - 1` /
+            // `end - 1` straight to `usize` — for a deliberately-negative
+            // or nonsensical end_offset (real CPython test:
+            // `test_exceptions.py`'s `test_range_of_offsets`, e.g.
+            // `end_offset=-2` or `end_offset` before `offset`) that
+            // subtraction underflows to a huge `usize`, and
+            // `"^".repeat(huge)` aborts the process with a `Vec` capacity
+            // overflow instead of raising/rendering anything. Doing the
+            // whole computation in `i64` and only converting to `usize`
+            // after clamping to `>= 0` makes that impossible.
+            let rtext = text.trim_end_matches('\n');
+            let ltext = rtext.trim_start_matches(['\n', '\x0c', ' ']);
+            let spaces = (rtext.len() - ltext.len()) as i64;
+            let mut off = offset;
+            let mut end_off = match end_offset {
+                Some(e) if e != 0 => e,
+                _ => offset,
+            };
+            if !rtext.is_empty() {
+                let rlen = rtext.len() as i64;
+                if off > rlen {
+                    off = rlen + 1;
+                }
+                if end_off > rlen {
+                    end_off = rlen + 1;
+                }
+            }
+            if off >= end_off || end_off < 0 {
+                end_off = off + 1;
+            }
+            let colno = off - 1 - spaces;
+            let end_colno = end_off - 1 - spaces;
+            // CPython only shows carets at all when the (clamped) start
+            // column is non-negative — a negative/zero raw offset (or one
+            // that clamps to before the start of the stripped text) means
+            // no caret line, just the source line.
+            if colno >= 0 {
                 let indent = "    "; // 4-space indent
-                let text_stripped = text.trim_end_matches('\n');
-                let caret_len = if let Some(end) = end_offset {
-                    // Use end_offset for caret length
-                    let start = (offset - 1) as usize;
-                    let end = (end - 1) as usize;
-                    std::cmp::max(1, end - start + 1)
-                } else {
-                    // Fallback: caret extends to end of line
-                    std::cmp::max(1, text_stripped.len() - offset as usize + 1)
-                };
-                let spaces = (offset - 1) as usize;
-                let caret_line = format!("{}{}{}\n", indent, " ".repeat(spaces), "^".repeat(caret_len));
+                let caret_len = std::cmp::max(0, end_colno - colno) as usize;
+                let caret_line = format!(
+                    "{}{}{}\n",
+                    indent,
+                    " ".repeat(colno as usize),
+                    "^".repeat(caret_len)
+                );
                 // Insert caret after the source line
                 out.insert_str(last_source_line_end, &caret_line);
             }
@@ -368,15 +403,27 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         };
     }
     sys_func!("exit", |args| {
-        let code = if args.len() > 0 {
-            match &*args[0].borrow() {
-                PyObject::Int(i) => i.to_i64().unwrap_or(0) as i32,
-                _ => 1,
-            }
-        } else {
-            0
-        };
-        Err(PyError::SystemExit(code))
+        if args.is_empty() {
+            return Err(PyError::SystemExit(0));
+        }
+        if let Some(i) = args[0].as_i64() {
+            return Err(PyError::SystemExit(i as i32));
+        }
+        if matches!(&*args[0].borrow(), PyObject::None) {
+            return Err(PyError::SystemExit(0));
+        }
+        Err(PyError::Exception(
+            "SystemExit".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "SystemExit".to_string(),
+                args: vec![args[0].clone()],
+                cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
+                extra: None,
+            }),
+        ))
     });
     // sys.audit — CPython audit hook stub. No-op in this interpreter.
     sys_func!("audit", |_args| Ok(py_none()));
@@ -1163,6 +1210,11 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     sys_func!("exception", sys_exception_builtin);
     sys_func!("getrecursionlimit", sys_getrecursionlimit_builtin);
     sys_func!("setrecursionlimit", sys_setrecursionlimit_builtin);
+    // `sys.get_recursion_depth()` — returns current recursion depth.
+    // test_xml_etree and test_io both call this.
+    sys_func!("get_recursion_depth", |_args| {
+        Ok(py_int(0)) // simplified: always return 0
+    });
     sys_func!("settrace", sys_settrace_builtin);
     sys_func!("gettrace", sys_gettrace_builtin);
     sys_func!("_getframe", sys_getframe_builtin);

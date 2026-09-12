@@ -5,6 +5,7 @@ def _count_elements(mapping, iterable):
         mapping[elem] = mapping.get(elem, 0) + 1
 
 class UserList:
+    """A more or less complete user-defined wrapper around list objects."""
     def __init__(self, initlist=None):
         self.data = []
         if initlist is not None:
@@ -140,6 +141,14 @@ class UserList:
 
     def reverse(self):
         self.data.reverse()
+
+    def __reversed__(self):
+        # Mirrors collections.abc.Sequence.__reversed__ (real CPython),
+        # which UserList inherits there; ours is standalone (not an ABC
+        # subclass), so it needs its own. Also shrinks the
+        # `test_list_protocol` (UserList ⊇ list) gap.
+        for i in reversed(range(len(self))):
+            yield self[i]
 
     def sort(self, *args, **kwds):
         self.data.sort(*args, **kwds)

@@ -263,11 +263,32 @@ impl Parser {
 /// be displayed via sys.displayhook instead of being discarded by POP_TOP.
 pub fn try_parse_as_expression(source: &str) -> Result<Program, String> {
     let mut parser = Parser::new(source);
-    let expr = parser.parse_expr()?;
+    // CPython's eval mode accepts a comma-separated test list (a tuple
+    // display with optional trailing comma) — plain `parse_expr` alone
+    // rejects `eval("1, 2")` with "extra tokens after expression". (No
+    // starred elements: real CPython raises SyntaxError for those.)
+    let first = parser.parse_expr()?;
+    let mut exprs = vec![first];
+    let mut saw_comma = false;
+    while parser.eat(&Token::Comma) {
+        saw_comma = true;
+        if parser.at(&Token::EndOfFile)
+            || parser.at(&Token::Newline)
+            || parser.at(&Token::Semicolon)
+        {
+            break;
+        }
+        exprs.push(parser.parse_expr()?);
+    }
     // Consume trailing newlines
     while parser.eat(&Token::Newline) || parser.eat(&Token::Semicolon) {}
     if !parser.at(&Token::EndOfFile) {
         return Err("extra tokens after expression".to_string());
     }
+    let expr = if exprs.len() == 1 && !saw_comma {
+        exprs.pop().unwrap()
+    } else {
+        crate::ast::Expr::Tuple(exprs)
+    };
     Ok(Program::Expression(Box::new(expr)))
 }

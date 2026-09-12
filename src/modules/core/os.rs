@@ -270,7 +270,26 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 {
             return Err(PyError::type_error("putenv() takes exactly 2 arguments"));
         }
-        std::env::set_var(args[0].str(), args[1].str());
+        let name = args[0].str();
+        let value = args[1].str();
+        // `std::env::set_var` PANICS (rather than returning a `Result`) on
+        // an empty key, a key containing '=' or a NUL byte, or a value
+        // containing a NUL byte — real CPython's `os.putenv` validates the
+        // same cases and raises `ValueError` instead (see
+        // `os_putenv_impl`/`win32_putenv` in CPython's posixmodule.c, which
+        // explicitly reject an embedded '=' in the name with
+        // "illegal environment variable name"). Guard before the call so a
+        // Python-level edge case (real CPython test: `test_posix.py`) raises
+        // a normal exception instead of crashing the process.
+        if name.is_empty() || name.contains('=') || name.contains('\0') {
+            return Err(PyError::value_error("illegal environment variable name"));
+        }
+        if value.contains('\0') {
+            return Err(PyError::value_error(
+                "embedded null byte in environment variable value",
+            ));
+        }
+        std::env::set_var(name, value);
         Ok(py_none())
     });
 
@@ -278,7 +297,13 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("unsetenv() takes at least 1 argument"));
         }
-        std::env::remove_var(args[0].str());
+        let name = args[0].str();
+        // Same panic-vs-Result mismatch as `putenv` above, for
+        // `std::env::remove_var`.
+        if name.is_empty() || name.contains('=') || name.contains('\0') {
+            return Err(PyError::value_error("illegal environment variable name"));
+        }
+        std::env::remove_var(name);
         Ok(py_none())
     });
 

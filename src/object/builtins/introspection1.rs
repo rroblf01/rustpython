@@ -190,9 +190,32 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 .ok_or_else(|| crate::object::PyError::runtime_error("no frame"))?;
             let mut names: Vec<PyObjectRef> = Vec::new();
             let mut seen = std::collections::HashSet::new();
+            // Comprehensions in this compiler are inlined directly into the
+            // ENCLOSING code object rather than compiled as their own real
+            // nested scope (see `compile_comprehension_save`'s doc comment
+            // in `src/compiler/comprehension.rs`) — they save/restore the
+            // loop variable's prior binding through synthetic
+            // `_comp_save_{id}_{name}`/`_comp_had_{id}_{name}` varnames added
+            // to that SAME code object once at compile time. Once any
+            // comprehension has ever executed at module (or class-body)
+            // scope, its `code.varnames`/`fast_locals` become permanently
+            // non-empty (holding only these internal temp slots) — which
+            // used to make the "is this scope's real locals non-empty?"
+            // check below FALSE POSITIVE forever after, hiding every real
+            // global/class-body name from bare `dir()` behind an oracle-only
+            // view of compiler plumbing (`['_comp_save_0_n']` instead of the
+            // module's actual names). These are never real user-visible
+            // bindings, so they're excluded here entirely rather than
+            // reported as if they were.
+            fn is_comprehension_internal(name: &str) -> bool {
+                name.starts_with("_comp_save_") || name.starts_with("_comp_had_")
+            }
             // Locals via InternedMap (used for some scopes)
             for (k, _) in frame.locals.iter() {
                 let s = crate::interner::lookup_str(k);
+                if is_comprehension_internal(s) {
+                    continue;
+                }
                 if seen.insert(s.to_string()) {
                     names.push(py_str(s));
                 }
@@ -206,6 +229,9 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     .is_some()
                 {
                     let s = crate::interner::lookup_str(*var_id);
+                    if is_comprehension_internal(s) {
+                        continue;
+                    }
                     if seen.insert(s.to_string()) {
                         names.push(py_str(s));
                     }
@@ -324,6 +350,23 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         }
                     }
                 }
+            }
+        }
+        PyObject::Generator { .. } => {
+            // Kept in sync with `attrs/generator.rs`'s own `get()` match —
+            // `dir()` must never promise a name that attribute access then
+            // rejects with `AttributeError`.
+            for n in [
+                "__next__",
+                "send",
+                "throw",
+                "close",
+                "__iter__",
+                "__await__",
+                "gi_running",
+                "gi_frame",
+            ] {
+                names.push(py_str(n));
             }
         }
         _ => {}

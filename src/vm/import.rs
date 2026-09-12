@@ -742,6 +742,45 @@ impl VirtualMachine {
         if instrs.is_empty() || instrs.len() > 12 {
             return None;
         }
+        // Validate the whole body BEFORE executing anything: the loop below
+        // used to bail out (`None`) at the first unsupported opcode only
+        // AFTER running the prefix — and prefix ops like BINARY_OP can invoke
+        // user `__add__` etc., so a body like `return (a + b) + f()` ran the
+        // user's `__add__` once here and a second time on the slow-path
+        // re-execution. Pre-scanning keeps this fast path side-effect-free
+        // whenever it declines (and skips the wasted prefix work per call).
+        for instr in instrs.iter() {
+            let ok = match instr.op {
+                Opcode::LOAD_FAST
+                | Opcode::STORE_FAST
+                | Opcode::COMPARE_OP
+                | Opcode::POP_JUMP_IF_FALSE
+                | Opcode::JUMP_FORWARD
+                | Opcode::JUMP_BACKWARD
+                | Opcode::RETURN_VALUE
+                | Opcode::LOAD_ATTR => true,
+                Opcode::LOAD_CONST => {
+                    let const_idx = instr.arg as usize;
+                    match code.consts.get(const_idx) {
+                        Some(
+                            ConstValue::None
+                            | ConstValue::Bool(_)
+                            | ConstValue::Int(_)
+                            | ConstValue::Float(_)
+                            | ConstValue::String(_),
+                        ) => true,
+                        _ => false,
+                    }
+                }
+                // Mirrors the execution loop's own arg gate (13=SUBSCR ok,
+                // 12=matmul and >=100=in-place declasse).
+                Opcode::BINARY_OP => matches!(instr.arg, 0..=11 | 13),
+                _ => false,
+            };
+            if !ok {
+                return None;
+            }
+        }
         // Pre-allocate local variables from arguments
         let mut locals: Vec<Option<PyObjectRef>> = vec![None; code.varnames.len()];
         for (i, arg) in args.iter().enumerate() {

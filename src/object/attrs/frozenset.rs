@@ -156,17 +156,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             }
                             if let PyObject::FrozenSet(set) = &*args[0].borrow() {
                                 let other_set = convert_to_set(&args[1])?;
-                                let mut result = PySet::new();
-                                for item in set.to_vec() {
-                                    if !other_set.contains(&item).unwrap_or(false) {
-                                        result.add(item)?;
-                                    }
-                                }
-                                for item in other_set.to_vec() {
-                                    if !set.contains(&item).unwrap_or(false) {
-                                        result.add(item)?;
-                                    }
-                                }
+                                let result = set.symmetric_difference(&other_set)?;
                                 Ok(PyObjectRef::imm(PyObject::FrozenSet(result)))
                             } else {
                                 Err(PyError::runtime_error(

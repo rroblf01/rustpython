@@ -11,6 +11,15 @@ mod primitive_types;
 mod collection_types;
 
 
+/// `object.__reduce__`'s default body — a named `fn` (not an inline closure)
+/// specifically so `__reduce_ex__` can recognize "this class didn't
+/// override `__reduce__`" via `fn_addr_eq` against ONE stable symbol,
+/// rather than comparing against a second identically-bodied closure that
+/// thin-LTO could fold to the same address as an unrelated stub.
+fn object_reduce_default(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    Ok(py_none())
+}
+
 pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     let mut builtins = HashMap::new();
     builtins.insert_str("None", py_none());
@@ -28,10 +37,46 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     // on the implicit `LOAD_NAME __name__` every `class` body prologue
     // emits.
     builtins.insert_str("__name__", py_str("builtins"));
-    builtins.insert_str(
-        "Ellipsis",
-        PyObjectRef::imm(PyObject::Str(compact_str::CompactString::from("..."))),
-    );
+    {
+        let mut ellipsis_dict = HashMap::new();
+        ellipsis_dict.insert_str(
+            "__repr__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__repr__".to_string(),
+                func: |_args| Ok(py_str("Ellipsis")),
+            }),
+        );
+        ellipsis_dict.insert_str(
+            "__str__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__str__".to_string(),
+                func: |_args| Ok(py_str("Ellipsis")),
+            }),
+        );
+        ellipsis_dict.insert_str(
+            "__bool__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__bool__".to_string(),
+                func: |_args| Ok(py_bool(true)),
+            }),
+        );
+        let ellipsis_type = PyObjectRef::new(PyObject::Type {
+            name: "ellipsis".to_string(),
+            dict: Box::new(str_map_to_typedict(ellipsis_dict)),
+            bases: vec![],
+            mro: vec![],
+        });
+        if let PyObject::Type { mro, .. } = &mut *ellipsis_type.borrow_mut() {
+            *mro = vec![ellipsis_type.clone()];
+        }
+        let ellipsis = PyObjectRef::imm(PyObject::Instance {
+            typ: ellipsis_type.clone(),
+            dict: AttrMap::new(),
+        });
+        crate::object::seed_primitive_type_cache("ellipsis", ellipsis_type.clone());
+        builtins.insert_str("ellipsis", ellipsis_type);
+        builtins.insert_str("Ellipsis", ellipsis);
+    }
     // NotImplemented: the singleton rich-comparison/binary-op dunders return
     // to signal "try the other operand's reflected method instead" — needed
     // by any `__eq__`/`__lt__`/etc. that follows the standard pattern of
@@ -389,7 +434,35 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
             },
         }),
     );
-    // __getattribute__(self, name): gets an attribute from the instance
+    // __delattr__(self, name): mirror of __setattr__ above. Goes straight
+    // to `del_attribute` (like `builtin_setattr` goes straight to
+    // `set_attribute`) rather than routing through `builtin_delattr`,
+    // whose MRO `__delattr__` lookup would find THIS VERY entry and
+    // recurse forever. Needed so `dir()` on any type (e.g. `dir(list)`,
+    // test_descrtut) includes it — real CPython has it on `object`.
+    object_dict.insert_str(
+        "__delattr__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__delattr__".to_string(),
+            func: |args| {
+                if args.len() < 2 {
+                    return Err(PyError::type_error(
+                        "__delattr__ requires at least 2 arguments (self, name)",
+                    ));
+                }
+                let attr_name = args[1].str();
+                if !matches!(args[0], PyObjectRef::Mut(_)) {
+                    return Err(PyError::attribute_error(format!(
+                        "'{}' object has no attribute '{}'",
+                        args[0].borrow().type_name(),
+                        attr_name
+                    )));
+                }
+                args[0].borrow_mut().del_attribute(&attr_name)?;
+                Ok(py_none())
+            },
+        }),
+    );
     object_dict.insert_str(
         "__getattribute__",
         PyObjectRef::new(PyObject::BuiltinFunction {
@@ -763,7 +836,61 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         "__reduce__",
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__reduce__".to_string(),
-            func: |_args| Ok(py_none()),
+            func: object_reduce_default,
+        }),
+    );
+    // __reduce_ex__(self, protocol): real CPython's `object.__reduce_ex__`
+    // is the pickle-protocol-aware entry point — its defining job is to
+    // check whether `type(self)` overrides `__reduce__` and, if so,
+    // DELEGATE to it (only falling back to its own default/copyreg-based
+    // behavior otherwise). An earlier version of this stub always
+    // returned `None` unconditionally, ignoring any real override — this
+    // broke `copy.copy`/`copy.deepcopy` for any class with a genuine
+    // `__reduce__` (real trigger: `Lib/_weakrefset.py`'s `WeakSet.__reduce__`,
+    // which reconstructs its weak-ref contents via `(cls, (list(self),),
+    // state)` — with the override silently ignored, `copy.py`'s reduce
+    // fallback fell through to a shallower path that never restored
+    // `self.data`, leaving the copy looking fine until something touched
+    // it, e.g. `dup == original` raising `AttributeError: no attribute
+    // 'data'`). This codebase's OWN pickle support goes through a
+    // separate, dedicated path (`src/modules/misc/pickle_ser.rs`) that
+    // doesn't consult `__reduce_ex__` at all, so this only needs to
+    // matter for `copy`'s consumption of it, not real pickling.
+    object_dict.insert_str(
+        "__reduce_ex__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__reduce_ex__".to_string(),
+            func: |args| {
+                let self_obj = args.first().ok_or_else(|| {
+                    PyError::type_error("__reduce_ex__() missing self argument")
+                })?;
+                let reduce = self_obj.borrow().get_attribute("__reduce__")?;
+                // Only the DEFAULT `object.__reduce__` stub above is a
+                // `BuiltinFunction` wrapping this exact named fn — any real
+                // override (a Python-defined method, or a different native
+                // one) is a different PyObject shape entirely, so this
+                // never needs risky function-pointer comparison against a
+                // second identical-looking closure (thin-LTO can fold
+                // those to the same address — see this project's own
+                // documented "LTO identical-code-folding hazard").
+                let is_default = matches!(
+                    &*reduce.borrow(),
+                    PyObject::BuiltinFunction { func, .. }
+                        if std::ptr::fn_addr_eq(*func, object_reduce_default as BuiltinFunc)
+                );
+                if is_default {
+                    return Ok(py_none());
+                }
+                // `get_attribute` returns the RAW, unbound method here (the
+                // full self-binding protocol only applies at the `LOAD_ATTR`
+                // opcode level, not this lower-level lookup) — must bind
+                // `self_obj` explicitly via `call_bound_method`, not just
+                // invoke it with no args (confirmed via a real repro: doing
+                // so raised `TypeError: 'function' object is not callable`
+                // for a plain Python-defined `__reduce__` like
+                // `_weakrefset.WeakSet`'s).
+                crate::object::call_bound_method(reduce, self_obj.clone(), vec![])
+            },
         }),
     );
     let object_type = PyObjectRef::new(PyObject::Type {

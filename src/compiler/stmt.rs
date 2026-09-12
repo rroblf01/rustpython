@@ -34,7 +34,18 @@ impl Compiler {
         match stmt {
             Stmt::Expr(expr) => {
                 self.compile_expr(expr)?;
-                self.emit(Opcode::POP_TOP, 0);
+                // Single (REPL/doctest) mode echoes expression-statement
+                // values (CPython's PRINT_EXPR); exec mode discards them.
+                // Module scope only: nested `def`/`class` bodies never echo
+                // (verified against real CPython 3.14's own disassembly —
+                // only the outermost unit prints), while `if`/`for`/`try`
+                // bodies at module level do (same code object, scope stays
+                // Module).
+                if self.single_mode && matches!(self.scope, ScopeType::Module) {
+                    self.emit(Opcode::PRINT_EXPR, 0);
+                } else {
+                    self.emit(Opcode::POP_TOP, 0);
+                }
             }
             Stmt::Pass => {}
             Stmt::Break => {
@@ -194,7 +205,14 @@ impl Compiler {
                     // For subscript assignment, compile obj and index before value
                     if let Expr::Subscript { value: obj, slice } = target {
                         self.compile_expr(obj)?;
-                        self.compile_expr(slice)?;
+                        if let Expr::Starred(inner) = slice.as_ref() {
+                            self.emit(Opcode::BUILD_LIST, 0);
+                            self.compile_expr(inner)?;
+                            self.emit(Opcode::LIST_EXTEND, 0);
+                            self.emit(Opcode::LIST_TO_TUPLE, 0);
+                        } else {
+                            self.compile_expr(slice)?;
+                        }
                         self.compile_expr(value)?;
                         self.emit(Opcode::STORE_SUBSCR, 0);
                     } else {
@@ -237,7 +255,14 @@ impl Compiler {
                     Expr::Subscript { value: obj, slice } => {
                         // For subscript augmented assignment like x[0] += 1:
                         self.compile_expr(obj)?;
-                        self.compile_expr(slice)?;
+                        if let Expr::Starred(inner) = slice.as_ref() {
+                            self.emit(Opcode::BUILD_LIST, 0);
+                            self.compile_expr(inner)?;
+                            self.emit(Opcode::LIST_EXTEND, 0);
+                            self.emit(Opcode::LIST_TO_TUPLE, 0);
+                        } else {
+                            self.compile_expr(slice)?;
+                        }
                         self.emit(Opcode::COPY, 0);
                         self.emit(Opcode::COPY, 2);
                         self.emit(Opcode::SWAP, 1);
@@ -503,28 +528,76 @@ impl Compiler {
                 self.compile_class_body(name.clone(), body)?;
                 let class_name_idx = self.get_const_index(ConstValue::String(name.clone())) as u32;
                 self.emit(Opcode::LOAD_CONST, class_name_idx);
-                if bases.is_empty() {
-                    let const_none = self.get_const_index(ConstValue::None) as u32;
-                    self.emit(Opcode::LOAD_CONST, const_none);
-                } else if bases.len() == 1 {
-                    self.compile_expr(&bases[0])?;
-                } else {
-                    for base in bases {
-                        self.compile_expr(base)?;
+                // Starred bases (`class C(B, *bases)`) must be unpacked
+                // into a flat tuple (BUILD_LIST/LIST_EXTEND/LIST_TO_TUPLE),
+                // and any `**kwds` needs the CALL_FUNCTION_EX path with a
+                // DICT_MERGE-built kwargs dict (which raises on duplicates,
+                // mirroring call-args emission) — the plain CALL shape
+                // below can express neither (it passed the starred object
+                // itself as one base, nesting tuples, and packed `**`
+                // dicts under a "" name).
+                let has_star_bases = bases.iter().any(|b| matches!(b, Expr::Starred(_)));
+                let has_star_kwargs = kw.iter().any(|k| k.arg.is_none());
+                if has_star_bases || has_star_kwargs {
+                    // Stack: [build_class, func, name] — append a flat
+                    // bases tuple, pack (func, name, bases) as args_tuple.
+                    if bases.is_empty() {
+                        self.emit(Opcode::BUILD_TUPLE, 0);
+                    } else {
+                        self.emit(Opcode::BUILD_LIST, 0);
+                        for base in bases {
+                            if let Expr::Starred(inner) = base {
+                                self.compile_expr(inner)?;
+                                self.emit(Opcode::LIST_EXTEND, 0);
+                            } else {
+                                self.compile_expr(base)?;
+                                self.emit(Opcode::LIST_APPEND, 0);
+                            }
+                        }
+                        self.emit(Opcode::LIST_TO_TUPLE, 0);
                     }
-                    self.emit(Opcode::BUILD_TUPLE, bases.len() as u32);
+                    self.emit(Opcode::BUILD_TUPLE, 3);
+                    // Merged kwargs dict (dup-checking, like calls).
+                    self.emit(Opcode::BUILD_MAP, 0);
+                    for k in kw {
+                        if let Some(nm) = &k.arg {
+                            self.emit(Opcode::BUILD_MAP, 0);
+                            let name_idx =
+                                self.get_const_index(ConstValue::String(nm.clone())) as u32;
+                            self.emit(Opcode::LOAD_CONST, name_idx);
+                            self.compile_expr(&k.value)?;
+                            self.emit(Opcode::MAP_ADD, 0);
+                            self.emit(Opcode::DICT_MERGE, 0);
+                        } else {
+                            self.compile_expr(&k.value)?;
+                            self.emit(Opcode::DICT_MERGE, 0);
+                        }
+                    }
+                    self.emit(Opcode::CALL_FUNCTION_EX, 0);
+                } else {
+                    if bases.is_empty() {
+                        let const_none = self.get_const_index(ConstValue::None) as u32;
+                        self.emit(Opcode::LOAD_CONST, const_none);
+                    } else if bases.len() == 1 {
+                        self.compile_expr(&bases[0])?;
+                    } else {
+                        for base in bases {
+                            self.compile_expr(base)?;
+                        }
+                        self.emit(Opcode::BUILD_TUPLE, bases.len() as u32);
+                    }
+                    let kw_count = kw.len();
+                    for k in kw {
+                        // Push keyword name as a string constant
+                        let name_idx = self
+                            .get_const_index(ConstValue::String(k.arg.clone().unwrap_or_default()))
+                            as u32;
+                        self.emit(Opcode::LOAD_CONST, name_idx);
+                        self.compile_expr(&k.value)?;
+                    }
+                    let call_arg = 3 | ((kw_count as u32) << 8);
+                    self.emit(Opcode::CALL, call_arg);
                 }
-                let kw_count = kw.len();
-                for k in kw {
-                    // Push keyword name as a string constant
-                    let name_idx = self
-                        .get_const_index(ConstValue::String(k.arg.clone().unwrap_or_default()))
-                        as u32;
-                    self.emit(Opcode::LOAD_CONST, name_idx);
-                    self.compile_expr(&k.value)?;
-                }
-                let call_arg = 3 | ((kw_count as u32) << 8);
-                self.emit(Opcode::CALL, call_arg);
                 // Set __doc__ on class if present
                 if let Some(doc) = docstring {
                     self.emit(Opcode::DUP_TOP, 0);
@@ -674,7 +747,14 @@ impl Compiler {
                     match target {
                         Expr::Subscript { value, slice } => {
                             self.compile_expr(value)?;
-                            self.compile_expr(slice)?;
+                            if let Expr::Starred(inner) = slice.as_ref() {
+                                self.emit(Opcode::BUILD_LIST, 0);
+                                self.compile_expr(inner)?;
+                                self.emit(Opcode::LIST_EXTEND, 0);
+                                self.emit(Opcode::LIST_TO_TUPLE, 0);
+                            } else {
+                                self.compile_expr(slice)?;
+                            }
                             self.emit(Opcode::DELETE_SUBSCR, 0);
                         }
                         Expr::Attribute { value, attr } => {

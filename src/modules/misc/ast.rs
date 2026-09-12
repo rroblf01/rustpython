@@ -153,6 +153,19 @@ fn parse_literal(chars: &[char], pos: &mut usize) -> PyResult<PyObjectRef> {
                     ));
                 }
                 *pos += 1;
+                // A comma may be immediately followed by the closing paren
+                // (a trailing comma) — required syntax for a 1-element
+                // tuple (`(x,)`) and always legal for longer ones
+                // (`(x, y,)`). Without this check, the loop unconditionally
+                // tried to parse ANOTHER element after every comma, so any
+                // trailing-comma tuple (extremely common — it's the only
+                // way to write a 1-tuple) failed with a bogus "unexpected
+                // character ')'" error instead of completing normally.
+                skip_ws(chars, pos);
+                if *pos < chars.len() && chars[*pos] == ')' {
+                    *pos += 1;
+                    break;
+                }
             }
             Ok(py_tuple(items))
         }
@@ -185,6 +198,13 @@ fn parse_literal(chars: &[char], pos: &mut usize) -> PyResult<PyObjectRef> {
                     ));
                 }
                 *pos += 1;
+                // Trailing comma before the closing bracket (`[x, y,]`) is
+                // legal Python syntax — same fix as the tuple branch above.
+                skip_ws(chars, pos);
+                if *pos < chars.len() && chars[*pos] == ']' {
+                    *pos += 1;
+                    break;
+                }
             }
             Ok(py_list(items))
         }
@@ -230,6 +250,14 @@ fn parse_literal(chars: &[char], pos: &mut usize) -> PyResult<PyObjectRef> {
                     ));
                 }
                 *pos += 1;
+                // Trailing comma before the closing brace (`{k: v,}`) is
+                // legal Python syntax — same fix as the tuple/list branches
+                // above.
+                skip_ws(chars, pos);
+                if *pos < chars.len() && chars[*pos] == '}' {
+                    *pos += 1;
+                    break;
+                }
             }
             Ok(dict_obj)
         }

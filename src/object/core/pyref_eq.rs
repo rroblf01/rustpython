@@ -108,8 +108,12 @@ impl PyObjectRef {
         // clearing a list — test_list::test_equal_operator_modifying_operand)
         // never ran.
         if self_eq_not_impl || !matches!(&*self.borrow(), PyObject::Instance { .. }) {
-            if let PyObject::Instance { typ, .. } = &*other.borrow() {
-                let typ = typ.clone();
+            let other_typ = if let PyObject::Instance { typ, .. } = &*other.borrow() {
+                Some(typ.clone())
+            } else {
+                None
+            };
+            if let Some(typ) = other_typ {
                 if let Some(f) = lookup_dunder_via_mro(&typ, "__eq__") {
                     let result = call_bound_method(f, other.clone(), vec![self.clone()])?;
                     if !is_not_implemented(&result) {

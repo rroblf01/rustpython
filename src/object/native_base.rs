@@ -225,6 +225,30 @@ pub(crate) fn is_pseudo_type_builtin_function_name(name: &str) -> bool {
     )
 }
 
+/// Maps a `types` module pseudo-type constructor name (`types.GeneratorType`,
+/// `types.FunctionType`, ...) to the actual `PyObject::type_name()` string an
+/// instance of it reports — needed because these, like the names above, are
+/// represented here as plain `PyObject::BuiltinFunction`s (`_types_native`'s
+/// `t_func!` macro) rather than real `PyObject::Type`s, but UNLIKE the ones
+/// above their registered name doesn't happen to already match the runtime
+/// type name (`"generator"` vs `"GeneratorType"`) — so `isinstance`'s generic
+/// `obj_type == class_name` fallback (`introspection2.rs`) never linked them
+/// at all. Real trigger: `isinstance(g, types.GeneratorType)` (CPython's own
+/// `test_genexps.py` doctest) was unconditionally `False`.
+pub(crate) fn pseudo_type_name_alias(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "GeneratorType" => "generator",
+        "CoroutineType" => "coroutine",
+        "FunctionType" | "LambdaType" => "function",
+        "ModuleType" => "module",
+        "MethodType" => "method",
+        "CodeType" => "code",
+        "CellType" => "cell",
+        "BuiltinFunctionType" | "BuiltinMethodType" => "builtin_function_or_method",
+        _ => return None,
+    })
+}
+
 /// Name of the builtin type (list/dict/str) a class transparently
 /// subclasses, if any — checked on the class's own dict only (the marker is
 /// propagated down into every subclass's own dict at class-creation time,

@@ -259,7 +259,21 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
         2 => a.equals(b)?,
         3 => a.borrow().ge(b)?,
         4 => a.borrow().gt(b)?,
-        5 => a.borrow().ne(b)?,
+        // `!a.equals(b)?`, NOT `a.borrow().ne(b)?`: `PyObject::ne` (called
+        // through the latter) just does `self.equals(other)` on the
+        // borrowed `&PyObject`, but the `a.borrow()` temporary that produces
+        // that `&PyObject` stays alive for the WHOLE nested call — for a
+        // `dict`/OrderedDict comparison whose value's `__eq__` mutates `a`
+        // itself (real CPython regression `test_ordered_dict.py`'s
+        // `test_issue119004_change_size_by_delete_key_in_dict_eq`, `del
+        // dict1[...]` inside a key's `__eq__` during `dict1 != dict2`),
+        // that reentrant `del` needs `.borrow_mut()` on the very RefCell
+        // `a.borrow()` is still holding — panic ("RefCell already
+        // borrowed"). `a.equals(b)` is the reentrancy-safe `PyObjectRef`
+        // method (already used for `==` just above) — it snapshots a
+        // dict's items before comparing them, never holding a live borrow
+        // across a nested `.equals()` call.
+        5 => !a.equals(b)?,
         6 => contains_op(b, a)?,
         7 => !contains_op(b, a)?,
         8 => a.is(b),

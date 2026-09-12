@@ -9,6 +9,18 @@ impl VirtualMachine {
                 self.frames[fi].pop()?;
             }
 
+            Opcode::PRINT_EXPR => {
+                // `compile(src, f, "single")` echo (REPL/doctest): print
+                // the repr of any non-None expression-statement value to
+                // the CURRENT sys.stdout (redirectable — never a raw
+                // println! — matching `print`'s own lookup).
+                let val = self.frames[fi].pop()?;
+                if !matches!(&*val.borrow(), PyObject::None) {
+                    let s = val.repr();
+                    crate::object::print_with_vm(self, &[py_str(&s)], &[])?;
+                }
+            }
+
             Opcode::DUP_TOP => {
                 let val = self.frames[fi].peek(0)?;
                 self.frames[fi].push(val);

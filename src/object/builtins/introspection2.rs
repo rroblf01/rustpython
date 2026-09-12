@@ -47,13 +47,28 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let class = args[1].borrow();
     // A class with a custom `__instancecheck__` (collections.abc ABCs like
     // Hashable/Iterable/Sized) delegates the check to it.
-    if let PyObject::Type { dict, .. } = &*class {
-        if let Some(ic) = dict.get_str("__instancecheck__") {
-            if !matches!(&*ic.borrow(), PyObject::None) {
-                let result = call_bound_method(ic.clone(), args[1].clone(), vec![args[0].clone()])?;
-                return Ok(result);
-            }
-        }
+    //
+    // `ic` is extracted (and its "is it None" check done) BEFORE dropping
+    // the `class`/`obj` borrow guards below — `call_bound_method` reenters
+    // Python code (e.g. ABCMeta's `__instancecheck__`/`__subclasscheck__`),
+    // which routinely does `cls._abc_negative_cache = ...` (a STORE_ATTR
+    // right back on `args[1]`, the very object `class` still borrows here).
+    // Holding a live `Ref` guard across that reentrant call made the
+    // STORE_ATTR's `borrow_mut()` panic with "RefCell already borrowed" —
+    // same bug family as the other over-held-guard-across-reentrancy fixes
+    // this session, just a new site (`test_types.py`'s ABCMeta-cache path).
+    let instancecheck_hook = if let PyObject::Type { dict, .. } = &*class {
+        dict.get_str("__instancecheck__")
+            .filter(|ic| !matches!(&*ic.borrow(), PyObject::None))
+            .cloned()
+    } else {
+        None
+    };
+    if let Some(ic) = instancecheck_hook {
+        drop(class);
+        drop(obj);
+        let result = call_bound_method(ic, args[1].clone(), vec![args[0].clone()])?;
+        return Ok(result);
     }
     // Fallback: `__instancecheck__` defined on the class's METACLASS (the
     // standard CPython placement). The dict-level lookup above only fires
@@ -70,6 +85,11 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         if !meta.is(&args[1]) {
             if let Some(f) = crate::object::lookup_dunder_via_mro(&meta, "__instancecheck__") {
+                // Same reentrancy hazard as the dict-level hook above: drop
+                // the borrows on `args[0]`/`args[1]` before calling into
+                // Python code that may write back to either.
+                drop(class);
+                drop(obj);
                 let result =
                     call_bound_method(f, args[1].clone(), vec![args[0].clone()])?;
                 return Ok(result);
@@ -304,6 +324,18 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             Ok(py_bool(cname == "type" || cname == "object"))
         }
         _ => {
+            // Every value is an instance of `object` (the universal base) —
+            // the arms above cover `Instance`s, bools and builtin exception
+            // classes, but plain native values (List/Dict/Str/Int/...) fall
+            // through to here and fell off the end as False
+            // (`isinstance([], object)` — test_descrtut). Gated on a real
+            // `Type` (a string classinfo like `isinstance(x, "object")`
+            // stays on the lenient name-matching path below, as before).
+            if let PyObject::Type { name, .. } = &*class {
+                if name == "object" {
+                    return Ok(py_bool(true));
+                }
+            }
             let obj_type = args[0].borrow().type_name();
             let class_name = match &*class {
                 PyObject::BuiltinFunction { name, .. } => name.clone(),
@@ -314,6 +346,17 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // Direct type name match for built-in types (int, str, list, etc.)
             if obj_type == class_name {
                 return Ok(py_bool(true));
+            }
+            // `types.GeneratorType`/`types.FunctionType`/etc — a
+            // `BuiltinFunction` "pseudo-class" whose registered NAME differs
+            // from the runtime `type_name()` string it should match against
+            // (see `pseudo_type_name_alias`'s own doc comment).
+            if let PyObject::BuiltinFunction { name, .. } = &*class {
+                if let Some(alias) = crate::object::pseudo_type_name_alias(name) {
+                    if obj_type == alias {
+                        return Ok(py_bool(true));
+                    }
+                }
             }
             // Native `re` objects: `CompiledRegex` reports type_name
             // "re.Pattern" while the module exposes `Pattern`, and each

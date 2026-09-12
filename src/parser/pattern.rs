@@ -124,7 +124,7 @@ impl Parser {
         if matches!(&self.current, Token::Name(_)) {
             let name = self.expect_name()?;
             if self.at(&Token::LeftParen) {
-                return self.parse_class_pattern(name);
+                return self.parse_class_pattern(Expr::Name(name));
             }
             // A dotted name (`case Format.STRING:`, `case some.deep.CONST:`)
             // is a "value pattern" — matched by equality against the
@@ -144,6 +144,17 @@ impl Parser {
                         value: Box::new(expr),
                         attr,
                     };
+                }
+                // A dotted CLASS pattern (`case unittest.TestResult():`,
+                // `case pkg.mod.Foo(x, y=1):`) — the dotted chain names a
+                // class, not a value, when immediately followed by `(`.
+                // Missing this check dropped straight into the value-
+                // pattern return below, which left the `(` unconsumed and
+                // the following `:` unreachable, breaking every dotted-
+                // class match arm (confirmed real: `Lib/test/test_regrtest
+                // ...`'s `case unittest.TestResult():`).
+                if self.at(&Token::LeftParen) {
+                    return self.parse_class_pattern(expr);
                 }
                 return Ok(Pattern::MatchValue(Box::new(expr)));
             }
@@ -189,7 +200,7 @@ impl Parser {
         Ok(Pattern::MatchValue(Box::new(expr)))
     }
 
-    pub(crate) fn parse_class_pattern(&mut self, name: String) -> Result<Pattern, String> {
+    pub(crate) fn parse_class_pattern(&mut self, cls: Expr) -> Result<Pattern, String> {
         self.expect(&Token::LeftParen)?;
         let mut patterns = Vec::new();
         let mut kwd_attrs = Vec::new();
@@ -209,7 +220,6 @@ impl Parser {
             }
         }
         self.expect(&Token::RightParen)?;
-        let cls = Expr::Name(name);
         Ok(Pattern::MatchClass {
             cls: Box::new(cls),
             patterns,

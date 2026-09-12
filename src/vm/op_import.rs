@@ -413,6 +413,30 @@ impl VirtualMachine {
                 drop(g);
                 // Also mirror into frame.locals so subsequent LOAD_NAME in
                 // the same scope sees the names (exec with separate locals).
+                //
+                // NOTE: this clones `frame.locals`, mutates the CLONE, and
+                // deliberately does NOT write it back. That looks like a
+                // no-op bug at first glance, but making it write back is
+                // actively WRONG for the common (module-scope) case: at true
+                // module scope `locals()`/`globals()` are the SAME
+                // namespace in real CPython, and `LOAD_NAME` here already
+                // falls back to `frame.globals` (mirrored above via the
+                // `g.insert` loop) when a name isn't in `frame.locals` —
+                // which is exactly right AS LONG AS `frame.locals` doesn't
+                // ALSO independently cache the name. If it did (writeback
+                // enabled), a later plain reassignment of that same name at
+                // module scope — `STORE_NAME` only ever updates
+                // `frame.globals`/the live module dict, never
+                // `frame.locals` — would leave a stale copy shadowing the
+                // correct value forever after in THIS same scope (confirmed
+                // by trying the writeback: `from x import *` then `class
+                // Name: ...` redefining an imported `Name` made subsequent
+                // bare reads of `Name` incorrectly return the STALE
+                // star-imported original). Left as a documented no-op
+                // rather than "fixed" until `exec(code, globals, locals)`
+                // with a genuinely separate locals dict gets a real,
+                // dedicated mirroring path that doesn't also apply to plain
+                // module-scope execution.
                 let mut locals = self.frames[fi].locals.clone();
                 for n in &names {
                     let obj = module.borrow();

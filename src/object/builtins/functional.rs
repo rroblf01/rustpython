@@ -49,19 +49,24 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // panic-tolerant `py_stable_sort_by` (see its own doc comment) rather
     // than `Vec::sort_by`, since a deliberately-inconsistent comparator
     // (real CPython test: `test_sort.py`'s `test_bug453523`) makes the
-    // standard library's sort abort the whole process.
+    // standard library's sort abort the whole process. `py_stable_sort_by`
+    // now propagates a genuinely-raising key call or comparison (TypeError
+    // from an incompatible comparison, a hostile key function, etc.)
+    // instead of swallowing it via `unwrap_or`/`unwrap_or_else` — matching
+    // real CPython, which aborts `sorted()` and re-raises rather than
+    // treating a raising key/comparison as "equal"/"not less than".
     let len = v.len();
     if len > 1 {
         let key_fn_ref = key_fn.clone();
         let reverse_flag = reverse;
         v = py_stable_sort_by(v, &|a, b| {
             let a_val = if let Some(ref kf) = key_fn_ref {
-                call_bound_method(kf.clone(), a.clone(), vec![]).unwrap_or_else(|_| a.clone())
+                call_bound_method(kf.clone(), a.clone(), vec![])?
             } else {
                 a.clone()
             };
             let b_val = if let Some(ref kf) = key_fn_ref {
-                call_bound_method(kf.clone(), b.clone(), vec![]).unwrap_or_else(|_| b.clone())
+                call_bound_method(kf.clone(), b.clone(), vec![])?
             } else {
                 b.clone()
             };
@@ -76,8 +81,8 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             } else {
                 py_compare(&a_val, &b_val, 0)
             };
-            cmp.map(|r| r.truthy()).unwrap_or(false)
-        });
+            cmp.map(|r| r.truthy())
+        })?;
     }
     Ok(py_list(v))
 }

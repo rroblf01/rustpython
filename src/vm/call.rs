@@ -870,6 +870,20 @@ impl VirtualMachine {
                     .get(2)
                     .filter(|l| is_dict_like(l))
                     .filter(|l| globals_dict.map_or(true, |g| !l.is(g)));
+                // Real CPython injects `__builtins__` into an explicit
+                // globals dict when missing — both so names resolve AND so
+                // the key shows up iterating the dict afterwards (the
+                // descrtut case: `exec("x = 3", a)` must leave `a` holding
+                // `__builtins__`). Mirror the surrounding frame's own entry
+                // so the object is identical to what a bare `exec(src)`
+                // sees (name resolution would fall back to `f.builtins`
+                // anyway, so this only adds the visible-dict behavior).
+                let caller_builtins = self.frames.last().and_then(|f| {
+                    f.globals
+                        .borrow()
+                        .get(&interner::intern("__builtins__"))
+                        .cloned()
+                });
                 let namespace = if let Some(g) = globals_dict {
                     if let Some(l) = distinct_locals {
                         let mut hm: HashMap<StrId, PyObjectRef> = str_map_to_strid_map(
@@ -879,6 +893,9 @@ impl VirtualMachine {
                             l,
                             "exec() locals must be a dict",
                         )?));
+                        if let Some(bm) = caller_builtins.clone() {
+                            hm.entry(interner::intern("__builtins__")).or_insert(bm);
+                        }
                         Some(Rc::new(RefCell::new(hm)))
                     } else {
                         // No separate locals dict: `g` is both the read AND
@@ -905,6 +922,9 @@ impl VirtualMachine {
                                 crate::object::dict_arg_to_hashmap(g, "exec() globals must be a dict")?
                             {
                                 hm.insert(interner::intern(&k), v);
+                            }
+                            if let Some(bm) = caller_builtins.clone() {
+                                hm.entry(interner::intern("__builtins__")).or_insert(bm);
                             }
                         }
                         Some(ns)
@@ -957,17 +977,44 @@ impl VirtualMachine {
                         // `namespace`'s construction above), so any name
                         // present in `target` but no longer in `globals_rc`
                         // was `del`eted during execution and must disappear
-                        // from `target` too — previously this only ever
-                        // added/updated keys, so `del name` inside an
-                        // `exec(code, some_dict)` never actually removed
-                        // `name` from the caller's dict (test_descrtut.py's
-                        // `del property  # unmask the builtin` doctest:
-                        // `property` kept resolving to the just-deleted
-                        // local class instead of falling through to the
-                        // real builtin).
+                        // from `target` too (test_descrtut.py's `del
+                        // property  # unmask the builtin` doctest).
+                        // Non-string-keyed entries (e.g. int keys on a
+                        // dict-subclass exec namespace) cannot round-trip
+                        // through the StrId-keyed frame namespace — and
+                        // Python code under exec cannot name them either —
+                        // so save them aside and restore verbatim. The old
+                        // code wrote every key back stringified, permanently
+                        // corrupting the caller's dict (int key 1 became
+                        // '1', test_descrtut).
+                        let saved_non_string: Vec<(PyObjectRef, PyObjectRef)> = d
+                            .items()
+                            .into_iter()
+                            .filter(|(k, _)| !matches!(&*k.borrow(), PyObject::Str(_)))
+                            .collect();
+                        // String forms of the saved keys above: these strings
+                        // may ALSO be present in the frame namespace purely
+                        // because the read path stringified the same
+                        // non-string keys (`dict_arg_to_hashmap` maps
+                        // `k.str()`). They must not be mirrored back, or the
+                        // caller ends up with BOTH `1` and `'1'`. (An exec
+                        // body explicitly assigning `globals()["1"]` is the
+                        // only collision, and vanishingly rare versus the
+                        // always-on corruption.)
+                        let shadowed: std::collections::HashSet<String> = saved_non_string
+                            .iter()
+                            .map(|(k, _)| k.str())
+                            .collect();
                         d.clear();
                         for (k, v) in globals_rc.borrow().iter() {
-                            let _ = d.set(py_str(interner::lookup_str(*k)), v.clone());
+                            let s = interner::lookup_str(*k);
+                            if shadowed.contains(s) {
+                                continue;
+                            }
+                            let _ = d.set(py_str(s), v.clone());
+                        }
+                        for (k, v) in saved_non_string {
+                            let _ = d.set(k, v);
                         }
                     }
                 }

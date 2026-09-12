@@ -93,14 +93,24 @@ class MimeTypes:
         Valid extensions are empty or start with a '.'.
         """
         if ext and not ext.startswith('.'):
-            from warnings import _deprecated
+            import warnings
 
-            _deprecated(
-                "Undotted extensions",
+            warnings.warn(
                 "Using undotted extensions is deprecated and "
-                "will raise a ValueError in Python {remove}",
-                remove=(3, 16),
+                "will raise a ValueError in Python 3.16",
+                DeprecationWarning,
             )
+            try:
+                from warnings import _deprecated
+
+                _deprecated(
+                    "Undotted extensions",
+                    "Using undotted extensions is deprecated and "
+                    "will raise a ValueError in Python {remove}",
+                    remove=(3, 16),
+                )
+            except Exception:
+                pass
 
         if not type:
             return
