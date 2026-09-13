@@ -6,24 +6,41 @@ use std::collections::HashMap;
 // entry for context).
 // Shelf class backed by a dict. open(filename) -> Shelf instance.
 
-/// Extract the _data dict from a Shelf Instance (args[0]).
+/// Extract the _data dict from a Shelf Instance (args[0]). Raises
+/// `ValueError` once the shelf has been `close()`d — real CPython's
+/// `shelve.Shelf.__getattr__`/`Shelf.closed` machinery makes every
+/// operation on a closed shelf fail with `ValueError`
+/// ("invalid operation on closed shelf"), which `test_shelve.py`'s
+/// `test_close` asserts directly (`assertRaises(ValueError, len, s)` after
+/// `s.close()`).
 fn shelf_get_data(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error("method requires self"));
     }
     match &*args[0].borrow() {
-        PyObject::Instance { dict, .. } => match dict.get("_data") {
-            Some(data) => Ok(data.clone()),
-            None => Err(PyError::runtime_error(
-                "Shelf instance corrupted: missing _data",
-            )),
-        },
+        PyObject::Instance { dict, .. } => {
+            if matches!(dict.get("_closed"), Some(v) if v.truthy()) {
+                return Err(PyError::value_error(
+                    "invalid operation on closed shelf",
+                ));
+            }
+            match dict.get("_data") {
+                Some(data) => Ok(data.clone()),
+                None => Err(PyError::runtime_error(
+                    "Shelf instance corrupted: missing _data",
+                )),
+            }
+        }
         _ => Err(PyError::type_error("expected Shelf instance")),
     }
 }
 
 fn shelf_close(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let _ = args;
+    if let Some(first) = args.first() {
+        if let PyObject::Instance { dict, .. } = &mut *first.borrow_mut() {
+            dict.insert("_closed".to_string(), py_bool(true));
+        }
+    }
     Ok(py_none())
 }
 
@@ -194,21 +211,18 @@ fn shelf_delitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_none())
 }
 
-pub fn shelf_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.is_empty() {
-        return Err(PyError::type_error(
-            "open() takes at least 1 argument (filename)",
-        ));
-    }
-    let filename = args[0].str();
-
-    // Internal data dict
-    let data_dict = py_dict();
-
+/// Build a `Shelf` instance directly around a caller-supplied
+/// dict-like backing object (the `shelve.Shelf(dict, ...)` constructor
+/// path) or a fresh internal dict keyed by `filename` (the `shelve.open()`
+/// path) — the shared machinery both need.
+fn build_shelf_instance(data_dict: PyObjectRef, filename: Option<String>) -> PyObjectRef {
     // Instance dict with field and methods
     let mut inst_dict = AttrMap::new();
     inst_dict.insert("_data".to_string(), data_dict);
-    inst_dict.insert("filename".to_string(), py_str(&filename));
+    inst_dict.insert("_closed".to_string(), py_bool(false));
+    if let Some(filename) = filename {
+        inst_dict.insert("filename".to_string(), py_str(&filename));
+    }
 
     inst_dict.insert(
         "close".to_string(),
@@ -307,12 +321,40 @@ pub fn shelf_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         mro: vec![],
     });
 
-    let instance = PyObjectRef::new(PyObject::Instance {
+    PyObjectRef::new(PyObject::Instance {
         typ: shelf_type,
         dict: inst_dict,
-    });
+    })
+}
 
-    Ok(instance)
+pub fn shelf_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error(
+            "open() takes at least 1 argument (filename)",
+        ));
+    }
+    let filename = args[0].str();
+    Ok(build_shelf_instance(py_dict(), Some(filename)))
+}
+
+/// `shelve.Shelf(dict, protocol=None, writeback=False, keyencoding='utf-8')`
+/// — the class constructor, distinct from `shelve.open(filename)`. Used
+/// directly by real code/tests (e.g. `shelve.Shelf(d1, protocol=2)`) to
+/// wrap an arbitrary already-open dict-like mapping. Previously
+/// `shelve.Shelf` was registered as the plain string `"Shelf"` (a
+/// leftover placeholder), so calling it raised `TypeError: 'str' object
+/// is not callable` — this is the general fix, a real constructor.
+/// `protocol`/`writeback`/`keyencoding` are accepted (kwargs arrive as a
+/// trailing packed dict per this codebase's builtin calling convention)
+/// but not yet meaningfully applied, matching this module's existing
+/// in-memory-only (non-persistent) `Shelf` semantics.
+pub fn shelf_new(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error(
+            "Shelf() takes at least 1 argument (dict)",
+        ));
+    }
+    Ok(build_shelf_instance(args[0].clone(), None))
 }
 
 pub fn create_shelve_dict() -> HashMap<String, PyObjectRef> {
@@ -324,6 +366,12 @@ pub fn create_shelve_dict() -> HashMap<String, PyObjectRef> {
             func: shelf_open,
         }),
     );
-    d.insert_str("Shelf", py_str("Shelf"));
+    d.insert_str(
+        "Shelf",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "Shelf".to_string(),
+            func: shelf_new,
+        }),
+    );
     d
 }

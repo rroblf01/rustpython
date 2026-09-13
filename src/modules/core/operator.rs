@@ -407,7 +407,25 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
                 "operator.length_hint requires 1 argument",
             ));
         }
-        builtin_len(args)
+        let default = args.get(1).cloned().unwrap_or_else(|| py_int(0));
+        // Real semantics (CPython's `operator.length_hint`): try `len(obj)`
+        // first; if that fails with TypeError (no `__len__`), fall back to
+        // `obj.__length_hint__()`; if THAT is also missing/fails, return
+        // `default`. Previously this just called `len()` directly, so any
+        // object with only `__length_hint__` (e.g. `dict_keyiterator`,
+        // `deque_reverse_iterator` — real iterators, no public `__len__`)
+        // raised TypeError instead of returning the actual hint
+        // (test_iterlen.py).
+        if let Ok(v) = builtin_len(std::slice::from_ref(&args[0])) {
+            return Ok(v);
+        }
+        match bound_attr(&args[0], "__length_hint__") {
+            Ok(method) => match builtin_call(&method, &[]) {
+                Ok(v) => Ok(v),
+                Err(_) => Ok(default),
+            },
+            Err(_) => Ok(default),
+        }
     });
     // `operator.is_`/`is_not` — plain identity checks, real Python's
     // function-object equivalents of the `is`/`is not` operators (used
@@ -549,7 +567,148 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_none())
     });
 
+    // `itemgetter`/`attrgetter`/`methodcaller` used to be built as bare
+    // `PyObject::Closure`s capturing their construction args in a Rust
+    // closure — functionally correct for calling, but a `Closure` has no
+    // attribute storage at all, so it could never support `repr()` (real
+    // CPython: `operator.itemgetter(1, 2)` reprs as
+    // `operator.itemgetter(1, 2)`) or `pickle` (real CPython implements
+    // `__reduce__` returning `(type(self), self._items)`, since a bound
+    // Rust/C closure is inherently unpicklable but the (type, args) it was
+    // built from is). Every instance of these factories was reported as
+    // `TypeError: cannot pickle builtin_function_or_method object` by
+    // `test_operator.py`'s pickle round-trip tests. Fixed generally by
+    // making each a real `PyObject::Type`-backed instance (same pattern as
+    // `OrderedDict`/`deque` above) storing its constructor args under a
+    // reserved instance-dict key, with `__call__`/`__repr__`/`__reduce__`/
+    // `__eq__` implemented against that stored state instead of a captured
+    // closure.
+    const OG_ITEMS_KEY: &str = "__og_items__";
+
+    fn make_getter_type(
+        name: &str,
+        items: Vec<PyObjectRef>,
+        call: BuiltinFunc,
+        repr: BuiltinFunc,
+    ) -> PyObjectRef {
+        let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+        type_dict.insert_str(
+            "__call__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__call__".to_string(),
+                func: call,
+            }),
+        );
+        type_dict.insert_str(
+            "__repr__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__repr__".to_string(),
+                func: repr,
+            }),
+        );
+        type_dict.insert_str(
+            "__reduce__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__reduce__".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    let stored_items = args[0]
+                        .borrow()
+                        .get_attribute(OG_ITEMS_KEY)?;
+                    let typ = if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+                        typ.clone()
+                    } else {
+                        return Err(PyError::type_error("__reduce__ on non-instance"));
+                    };
+                    Ok(py_tuple(vec![typ, stored_items]))
+                },
+            }),
+        );
+        type_dict.insert_str(
+            "__eq__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__eq__".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    if args.len() < 2 {
+                        return Ok(py_bool(false));
+                    }
+                    let a_items = args[0].borrow().get_attribute(OG_ITEMS_KEY)?;
+                    let b_items = match args[1].borrow().get_attribute(OG_ITEMS_KEY) {
+                        Ok(v) => v,
+                        Err(_) => return Ok(py_not_implemented()),
+                    };
+                    // Also require same type (an itemgetter must not equal
+                    // an attrgetter with identical args).
+                    let same_type = match (&*args[0].borrow(), &*args[1].borrow()) {
+                        (
+                            PyObject::Instance { typ: t1, .. },
+                            PyObject::Instance { typ: t2, .. },
+                        ) => container_of(t1) == container_of(t2),
+                        _ => false,
+                    };
+                    fn container_of(t: &PyObjectRef) -> usize {
+                        t.get_id()
+                    }
+                    if !same_type {
+                        return Ok(py_bool(false));
+                    }
+                    Ok(py_bool(a_items.equals(&b_items)?))
+                },
+            }),
+        );
+        let typ = PyObjectRef::new(PyObject::Type {
+            name: name.to_string(),
+            dict: Box::new(str_map_to_typedict(type_dict)),
+            bases: vec![],
+            mro: vec![],
+        });
+        if let PyObject::Type { dict, .. } = &mut *typ.borrow_mut() {
+            dict.insert_str("__module__", py_str("operator"));
+        }
+        if let PyObject::Type { mro, .. } = &mut *typ.borrow_mut() {
+            *mro = vec![typ.clone()];
+        }
+        let mut attrs = crate::object::AttrMap::new();
+        attrs.insert(OG_ITEMS_KEY.to_string(), py_tuple(items));
+        // Return the TYPE — the caller wraps construction below (needed
+        // since each call to the factory produces one fresh Instance).
+        let _ = attrs; // constructed per-call below; this fn only builds the type.
+        typ
+    }
+
     // itemgetter factory
+    thread_local! {
+        static ITEMGETTER_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+        static ATTRGETTER_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+        static METHODCALLER_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+    }
+
+    fn itemgetter_call(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+        if args.len() < 2 {
+            return Err(PyError::type_error("itemgetter called with no arguments"));
+        }
+        let items = match &*args[0].borrow().get_attribute(OG_ITEMS_KEY)?.borrow() {
+            PyObject::Tuple(t) => t.clone(),
+            _ => Vec::new(),
+        };
+        let obj = &args[1];
+        if items.len() == 1 {
+            py_getitem(obj, &items[0])
+        } else {
+            let mut results = Vec::new();
+            for item in &items {
+                results.push(py_getitem(obj, item)?);
+            }
+            Ok(PyObjectRef::imm(PyObject::Tuple(results)))
+        }
+    }
+    fn itemgetter_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+        let items = match &*args[0].borrow().get_attribute(OG_ITEMS_KEY)?.borrow() {
+            PyObject::Tuple(t) => t.clone(),
+            _ => Vec::new(),
+        };
+        let parts: Vec<String> = items.iter().map(|i| i.repr()).collect();
+        Ok(py_str(&format!("operator.itemgetter({})", parts.join(", "))))
+    }
     d.insert_str(
         "itemgetter",
         PyObjectRef::new(PyObject::BuiltinFunction {
@@ -560,29 +719,65 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
                         "itemgetter requires at least 1 argument",
                     ));
                 }
-                let items = args.to_vec();
-                // Return a callable that does getitem on its argument
-                let getter = PyObjectRef::new(PyObject::Closure(Rc::new(move |get_args| {
-                    if get_args.is_empty() {
-                        return Err(PyError::type_error("itemgetter called with no arguments"));
+                let typ = ITEMGETTER_TYPE.with(|c| {
+                    let mut b = c.borrow_mut();
+                    if b.is_none() {
+                        *b = Some(make_getter_type(
+                            "itemgetter",
+                            vec![],
+                            itemgetter_call as BuiltinFunc,
+                            itemgetter_repr as BuiltinFunc,
+                        ));
                     }
-                    let obj = &get_args[0];
-                    if items.len() == 1 {
-                        py_getitem(obj, &items[0])
-                    } else {
-                        let mut results = Vec::new();
-                        for item in &items {
-                            results.push(py_getitem(obj, item)?);
-                        }
-                        Ok(PyObjectRef::imm(PyObject::Tuple(results)))
-                    }
-                })));
-                Ok(getter)
+                    b.clone().unwrap()
+                });
+                let mut attrs = crate::object::AttrMap::new();
+                attrs.insert(OG_ITEMS_KEY.to_string(), py_tuple(args.to_vec()));
+                Ok(PyObjectRef::new(PyObject::Instance { typ, dict: attrs }))
             },
         }),
     );
 
     // attrgetter factory
+    // Real `operator.attrgetter('a.b.c')` resolves a DOTTED path — each `.`
+    // segment is a further `getattr` on the previous result — not a single
+    // literal attribute named `"a.b.c"`. `bound_attr` (above) does a single
+    // lookup, so it must be driven once per dotted segment here.
+    fn attrgetter_one(obj: &PyObjectRef, path: &str) -> PyResult<PyObjectRef> {
+        let mut cur = obj.clone();
+        for segment in path.split('.') {
+            cur = bound_attr(&cur, segment)?;
+        }
+        Ok(cur)
+    }
+    fn attrgetter_call(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+        if args.len() < 2 {
+            return Err(PyError::type_error("attrgetter called with no arguments"));
+        }
+        let attrs_tuple = match &*args[0].borrow().get_attribute(OG_ITEMS_KEY)?.borrow() {
+            PyObject::Tuple(t) => t.clone(),
+            _ => Vec::new(),
+        };
+        let attrs: Vec<String> = attrs_tuple.iter().map(|a| a.str()).collect();
+        let obj = &args[1];
+        if attrs.len() == 1 {
+            attrgetter_one(obj, &attrs[0])
+        } else {
+            let mut results = Vec::new();
+            for attr in &attrs {
+                results.push(attrgetter_one(obj, attr)?);
+            }
+            Ok(PyObjectRef::imm(PyObject::Tuple(results)))
+        }
+    }
+    fn attrgetter_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+        let items = match &*args[0].borrow().get_attribute(OG_ITEMS_KEY)?.borrow() {
+            PyObject::Tuple(t) => t.clone(),
+            _ => Vec::new(),
+        };
+        let parts: Vec<String> = items.iter().map(|i| i.repr()).collect();
+        Ok(py_str(&format!("operator.attrgetter({})", parts.join(", "))))
+    }
     d.insert_str(
         "attrgetter",
         PyObjectRef::new(PyObject::BuiltinFunction {
@@ -593,33 +788,72 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
                         "attrgetter requires at least 1 argument",
                     ));
                 }
-                let attrs: Vec<String> = args.iter().map(|a| a.str()).collect();
-                let getter = PyObjectRef::new(PyObject::Closure(Rc::new(move |get_args| {
-                    if get_args.is_empty() {
-                        return Err(PyError::type_error("attrgetter called with no arguments"));
+                let typ = ATTRGETTER_TYPE.with(|c| {
+                    let mut b = c.borrow_mut();
+                    if b.is_none() {
+                        *b = Some(make_getter_type(
+                            "attrgetter",
+                            vec![],
+                            attrgetter_call as BuiltinFunc,
+                            attrgetter_repr as BuiltinFunc,
+                        ));
                     }
-                    if attrs.len() == 1 {
-                        bound_attr(&get_args[0], &attrs[0])
-                    } else {
-                        let mut results = Vec::new();
-                        for attr in &attrs {
-                            results.push(bound_attr(&get_args[0], attr)?);
-                        }
-                        Ok(PyObjectRef::imm(PyObject::Tuple(results)))
-                    }
-                })));
-                Ok(getter)
+                    b.clone().unwrap()
+                });
+                let mut attrs = crate::object::AttrMap::new();
+                attrs.insert(OG_ITEMS_KEY.to_string(), py_tuple(args.to_vec()));
+                Ok(PyObjectRef::new(PyObject::Instance { typ, dict: attrs }))
             },
         }),
     );
 
-    // `operator.methodcaller(name, *args)` — missing entirely. Returns a
-    // callable that, given `obj`, calls `obj.name(*args)` — a common
-    // `key=`/callback idiom (`sorted(objs, key=methodcaller('lower'))`,
-    // real trigger: CPython's own `test_operator.py`). Positional args only
-    // (no keyword-argument support) — good enough for the common case, and
-    // consistent with this module's existing `itemgetter`/`attrgetter`
-    // factories just above, neither of which support keywords either.
+    // `operator.methodcaller(name, *args, **kwargs)` — a callable that,
+    // given `obj`, calls `obj.name(*args, **kwargs)` — a common
+    // `key=`/callback idiom (`sorted(objs, key=methodcaller('lower'))`).
+    // Keyword arguments to the wrapped call are NOT supported (matching the
+    // pre-existing behavior — positional-only), but the stored args now
+    // round-trip through pickle/repr/equality like real CPython's.
+    fn methodcaller_call(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+        if args.len() < 2 {
+            return Err(PyError::type_error(
+                "methodcaller's callable requires an argument",
+            ));
+        }
+        let items = match &*args[0].borrow().get_attribute(OG_ITEMS_KEY)?.borrow() {
+            PyObject::Tuple(t) => t.clone(),
+            _ => Vec::new(),
+        };
+        if items.is_empty() {
+            return Err(PyError::type_error("methodcaller requires at least 1 argument"));
+        }
+        let method_name = items[0].str();
+        let extra_args = &items[1..];
+        let obj = &args[1];
+        let method = bound_attr(obj, &method_name)?;
+        let mut full_args = extra_args.to_vec();
+        full_args.extend_from_slice(&args[2..]);
+        builtin_call(&method, &full_args)
+    }
+    fn methodcaller_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+        let items = match &*args[0].borrow().get_attribute(OG_ITEMS_KEY)?.borrow() {
+            PyObject::Tuple(t) => t.clone(),
+            _ => Vec::new(),
+        };
+        if items.is_empty() {
+            return Ok(py_str("operator.methodcaller()"));
+        }
+        let name_repr = items[0].str();
+        let rest: Vec<String> = items[1..].iter().map(|i| i.repr()).collect();
+        if rest.is_empty() {
+            Ok(py_str(&format!("operator.methodcaller('{}')", name_repr)))
+        } else {
+            Ok(py_str(&format!(
+                "operator.methodcaller('{}', {})",
+                name_repr,
+                rest.join(", ")
+            )))
+        }
+    }
     d.insert_str(
         "methodcaller",
         PyObjectRef::new(PyObject::BuiltinFunction {
@@ -630,21 +864,21 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
                         "methodcaller requires at least 1 argument",
                     ));
                 }
-                let method_name = args[0].str();
-                let extra_args: Vec<PyObjectRef> = args[1..].to_vec();
-                let caller = PyObjectRef::new(PyObject::Closure(Rc::new(move |call_args| {
-                    if call_args.is_empty() {
-                        return Err(PyError::type_error(
-                            "methodcaller's callable requires an argument",
+                let typ = METHODCALLER_TYPE.with(|c| {
+                    let mut b = c.borrow_mut();
+                    if b.is_none() {
+                        *b = Some(make_getter_type(
+                            "methodcaller",
+                            vec![],
+                            methodcaller_call as BuiltinFunc,
+                            methodcaller_repr as BuiltinFunc,
                         ));
                     }
-                    let obj = &call_args[0];
-                    let method = bound_attr(obj, &method_name)?;
-                    let mut full_args = extra_args.clone();
-                    full_args.extend_from_slice(&call_args[1..]);
-                    builtin_call(&method, &full_args)
-                })));
-                Ok(caller)
+                    b.clone().unwrap()
+                });
+                let mut attrs = crate::object::AttrMap::new();
+                attrs.insert(OG_ITEMS_KEY.to_string(), py_tuple(args.to_vec()));
+                Ok(PyObjectRef::new(PyObject::Instance { typ, dict: attrs }))
             },
         }),
     );

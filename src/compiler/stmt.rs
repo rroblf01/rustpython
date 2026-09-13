@@ -833,9 +833,17 @@ impl Compiler {
                 }
             }
             Stmt::TypeAlias { name, value, .. } => {
+                // `STORE_FAST` unconditionally was wrong outside function
+                // scope: at module/class-body scope there is no fastlocals
+                // array, so `type Alias = ...` at the top level (or in a
+                // class body) silently bound nowhere `LOAD_NAME`/`LOAD_GLOBAL`
+                // could ever see it, leaving even a bare `type Alias = int`
+                // at module scope unresolvable (`NameError: name 'Alias' is
+                // not defined`) — general scope-selection bug, same class as
+                // every other binding statement that must route through
+                // `emit_store_name` instead of hardcoding one opcode.
                 self.compile_expr(value)?;
-                let name_idx = self.add_varname(name) as u32;
-                self.emit(Opcode::STORE_FAST, name_idx);
+                self.emit_store_name(name);
             }
             Stmt::Located(line, inner) => {
                 self.set_line(*line);

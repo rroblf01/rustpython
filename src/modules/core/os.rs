@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 mod helpers;
 mod path;
+mod uname;
 
 pub(crate) use helpers::dup_std_fd;
 pub use helpers::os_kill_builtin;
@@ -153,7 +154,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
                     .collect();
                 Ok(py_list(names))
             }
-            Err(e) => Err(PyError::os_error_from_io(&e)),
+            Err(e) => Err(PyError::os_error_from_io_path(&e, Some(&path))),
         }
     });
     // `os.scandir()`/`os.DirEntry` were entirely missing (not just an
@@ -325,7 +326,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("remove() takes at least 1 argument"));
         }
         let path = crate::object::path_arg_to_string(&args[0]);
-        std::fs::remove_file(&path).map_err(|e| PyError::os_error_from_io(&e))?;
+        std::fs::remove_file(&path).map_err(|e| PyError::os_error_from_io_path(&e, Some(&path)))?;
         Ok(py_none())
     });
 
@@ -335,7 +336,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("unlink() takes at least 1 argument"));
         }
         let path = crate::object::path_arg_to_string(&args[0]);
-        std::fs::remove_file(&path).map_err(|e| PyError::os_error_from_io(&e))?;
+        std::fs::remove_file(&path).map_err(|e| PyError::os_error_from_io_path(&e, Some(&path)))?;
         Ok(py_none())
     });
 
@@ -371,9 +372,10 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("chdir() takes at least 1 argument"));
         }
-        match std::env::set_current_dir(&args[0].str()) {
+        let path = args[0].str();
+        match std::env::set_current_dir(&path) {
             Ok(()) => Ok(py_none()),
-            Err(e) => Err(PyError::os_error_from_io(&e)),
+            Err(e) => Err(PyError::os_error_from_io_path(&e, Some(&path))),
         }
     });
 
@@ -779,7 +781,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         let path = os_path_arg(&args[0])?;
         match std::fs::metadata(&path) {
             Ok(meta) => Ok(create_module("stat_result", stat_to_dict(&meta))),
-            Err(e) => Err(PyError::os_error_from_io(&e)),
+            Err(e) => Err(PyError::os_error_from_io_path(&e, Some(&path))),
         }
     });
 
@@ -1018,61 +1020,138 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("rmdir() takes at least 1 argument"));
         }
-        match std::fs::remove_dir(&args[0].str()) {
+        let path = args[0].str();
+        match std::fs::remove_dir(&path) {
             Ok(()) => Ok(py_none()),
-            Err(e) => Err(PyError::os_error_from_io(&e)),
+            Err(e) => Err(PyError::os_error_from_io_path(&e, Some(&path))),
         }
     });
 
-    // --- os.walk(top): directory tree walker (returns list of tuples) ---
+    // --- os.walk(top, topdown=True, onerror=None, followlinks=False):
+    // directory tree walker (returns list of tuples) ---
+    //
+    // Previously ALWAYS produced top-down order regardless of the
+    // `topdown` argument (which was silently ignored entirely — not even
+    // read out of args). That's a correctness bug with real fallout: any
+    // bottom-up consumer (`shutil.rmtree`'s `_rmtree_unsafe`, vendored
+    // verbatim from real CPython in `Lib/shutil.py`, calls
+    // `os.walk(path, topdown=False, ...)` specifically so it can delete
+    // children before parents) instead got parent directories yielded
+    // BEFORE their children, so `os.rmdir()` on a still-nonempty directory
+    // failed with ENOTEMPTY (`OSError: Directory not empty`) — which in
+    // turn left stray files/symlinks behind for the NEXT test's setUp to
+    // trip over as `FileExistsError` (see `test_glob.py`'s repeated
+    // `os.symlink(...) -> FileExistsError` failures, all rooted in one
+    // earlier `rmtree` in the same run silently failing this way).
+    //
+    // Also does NOT follow symlinked subdirectories unless `followlinks`
+    // is true, matching real `os.walk`'s default (a symlink to a
+    // directory is reported in `filenames`... actually `dirnames`, per
+    // CPython, but not recursed into).
+    fn walk_visit(
+        dir: &str,
+        topdown: bool,
+        followlinks: bool,
+        results: &mut Vec<PyObjectRef>,
+    ) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return, // unreadable directory: skip silently (no onerror support)
+        };
+        let mut dirname_strs: Vec<String> = Vec::new();
+        let mut filename_strs: Vec<String> = Vec::new();
+        let mut recurse_names: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "." || name == ".." {
+                continue;
+            }
+            // `metadata()` follows symlinks (like `entry.is_dir()` in real
+            // CPython's default `os.walk`); `symlink_metadata()` doesn't.
+            let is_dir = entry
+                .metadata()
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
+            if is_dir {
+                dirname_strs.push(name.clone());
+                let is_symlink = entry
+                    .path()
+                    .symlink_metadata()
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+                if followlinks || !is_symlink {
+                    recurse_names.push(name);
+                }
+            } else {
+                filename_strs.push(name);
+            }
+        }
+        dirname_strs.sort();
+        filename_strs.sort();
+        recurse_names.sort();
+        let make_tuple = |dirname_strs: &[String], filename_strs: &[String]| {
+            let dirnames: Vec<PyObjectRef> = dirname_strs.iter().map(|s| py_str(s)).collect();
+            let filenames: Vec<PyObjectRef> = filename_strs.iter().map(|s| py_str(s)).collect();
+            py_tuple(vec![py_str(dir), py_list(dirnames), py_list(filenames)])
+        };
+
+        if topdown {
+            results.push(make_tuple(&dirname_strs, &filename_strs));
+            for name in &recurse_names {
+                let sub = if dir.ends_with('/') {
+                    format!("{dir}{name}")
+                } else {
+                    format!("{dir}/{name}")
+                };
+                walk_visit(&sub, topdown, followlinks, results);
+            }
+        } else {
+            for name in &recurse_names {
+                let sub = if dir.ends_with('/') {
+                    format!("{dir}{name}")
+                } else {
+                    format!("{dir}/{name}")
+                };
+                walk_visit(&sub, topdown, followlinks, results);
+            }
+            results.push(make_tuple(&dirname_strs, &filename_strs));
+        }
+    }
+
     os_func!("walk", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("walk() takes at least 1 argument"));
         }
-        let top = args[0].str();
-        let mut results = Vec::new();
-        let mut dirs_to_visit = vec![top];
-        while let Some(dir) = dirs_to_visit.pop() {
-            match std::fs::read_dir(&dir) {
-                Ok(entries) => {
-                    let mut dirname_strs: Vec<String> = Vec::new();
-                    let mut filename_strs: Vec<String> = Vec::new();
-                    for entry in entries.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                        if name == "." || name == ".." {
-                            continue;
-                        }
-                        if is_dir {
-                            dirname_strs.push(name);
-                        } else {
-                            filename_strs.push(name);
-                        }
-                    }
-                    dirname_strs.sort();
-                    filename_strs.sort();
-                    let dirnames: Vec<PyObjectRef> =
-                        dirname_strs.iter().map(|s| py_str(s)).collect();
-                    let filenames: Vec<PyObjectRef> =
-                        filename_strs.iter().map(|s| py_str(s)).collect();
-                    results.push(py_tuple(vec![
-                        py_str(&dir),
-                        py_list(dirnames),
-                        py_list(filenames),
-                    ]));
-                    // Push subdirs in reverse order for DFS alphabetical traversal
-                    for dirname in dirname_strs.iter().rev() {
-                        let sub = if dir.ends_with('/') {
-                            format!("{}{}", dir, dirname)
-                        } else {
-                            format!("{}/{}", dir, dirname)
-                        };
-                        dirs_to_visit.push(sub);
-                    }
-                }
-                Err(_) => { /* skip unreadable directories */ }
+        let (pos_args, kwargs) = match args.last() {
+            Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
+                (&args[..args.len() - 1], Some(last))
             }
-        }
+            _ => (args, None),
+        };
+        let top = pos_args[0].str();
+        let kwarg = |name: &str| -> Option<PyObjectRef> {
+            kwargs.and_then(|d| {
+                if let PyObject::Dict(d) = &*d.borrow() {
+                    d.get(&py_str(name)).ok().flatten()
+                } else {
+                    None
+                }
+            })
+        };
+        let topdown = pos_args
+            .get(1)
+            .cloned()
+            .or_else(|| kwarg("topdown"))
+            .map(|v| v.truthy())
+            .unwrap_or(true);
+        let followlinks = pos_args
+            .get(3)
+            .cloned()
+            .or_else(|| kwarg("followlinks"))
+            .map(|v| v.truthy())
+            .unwrap_or(false);
+        let mut results = Vec::new();
+        walk_visit(&top, topdown, followlinks, &mut results);
         Ok(PyObjectRef::new(PyObject::List(results)))
     });
 
@@ -1300,5 +1379,24 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
 
     // os.path sub-module will be wired as a proper submodule in vm.rs
     // The path attribute is set there (not inline) to allow proper os.path import
+
+    // `os.uname()`/`os.uname_result` — see `uname.rs` for the full
+    // rationale (missing entirely; broke `test_sysconfig.py`'s
+    // `_set_uname` and real `sysconfig.get_platform()`'s own
+    // `os.uname()` unpacking on POSIX).
+    d.insert_str(
+        "uname",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "uname".to_string(),
+            func: uname::os_uname,
+        }),
+    );
+    d.insert_str(
+        "uname_result",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "uname_result".to_string(),
+            func: uname::os_uname_result_ctor,
+        }),
+    );
     d
 }

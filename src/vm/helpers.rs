@@ -439,5 +439,6 @@ pub(crate) fn eval_const_value(const_val: ConstValue) -> PyResult<PyObjectRef> {
             let objs: Vec<PyObjectRef> = items.into_iter().map(|s| py_str(&s)).collect();
             PyObjectRef::imm(PyObject::Tuple(objs))
         }
+        ConstValue::Object(obj) => obj,
     })
 }

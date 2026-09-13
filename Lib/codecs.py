@@ -1,6 +1,17 @@
 """Python codecs module - wraps _codecs built-in module."""
 
 import _codecs
+# Real CPython's codecs.py does `from _codecs import *`, which is how
+# `Lib/encodings/utf_16.py`/`utf_32.py`/etc. get `codecs.utf_16_encode`,
+# `codecs.utf_32_ex_decode`, and friends as plain module attributes on
+# this wrapper module (they call `import codecs` then reach for those
+# names directly, never `import _codecs`). Without this, every one of
+# those `encodings/` modules raised `AttributeError` at import time
+# instead of the codec actually working — surfaced as
+# `ValueError: unknown encoding: utf_32`/`utf_16`/etc. one level up in
+# `encodings.search_function`'s except-ImportError-only guard letting
+# the AttributeError propagate. See test_codecs.py.
+from _codecs import *
 
 def lookup(encoding):
     return _codecs.lookup(encoding)

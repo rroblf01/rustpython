@@ -705,6 +705,29 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
         }
     });
 
+    // `socket.getfqdn([name])` was entirely missing (`AttributeError`) —
+    // real CPython implements it in pure Python (`Lib/socket.py`): with no
+    // usable `name`, fall back to `gethostname()`; otherwise a real reverse
+    // lookup is attempted via `gethostbyaddr()` and, on failure, the
+    // original `name` is returned unchanged. This project has no DNS
+    // reverse-lookup support to build the full algorithm on, so this is the
+    // honest best-effort subset: the empty-name fallback (the common case —
+    // building a local test server URL, `test_urllib2_localnet.py`) plus
+    // the plain passthrough CPython's own `except socket.error: pass` path
+    // falls back to when a reverse lookup isn't available.
+    sock_func!("getfqdn", |args| {
+        let name = args.first().map(|a| a.str()).unwrap_or_default();
+        let name = name.trim();
+        if name.is_empty() || name == "0.0.0.0" {
+            match std::process::Command::new("hostname").output() {
+                Ok(output) => Ok(py_str(String::from_utf8_lossy(&output.stdout).trim())),
+                Err(_) => Ok(py_str("localhost")),
+            }
+        } else {
+            Ok(py_str(name))
+        }
+    });
+
     sock_func!("gethostbyname", |args| {
         if args.is_empty() {
             return Err(PyError::type_error(

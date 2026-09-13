@@ -329,6 +329,29 @@ impl PyDict {
         value: PyObjectRef,
         h: usize,
     ) -> PyResult<()> {
+        // Probe BEFORE reserving capacity: `ensure_capacity(1)` used to run
+        // unconditionally, pessimistically assuming every `set()` call
+        // inserts a brand-new entry. For an update to an ALREADY-PRESENT
+        // key (size never changes), that pre-emptive capacity check could
+        // still decide a rehash was "due" (comparing `size + 1` against
+        // current capacity) and rehash anyway — which bumps `version`
+        // even though nothing about the dict's iteration-visible contents
+        // actually changed. Any live `DictIter`/`DictValuesIter`/
+        // `DictItemsIter` snapshot then saw a version mismatch and raised
+        // "dictionary changed size during iteration" on a completely
+        // legal, common idiom (`for k in d: d[k] = f(d[k])`) the moment
+        // the dict's size crossed a load-factor threshold — confirmed via
+        // `Lib/configparser.py`'s `_join_multiline_values` (`for name, val
+        // in options.items(): options[name] = ...`), which starts
+        // spuriously raising as soon as a section reaches 5 options
+        // (`test_configparser.py`'s `test_converters`/others). Only
+        // reserve capacity (and only then reprobe, since a rehash moves
+        // every slot) when this is actually a new entry.
+        let (slot, existing) = self.probe(&key, h);
+        if existing.is_some() {
+            self.apply_probed_set(slot, existing, key, value);
+            return Ok(());
+        }
         self.ensure_capacity(1);
         let (slot, existing) = self.probe(&key, h);
         self.apply_probed_set(slot, existing, key, value);
@@ -513,10 +536,23 @@ pub(crate) fn pydict_safe_set(
         let mut obj = target.borrow_mut();
         match &mut *obj {
             PyObject::Dict(d) => {
-                d.ensure_capacity(1);
+                // Probe BEFORE reserving capacity — see `set_with_hash`'s
+                // doc comment for why: reserving unconditionally made an
+                // in-place update to an ALREADY-PRESENT key spuriously
+                // rehash (and bump `version`) whenever the dict happened
+                // to be near its load-factor threshold, breaking any live
+                // iterator's "changed size" check on an update that never
+                // actually changed the size.
                 if let Ok((slot, existing)) = d.probe_no_reentry_risk(&key, h) {
-                    d.apply_probed_set(slot, existing, key, value);
-                    return Ok(());
+                    if existing.is_some() {
+                        d.apply_probed_set(slot, existing, key, value);
+                        return Ok(());
+                    }
+                    d.ensure_capacity(1);
+                    if let Ok((slot2, existing2)) = d.probe_no_reentry_risk(&key, h) {
+                        d.apply_probed_set(slot2, existing2, key, value);
+                        return Ok(());
+                    }
                 }
             }
             _ => return Err(PyError::runtime_error("setitem on non-dict")),
@@ -527,7 +563,9 @@ pub(crate) fn pydict_safe_set(
             let mut obj = target.borrow_mut();
             match &mut *obj {
                 PyObject::Dict(d) => {
-                    d.ensure_capacity(1);
+                    if !d.probe(&key, h).1.is_some() {
+                        d.ensure_capacity(1);
+                    }
                     d.version()
                 }
                 _ => return Err(PyError::runtime_error("setitem on non-dict")),
@@ -571,13 +609,23 @@ pub(crate) fn pydict_safe_get_or_insert(
         let mut obj = target.borrow_mut();
         match &mut *obj {
             PyObject::Dict(d) => {
-                d.ensure_capacity(1);
+                // Probe before reserving capacity, same reasoning as
+                // `pydict_safe_set` above: `setdefault` on an
+                // ALREADY-PRESENT key is a pure read (no insert, no size
+                // change at all) and must never risk a spurious rehash/
+                // version bump that would break a live iterator.
                 if let Ok((slot, existing)) = d.probe_no_reentry_risk(&key, h) {
                     if let Some(entry_idx) = existing {
                         return Ok(d.entries[entry_idx].as_ref().unwrap().1.clone());
                     }
-                    d.apply_probed_set(slot, None, key, default.clone());
-                    return Ok(default);
+                    d.ensure_capacity(1);
+                    if let Ok((slot2, existing2)) = d.probe_no_reentry_risk(&key, h) {
+                        if let Some(entry_idx) = existing2 {
+                            return Ok(d.entries[entry_idx].as_ref().unwrap().1.clone());
+                        }
+                        d.apply_probed_set(slot2, None, key, default.clone());
+                        return Ok(default);
+                    }
                 }
             }
             _ => return Err(PyError::runtime_error("setdefault on non-dict")),
@@ -588,7 +636,9 @@ pub(crate) fn pydict_safe_get_or_insert(
             let mut obj = target.borrow_mut();
             match &mut *obj {
                 PyObject::Dict(d) => {
-                    d.ensure_capacity(1);
+                    if d.probe(&key, h).1.is_none() {
+                        d.ensure_capacity(1);
+                    }
                     d.version()
                 }
                 _ => return Err(PyError::runtime_error("setdefault on non-dict")),

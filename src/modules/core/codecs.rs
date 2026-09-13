@@ -722,6 +722,37 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
             },
         }),
     );
+    macro_rules! insert_codec_fn {
+        ($name:literal, $func:path) => {
+            d.insert_str(
+                $name,
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $func,
+                }),
+            );
+        };
+    }
+    insert_codec_fn!("utf_8_encode", helpers::_codecs_encode);
+    insert_codec_fn!("utf_8_decode", helpers::_codecs_decode);
+    insert_codec_fn!("ascii_encode", helpers::_codecs_encode);
+    insert_codec_fn!("ascii_decode", helpers::_codecs_decode);
+    insert_codec_fn!("latin_1_encode", helpers::_codecs_encode);
+    insert_codec_fn!("latin_1_decode", helpers::_codecs_decode);
+    insert_codec_fn!("utf_16_encode", helpers::_codecs_utf_16_encode);
+    insert_codec_fn!("utf_16_decode", helpers::_codecs_utf_16_decode);
+    insert_codec_fn!("utf_16_le_encode", helpers::_codecs_utf_16_le_encode);
+    insert_codec_fn!("utf_16_le_decode", helpers::_codecs_utf_16_le_decode);
+    insert_codec_fn!("utf_16_be_encode", helpers::_codecs_utf_16_be_encode);
+    insert_codec_fn!("utf_16_be_decode", helpers::_codecs_utf_16_be_decode);
+    insert_codec_fn!("utf_16_ex_decode", helpers::_codecs_utf_16_ex_decode);
+    insert_codec_fn!("utf_32_encode", helpers::_codecs_utf_32_encode);
+    insert_codec_fn!("utf_32_decode", helpers::_codecs_utf_32_decode);
+    insert_codec_fn!("utf_32_le_encode", helpers::_codecs_utf_32_le_encode);
+    insert_codec_fn!("utf_32_le_decode", helpers::_codecs_utf_32_le_decode);
+    insert_codec_fn!("utf_32_be_encode", helpers::_codecs_utf_32_be_encode);
+    insert_codec_fn!("utf_32_be_decode", helpers::_codecs_utf_32_be_decode);
+    insert_codec_fn!("utf_32_ex_decode", helpers::_codecs_utf_32_ex_decode);
     d.insert_str(
         "charmap_encode",
         PyObjectRef::new(PyObject::BuiltinFunction {

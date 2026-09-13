@@ -76,8 +76,15 @@ pub fn tiw_delegate_with_vm(
     // `close()` must be a no-op (not an error) on an already-closed file,
     // and `name`/`mode` never called `io_ensure_open` either — match the
     // original per-method behavior exactly.
-    if method != "close" && method != "name" && method != "mode" {
+    if method != "close" && method != "name" && method != "mode" && method != "mode_setter" {
         crate::modules::dev::io_ensure_open(args)?;
+    }
+    if method == "mode_setter" {
+        let value = args.get(1).cloned().unwrap_or_else(py_none);
+        if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+            dict.insert_str("_mode_override", value);
+        }
+        return Ok(py_none());
     }
     let raw = crate::modules::dev::io_get_raw(args)?;
     match method {
@@ -96,6 +103,24 @@ pub fn tiw_delegate_with_vm(
                 return Ok(py_str(&String::from_utf8_lossy(&b[..])));
             }
             Ok(data)
+        }
+        "__next__" => {
+            let data = crate::object::call_method_rebound(vm, &raw, "readline", vec![py_int(-1)])?;
+            let s = if let PyObject::Bytes(ref b) = &*data.borrow() {
+                py_str(&String::from_utf8_lossy(&b[..]))
+            } else {
+                data.clone()
+            };
+            let is_empty = match &*s.borrow() {
+                PyObject::Str(st) => st.is_empty(),
+                PyObject::Bytes(b) => b.is_empty(),
+                _ => false,
+            };
+            if is_empty {
+                Err(PyError::StopIteration)
+            } else {
+                Ok(s)
+            }
         }
         "readlines" => {
             // Needed by linecache (traceback source lines) via
@@ -181,7 +206,22 @@ pub fn tiw_delegate_with_vm(
             Ok(py_none())
         }
         "name" => crate::object::call_method_rebound(vm, &raw, "name", vec![]),
-        "mode" => crate::object::call_method_rebound(vm, &raw, "mode", vec![]),
+        "mode" => {
+            // Real CPython's `_io.TextIOWrapper.mode` is a PLAIN settable
+            // attribute, not a read-only property — `tokenize.open()`
+            // (vendored verbatim from CPython) does `text.mode = 'r'`
+            // right after construction (test_linecache.py's traceback
+            // source-line lookups go through it, so every call failed
+            // with AttributeError before this). Check for a
+            // previously-stored override first; otherwise delegate to the
+            // raw buffer's own mode as before.
+            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                if let Some(v) = dict.get_str("_mode_override") {
+                    return Ok(v.clone());
+                }
+            }
+            crate::object::call_method_rebound(vm, &raw, "mode", vec![])
+        }
         _ => Err(PyError::runtime_error("unknown TextIOWrapper delegate method")),
     }
 }
@@ -873,6 +913,29 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             } else {
                 String::new()
             };
+            // Cached "is this buffer pure ASCII" flag, recomputed only when
+            // the buffer's CONTENTS actually change (`write`/`truncate`),
+            // never on every read. Without this, `readline`/`__next__`
+            // materialized the ENTIRE buffer into a fresh `Vec<char>` on
+            // EVERY SINGLE CALL just to walk it one line at a time — for a
+            // large buffer read line-by-line (`for line in io.StringIO(...)`,
+            // exactly what `configparser.read_string()` does), that's
+            // O(total length) work repeated once per line, i.e. O(n^2)
+            // overall for n lines. Confirmed real: `test_configparser.py`'s
+            // `test_combine_error_linear_complexity` (a 50000-line
+            // `ConfigParser.read_string()`) went from "completes in ~35s
+            // for the whole file" to a 60s timeout the moment an unrelated
+            // fix (a spurious `PyDict` "changed size during iteration"
+            // error, see `pydict.rs`) stopped masking this by making the
+            // parse fail fast instead of actually running to completion.
+            // For the overwhelmingly common ASCII case, byte offset ==
+            // char offset, so `readline`/`__next__` can scan the
+            // underlying `str`'s bytes directly from the current position
+            // to the next `\n` — O(that line's length), not O(everything
+            // read so far) — without materializing anything. Falls back to
+            // the original full `Vec<char>` walk, unchanged, for any
+            // buffer containing non-ASCII content.
+            let is_ascii_cache = Rc::new(RefCell::new(initial_value.is_ascii()));
             let buffer = Rc::new(RefCell::new(initial_value));
             let pos = Rc::new(RefCell::new(0usize));
             let mut type_dict = HashMap::new();
@@ -919,10 +982,31 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             );
 
             // readline(size=-1) — up to and including the next '\n', or EOF.
-            let (b, p) = (buffer.clone(), pos.clone());
+            let (b, p, ascii_flag) = (buffer.clone(), pos.clone(), is_ascii_cache.clone());
             type_dict.insert_str(
                 "readline",
                 PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
+                    if *ascii_flag.borrow() {
+                        let data = b.borrow();
+                        let bytes = data.as_bytes();
+                        let start = (*p.borrow()).min(bytes.len());
+                        let limit = opt_size(args, 0)
+                            .map(|n| (start + n as usize).min(bytes.len()))
+                            .unwrap_or(bytes.len());
+                        let mut end = start;
+                        while end < limit {
+                            if bytes[end] == b'\n' {
+                                end += 1;
+                                break;
+                            }
+                            end += 1;
+                        }
+                        *p.borrow_mut() = end;
+                        // Safe: pure-ASCII buffer, so any byte range is a
+                        // valid UTF-8 boundary.
+                        let s = std::str::from_utf8(&bytes[start..end]).unwrap().to_string();
+                        return Ok(py_str(&s));
+                    }
                     let chars: Vec<char> = b.borrow().chars().collect();
                     let start = (*p.borrow()).min(chars.len());
                     let limit = opt_size(args, 0)
@@ -945,7 +1029,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             // buffer if writing past its current end), then advance position
             // by the written length. Matches real `StringIO.write`'s
             // "positioned write", not a plain append.
-            let (b, p) = (buffer.clone(), pos.clone());
+            let (b, p, ascii_flag) = (buffer.clone(), pos.clone(), is_ascii_cache.clone());
             type_dict.insert_str(
                 "write",
                 PyObjectRef::new(PyObject::Closure(Rc::new(
@@ -968,7 +1052,9 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                         } else {
                             chars.splice(start..end, new_chars.iter().cloned());
                         }
-                        *b.borrow_mut() = chars.into_iter().collect();
+                        let new_buf: String = chars.into_iter().collect();
+                        *ascii_flag.borrow_mut() = new_buf.is_ascii();
+                        *b.borrow_mut() = new_buf;
                         *p.borrow_mut() = end;
                         Ok(py_int(text.chars().count() as i64))
                     },
@@ -1023,7 +1109,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             // truncate(size=None) — cut the buffer at `size` chars (current
             // position if omitted); does NOT move the current position (matches
             // real `io.StringIO.truncate`).
-            let (b, p) = (buffer.clone(), pos.clone());
+            let (b, p, ascii_flag) = (buffer.clone(), pos.clone(), is_ascii_cache.clone());
             type_dict.insert_str(
                 "truncate",
                 PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
@@ -1033,7 +1119,9 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                         .unwrap_or(*p.borrow())
                         .min(chars.len());
                     chars.truncate(size);
-                    *b.borrow_mut() = chars.into_iter().collect();
+                    let new_buf: String = chars.into_iter().collect();
+                    *ascii_flag.borrow_mut() = new_buf.is_ascii();
+                    *b.borrow_mut() = new_buf;
                     Ok(py_int(size as i64))
                 }))),
             );
@@ -1085,10 +1173,29 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                     },
                 }),
             );
-            let (b, p) = (buffer.clone(), pos.clone());
+            let (b, p, ascii_flag) = (buffer.clone(), pos.clone(), is_ascii_cache.clone());
             type_dict.insert_str(
                 "__next__",
                 PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+                    if *ascii_flag.borrow() {
+                        let data = b.borrow();
+                        let bytes = data.as_bytes();
+                        let start = (*p.borrow()).min(bytes.len());
+                        if start >= bytes.len() {
+                            return Err(PyError::StopIteration);
+                        }
+                        let mut end = start;
+                        while end < bytes.len() {
+                            if bytes[end] == b'\n' {
+                                end += 1;
+                                break;
+                            }
+                            end += 1;
+                        }
+                        *p.borrow_mut() = end;
+                        let s = std::str::from_utf8(&bytes[start..end]).unwrap().to_string();
+                        return Ok(py_str(&s));
+                    }
                     let chars: Vec<char> = b.borrow().chars().collect();
                     let start = (*p.borrow()).min(chars.len());
                     if start >= chars.len() {
@@ -1210,6 +1317,68 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         ] {
             td.insert(name.into(), bf(name, tiw_delegate_marker));
         }
+        // `__iter__`/`__next__` — `TextIOWrapper` (and thus any file opened
+        // in text mode) must support `for line in fp:`. Missing entirely
+        // before (`TypeError: 'TextIOWrapper' object is not iterable`),
+        // breaking `linecache`/`tokenize`-based source retrieval
+        // (test_linecache.py's `test_getline` iterates a real file handle
+        // directly). `__next__` delegates to the same `readline` path as
+        // the explicit method, raising `StopIteration` on an empty read
+        // (EOF) exactly like real Python's file iterator protocol.
+        td.insert("__iter__".into(), bf("__iter__", |args: &[PyObjectRef]| {
+            args.first().cloned().ok_or_else(|| {
+                PyError::type_error("__iter__() missing 1 required positional argument: 'self'")
+            })
+        }));
+        // `__next__` deliberately does NOT go through `tiw_delegate_marker`
+        // (unlike `read`/`readline`/...): those all reach `call.rs`'s
+        // interception through a live bytecode `CALL`, which holds the real
+        // `&mut VirtualMachine` to pass through. `__next__` is different —
+        // it is ALSO invoked from plain `fn(&[PyObjectRef])` builtins with
+        // no VM at all (`builtin_next`'s `Instance` branch calls the raw
+        // dunder function pointer directly; `enumerate()`/`zip()`/`list()`
+        // etc. all route through that same vm-less `builtin_next`). Reusing
+        // the marker there would hit "delegate marker reached directly"
+        // (test_linecache.py's `for line in fp:` inside `enumerate(fp)`).
+        // So this calls the raw buffer's `readline` via the plain,
+        // vm-free `builtin_call` instead of `call_method_rebound` — this
+        // loses `call_method_rebound`'s "resolve a Python-subclass's
+        // overridden readline" support, but the raw object here is always
+        // this module's own native `FileIO`/`BufferedReader`/`BytesIO`
+        // (never user Python subclasses in the tested paths), whose
+        // `readline` is itself a plain `Closure`/`BuiltinMethod` needing no
+        // VM either.
+        td.insert("__next__".into(), bf("__next__", |args: &[PyObjectRef]| {
+            crate::modules::dev::io_ensure_open(args)?;
+            let raw = crate::modules::dev::io_get_raw(args)?;
+            let readline = raw.borrow().get_attribute("readline")?;
+            let bound = match &*readline.borrow() {
+                PyObject::BuiltinMethod { func, name, self_obj } if matches!(&*self_obj.borrow(), PyObject::None) => {
+                    PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: name.clone(),
+                        func: *func,
+                        self_obj: raw.clone(),
+                    })
+                }
+                _ => readline.clone(),
+            };
+            let data = crate::object::builtin_call(&bound, &[py_int(-1)])?;
+            let s = if let PyObject::Bytes(ref b) = &*data.borrow() {
+                py_str(&String::from_utf8_lossy(&b[..]))
+            } else {
+                data.clone()
+            };
+            let is_empty = match &*s.borrow() {
+                PyObject::Str(st) => st.is_empty(),
+                PyObject::Bytes(b) => b.is_empty(),
+                _ => false,
+            };
+            if is_empty {
+                Err(PyError::StopIteration)
+            } else {
+                Ok(s)
+            }
+        }));
         td.insert("reconfigure".into(), bf("reconfigure", |_a| Ok(py_none())));
         td.insert("readable".into(), bf("readable", |_a| Ok(py_bool(true))));
         td.insert("writable".into(), bf("writable", |_a| Ok(py_bool(true))));
@@ -1264,7 +1433,10 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 doc: None,
             }))),
         );
-        // mode — property
+        // mode — property. Real CPython's `TextIOWrapper.mode` is a plain
+        // settable attribute (see `tiw_delegate_with_vm`'s "mode"/
+        // "mode_setter" branches for why this needs a real setter, not
+        // `None` — found via `tokenize.open()`'s `text.mode = 'r'`).
         td.insert(
             "mode".into(),
             PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
@@ -1272,7 +1444,10 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                     name: "mode".to_string(),
                     func: tiw_delegate_marker,
                 })),
-                setter: None,
+                setter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "mode_setter".to_string(),
+                    func: tiw_delegate_marker,
+                })),
                 deleter: None,
                 doc: None,
             }))),

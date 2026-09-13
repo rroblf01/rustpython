@@ -2,6 +2,94 @@
 use crate::object::*;
 use super::*;
 use crate::interner;
+use std::cell::RefCell;
+use num_traits::ToPrimitive;
+
+fn code_replace_get_kwarg(kwargs: &Option<PyObjectRef>, name: &str) -> Option<PyObjectRef> {
+    kwargs.as_ref().and_then(|d| {
+        if let PyObject::Dict(d) = &*d.borrow() {
+            d.get(&py_str(name)).ok().flatten()
+        } else {
+            None
+        }
+    })
+}
+
+pub(crate) fn code_replace(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let self_obj = args.first().ok_or_else(|| {
+        PyError::type_error("code.replace() missing self")
+    })?;
+    let kwargs: Option<PyObjectRef> = match args.get(1) {
+        Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => Some(last.clone()),
+        _ => None,
+    };
+    let orig = match &*self_obj.borrow() {
+        PyObject::Code(c) => (**c).clone(),
+        _ => return Err(PyError::type_error("replace() self must be a code object")),
+    };
+    let mut new_code = orig;
+
+    macro_rules! str_field {
+        ($key:expr, $field:ident) => {
+            if let Some(v) = code_replace_get_kwarg(&kwargs, $key) {
+                new_code.$field = crate::interner::intern(&v.str());
+            }
+        };
+    }
+    macro_rules! usize_field {
+        ($key:expr, $field:ident) => {
+            if let Some(v) = code_replace_get_kwarg(&kwargs, $key) {
+                if let PyObject::Int(n) = &*v.borrow() {
+                    new_code.$field = n.to_usize().unwrap_or(0);
+                }
+            }
+        };
+    }
+
+    str_field!("co_filename", filename);
+    str_field!("co_name", name);
+    usize_field!("co_argcount", arg_count);
+    usize_field!("co_posonlyargcount", posonlyarg_count);
+    usize_field!("co_kwonlyargcount", kwonlyarg_count);
+    usize_field!("co_nlocals", nlocals);
+    usize_field!("co_firstlineno", first_lineno);
+    if let Some(v) = code_replace_get_kwarg(&kwargs, "co_flags") {
+        if let PyObject::Int(n) = &*v.borrow() {
+            new_code.flags = n.to_usize().unwrap_or(0) as u16;
+        }
+    }
+    if let Some(v) = code_replace_get_kwarg(&kwargs, "co_varnames") {
+        if let PyObject::Tuple(items) = &*v.borrow() {
+            new_code.varnames = items
+                .iter()
+                .map(|s| crate::interner::intern(&s.str()))
+                .collect();
+        }
+    }
+    if let Some(v) = code_replace_get_kwarg(&kwargs, "co_names") {
+        if let PyObject::Tuple(items) = &*v.borrow() {
+            new_code.names = items
+                .iter()
+                .map(|s| crate::interner::intern(&s.str()))
+                .collect();
+        }
+    }
+    if let Some(v) = code_replace_get_kwarg(&kwargs, "co_consts") {
+        if let PyObject::Tuple(items) = &*v.borrow() {
+            new_code.consts = items
+                .iter()
+                .map(|item| crate::bytecode::ConstValue::Object(item.clone()))
+                .collect();
+        }
+    }
+    // Any lazily-populated per-const parse cache from the original code
+    // object is invalid once `consts` may have changed — reset it so
+    // `LOAD_CONST` re-derives fresh entries against the NEW `consts` vec
+    // instead of serving stale cached values at the old indices.
+    new_code.const_cache = RefCell::new(vec![None; new_code.consts.len()]);
+
+    Ok(PyObjectRef::imm(PyObject::Code(std::rc::Rc::new(new_code))))
+}
 
 pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
     match o {
@@ -80,6 +168,18 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     "__closure__" => Ok(dict.get("__closure__").cloned().unwrap_or(py_none())),
                     "__module__" => Ok(dict.get("__module__").cloned().unwrap_or(py_none())),
                     "__annotations__" => {
+                        // A directly-assigned value (`func.__annotations__ =
+                        // {...}`) must win over whatever `__annotate__` would
+                        // lazily compute — real CPython's `__annotations__`
+                        // is a plain settable attribute, and code like
+                        // `functools.update_wrapper` does exactly this
+                        // (`setattr(wrapper, '__annotations__', value)`).
+                        // Previously this fell straight through to the
+                        // `__annotate__`/shared-empty-dict logic below and
+                        // silently ignored any explicit assignment.
+                        if let Some(v) = dict.get_str("__annotations__").cloned() {
+                            return Ok(v);
+                        }
                         // PEP 649: calling `__annotate__` lazily computes the
                         // annotations dict (undefined names fail only on
                         // first access). Cache per function (keyed by the
@@ -614,6 +714,117 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             .filter_map(|cv| crate::vm::eval_const_value(cv.clone()).ok())
                             .collect(),
                     )),
+                    "co_cellvars" => Ok(py_tuple(
+                        c.cellvars.iter().map(|v| py_str(v)).collect(),
+                    )),
+                    "co_freevars" => Ok(py_tuple(
+                        c.freevars.iter().map(|v| py_str(v)).collect(),
+                    )),
+                    // `types.CodeType.replace(**changes)` — returns a copy of
+                    // the code object with the given fields overridden.
+                    // Missing entirely before (AttributeError), breaking any
+                    // introspection/rewriting code that walks and rebuilds
+                    // `__code__` (test_listcomps.py's `test_code_replace`,
+                    // which recursively rewrites `co_consts` for nested code
+                    // objects). `BuiltinMethod`'s calling convention packs
+                    // kwargs as a trailing dict (see CLAUDE.md gotchas), so
+                    // this only ever receives `[self, kwargs_dict?]`.
+                    "replace" => {
+                        let code_rc = c.clone();
+                        Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                            name: "replace".to_string(),
+                            func: code_replace,
+                            self_obj: PyObjectRef::new(PyObject::Code(code_rc)),
+                        }))
+                    }
+                    "co_qualname" => Ok(py_str(crate::interner::lookup_str(c.name))),
+                    // `co_lines()` — a *method* (not a plain attribute)
+                    // since CPython 3.10 replacing the old `co_lnotab`
+                    // bytes blob: returns an iterator of
+                    // `(start_byte, end_byte, line)` triples over
+                    // `co_code`. Missing entirely before (`AttributeError`
+                    // on every call — real trigger: `test_compile.py`
+                    // reading `[line for _, _, line in co.co_lines()]`).
+                    // Byte offsets here use the same "2 bytes per
+                    // instruction" convention as the `co_code` synthesis
+                    // below so the two stay consistent; consecutive
+                    // instructions sharing a line number are coalesced
+                    // into a single triple, matching real CPython's
+                    // behavior of one entry per contiguous same-line run
+                    // rather than one entry per instruction.
+                    "co_lines" => {
+                        let lines = c.line_numbers.clone();
+                        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                            move |_args: &[PyObjectRef]| {
+                                let mut triples = Vec::new();
+                                let mut i = 0usize;
+                                while i < lines.len() {
+                                    let line = lines[i];
+                                    let start = i;
+                                    let mut j = i + 1;
+                                    while j < lines.len() && lines[j] == line {
+                                        j += 1;
+                                    }
+                                    if line != 0 {
+                                        triples.push(py_tuple(vec![
+                                            py_int((start * 2) as i64),
+                                            py_int((j * 2) as i64),
+                                            py_int(line as i64),
+                                        ]));
+                                    }
+                                    i = j;
+                                }
+                                Ok(py_list(triples))
+                            },
+                        ))))
+                    }
+                    // This VM's bytecode isn't CPython's actual wordcode
+                    // format, so there's no real "true" `co_code` bytes to
+                    // return — but real code (`test_compile.py`'s
+                    // `co_lines()`/dis-adjacent introspection, `dis.dis`
+                    // fallbacks, etc.) just needs *some* `bytes` object of
+                    // a length consistent with `co_lines()`'s reported byte
+                    // ranges, not byte-identical CPython opcodes. Each of
+                    // this VM's instructions is represented as one 2-byte
+                    // (opcode, arg-low-byte) pair, matching CPython
+                    // 3.11+'s fixed 2-byte instruction width, so
+                    // `len(co_code) == 2 * len(instructions)` stays
+                    // internally consistent with the offsets `co_lines()`
+                    // hands out below.
+                    "co_code" => {
+                        let mut bytes = Vec::with_capacity(c.instructions.len() * 2);
+                        for instr in &c.instructions {
+                            bytes.push(instr.op as u8);
+                            bytes.push((instr.arg & 0xff) as u8);
+                        }
+                        Ok(PyObjectRef::imm(PyObject::Bytes(bytes)))
+                    }
+                    // Best-effort operand-stack depth estimate: this VM
+                    // doesn't compute or enforce a fixed max stack size
+                    // (its stack is just a growable `Vec`), so there was no
+                    // real value to report here at all — real trigger:
+                    // `test_compile.py` reading `code.co_stacksize`
+                    // directly, `AttributeError` on every access. Walk the
+                    // instructions with a coarse per-opcode net stack
+                    // effect (most opcodes: push 1 and pop `nargs`-ish;
+                    // unrecognized/control-flow opcodes assumed net-zero)
+                    // and report the running peak, floored at 1 — approximate,
+                    // not CPython-bit-exact, but a real, non-crashing value
+                    // in the right ballpark rather than a hardcoded constant.
+                    "co_stacksize" => {
+                        let mut depth: i64 = 0;
+                        let mut peak: i64 = 1;
+                        for instr in c.instructions.iter() {
+                            depth += crate::bytecode::stack_effect(instr.op, instr.arg);
+                            if depth < 0 {
+                                depth = 0;
+                            }
+                            if depth > peak {
+                                peak = depth;
+                            }
+                        }
+                        Ok(py_int(peak))
+                    }
                     _ => Err(PyError::attribute_error(format!(
                         "'code' object has no attribute '{}'",
                         name

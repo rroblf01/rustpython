@@ -106,6 +106,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     "tolist" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "tolist".to_string(),
                         func: |args| {
+                            if args.len() != 1 {
+                                return Err(PyError::type_error(format!(
+                                    "tolist() takes no arguments ({} given)",
+                                    args.len() - 1
+                                )));
+                            }
                             if let PyObject::Array(arr) = &*args[0].borrow() {
                                 let is_float = array_typecode_is_float(arr.typecode);
                                 let items: Vec<PyObjectRef> = arr
@@ -134,13 +140,21 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     "append() takes exactly one argument",
                                 ));
                             }
-                            let v = if array_typecode_is_float(match &*args[0].borrow() {
+                            let is_float = array_typecode_is_float(match &*args[0].borrow() {
                                 PyObject::Array(a) => a.typecode,
                                 _ => 'B',
-                            }) {
-                                args[1].as_f64().unwrap_or(0.0)
+                            });
+                            let v = if is_float {
+                                args[1].as_f64().ok_or_else(|| {
+                                    PyError::type_error("must be real number, not str")
+                                })?
                             } else {
-                                args[1].as_i64().unwrap_or(0) as f64
+                                if args[1].as_i64().is_none() {
+                                    return Err(PyError::type_error(
+                                        "integer argument expected, got float",
+                                    ));
+                                }
+                                args[1].as_i64().unwrap() as f64
                             };
                             if let PyObject::Array(arr) = &mut *args[0].borrow_mut() {
                                 arr.data.push(v);

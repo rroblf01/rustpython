@@ -19,14 +19,35 @@ impl Compiler {
                 {
                     let idx = self.get_name_index(name) as u32;
                     self.emit(Opcode::STORE_NAME, idx);
+                } else if self.scope == ScopeType::Function && self.code.freevars.contains(name) {
+                    // Free variable (nonlocal): use STORE_DEREF. Checked
+                    // BEFORE cellvars — a name relayed from an enclosing
+                    // scope that this function also re-exposes as a
+                    // cellvar purely so something nested inside IT can
+                    // close over it (see `analyze_function`'s cell_vars
+                    // doc comment, and the matching "check freevars first"
+                    // comment in `function.rs`'s closure-building code)
+                    // lands in BOTH `cellvars` and `freevars` here — but
+                    // only the freevar slot holds the REAL cell received
+                    // via our own closure; the cellvar slot is a fresh,
+                    // separate, never-shared cell `MAKE_CELL` created at
+                    // this scope's own start. Checking `cellvars` first
+                    // (the previous order) wrote through that fresh, dead
+                    // cell instead of the shared one threaded down to any
+                    // deeper nested function — so a 3-level `nonlocal`
+                    // chain (`f` -> `g` -> `h`, all declaring `nonlocal x`)
+                    // silently dropped `g`'s own mutation of `x`: `h` never
+                    // observed it, because `h`'s closure was built from
+                    // `g`'s freevar cell while `g` itself wrote to the
+                    // unrelated cellvar cell. Matches the read-side
+                    // ordering in `expr.rs`'s `Expr::Name` arm, which
+                    // already checked freevars first.
+                    let fv_idx = self.code.freevars.iter().position(|n| n == name).unwrap();
+                    let idx = (self.code.cellvars.len() + fv_idx) as u32;
+                    self.emit(Opcode::STORE_DEREF, idx);
                 } else if self.scope == ScopeType::Function && self.code.cellvars.contains(name) {
                     // Cell variable: use STORE_DEREF
                     let idx = self.code.cellvars.iter().position(|n| n == name).unwrap() as u32;
-                    self.emit(Opcode::STORE_DEREF, idx);
-                } else if self.scope == ScopeType::Function && self.code.freevars.contains(name) {
-                    // Free variable (nonlocal): use STORE_DEREF
-                    let fv_idx = self.code.freevars.iter().position(|n| n == name).unwrap();
-                    let idx = (self.code.cellvars.len() + fv_idx) as u32;
                     self.emit(Opcode::STORE_DEREF, idx);
                 } else {
                     let idx = self.add_varname(name) as u32;

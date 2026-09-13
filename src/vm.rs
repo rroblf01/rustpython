@@ -185,7 +185,7 @@ impl VirtualMachine {
             vm.install_source_defined_stdlib(
                 "functools",
                 crate::modules::FUNCTOOLS_EXTRA_SOURCE,
-                &["lru_cache", "cache", "cached_property"],
+                &["lru_cache", "cache", "cached_property", "update_wrapper", "wraps", "WRAPPER_ASSIGNMENTS", "WRAPPER_UPDATES"],
             );
             vm.install_source_defined_stdlib(
                 "enum",
@@ -574,7 +574,7 @@ impl VirtualMachine {
         vm.install_source_defined_stdlib(
             "functools",
             crate::modules::FUNCTOOLS_EXTRA_SOURCE,
-            &["lru_cache", "cache", "cached_property"],
+            &["lru_cache", "cache", "cached_property", "update_wrapper", "wraps", "WRAPPER_ASSIGNMENTS", "WRAPPER_UPDATES"],
         );
         vm.install_source_defined_stdlib(
             "enum",

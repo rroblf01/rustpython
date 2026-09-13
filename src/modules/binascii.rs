@@ -256,11 +256,9 @@ pub fn create_binascii_dict() -> HashMap<String, PyObjectRef> {
         }
         let data = if let Some(b) = arg_bytes(&args[0]) {
             b
-        } else if let PyObject::Str(s) = &*args[0].borrow() {
-            s.as_bytes().to_vec()
         } else {
             return Err(PyError::type_error(
-                "argument must be bytes, bytearray, or str",
+                "a bytes-like object is required, not 'str'",
             ));
         };
         // Optional `sep`/`bytes_per_sep` (real CPython 3.8+

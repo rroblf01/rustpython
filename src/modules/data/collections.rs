@@ -137,22 +137,42 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
                     }
                     let backing = crate::object::native_backing_of(&args[0])
                         .ok_or_else(|| PyError::runtime_error("OrderedDict.__repr__ on non-OD"))?;
+                    // Real CPython (`Lib/collections/__init__.py`'s
+                    // `OrderedDict.__repr__`): `'%s(%r)' % (type(self).__name__,
+                    // dict(self.items()))` — a plain `{k: v, ...}` dict repr
+                    // wrapped in the class name, NOT the `[(k, v), ...]`
+                    // list-of-pairs form (that form is only what `pprint`'s
+                    // OWN separate `_pprint_ordered_dict` dispatch produces —
+                    // see `Lib/pprint.py` — a distinct code path from `repr()`
+                    // itself).
+                    let class_name = if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+                        if let PyObject::Type { name, .. } = &*typ.borrow() {
+                            name.clone()
+                        } else {
+                            "OrderedDict".to_string()
+                        }
+                    } else {
+                        "OrderedDict".to_string()
+                    };
+                    let is_empty = {
+                        let b = backing.borrow();
+                        matches!(&*b, PyObject::Dict(d) if d.len() == 0)
+                    };
+                    if is_empty {
+                        return Ok(py_str(&format!("{}()", class_name)));
+                    }
                     let items: Vec<String> = {
                         let b = backing.borrow();
                         match &*b {
                             PyObject::Dict(d) => d
                                 .items()
                                 .iter()
-                                .map(|(k, v)| format!("({}, {})", k.repr(), v.repr()))
+                                .map(|(k, v)| format!("{}: {}", k.repr(), v.repr()))
                                 .collect(),
                             _ => Vec::new(),
                         }
                     };
-                    if items.is_empty() {
-                        Ok(py_str("OrderedDict()"))
-                    } else {
-                        Ok(py_str(&format!("OrderedDict([{}])", items.join(", "))))
-                    }
+                    Ok(py_str(&format!("{}({{{}}})", class_name, items.join(", "))))
                 },
             }),
         );
@@ -248,6 +268,108 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
                     } else {
                         Err(PyError::runtime_error("OrderedDict has no dict"))
                     }
+                },
+            }),
+        );
+        od_dict.insert_str(
+            "fromkeys",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "fromkeys".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    if args.is_empty() {
+                        return Err(PyError::type_error("fromkeys() takes at least 1 argument"));
+                    }
+                    let keys = crate::object::collect_iterable(&args[0])?;
+                    let value = args.get(1).cloned().unwrap_or_else(py_none);
+                    let dict = crate::object::py_dict();
+                    if let PyObject::Dict(d) = &mut *dict.borrow_mut() {
+                        for k in keys {
+                            d.set(k, value.clone())?;
+                        }
+                    }
+                    let typ = OD_TYPE.with(|c| c.borrow().clone()).ok_or_else(|| {
+                        PyError::runtime_error("OrderedDict type not initialized")
+                    })?;
+                    let backing = match &*dict.borrow() {
+                        PyObject::Dict(d) => PyObjectRef::new(PyObject::Dict(d.clone())),
+                        _ => unreachable!(),
+                    };
+                    let mut attrs = crate::object::AttrMap::new();
+                    attrs.insert(crate::object::NATIVE_BACKING_KEY.to_string(), backing);
+                    Ok(PyObjectRef::new(PyObject::Instance { typ, dict: attrs }))
+                },
+            }),
+        );
+        od_dict.insert_str(
+            "popitem",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "popitem".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    // args: [self, last?] — `last` may arrive as a plain
+                    // positional bool or packed as a trailing kwargs dict
+                    // (see the kwargs-packing gotcha in CLAUDE.md).
+                    let mut last = true;
+                    if args.len() > 1 {
+                        let extra = &args[1];
+                        if let PyObject::Dict(d) = &*extra.borrow() {
+                            if let Ok(Some(v)) = d.get(&py_str("last")) {
+                                last = v.truthy();
+                            }
+                        } else {
+                            last = extra.truthy();
+                        }
+                    }
+                    let b = od_backing(args)?;
+                    let mut inner = b.borrow_mut();
+                    if let PyObject::Dict(d) = &mut *inner {
+                        let items = d.items();
+                        if items.is_empty() {
+                            return Err(PyError::key_error(
+                                "'popitem(): dictionary is empty'".to_string(),
+                            ));
+                        }
+                        let (k, v) = if last {
+                            items[items.len() - 1].clone()
+                        } else {
+                            items[0].clone()
+                        };
+                        d.remove(&k)?;
+                        Ok(py_tuple(vec![k, v]))
+                    } else {
+                        Err(PyError::runtime_error("OrderedDict has no dict"))
+                    }
+                },
+            }),
+        );
+        od_dict.insert_str(
+            "__reduce__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__reduce__".to_string(),
+                func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    let b = od_backing(args)?;
+                    let items: Vec<PyObjectRef> = {
+                        let inner = b.borrow();
+                        if let PyObject::Dict(d) = &*inner {
+                            d.items()
+                                .into_iter()
+                                .map(|(k, v)| py_tuple(vec![k, v]))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        }
+                    };
+                    let typ = if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+                        typ.clone()
+                    } else {
+                        OD_TYPE.with(|c| c.borrow().clone()).ok_or_else(|| {
+                            PyError::runtime_error("OrderedDict type not initialized")
+                        })?
+                    };
+                    let items_list = PyObjectRef::new(PyObject::List(items));
+                    Ok(py_tuple(vec![
+                        typ,
+                        py_tuple(vec![items_list]),
+                    ]))
                 },
             }),
         );

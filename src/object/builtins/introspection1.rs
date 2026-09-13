@@ -369,6 +369,25 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 names.push(py_str(n));
             }
         }
+        // Custom attributes set on a function (`f.known_attr = 7`) — and,
+        // reached through a bound method, on its underlying function —
+        // must show up in `dir()`. Previously fell through to the `_ => {}`
+        // catch-all below, so `dir()` only ever reported `__class__`/
+        // `__dir__` for functions/methods no matter what was assigned onto
+        // them (real trigger: test_funcattrs.py's
+        // test_dir_includes_correct_attrs).
+        PyObject::Function(f) => {
+            for key in f.dict.keys() {
+                names.push(py_str(key));
+            }
+        }
+        PyObject::BoundMethod { func, .. } => {
+            if let PyObject::Function(f) = &*func.borrow() {
+                for key in f.dict.keys() {
+                    names.push(py_str(key));
+                }
+            }
+        }
         _ => {}
     }
     // Add basic attributes for all types EXCEPT modules — real
@@ -768,6 +787,28 @@ pub fn call_bound_method(
             let mut all = vec![self_obj.clone()];
             all.extend(args);
             crate::object::call_function_disposable(&func, all, vec![])
+        }
+        // A plain `Instance` used as a `key=`/callback value passed to a
+        // native higher-order builtin through this same "prepend self_obj,
+        // call" convention (real trigger: `operator.itemgetter`/
+        // `attrgetter`/`methodcaller` are real `Type`-backed `Instance`s,
+        // not `Closure`s, so they carry no arm here at all — `sorted(data,
+        // key=itemgetter(1, 0))`/`heapq.merge(..., key=itemgetter(...))`
+        // raised `TypeError: object is not callable` the moment the
+        // itemgetter/attrgetter rewrite gave them real `repr`/`pickle`
+        // support). Look up `__call__` via the type's MRO and dispatch
+        // through the same "prepend self, call" shape as the
+        // `BuiltinFunction`/`Closure`/`Function` arms above — `func` itself
+        // (the Instance) becomes the found `__call__`'s own `self`.
+        PyObject::Instance { typ, .. } => {
+            match crate::object::lookup_dunder_via_mro(typ, "__call__") {
+                Some(call_fn) => {
+                    let mut all = vec![self_obj];
+                    all.extend(args);
+                    call_bound_method(call_fn, func.clone(), all)
+                }
+                None => Err(PyError::type_error("object is not callable")),
+            }
         }
         _ => Err(PyError::type_error("object is not callable")),
     }

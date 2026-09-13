@@ -126,81 +126,13 @@ pub fn create_functools_dict() -> HashMap<String, PyObjectRef> {
         }))
     });
 
-    ft_func!("update_wrapper", |args| {
-        if args.len() < 2 {
-            return Err(PyError::type_error(
-                "update_wrapper() requires at least 2 arguments",
-            ));
-        }
-        let wrapper = args[0].clone();
-        let wrapped = args[1].clone();
-        let attrs = [
-            "__module__",
-            "__name__",
-            "__qualname__",
-            "__doc__",
-            "__annotations__",
-            "__dict__",
-        ];
-        for attr in &attrs {
-            if let Ok(val) = wrapped.borrow().get_attribute(attr) {
-                let _ = wrapper.borrow_mut().set_attribute(attr, val);
-            }
-        }
-        let _ = wrapper
-            .borrow_mut()
-            .set_attribute("__wrapped__", wrapped.clone());
-        for attr in &["__defaults__", "__kwdefaults__", "__code__", "__globals__"] {
-            if let Ok(val) = wrapped.borrow().get_attribute(attr) {
-                let _ = wrapper.borrow_mut().set_attribute(attr, val);
-            }
-        }
-        Ok(wrapper)
-    });
-    // `functools.WRAPPER_ASSIGNMENTS`/`WRAPPER_UPDATES` — the attribute
-    // lists `functools.wraps` copies (test_reprlib imports the former).
-    d.insert_str(
-        "WRAPPER_ASSIGNMENTS",
-        py_tuple(vec![
-            py_str("__module__"),
-            py_str("__name__"),
-            py_str("__qualname__"),
-            py_str("__annotations__"),
-            py_str("__doc__"),
-        ]),
-    );
-    d.insert_str("WRAPPER_UPDATES", py_tuple(vec![py_str("__dict__")]));
-    ft_func!("wraps", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error("wraps() requires at least 1 argument"));
-        }
-        let wrapped = args[0].clone();
-        let wrapped_clone = wrapped.clone();
-        let decorator = move |inner_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-            if inner_args.is_empty() {
-                return Err(PyError::type_error("wraps() decorator requires 1 argument"));
-            }
-            let wrapper_fn = inner_args[0].clone();
-            let attrs = [
-                "__module__",
-                "__name__",
-                "__qualname__",
-                "__doc__",
-                "__annotations__",
-                "__dict__",
-            ];
-            for attr in &attrs {
-                if let Ok(val) = wrapped_clone.borrow().get_attribute(attr) {
-                    let _ = wrapper_fn.borrow_mut().set_attribute(attr, val);
-                }
-            }
-            let _ = wrapper_fn
-                .borrow_mut()
-                .set_attribute("__wrapped__", wrapped_clone.clone());
-            Ok(wrapper_fn)
-        };
-        Ok(PyObjectRef::new(PyObject::Closure(Rc::new(decorator))))
-    });
+    // update_wrapper/wraps/WRAPPER_ASSIGNMENTS/WRAPPER_UPDATES: real
+    // implementations installed as Python source — see
+    // VirtualMachine::new_with_args's install_source_defined_stdlib call
+    // and functools_extra.py. The previous native versions here hardcoded a
+    // fixed attribute list and completely ignored the `assigned`/`updated`
+    // parameters (`update_wrapper(wrapper, f, (), ())` still copied
+    // __name__ etc.), breaking test_functools.py's TestUpdateWrapper suite.
     // lru_cache/cache: real implementations installed as Python source —
     // see VirtualMachine::new_with_args's install_source_defined_stdlib
     // call and functools_extra.py. A wrapper needs to support the

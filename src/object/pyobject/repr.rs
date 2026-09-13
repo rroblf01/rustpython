@@ -498,8 +498,31 @@ impl PyObject {
             PyObject::File { name, .. } => format!("<_io.FileIO '{}'>", name),
             PyObject::Socket { .. } => format!("<socket object>"),
             PyObject::Thread(_) => "<Thread>".to_string(),
-            PyObject::Lock(_) => "<lock>".to_string(),
-            PyObject::RLock(_) => "<RLock>".to_string(),
+            // Real CPython: `<locked _thread.lock object at 0x...>` /
+            // `<unlocked _thread.lock object at 0x...>` — was a bare
+            // `"<lock>"` with no locked-state or address at all, failing
+            // `Lib/test/lock_tests.py`'s `test_locked_repr`
+            // (`assertRegex(repr(lock), "<locked .* object (.*)?at .*>")`,
+            // used by both `test_thread.py` and `test_threading.py`).
+            PyObject::Lock(inner_arc) => {
+                let locked = inner_arc
+                    .lock()
+                    .map(|g| g.lock.load(std::sync::atomic::Ordering::SeqCst))
+                    .unwrap_or(false);
+                format!(
+                    "<{} _thread.lock object at 0x{:x}>",
+                    if locked { "locked" } else { "unlocked" },
+                    self as *const PyObject as usize
+                )
+            }
+            PyObject::RLock(inner_arc) => {
+                let locked = inner_arc.lock().map(|g| g.owner.is_some()).unwrap_or(false);
+                format!(
+                    "<{} _thread.RLock object owner=0 count=0 at 0x{:x}>",
+                    if locked { "locked" } else { "unlocked" },
+                    self as *const PyObject as usize
+                )
+            }
             PyObject::Event(_) => "<Event>".to_string(),
             PyObject::ThreadCondition { .. } => "<Condition>".to_string(),
             PyObject::ThreadSemaphore { .. } => "<Semaphore>".to_string(),

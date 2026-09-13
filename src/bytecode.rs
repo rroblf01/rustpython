@@ -198,6 +198,51 @@ pub enum OpGroup {
     Other,
 }
 
+/// Coarse net operand-stack effect (pushes minus pops) of one instruction,
+/// used only for `code.co_stacksize`'s best-effort estimate (see
+/// `src/object/attrs/callable.rs`'s `"co_stacksize"` case) — this VM's
+/// stack is an unbounded growable `Vec`, not a fixed-size array CPython
+/// needs to presize, so nothing here previously tracked or needed a real
+/// max-depth number at all. Deliberately approximate: groups opcodes by
+/// `Opcode::group()`'s existing coarse categories rather than modeling
+/// every opcode's exact CPython stack effect (`CALL`'s `arg` = argcount,
+/// `BUILD_*`'s `arg` = element count, etc., matching this VM's own
+/// `dispatch.rs` semantics for those groups); anything not recognized nets
+/// to zero, which just makes the estimate a lower bound, not wrong in a
+/// way that could send a caller's naive `Vec` indexing out of bounds.
+pub fn stack_effect(opcode: Opcode, arg: u32) -> i64 {
+    use Opcode::*;
+    match opcode {
+        LOAD_CONST | LOAD_GLOBAL | LOAD_NAME | LOAD_DEREF | GET_ITER | DUP_TOP | COPY => 1,
+        LOAD_FAST => 1,
+        LOAD_ATTR => 0, // pops object, pushes attr (net 0)
+        POP_TOP | STORE_FAST | STORE_NAME | STORE_GLOBAL | STORE_DEREF | DELETE_FAST
+        | DELETE_NAME | DELETE_ATTR | DELETE_SUBSCR | RETURN_VALUE => -1,
+        STORE_ATTR | STORE_SUBSCR => -2,
+        BINARY_OP | COMPARE_OP | CONTAINS_OP | IS_OP => -1,
+        UNARY_NEGATIVE | UNARY_NOT | UNARY_INVERT | UNARY_POSITIVE => 0,
+        CALL => 1 - (arg as i64 + 2).max(0),
+        CALL_FUNCTION_EX => -2,
+        CALL_KW => 1 - (arg as i64 + 3).max(0),
+        PUSH_NULL => 1,
+        BUILD_LIST | BUILD_TUPLE | BUILD_SET | BUILD_STRING => 1 - arg as i64,
+        BUILD_MAP => 1 - 2 * arg as i64,
+        BUILD_SLICE => 1 - arg as i64,
+        LIST_APPEND | SET_ADD => -1,
+        MAP_ADD => -2,
+        LIST_EXTEND | SET_UPDATE => -1,
+        UNPACK_SEQUENCE => arg as i64 - 1,
+        SWAP => 0,
+        JUMP_FORWARD | JUMP_BACKWARD | JUMP => 0,
+        POP_JUMP_IF_FALSE | POP_JUMP_IF_TRUE | POP_JUMP_IF_NONE | POP_JUMP_IF_NOT_NONE => -1,
+        FOR_ITER => 1,
+        YIELD_VALUE | SEND => 0,
+        RAISE_VARARGS => -(arg as i64),
+        RERAISE => 0,
+        _ => 0,
+    }
+}
+
 impl Opcode {
     /// Categorize opcode into a dispatch group for faster matching.
     /// Each group is small enough (5-15 members) that LLVM generates
@@ -826,6 +871,15 @@ fn write_const_value(buf: &mut Vec<u8>, cv: &ConstValue) {
             write_u8(buf, 8);
             write_str_vec(buf, items);
         }
+        // `Object` only ever appears in a code object built at runtime via
+        // `code.replace(co_consts=...)` (see its doc comment) — never in
+        // anything actually compiled from source, so this binary
+        // code-object serialization path (used for e.g. bytecode caching)
+        // never needs to round-trip it faithfully. Degrade to `None`
+        // rather than making this function fallible for every caller.
+        ConstValue::Object(_) => {
+            write_u8(buf, 0);
+        }
     }
 }
 
@@ -926,7 +980,7 @@ fn read_const_value(data: &[u8], pos: &mut usize) -> Result<ConstValue, String> 
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum ConstValue {
     None,
     Bool(bool),
@@ -937,6 +991,40 @@ pub enum ConstValue {
     Bytes(Vec<u8>),
     Code(Box<CodeObject>),
     Tuple(Vec<String>),
+    /// An already-materialized runtime object used directly as a constant.
+    /// Every other variant above is a string/structural literal parsed at
+    /// codegen time; this one exists solely for `code.replace(co_consts=...)`
+    /// (real CPython `types.CodeType.replace`, test_listcomps.py's
+    /// `test_code_replace`), which hands back arbitrary already-evaluated
+    /// `PyObjectRef`s (ints, tuples, nested code objects, ...) that have no
+    /// original source-literal form to re-derive. `PartialEq`/`Eq` can't be
+    /// derived once this variant exists (`PyObjectRef` has no general
+    /// equality outside the VM), so identity (`is`) is used as a
+    /// best-effort fallback below — good enough for `CodeObject`'s own
+    /// structural-equality use (comparing two freshly compiled code objects,
+    /// which never contain this variant).
+    Object(PyObjectRef),
+}
+
+impl PartialEq for ConstValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ConstValue::None, ConstValue::None) => true,
+            (ConstValue::Bool(a), ConstValue::Bool(b)) => a == b,
+            (ConstValue::Int(a), ConstValue::Int(b)) => a == b,
+            (ConstValue::Float(a), ConstValue::Float(b)) => a == b,
+            (
+                ConstValue::Complex { real: ar, imag: ai },
+                ConstValue::Complex { real: br, imag: bi },
+            ) => ar == br && ai == bi,
+            (ConstValue::String(a), ConstValue::String(b)) => a == b,
+            (ConstValue::Bytes(a), ConstValue::Bytes(b)) => a == b,
+            (ConstValue::Code(a), ConstValue::Code(b)) => a == b,
+            (ConstValue::Tuple(a), ConstValue::Tuple(b)) => a == b,
+            (ConstValue::Object(a), ConstValue::Object(b)) => a.is(b),
+            _ => false,
+        }
+    }
 }
 
 impl ConstValue {

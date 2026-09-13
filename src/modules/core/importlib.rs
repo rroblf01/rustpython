@@ -446,12 +446,21 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
     }
 
     // joinpath for traversable: args[0].name + args[1], returns new Traversable
+    // Also doubles as `__truediv__` (the real `importlib.resources.files(...)
+    // / "sub" / "path"` idiom used throughout the stdlib — e.g. ensurepip's
+    // `_get_pip_whl_path_ctx`) since a Traversable supports `/` the same as
+    // `joinpath`. `call_bound_method`'s `BuiltinMethod` arm may pass either
+    // `[self, other]` or a leading placeholder before that, depending on the
+    // call path, so tolerate a 3-arg call by taking the LAST argument as the
+    // child and the second-to-last as self.
     fn trav_joinpath(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if args.len() < 2 {
             return Ok(py_none());
         }
-        let base = mod_name(&args[0]);
-        let child = args[1].str();
+        let self_obj = &args[args.len() - 2];
+        let child_obj = &args[args.len() - 1];
+        let base = mod_name(self_obj);
+        let child = child_obj.str();
         let joined = format!(
             "{}/{}",
             base.trim_end_matches('/'),
@@ -461,12 +470,21 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
             "_Traversable",
             HashMap::from([("name".to_string(), py_str(&joined))]),
         );
-        // Add joinpath as BuiltinMethod with self_obj = trav
+        // Add joinpath (and its `/` alias, __truediv__) as BuiltinMethod
+        // with self_obj = trav
         if let PyObject::Module { dict, .. } = &mut *trav.borrow_mut() {
             dict.insert_str(
                 "joinpath",
                 PyObjectRef::new(PyObject::BuiltinMethod {
                     name: "joinpath".to_string(),
+                    func: trav_joinpath,
+                    self_obj: trav.clone(),
+                }),
+            );
+            dict.insert_str(
+                "__truediv__",
+                PyObjectRef::new(PyObject::BuiltinMethod {
+                    name: "__truediv__".to_string(),
                     func: trav_joinpath,
                     self_obj: trav.clone(),
                 }),
@@ -577,6 +595,14 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
                         "joinpath",
                         PyObjectRef::new(PyObject::BuiltinMethod {
                             name: "joinpath".to_string(),
+                            func: trav_joinpath,
+                            self_obj: trav.clone(),
+                        }),
+                    );
+                    dict.insert_str(
+                        "__truediv__",
+                        PyObjectRef::new(PyObject::BuiltinMethod {
+                            name: "__truediv__".to_string(),
                             func: trav_joinpath,
                             self_obj: trav.clone(),
                         }),

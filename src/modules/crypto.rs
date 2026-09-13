@@ -7,8 +7,247 @@ pub use hmac::create_hmac_dict;
 mod zlib;
 pub use zlib::create_zlib_dict;
 
+/// Real hash-algorithm digest computation shared by the constructors below
+/// and by `hashlib.new()`/the `Hash` object's `.digest()`/`.hexdigest()`.
+/// Algorithm names are matched case-insensitively (real CPython's
+/// `hashlib.new("SHA256")` works, and `.name` normalizes to lowercase).
+fn hashlib_compute_digest(algo: &str, data: &[u8]) -> PyResult<Vec<u8>> {
+    use sha2::digest::Digest as _;
+    Ok(match algo {
+        "md5" => md5::Md5::digest(data).to_vec(),
+        "sha1" => {
+            use sha1::Digest as _;
+            sha1::Sha1::digest(data).to_vec()
+        }
+        "sha224" => sha2::Sha224::digest(data).to_vec(),
+        "sha256" => sha2::Sha256::digest(data).to_vec(),
+        "sha384" => sha2::Sha384::digest(data).to_vec(),
+        "sha512" => sha2::Sha512::digest(data).to_vec(),
+        _ => {
+            return Err(PyError::value_error(format!(
+                "unsupported hash type {algo}"
+            )));
+        }
+    })
+}
+
+fn hashlib_digest_size(algo: &str) -> usize {
+    match algo {
+        "md5" => 16,
+        "sha1" => 20,
+        "sha224" => 28,
+        "sha256" => 32,
+        "sha384" => 48,
+        "sha512" => 64,
+        _ => 0,
+    }
+}
+
+fn hashlib_block_size(algo: &str) -> usize {
+    match algo {
+        "md5" | "sha1" | "sha224" | "sha256" => 64,
+        "sha384" | "sha512" => 128,
+        _ => 64,
+    }
+}
+
+/// Build a real `Hash` instance (the object `hashlib.sha256(data)`/
+/// `hashlib.new("sha256", data)` are supposed to return) with working
+/// `update()`/`digest()`/`hexdigest()`/`copy()` and `name`/`digest_size`/
+/// `block_size` attributes — instead of the previous shortcut of handing
+/// back a bare digest-bytes value from the constructor call directly
+/// (which silently broke every caller that then tried `.update()`,
+/// `.hexdigest()`, `.copy()`, `.name`, `.digest_size` — e.g. `hmac.py`'s
+/// `hashlib.new(name).update(msg)` construction, and `hashlib.new()`
+/// itself, which plainly did not exist).
+///
+/// State is kept the simple way (accumulate the raw input in the instance
+/// dict, recompute the digest from scratch on `.digest()`/`.hexdigest()`)
+/// rather than real incremental hasher state, since none of `PyObject`'s
+/// variants currently carry opaque native hasher state and `BuiltinFunction`
+/// methods are plain `fn` pointers with no captures (see `BuiltinFunc` in
+/// `src/object/core/small.rs`) — correctness matches real CPython exactly,
+/// just not the streaming-without-buffering performance characteristic.
+fn make_hash_instance(algo: &str, data: Vec<u8>) -> PyResult<PyObjectRef> {
+    let algo = algo.to_ascii_lowercase();
+    if hashlib_digest_size(&algo) == 0 {
+        return Err(PyError::value_error(format!(
+            "unsupported hash type {algo}"
+        )));
+    }
+
+    let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+
+    type_dict.insert_str(
+        "update",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "update".to_string(),
+            func: |args| {
+                if args.len() < 2 {
+                    return Err(PyError::type_error("update() takes 1 argument"));
+                }
+                let new_bytes = match &*args[1].borrow() {
+                    PyObject::Bytes(b) => b.clone(),
+                    PyObject::ByteArray(b) => b.clone(),
+                    _ => {
+                        return Err(PyError::type_error(
+                            "Unicode-objects must be encoded before hashing",
+                        ))
+                    }
+                };
+                let mut obj = args[0].borrow_mut();
+                if let PyObject::Instance { dict, .. } = &mut *obj {
+                    let mut cur = match dict.get("_data").map(|v| v.borrow()) {
+                        Some(guard) => match &*guard {
+                            PyObject::Bytes(b) => b.clone(),
+                            _ => vec![],
+                        },
+                        None => vec![],
+                    };
+                    cur.extend_from_slice(&new_bytes);
+                    dict.insert_str("_data", PyObjectRef::imm(PyObject::Bytes(cur)));
+                }
+                Ok(py_none())
+            },
+        }),
+    );
+
+    type_dict.insert_str(
+        "digest",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "digest".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error("digest() missing self argument"));
+                }
+                let (algo, data) = hashlib_get_self_algo_data(&args[0])?;
+                let digest = hashlib_compute_digest(&algo, &data)?;
+                Ok(PyObjectRef::imm(PyObject::Bytes(digest)))
+            },
+        }),
+    );
+
+    type_dict.insert_str(
+        "hexdigest",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "hexdigest".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error("hexdigest() missing self argument"));
+                }
+                let (algo, data) = hashlib_get_self_algo_data(&args[0])?;
+                let digest = hashlib_compute_digest(&algo, &data)?;
+                let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+                Ok(py_str(&hex))
+            },
+        }),
+    );
+
+    type_dict.insert_str(
+        "copy",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "copy".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error("copy() missing self argument"));
+                }
+                let (algo, data) = hashlib_get_self_algo_data(&args[0])?;
+                make_hash_instance(&algo, data)
+            },
+        }),
+    );
+
+    let mut instance_dict = AttrMap::new();
+    instance_dict.insert_str("_algo", py_str(&algo));
+    instance_dict.insert_str("_data", PyObjectRef::imm(PyObject::Bytes(data)));
+    instance_dict.insert_str("name", py_str(&algo));
+    instance_dict.insert_str("digest_size", py_int(hashlib_digest_size(&algo) as i64));
+    instance_dict.insert_str("block_size", py_int(hashlib_block_size(&algo) as i64));
+
+    Ok(PyObjectRef::new(PyObject::Instance {
+        typ: PyObjectRef::new(PyObject::Type {
+            name: "Hash".to_string(),
+            dict: Box::new(str_map_to_typedict(type_dict)),
+            bases: vec![],
+            mro: vec![],
+        }),
+        dict: instance_dict,
+    }))
+}
+
+/// Reads the `_algo`/`_data` instance attributes back out of a `Hash`
+/// object built by `make_hash_instance` — used by the object's own
+/// `fn`-pointer methods (`digest`/`hexdigest`/`copy`), which can't capture
+/// anything (see `BuiltinFunc` in `src/object/core/small.rs`) so can't
+/// close over the algorithm name directly.
+fn hashlib_get_self_algo_data(obj: &PyObjectRef) -> PyResult<(String, Vec<u8>)> {
+    let b = obj.borrow();
+    if let PyObject::Instance { dict, .. } = &*b {
+        let algo = dict.get("_algo").map(|v| v.str()).unwrap_or_default();
+        let data = match dict.get("_data").map(|v| v.borrow()) {
+            Some(guard) => match &*guard {
+                PyObject::Bytes(b) => b.clone(),
+                _ => vec![],
+            },
+            None => vec![],
+        };
+        Ok((algo, data))
+    } else {
+        Err(PyError::type_error("descriptor requires a 'Hash' object"))
+    }
+}
+
+/// Extract the optional `data`/`string` positional-or-keyword argument a
+/// hash constructor call may be given, correctly distinguishing a genuine
+/// kwargs dict (packed as the trailing arg per this project's calling
+/// convention — see CLAUDE.md) from a real bytes/str data argument, and
+/// ignoring the `usedforsecurity` kwarg real CPython also accepts but
+/// doesn't meaningfully enforce here.
+fn hashlib_extract_data_arg(args: &[PyObjectRef]) -> PyResult<Vec<u8>> {
+    let is_kwargs_dict = |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::Dict(_));
+    let data_arg = args.last().filter(|a| !is_kwargs_dict(a));
+    match data_arg {
+        Some(a) => match &*a.borrow() {
+            PyObject::Bytes(b) => Ok(b.clone()),
+            PyObject::ByteArray(b) => Ok(b.clone()),
+            _ => Err(PyError::type_error(
+                "Unicode-objects must be encoded before hashing",
+            )),
+        },
+        None => Ok(vec![]),
+    }
+}
+
 pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
+
+    // `hashlib.new(name, data=b'', **kwargs)` — real hashlib's generic
+    // constructor. Was entirely missing (`AttributeError: 'module' object
+    // has no attribute 'new'`), which broke any code building a hash by
+    // name instead of a hardcoded `hashlib.sha256(...)` call — notably
+    // `hmac.py`'s `_get_digest_constructor` (`digestmod='sha256'` string
+    // form), used by essentially every `hmac.new(key, msg, 'sha256')` call.
+    d.insert_str(
+        "new",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "new".to_string(),
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error(
+                        "new() missing required argument: 'name'",
+                    ));
+                }
+                // The name could itself be the trailing kwargs dict if
+                // called as `new(name=...)` — but real callers always pass
+                // name positionally, so just read args[0] as the name and
+                // treat everything after it as the data/kwargs tail.
+                let name = args[0].str();
+                let data = hashlib_extract_data_arg(&args[1..])?;
+                make_hash_instance(&name, data)
+            },
+        }),
+    );
+
     macro_rules! hl_func {
         ($name:expr, $func:expr) => {
             d.insert(
@@ -21,23 +260,17 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
+    // sha256/sha224/sha384/sha512/sha1/md5 — real CPython returns a live
+    // `Hash` object supporting `.update()`/`.digest()`/`.hexdigest()`/
+    // `.copy()`/`.name`/`.digest_size`/`.block_size`, not a bare digest
+    // value. Also, per real CPython, a `str` argument is REJECTED with
+    // `TypeError` ("Unicode-objects must be encoded before hashing") rather
+    // than silently auto-encoded — `hashlib_extract_data_arg` enforces
+    // that (see `test_hashlib.py`'s `test_case_md5_invalid_types`-style
+    // `assertRaises(TypeError, hash_object_constructor, 'spam')`).
     hl_func!("sha256", |args| {
-        if args.len() != 1 {
-            return Err(PyError::type_error("sha256() takes exactly one argument"));
-        }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => {
-                return Err(PyError::type_error(
-                    "sha256() argument must be bytes or str",
-                ))
-            }
-        };
-        use sha2::Digest;
-        let hash = sha2::Sha256::digest(&bytes);
-        Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+        let data = hashlib_extract_data_arg(args)?;
+        make_hash_instance("sha256", data)
     });
 
     // sha224/sha384/sha512 — same family as sha256, just missing. Added all
@@ -47,90 +280,28 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
     // sqlite3/base.py`'s `_sqlite_...` helpers` chain, plus general hashlib
     // completeness).
     hl_func!("sha224", |args| {
-        if args.len() != 1 {
-            return Err(PyError::type_error("sha224() takes exactly one argument"));
-        }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => {
-                return Err(PyError::type_error(
-                    "sha224() argument must be bytes or str",
-                ))
-            }
-        };
-        use sha2::Digest;
-        let hash = sha2::Sha224::digest(&bytes);
-        Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+        let data = hashlib_extract_data_arg(args)?;
+        make_hash_instance("sha224", data)
     });
 
     hl_func!("sha384", |args| {
-        if args.len() != 1 {
-            return Err(PyError::type_error("sha384() takes exactly one argument"));
-        }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => {
-                return Err(PyError::type_error(
-                    "sha384() argument must be bytes or str",
-                ))
-            }
-        };
-        use sha2::Digest;
-        let hash = sha2::Sha384::digest(&bytes);
-        Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+        let data = hashlib_extract_data_arg(args)?;
+        make_hash_instance("sha384", data)
     });
 
     hl_func!("sha512", |args| {
-        if args.len() != 1 {
-            return Err(PyError::type_error("sha512() takes exactly one argument"));
-        }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => {
-                return Err(PyError::type_error(
-                    "sha512() argument must be bytes or str",
-                ))
-            }
-        };
-        use sha2::Digest;
-        let hash = sha2::Sha512::digest(&bytes);
-        Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+        let data = hashlib_extract_data_arg(args)?;
+        make_hash_instance("sha512", data)
     });
 
     hl_func!("sha1", |args| {
-        if args.len() != 1 {
-            return Err(PyError::type_error("sha1() takes exactly one argument"));
-        }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("sha1() argument must be bytes or str")),
-        };
-        use sha1::Digest;
-        let hash = sha1::Sha1::digest(&bytes);
-        Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+        let data = hashlib_extract_data_arg(args)?;
+        make_hash_instance("sha1", data)
     });
 
     hl_func!("md5", |args| {
-        if args.len() != 1 {
-            return Err(PyError::type_error("md5() takes exactly one argument"));
-        }
-        let data = args[0].borrow();
-        let bytes = match &*data {
-            PyObject::Bytes(b) => b.clone(),
-            PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("md5() argument must be bytes or str")),
-        };
-        use sha2::digest::Digest;
-        let hash = md5::Md5::digest(&bytes);
-        Ok(PyObjectRef::imm(PyObject::Bytes(hash.to_vec())))
+        let data = hashlib_extract_data_arg(args)?;
+        make_hash_instance("md5", data)
     });
 
     // `_hashlib.openssl_md5`/`openssl_sha1`/`openssl_sha256`/`openssl_sha512`

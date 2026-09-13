@@ -299,54 +299,93 @@ impl PyError {
     /// FileNotFoundError: pass` never caught the "directory doesn't exist
     /// yet" case on a fresh run, crashing every single caller.
     pub fn os_error_from_io(e: &std::io::Error) -> Self {
+        Self::os_error_from_io_path(e, None)
+    }
+
+    /// Same as `os_error_from_io`, but also attaches `.filename` (CPython's
+    /// `OSError(errno, strerror, filename)` 3-arg form) when the caller knows
+    /// which path the failing syscall was operating on. Fixes two related
+    /// bugs the plain `os_error_from_io` had: (1) `.args` was `(msg, msg)` —
+    /// the same Rust `Display` string (which itself carries a bogus
+    /// `"... (os error N)"` suffix CPython's `strerror()` never produces)
+    /// duplicated into both slots — instead of the real `(errno, strerror)`
+    /// pair; (2) `.filename` was never set at all, so
+    /// `except FileNotFoundError as e: e.filename` — a common real-world and
+    /// stdlib-test idiom (`test_unicode_file_functions.py`) — always saw
+    /// `None` instead of the path that failed.
+    pub fn os_error_from_io_path(e: &std::io::Error, path: Option<&str>) -> Self {
         use std::io::ErrorKind;
-        let msg = format!("{}", e);
         let errno = e.raw_os_error();
-        let name = match e.kind() {
-            ErrorKind::NotFound => "FileNotFoundError",
-            ErrorKind::PermissionDenied => "PermissionError",
-            ErrorKind::AlreadyExists => "FileExistsError",
-            ErrorKind::Interrupted => "InterruptedError",
-            _ => {
-                // Plain OSError carrying the real errno (test_exceptions'
-                // test_errno_ENOTDIR asserts `OSError.errno == errno.ENOTDIR`
-                // after os.listdir on a file).
-                let mut extra = None;
-                if let Some(no) = errno {
-                    let mut m = std::collections::HashMap::new();
-                    m.insert("errno".to_string(), py_int(no as i64));
-                    extra = Some(m);
-                }
-                return PyError::Exception(
-                    "OSError".to_string(),
-                    PyObjectRef::new(PyObject::Exception {
-                        typ: "OSError".to_string(),
-                        args: vec![py_str(&msg), py_str(&msg)],
-                        cause: None,
-                        suppress_context: false,
-                        context: None,
-                        traceback: None,
-                        extra,
-                    }),
-                );
-            }
+        // Rust's `Display` for `io::Error` appends a `" (os error N)"` suffix
+        // that real CPython's `strerror(errno)` never has (`OSError.strerror`
+        // must be the bare OS message, e.g. "No such file or directory").
+        let full = format!("{}", e);
+        let strerror = match full.rfind(" (os error ") {
+            Some(idx) => full[..idx].to_string(),
+            None => full,
         };
-        let mut extra = None;
-        if let Some(no) = errno {
-            let mut m = std::collections::HashMap::new();
-            m.insert("errno".to_string(), py_int(no as i64));
-            extra = Some(m);
+        // Real CPython dispatches the OSError subclass strictly by errno
+        // (see `builtin_make_exception_oserror`'s table below) — mirrored
+        // here first since Rust's `ErrorKind` doesn't cover several of these
+        // (e.g. there is no stable `ErrorKind::NotADirectory`/`IsADirectory`),
+        // which meant `os.listdir()` on a plain file raised a bare `OSError`
+        // instead of `NotADirectoryError` and broke `except
+        // NotADirectoryError:`/`assertRaises(NotADirectoryError, ...)` call
+        // sites (`test_unicode_file_functions.py::test_open`).
+        let name = match errno {
+            Some(1) | Some(13) => "PermissionError",
+            Some(2) => "FileNotFoundError",
+            Some(3) => "ProcessLookupError",
+            Some(4) => "InterruptedError",
+            Some(10) => "ChildProcessError",
+            Some(11) | Some(114) | Some(115) => "BlockingIOError",
+            Some(17) => "FileExistsError",
+            Some(20) => "NotADirectoryError",
+            Some(21) => "IsADirectoryError",
+            Some(32) | Some(108) => "BrokenPipeError",
+            Some(103) => "ConnectionAbortedError",
+            Some(104) => "ConnectionResetError",
+            Some(110) => "TimeoutError",
+            Some(111) => "ConnectionRefusedError",
+            _ => match e.kind() {
+                ErrorKind::NotFound => "FileNotFoundError",
+                ErrorKind::PermissionDenied => "PermissionError",
+                ErrorKind::AlreadyExists => "FileExistsError",
+                ErrorKind::Interrupted => "InterruptedError",
+                _ => "OSError",
+            },
+        };
+        let mut extra = std::collections::HashMap::new();
+        let errno_obj = errno.map(|no| py_int(no as i64));
+        if let Some(no) = &errno_obj {
+            extra.insert("errno".to_string(), no.clone());
+        }
+        extra.insert("strerror".to_string(), py_str(&strerror));
+        // `.args` stays the plain (errno, strerror) 2-tuple even when a
+        // filename is known — real CPython exposes `.filename` as a separate
+        // attribute, not folded into `.args` (verified against CPython
+        // 3.14: `open('/missing').args == (2, 'No such file or directory')`
+        // while `.filename == '/missing'`).
+        let mut args = Vec::new();
+        if let Some(no) = &errno_obj {
+            args.push(no.clone());
+        } else {
+            args.push(py_str(&strerror));
+        }
+        args.push(py_str(&strerror));
+        if let Some(p) = path {
+            extra.insert("filename".to_string(), py_str(p));
         }
         PyError::Exception(
             name.to_string(),
             PyObjectRef::new(PyObject::Exception {
                 typ: name.to_string(),
-                args: vec![py_str(&msg), py_str(&msg)],
+                args,
                 cause: None,
                 suppress_context: false,
                 context: None,
                 traceback: None,
-                extra,
+                extra: Some(extra),
             }),
         )
     }

@@ -1172,6 +1172,28 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         }),
     );
     d.insert_str("platlibdir", py_str("lib"));
+    // `sys.builtin_module_names` — missing entirely (AttributeError),
+    // breaking any code that distinguishes "compiled into the interpreter"
+    // modules from filesystem-loaded ones (real trigger: `modulefinder.py`'s
+    // `import_hook`, vendored verbatim from CPython, checks
+    // `name in sys.builtin_module_names` for every import). Real CPython's
+    // own set varies by build; this lists the modules genuinely
+    // implemented natively in Rust (not loaded from `Lib/`) rather than a
+    // hand-copied CPython list, so it can't drift from what this
+    // interpreter actually provides without a filesystem import.
+    d.insert_str(
+        "builtin_module_names",
+        py_tuple(
+            [
+                "sys", "builtins", "_abc", "_codecs", "_collections", "_functools", "_io",
+                "_warnings", "_thread", "_imp", "_ast", "gc", "itertools", "marshal", "math",
+                "time", "posix", "errno",
+            ]
+            .iter()
+            .map(|s| py_str(s))
+            .collect(),
+        ),
+    );
     d.insert_str("maxsize", py_int(i64::MAX));
     d.insert_str("maxunicode", py_int(1114111));
     d.insert_str("api_version", py_int(1013));

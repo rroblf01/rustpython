@@ -1,3 +1,37 @@
+WRAPPER_ASSIGNMENTS = ('__module__', '__name__', '__qualname__', '__doc__',
+                       '__annotations__')
+WRAPPER_UPDATES = ('__dict__',)
+
+
+def update_wrapper(wrapper, wrapped, assigned=WRAPPER_ASSIGNMENTS,
+                    updated=WRAPPER_UPDATES):
+    """Real functools.update_wrapper, replacing the previous native
+    `update_wrapper`/`wraps` (src/modules/data/functools.rs) that hardcoded
+    a fixed attribute list and completely ignored the `assigned`/`updated`
+    parameters — `functools.update_wrapper(wrapper, f, (), ())` (real
+    trigger: test_functools.py's TestUpdateWrapper.test_no_update) still
+    copied __name__/__doc__/etc. from `wrapped` onto `wrapper` even though
+    an empty tuple was passed for `assigned`.
+    """
+    for attr in assigned:
+        try:
+            value = getattr(wrapped, attr)
+        except AttributeError:
+            pass
+        else:
+            setattr(wrapper, attr, value)
+    for attr in updated:
+        getattr(wrapper, attr).update(getattr(wrapped, attr, {}))
+    wrapper.__wrapped__ = wrapped
+    return wrapper
+
+
+def wraps(wrapped, assigned=WRAPPER_ASSIGNMENTS, updated=WRAPPER_UPDATES):
+    def decorator(wrapper):
+        return update_wrapper(wrapper, wrapped, assigned, updated)
+    return decorator
+
+
 class _lru_cache_wrapper:
     def __init__(self, func, maxsize):
         self.__wrapped__ = func

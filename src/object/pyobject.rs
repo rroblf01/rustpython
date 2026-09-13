@@ -164,8 +164,11 @@ pub enum PyObject {
     /// the caller actually asks for, exactly like real Python.
     EnumerateIter {
         source: PyObjectRef,
-        pos: usize,
-        start: usize,
+        pos: u64,
+        // Arbitrary-precision: `enumerate(seq, start=sys.maxsize)` must keep
+        // counting past i64/usize range like real Python ints do, not wrap
+        // around to a negative number (was `usize`, cast back via `as i64`).
+        start: num_bigint::BigInt,
     },
     MapIterator {
         func: PyObjectRef,
@@ -554,6 +557,33 @@ impl PyObject {
             // implicitly stringifies an exception (very common — logging,
             // `unittest`'s own traceback formatting) showed the redundant
             // `AssertionError('msg')` instead of plain `msg`.
+            // OSError (and subclasses) get CPython's special
+            // `[Errno N] strerror` / `[Errno N] strerror: 'filename'`
+            // `__str__`, not the generic args-tuple formatting below — e.g.
+            // `str(FileNotFoundError(2, 'No such file or directory',
+            // '/x'))` is `"[Errno 2] No such file or directory: '/x'"`,
+            // never `"(2, 'No such file or directory')"`.
+            PyObject::Exception { typ, args, extra, .. }
+                if crate::vm::util::is_exception_subclass(typ, "OSError")
+                    && matches!(args.as_slice(), [_, _] | [_, _, _]) =>
+            {
+                let errno = extra.as_ref().and_then(|e| e.get("errno"));
+                let strerror = extra.as_ref().and_then(|e| e.get("strerror"));
+                let filename = extra.as_ref().and_then(|e| e.get("filename"));
+                match (errno, strerror) {
+                    (Some(no), Some(msg)) => {
+                        let base = format!("[Errno {}] {}", no.str(), msg.str());
+                        match filename {
+                            Some(f) => format!("{}: {}", base, f.repr()),
+                            None => base,
+                        }
+                    }
+                    _ => format!(
+                        "({})",
+                        args.iter().map(|a| a.repr()).collect::<Vec<_>>().join(", ")
+                    ),
+                }
+            }
             PyObject::Exception { args, .. } => match args.as_slice() {
                 [] => String::new(),
                 [one] => one.str(),

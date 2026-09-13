@@ -294,7 +294,20 @@ pub(crate) fn format_strftime(
                 Some('p') => result.push_str(if h < 12 { "AM" } else { "PM" }),
                 Some('j') => result.push_str(&format!("{:03}", yday + 1)),
                 Some('w') => result.push_str(&format!("{}", (wday + 1) % 7)),
-                Some('u') => result.push_str(&format!("{}", if wday == 0 { 7 } else { wday })),
+                // ISO weekday: `wday` here is already Monday=0..Sunday=6
+                // (this module's convention, see `epoch_to_ymd`'s doc
+                // comment), so `%u` (Monday=1..Sunday=7) is simply `wday +
+                // 1` for every day, Sunday included (6+1=7). The previous
+                // `if wday == 0 { 7 } else { wday }` had the special case
+                // backwards — it treated `wday == 0` (which is MONDAY in
+                // this convention) as if it were the wrap-around case,
+                // while leaving Sunday (`wday == 6`) un-incremented,
+                // outputting "6" instead of "7" — confirmed via
+                // `test_strptime.py::test_weekday`'s `%u` round-trip
+                // (`strftime('%u', <Sunday>)` -> `"6"` -> reparsed via
+                // `_strptime.py`'s `weekday = int(u) - 1` -> `5`, not the
+                // original `6`).
+                Some('u') => result.push_str(&format!("{}", wday + 1)),
                 // %G (ISO year) / %V (ISO week): computed from the date's
                 // ordinal via the same Jan-4 anchor `isocalendar` uses.
                 gv @ (Some('G') | Some('V')) => {

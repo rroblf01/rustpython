@@ -65,6 +65,7 @@ impl VirtualMachine {
                             items.into_iter().map(|s| py_str(&s)).collect();
                         PyObjectRef::imm(PyObject::Tuple(objs))
                     }
+                    ConstValue::Object(obj) => obj,
                 };
                 if dst < self.frames[fi].registers.len() {
                     self.frames[fi].registers[dst] = Some(obj);

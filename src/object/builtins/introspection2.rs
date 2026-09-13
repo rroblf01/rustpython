@@ -683,7 +683,7 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let file = opts
         .open(&filename)
-        .map_err(|e| PyError::os_error_from_io(&e))?;
+        .map_err(|e| PyError::os_error_from_io_path(&e, Some(&filename)))?;
     let binary = mode.contains('b');
     Ok(PyObjectRef::new(PyObject::File {
         file: std::rc::Rc::new(std::cell::RefCell::new(file)),

@@ -143,10 +143,10 @@ pub fn builtin_enumerate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let iterable = iterable.or_else(|| positional.first().cloned());
     let start_arg = start_val.or_else(|| positional.get(1).cloned());
-    let start: usize = match start_arg {
-        None => 0,
+    let start: num_bigint::BigInt = match start_arg {
+        None => num_bigint::BigInt::from(0),
         Some(a) => match crate::object::int_or_bool_value(&a) {
-            Some(v) => v.to_usize().unwrap_or(usize::MAX) as usize,
+            Some(v) => v,
             None => {
                 return Err(PyError::type_error(format!(
                     "enumerate() argument 2 must be int, not {}",

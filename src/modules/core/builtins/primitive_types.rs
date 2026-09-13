@@ -2,6 +2,57 @@ use crate::object::*;
 use std::collections::HashMap;
 use num_traits::ToPrimitive;
 
+// Class-level rich-comparison dunders (`__lt__`/`__le__`/`__ge__`/`__gt__`)
+// for scalar native types (int/str/float/...). Instance-level comparisons
+// (`3 < 4`) already work via the separate `PyObject::equals`/`Compare`
+// machinery in `ops_compare.rs`, but that machinery is never consulted by
+// `lookup_dunder_via_mro`-style class-level access — `int.__lt__` (used by
+// real code that does `int.__lt__(self, other)` to bypass an overridden
+// subclass `__lt__`, e.g. CPython's own `test_sort.py`) raised a bogus
+// `AttributeError` because the type dict held no actual entry for it. This
+// mirrors the existing `list_richcmp!` macro in `collection_types.rs`.
+// Unwraps a `class Sub(int): ...`-style subclass instance to its raw
+// native scalar value (stored under `NATIVE_BACKING_KEY`) before comparing
+// — required so `int.__lt__(sub_instance, other)` (real code:
+// `test_sort.py`'s `WackyComparator.__lt__` explicitly calls
+// `int.__lt__(self, other)` to bypass its OWN overridden `__lt__`)
+// compares the plain scalar value directly instead of routing back through
+// `py_compare`'s `Instance` dispatch — which would look the name back up
+// via the subclass's own MRO and re-enter the very override that's calling
+// us, infinitely recursing until the stack overflows (confirmed via a
+// stack-overflow abort in `test_sort.py::test_unsafe_object_compare` while
+// adding these dunders).
+fn unwrap_native_scalar(o: &PyObjectRef) -> PyObjectRef {
+    if let PyObject::Instance { dict, .. } = &*o.borrow() {
+        if let Some(v) = dict.get(crate::object::NATIVE_BACKING_KEY) {
+            return v.clone();
+        }
+    }
+    o.clone()
+}
+
+macro_rules! scalar_richcmp {
+    ($dict:ident, $name:literal, $op:literal) => {
+        $dict.insert_str(
+            $name,
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: $name.to_string(),
+                func: |args: &[PyObjectRef]| {
+                    if args.len() != 2 {
+                        return Err(PyError::type_error(concat!(
+                            $name,
+                            "() takes exactly one argument"
+                        )));
+                    }
+                    let a = unwrap_native_scalar(&args[0]);
+                    let b = unwrap_native_scalar(&args[1]);
+                    crate::object::py_compare(&a, &b, $op)
+                },
+            }),
+        );
+    };
+}
+
 pub fn register_primitive_types(builtins: &mut HashMap<String, PyObjectRef>, object_type: &PyObjectRef) {
     // `int` — the first of the "native value" types (int/str/list/dict/...)
     // migrated from a plain `PyObject::BuiltinFunction` constructor to a
@@ -82,6 +133,12 @@ pub fn register_primitive_types(builtins: &mut HashMap<String, PyObjectRef>, obj
             doc: None,
         }))),
     );
+    scalar_richcmp!(int_dict, "__lt__", 0);
+    scalar_richcmp!(int_dict, "__le__", 1);
+    scalar_richcmp!(int_dict, "__eq__", 2);
+    scalar_richcmp!(int_dict, "__ge__", 3);
+    scalar_richcmp!(int_dict, "__gt__", 4);
+    scalar_richcmp!(int_dict, "__ne__", 5);
     let int_type = PyObjectRef::new(PyObject::Type {
         name: "int".to_string(),
         dict: Box::new(str_map_to_typedict(int_dict)),
@@ -224,6 +281,12 @@ pub fn register_primitive_types(builtins: &mut HashMap<String, PyObjectRef>, obj
             func: crate::object::builtin_str_repr as BuiltinFunc,
         }),
     );
+    scalar_richcmp!(str_dict, "__lt__", 0);
+    scalar_richcmp!(str_dict, "__le__", 1);
+    scalar_richcmp!(str_dict, "__eq__", 2);
+    scalar_richcmp!(str_dict, "__ge__", 3);
+    scalar_richcmp!(str_dict, "__gt__", 4);
+    scalar_richcmp!(str_dict, "__ne__", 5);
     let str_type = PyObjectRef::new(PyObject::Type {
         name: "str".to_string(),
         dict: Box::new(str_map_to_typedict(str_dict)),
@@ -467,6 +530,12 @@ pub fn register_primitive_types(builtins: &mut HashMap<String, PyObjectRef>, obj
             func: crate::object::builtin_float_repr as BuiltinFunc,
         }),
     );
+    scalar_richcmp!(float_dict, "__lt__", 0);
+    scalar_richcmp!(float_dict, "__le__", 1);
+    scalar_richcmp!(float_dict, "__eq__", 2);
+    scalar_richcmp!(float_dict, "__ge__", 3);
+    scalar_richcmp!(float_dict, "__gt__", 4);
+    scalar_richcmp!(float_dict, "__ne__", 5);
     let float_type = PyObjectRef::new(PyObject::Type {
         name: "float".to_string(),
         dict: Box::new(str_map_to_typedict(float_dict)),

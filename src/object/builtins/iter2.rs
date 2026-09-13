@@ -349,12 +349,12 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // its own internal materialization cap) — confirmed via the
             // simplest repro, `enumerate(itertools.cycle([1,2,3]))`, which
             // never even got to yield its first pair.
-            let idx = *start + *pos;
+            let idx = start.clone() + *pos;
             *pos += 1;
             let source = source.clone();
             drop(obj);
             match builtin_next(&[source]) {
-                Ok(val) => Ok(py_tuple(vec![py_int(idx as i64), val])),
+                Ok(val) => Ok(py_tuple(vec![py_int(idx), val])),
                 Err(PyError::StopIteration) => {
                     if args.len() >= 2 {
                         Ok(args[1].clone())
