@@ -806,15 +806,16 @@ pub fn pickle_deserialize(
         }
         b'(' => {
             let mut items = Vec::new();
-            while *pos < data.len() && data[*pos] != b')' {
+            while *pos < data.len() && data[*pos] != b')' && data[*pos] != b't' {
                 items.push(pickle_deserialize(data, pos, memo)?);
             }
             if *pos >= data.len() {
                 return Err(PyError::type_error("unterminated tuple in pickle data"));
             }
-            *pos += 1; // skip ')'
+            *pos += 1; // skip ')' or 't'
             Ok(py_tuple(items))
         }
+        b')' => Ok(py_tuple(vec![])),
         b'Y' => {
             // set: [elements]
             if *pos >= data.len() || data[*pos] != b'[' {

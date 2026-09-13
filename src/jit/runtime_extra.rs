@@ -54,6 +54,12 @@ pub(crate) extern "C" fn jit_store_attr(
         let name_str = name_obj.str();
         let obj_ref = &*obj;
         let val_ref = &*val;
+        // Must invalidate `jit_load_attr`'s ATTR_CACHE (keyed by (type_name,
+        // name), not per-instance) BEFORE it can be read stale by this same
+        // JIT-compiled loop's next LOAD_ATTR of this attribute — see
+        // `invalidate_attr_cache`'s doc comment in runtime.rs.
+        let type_name = obj_ref.borrow().type_name();
+        crate::jit::runtime::invalidate_attr_cache(&type_name, &name_str);
         let _ = obj_ref
             .borrow_mut()
             .set_attribute(&name_str, val_ref.clone());

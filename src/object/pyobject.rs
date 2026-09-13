@@ -293,7 +293,7 @@ pub enum PyObject {
         // `test_netrc.py::test_token_value_non_ascii`, which reads a
         // UTF-8 file one byte at a time.)
         pending: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
-        closed: bool,
+        closed: std::rc::Rc<std::cell::RefCell<bool>>,
     },
     /// Backing for `subprocess.Popen` — holds the spawned child process.
     /// `child` is `None` after `.communicate()`/`.wait()` has reaped it

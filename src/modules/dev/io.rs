@@ -50,6 +50,142 @@ pub fn iobase_exit_with_vm(
     Ok(py_bool(false))
 }
 
+/// `TextIOWrapper`'s `read`/`readline`/`readlines`/`write`/`seek`/`tell`/
+/// `flush`/`close`/`truncate`/`fileno`/`isatty`/`writelines`/`name`/`mode`
+/// all share this ONE marker (dispatched by the `name` field the
+/// `BuiltinFunction`/`BuiltinMethod` already carries — same convention as
+/// `zipimporter_method_marker`), rather than one marker per method. Real
+/// logic lives in `tiw_delegate_with_vm` below and is dispatched to from
+/// `src/vm/call.rs` via `fn_addr_eq` — see `iobase_exit_marker`'s doc
+/// comment (right above) for why a plain `fn(&[PyObjectRef])` builtin can't
+/// do this itself. This bare function must never actually run.
+pub fn tiw_delegate_marker(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    Err(PyError::runtime_error(
+        "TextIOWrapper delegate marker reached directly (interception in call.rs missing)",
+    ))
+}
+
+/// Real body for every `TextIOWrapper` method/property dispatched through
+/// `tiw_delegate_marker`. `args[0]` is always `self`; the raw handle backing
+/// it is fetched via `io_get_raw`.
+pub fn tiw_delegate_with_vm(
+    vm: &mut crate::vm::VirtualMachine,
+    method: &str,
+    args: &[PyObjectRef],
+) -> PyResult<PyObjectRef> {
+    // `close()` must be a no-op (not an error) on an already-closed file,
+    // and `name`/`mode` never called `io_ensure_open` either — match the
+    // original per-method behavior exactly.
+    if method != "close" && method != "name" && method != "mode" {
+        crate::modules::dev::io_ensure_open(args)?;
+    }
+    let raw = crate::modules::dev::io_get_raw(args)?;
+    match method {
+        "read" => {
+            let n = args.get(1).cloned().unwrap_or_else(|| py_int(-1));
+            let data = crate::object::call_method_rebound(vm, &raw, "read", vec![n])?;
+            if let PyObject::Bytes(ref b) = &*data.borrow() {
+                return Ok(py_str(&String::from_utf8_lossy(&b[..])));
+            }
+            Ok(data)
+        }
+        "readline" => {
+            let n = args.get(1).cloned().unwrap_or_else(|| py_int(-1));
+            let data = crate::object::call_method_rebound(vm, &raw, "readline", vec![n])?;
+            if let PyObject::Bytes(ref b) = &*data.borrow() {
+                return Ok(py_str(&String::from_utf8_lossy(&b[..])));
+            }
+            Ok(data)
+        }
+        "readlines" => {
+            // Needed by linecache (traceback source lines) via
+            // tokenize.open(); was missing -> AttributeError on every
+            // frame, making traceback extraction ~300x slow. Loop over
+            // readline until EOF.
+            let mut lines = Vec::new();
+            loop {
+                let data = crate::object::call_method_rebound(vm, &raw, "readline", vec![py_int(-1)])?;
+                let s = if let PyObject::Bytes(ref b) = &*data.borrow() {
+                    py_str(&String::from_utf8_lossy(&b[..]))
+                } else {
+                    data.clone()
+                };
+                let is_empty = match &*s.borrow() {
+                    PyObject::Str(st) => st.is_empty(),
+                    PyObject::Bytes(b) => b.is_empty(),
+                    _ => false,
+                };
+                if is_empty {
+                    break;
+                }
+                lines.push(s);
+            }
+            Ok(py_list(lines))
+        }
+        "write" => {
+            let text = args.get(1).cloned().ok_or_else(|| PyError::type_error("write missing text"))?;
+            let payload = match &*text.borrow() {
+                PyObject::Str(s2) => PyObjectRef::imm(PyObject::Bytes(s2.as_bytes().to_vec())),
+                _ => text.clone(),
+            };
+            let r = crate::object::call_method_rebound(vm, &raw, "write", vec![payload])?;
+            if matches!(&*r.borrow(), PyObject::None) {
+                let n = match &*text.borrow() { PyObject::Str(s2) => s2.chars().count() as i64, _ => 0 };
+                Ok(py_int(n))
+            } else {
+                Ok(r)
+            }
+        }
+        "seek" => {
+            let pos = args.get(1).cloned().unwrap_or_else(|| py_int(0));
+            let wh = args.get(2).cloned().unwrap_or_else(|| py_int(0));
+            crate::object::call_method_rebound(vm, &raw, "seek", vec![pos, wh])
+        }
+        "tell" => crate::object::call_method_rebound(vm, &raw, "tell", vec![]),
+        "flush" => crate::object::call_method_rebound(vm, &raw, "flush", vec![]),
+        "close" => {
+            let already = args[0].borrow().get_attribute("_closed").ok().map(|v| v.truthy()).unwrap_or(false);
+            if !already {
+                let _ = crate::object::call_method_rebound(vm, &raw, "close", vec![]);
+                if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                    dict.insert_str("_closed", py_bool(true));
+                }
+            }
+            Ok(py_none())
+        }
+        "truncate" => {
+            let pos = args.get(1).cloned().unwrap_or_else(py_none);
+            crate::object::call_method_rebound(vm, &raw, "truncate", vec![pos])
+        }
+        "fileno" => crate::object::call_method_rebound(vm, &raw, "fileno", vec![]),
+        "isatty" => crate::object::call_method_rebound(vm, &raw, "isatty", vec![]),
+        "writelines" => {
+            if args.len() < 2 {
+                return Err(PyError::type_error("writelines() takes exactly one argument"));
+            }
+            let lines = &args[1];
+            let iter = crate::object::builtin_iter(&[lines.clone()])?;
+            loop {
+                match crate::object::builtin_next(&[iter.clone()]) {
+                    Ok(line) => {
+                        let payload = match &*line.borrow() {
+                            PyObject::Str(s2) => PyObjectRef::imm(PyObject::Bytes(s2.as_bytes().to_vec())),
+                            _ => line.clone(),
+                        };
+                        let _ = crate::object::call_method_rebound(vm, &raw, "write", vec![payload])?;
+                    }
+                    Err(e) if crate::object::is_stop_iteration_error(&e) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(py_none())
+        }
+        "name" => crate::object::call_method_rebound(vm, &raw, "name", vec![]),
+        "mode" => crate::object::call_method_rebound(vm, &raw, "mode", vec![]),
+        _ => Err(PyError::runtime_error("unknown TextIOWrapper delegate method")),
+    }
+}
+
 pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     d.insert_str("SEEK_SET", py_int(0));
@@ -102,7 +238,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             name: filename.clone(),
             binary: mode.contains('b'),
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-            closed: false,
+            closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
         }))
     });
 
@@ -290,6 +426,36 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             }))),
         );
 
+        // getbuffer() — was entirely missing. Real `BytesIO.getbuffer()`
+        // returns a writable `memoryview` over the WHOLE internal buffer
+        // (not sliced at the current position, unlike `read()`). This is
+        // not a cosmetic gap: `pickle.py`'s own `_Framer.commit_frame`
+        // (used by EVERY `pickle.dumps()` call at protocol>=2, since
+        // `end_framing()` unconditionally force-commits the final frame)
+        // calls `self.current_frame.getbuffer()` and then both `len(data)`
+        // and `write(data)` on the result — with `getbuffer` missing this
+        // raised `AttributeError: 'BytesIO' object has no attribute
+        // 'getbuffer'` on effectively every single non-trivial pickle,
+        // general (not test-specific) and severe enough that it was
+        // masquerading as multiple "hangs" in test_pickle.py's own
+        // bisection (large fan-out loops over many objects/protocols
+        // logged as slow/timing-out because each iteration's exception
+        // handling and traceback formatting under `assertRaises`/subTest
+        // scaffolding added up, not because of any actual infinite loop).
+        // A plain `bytes` snapshot object satisfies both operations used
+        // here (`len()`, and being handed to another `write()`); it isn't
+        // a true live/writable view back into this buffer, but nothing in
+        // this interpreter's own pickle usage mutates through it.
+        let b_getbuffer = buf_rc.clone();
+        type_dict.insert_str(
+            "getbuffer",
+            PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+                Ok(PyObjectRef::imm(PyObject::Bytes(
+                    b_getbuffer.borrow().clone(),
+                )))
+            }))),
+        );
+
         // peek — returns bytes without advancing position (for BytesIO, same as read)
         let b_peek = buf_rc.clone();
         let p_peek = pos_rc.clone();
@@ -425,7 +591,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             name: path.clone(),
             binary: true,
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-            closed: false,
+            closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
         }))
     });
 
@@ -1012,111 +1178,39 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             }
             Ok(py_none())
         }));
-        td.insert("read".into(), bf("read", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let n = args.get(1).cloned().unwrap_or_else(|| py_int(-1));
-            let data = match crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "read", vec![n])) {
-                Ok(Ok(v)) => v,
-                Ok(Err(e)) => return Err(e),
-                Err(e) => return Err(e),
-            };
-            if let PyObject::Bytes(ref b) = &*data.borrow() {
-                return Ok(py_str(&String::from_utf8_lossy(&b[..])));
-            }
-            Ok(data)
-        }));
-        td.insert("readline".into(), bf("readline", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let n = args.get(1).cloned().unwrap_or_else(|| py_int(-1));
-            let data = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "readline", vec![n]))??;
-            if let PyObject::Bytes(ref b) = &*data.borrow() {
-                return Ok(py_str(&String::from_utf8_lossy(&b[..])));
-            }
-            Ok(data)
-        }));
-        td.insert("readlines".into(), bf("readlines", |args: &[PyObjectRef]| {
-            // Needed by linecache (traceback source lines) via
-            // tokenize.open(); was missing -> AttributeError on every
-            // frame, making traceback extraction ~300x slow. Loop over
-            // readline until EOF.
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let mut lines = Vec::new();
-            loop {
-                let data = crate::object::with_vm_mut(|vm| {
-                    crate::object::call_method_rebound(
-                        vm,
-                        &raw,
-                        "readline",
-                        vec![py_int(-1)],
-                    )
-                })??;
-                let s = if let PyObject::Bytes(ref b) = &*data.borrow() {
-                    py_str(&String::from_utf8_lossy(&b[..]))
-                } else {
-                    data.clone()
-                };
-                let is_empty = match &*s.borrow() {
-                    PyObject::Str(st) => st.is_empty(),
-                    PyObject::Bytes(b) => b.is_empty(),
-                    _ => false,
-                };
-                if is_empty {
-                    break;
-                }
-                lines.push(s);
-            }
-            Ok(py_list(lines))
-        }));
-        td.insert("write".into(), bf("write", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let text = args.get(1).cloned().ok_or_else(|| PyError::type_error("write missing text"))?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let payload = match &*text.borrow() {
-                PyObject::Str(s2) => PyObjectRef::imm(PyObject::Bytes(s2.as_bytes().to_vec())),
-                _ => text.clone(),
-            };
-            let r = match crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "write", vec![payload])) {
-                Ok(Ok(v)) => v,
-                Ok(Err(e)) => return Err(e),
-                Err(e) => return Err(e),
-            };
-            if matches!(&*r.borrow(), PyObject::None) {
-                let n = match &*text.borrow() { PyObject::Str(s2) => s2.chars().count() as i64, _ => 0 };
-                Ok(py_int(n))
-            } else { Ok(r) }
-        }));
+        // read/readline/readlines/write/seek/tell/flush/close/truncate/
+        // fileno/isatty/writelines all need to delegate to the raw object's
+        // OWN (possibly Python-subclass-overridden) method, which requires a
+        // live `&mut VirtualMachine` (`call_method_rebound`). These are
+        // reachable directly from live bytecode (`f.read()`, `for line in
+        // f`, ...), so grabbing a SECOND `&mut VirtualMachine` here via
+        // `with_vm_mut`'s raw-pointer dereference while the interpreter's
+        // own `&mut vm` is already live on the call stack is exactly the
+        // unsound-aliasing pattern documented in CLAUDE.md's "Gotchas"
+        // section (and already fixed once for `IOBase.__exit__` — see
+        // `iobase_exit_marker`'s doc comment for the same story). It doesn't
+        // just risk crashing: under `release`/`release-lite` optimizations
+        // the compiler may assume the two `&mut` never alias and reorder or
+        // miscompile around that assumption, which is what actually turned
+        // into a real, if rare and non-deterministic, bug — a busy-spinning
+        // infinite loop (not a blocked wait: confirmed via /proc's
+        // per-thread utime climbing steadily, not stuck in a syscall) that
+        // reproduced ~1-in-8 runs of `tests/cpython/test_mailbox.py`'s full
+        // real test order (never in isolation), at a DIFFERENT test each
+        // time (`TestMMDF.test_get_string_from`, `TestMH.test_set_item`,
+        // ...) — the signature of true undefined behavior, not a
+        // deterministic algorithmic bug. Fixed the same way as
+        // `iobase_exit_marker`/`zipimporter_method_marker`: one shared
+        // marker function dispatched by name from `src/vm/call.rs`, which
+        // already holds the genuinely live `&mut VirtualMachine` and can
+        // pass it straight through — no second alias ever created.
+        for name in [
+            "read", "readline", "readlines", "write", "seek", "tell",
+            "flush", "close", "truncate", "fileno", "isatty", "writelines",
+        ] {
+            td.insert(name.into(), bf(name, tiw_delegate_marker));
+        }
         td.insert("reconfigure".into(), bf("reconfigure", |_a| Ok(py_none())));
-        td.insert("seek".into(), bf("seek", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let pos = args.get(1).cloned().unwrap_or_else(|| py_int(0));
-            let wh = args.get(2).cloned().unwrap_or_else(|| py_int(0));
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "seek", vec![pos, wh]))?
-        }));
-        td.insert("tell".into(), bf("tell", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "tell", vec![]))?
-        }));
-        td.insert("flush".into(), bf("flush", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "flush", vec![]))?
-        }));
-        td.insert("close".into(), bf("close", |args: &[PyObjectRef]| {
-            let already = args[0].borrow().get_attribute("_closed").ok().map(|v| v.truthy()).unwrap_or(false);
-            if !already {
-                let raw = crate::modules::dev::io_get_raw(args)?;
-                let _ = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "close", vec![]));
-                if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-                    dict.insert_str("_closed", py_bool(true));
-                }
-            }
-            Ok(py_none())
-        }));
         td.insert("readable".into(), bf("readable", |_a| Ok(py_bool(true))));
         td.insert("writable".into(), bf("writable", |_a| Ok(py_bool(true))));
         td.insert("seekable".into(), bf("seekable", |_a| Ok(py_bool(true))));
@@ -1127,49 +1221,6 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 dict.insert_str("_closed", py_bool(true));
             }
             Ok(raw)
-        }));
-        // truncate — delegate to raw
-        td.insert("truncate".into(), bf("truncate", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let pos = args.get(1).cloned().unwrap_or_else(py_none);
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "truncate", vec![pos]))?
-        }));
-        // fileno — delegate to raw
-        td.insert("fileno".into(), bf("fileno", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "fileno", vec![]))?
-        }));
-        // isatty — delegate to raw
-        td.insert("isatty".into(), bf("isatty", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "isatty", vec![]))?
-        }));
-        // writelines — iterate and encode+write each
-        td.insert("writelines".into(), bf("writelines", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            if args.len() < 2 {
-                return Err(PyError::type_error("writelines() takes exactly one argument"));
-            }
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let lines = &args[1];
-            let iter = crate::object::builtin_iter(&[lines.clone()])?;
-            loop {
-                match crate::object::builtin_next(&[iter.clone()]) {
-                    Ok(line) => {
-                        let payload = match &*line.borrow() {
-                            PyObject::Str(s2) => PyObjectRef::imm(PyObject::Bytes(s2.as_bytes().to_vec())),
-                            _ => line.clone(),
-                        };
-                        let _ = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "write", vec![payload]))?;
-                    }
-                    Err(e) if crate::object::is_stop_iteration_error(&e) => break,
-                    Err(e) => return Err(e),
-                }
-            }
-            Ok(py_none())
         }));
         td.insert(
             "buffer".into(),
@@ -1199,16 +1250,14 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 doc: None,
             }))),
         );
-        // name — property
+        // name — property (see the big comment above `read`/`readline`/... for
+        // why this can't just call `with_vm_mut` directly)
         td.insert(
             "name".into(),
             PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
                 getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "name".to_string(),
-                    func: |args: &[PyObjectRef]| {
-                        let raw = crate::modules::dev::io_get_raw(args)?;
-                        Ok(crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "name", vec![]))??)
-                    },
+                    func: tiw_delegate_marker,
                 })),
                 setter: None,
                 deleter: None,
@@ -1221,10 +1270,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
                 getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "mode".to_string(),
-                    func: |args: &[PyObjectRef]| {
-                        let raw = crate::modules::dev::io_get_raw(args)?;
-                        Ok(crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "mode", vec![]))??)
-                    },
+                    func: tiw_delegate_marker,
                 })),
                 setter: None,
                 deleter: None,

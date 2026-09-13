@@ -153,7 +153,17 @@ impl VirtualMachine {
 
     fn execute_inner(&mut self, frame_floor: usize) -> PyResult<PyObjectRef> {
         loop {
-            let result = self.execute_instruction();
+            // Cooperative eval-breaker-style check: services a pending
+            // `signal.alarm`/SIGALRM even inside a tight Python loop that
+            // never itself calls into a blocking/selector-based syscall.
+            // See `misc_alarm_tick_with_vm`'s doc comment (src/modules/misc/
+            // selectors.rs) for why this is needed (test_io.py's reentrant/
+            // interrupted-write tests hung forever without it) and why it's
+            // cheap in the common (no alarm armed) case.
+            let result = match crate::modules::misc_alarm_tick_with_vm(self) {
+                Some(err) => Err(err),
+                None => self.execute_instruction(),
+            };
             match result {
                 Ok(None) => continue,
                 Ok(Some(val)) => return Ok(val),

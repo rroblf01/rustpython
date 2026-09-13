@@ -479,6 +479,28 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+/// Invalidate any `jit_load_attr` cache entry for `type_name.name` — must be
+/// called from `jit_store_attr` (runtime_extra.rs) and the interpreter's own
+/// `STORE_ATTR` (`src/vm/op_store.rs`) on every successful attribute store.
+/// Without this, `ATTR_CACHE` (keyed only by `(type_name, name)`, not
+/// per-instance) permanently serves the value that was live the FIRST time a
+/// JIT-compiled loop read that attribute, even after later iterations of the
+/// very same loop write a new value to it — the classic symptom being a
+/// `while self.attr:` loop whose body calls a (non-loop, so never
+/// JIT-compiled) function that reassigns `self.attr` via the plain
+/// interpreter's STORE_ATTR: spins forever re-reading the pre-mutation
+/// cached value. Confirmed real repro: `Lib/profile.py`'s
+/// `Profile.simulate_cmd_complete`'s `while self.cur[-1]:` calling
+/// `trace_dispatch_return` (which reassigns `self.cur`) hung indefinitely
+/// with JIT enabled, completed immediately with JIT disabled.
+pub(crate) fn invalidate_attr_cache(type_name: &str, name: &str) {
+    ATTR_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .remove(&(type_name.to_string(), name.to_string()));
+    });
+}
+
 pub(crate) extern "C" fn jit_load_attr(
     obj: *const PyObjectRef,
     names: *const PyObjectRef,

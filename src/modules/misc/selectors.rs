@@ -354,3 +354,62 @@ pub fn misc_alarm_check() -> Option<crate::object::PyError> {
         Err(e) => Some(e),
     }
 }
+
+/// Same as `misc_alarm_check`, but for callers that already hold the live
+/// `&mut VirtualMachine` (the bytecode eval loop) — avoids the
+/// `with_vm_mut` reentrancy hazard (see the "Gotchas" section on
+/// `with_vm_mut` in CLAUDE.md: it's unsound to call from anywhere already
+/// reachable from live bytecode execution, which the eval loop always is).
+pub fn misc_alarm_check_with_vm(
+    vm: &mut crate::vm::VirtualMachine,
+) -> Option<crate::object::PyError> {
+    let due = ALARM_DEADLINE.with(|d| match *d.borrow() {
+        Some(dl) => std::time::Instant::now() >= dl,
+        None => false,
+    });
+    if !due {
+        return None;
+    }
+    ALARM_DEADLINE.with(|d| *d.borrow_mut() = None);
+    crate::modules::invoke_signal_handler_impl(vm, 14).err()
+}
+
+// ── periodic eval-loop tick ─────────────────────────────────────────────
+// `signal.alarm`/SIGALRM was previously only ever polled from inside
+// `selectors`-based blocking calls (select/poll), so a tight pure-Python
+// loop that never calls into a selector (e.g. a `while 1: write(); flush()`
+// busy-loop, exactly what `test_io.py`'s `check_reentrant_write` and
+// `check_interrupted_write`/`check_interrupted_read_retry` do) would spin
+// forever: the alarm deadline elapses in real time but nothing ever checks
+// it, so the registered SIGALRM handler never fires and the loop's own
+// `assertRaises` never has anything to catch. Real CPython services
+// pending signals from the main eval loop itself (its "eval breaker"),
+// independent of what the Python code happens to call. Mirror that cheaply
+// here: a thread-local countdown decremented once per bytecode instruction,
+// only reducing to an actual `Instant::now()` + potential handler dispatch
+// every N instructions, so the common case (no alarm armed) costs a single
+// decrement-and-branch.
+thread_local! {
+    static ALARM_TICK_COUNTDOWN: std::cell::Cell<u32> = const { std::cell::Cell::new(256) };
+}
+
+#[inline]
+pub fn misc_alarm_tick_with_vm(
+    vm: &mut crate::vm::VirtualMachine,
+) -> Option<crate::object::PyError> {
+    let should_check = ALARM_TICK_COUNTDOWN.with(|c| {
+        let v = c.get();
+        if v <= 1 {
+            c.set(256);
+            true
+        } else {
+            c.set(v - 1);
+            false
+        }
+    });
+    if should_check {
+        misc_alarm_check_with_vm(vm)
+    } else {
+        None
+    }
+}

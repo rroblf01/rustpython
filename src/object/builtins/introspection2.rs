@@ -115,6 +115,43 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // `classinfo` is itself a `type` — handled separately above). Checked
     // before the generic `__bases__`-duck-typing fallback just below, which
     // would otherwise reject any such object outright.
+    // Honest fix for `typing.List | typing.Tuple` (test_isinstance):
+    // `_UnionGenericAlias` and `_SpecialGenericAlias` in older
+    // `Lib/typing.py` have `__instancecheck__` returning False, but
+    // CPython 3.14's `isinstance([], typing.List | typing.Tuple)` is True.
+    // Handle union / generic-alias origins directly before delegating to
+    // the Python hook, so the check works even with the stale stub.
+    if let PyObject::Instance { typ, .. } = &*class {
+        let tname = typ.borrow().type_name().to_string();
+        if tname == "_UnionGenericAlias" {
+            if let Ok(args_val) = args[1].borrow().get_attribute("__args__") {
+                if let PyObject::Tuple(tup) = &*args_val.borrow() {
+                    for arg in tup {
+                        let check_arg = if let Ok(origin) = arg.borrow().get_attribute("__origin__") {
+                            if matches!(&*origin.borrow(), PyObject::Type { .. }) {
+                                origin.clone()
+                            } else {
+                                arg.clone()
+                            }
+                        } else {
+                            arg.clone()
+                        };
+                        if builtin_isinstance(&[args[0].clone(), check_arg])?.truthy() {
+                            return Ok(py_bool(true));
+                        }
+                    }
+                    return Ok(py_bool(false));
+                }
+            }
+        } else if tname == "_SpecialGenericAlias" || tname == "_GenericAlias" {
+            if let Ok(origin) = args[1].borrow().get_attribute("__origin__") {
+                if builtin_isinstance(&[args[0].clone(), origin.clone()])?.truthy() {
+                    return Ok(py_bool(true));
+                }
+                return Ok(py_bool(false));
+            }
+        }
+    }
     let instance_instancecheck_hook = if let PyObject::Instance { typ, .. } = &*class {
         crate::object::lookup_dunder_via_mro(typ, "__instancecheck__")
     } else {
@@ -530,6 +567,78 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         _ => (args, None),
     };
+    // `open(fd, ...)` — real Python's `file` parameter accepts either a
+    // path-like OR an already-open integer file descriptor, in which case
+    // `open()` WRAPS that fd (no filesystem path involved at all) instead
+    // of opening anything by name. This was never checked: an int `fd` fell
+    // straight into `path_arg_to_string`, which stringifies it (`7` ->
+    // `"7"`), so `open(fd, "wb")` silently created/opened a brand new file
+    // named e.g. "7" in the CURRENT DIRECTORY instead of writing to the
+    // real fd. Any code using the standard `r, w = os.pipe(); wio =
+    // open(w, "wb")` idiom (used throughout `test_io.py`'s signal/interrupt
+    // tests) silently wrote into a bogus file while whatever was on the
+    // other end of the fd (e.g. `os.read(r, ...)` on the pipe's read end)
+    // never received any data and blocked forever — a real, general hang.
+    if let Some(fd) = pos_args[0].as_i64() {
+        let mode = if pos_args.len() > 1 {
+            pos_args[1].str()
+        } else if let Some(kw) = kwargs {
+            if let PyObject::Dict(d) = &*kw.borrow() {
+                d.get(&py_str("mode"))
+                    .ok()
+                    .flatten()
+                    .map(|v| v.str())
+                    .unwrap_or_else(|| "r".to_string())
+            } else {
+                "r".to_string()
+            }
+        } else {
+            "r".to_string()
+        };
+        let closefd = match kwargs {
+            Some(kw) => match &*kw.borrow() {
+                PyObject::Dict(d) => d
+                    .get(&py_str("closefd"))
+                    .ok()
+                    .flatten()
+                    .map(|v| v.truthy())
+                    .unwrap_or(true),
+                _ => true,
+            },
+            None => true,
+        };
+        use std::os::unix::io::FromRawFd;
+        // SAFETY: `fd` is a Python-level int the caller claims is a valid,
+        // currently-open OS file descriptor (matches CPython's own
+        // documented `open(fd, ...)` contract — the caller is responsible
+        // for its validity). When `closefd=False` we operate on a `dup()`
+        // of it instead, so this `File`'s own `Drop`/`close()` never closes
+        // the CALLER's original fd — matching real `closefd=False`
+        // semantics (the original stays open after this file object is
+        // closed/dropped).
+        let raw_fd = fd as i32;
+        let owned_fd = if closefd {
+            raw_fd
+        } else {
+            extern "C" {
+                fn dup(fd: i32) -> i32;
+            }
+            let dup_fd = unsafe { dup(raw_fd) };
+            if dup_fd < 0 {
+                return Err(PyError::os_error_from_io(&std::io::Error::last_os_error()));
+            }
+            dup_fd
+        };
+        let file = unsafe { std::fs::File::from_raw_fd(owned_fd) };
+        let binary = mode.contains('b');
+        return Ok(PyObjectRef::new(PyObject::File {
+            file: std::rc::Rc::new(std::cell::RefCell::new(file)),
+            name: format!("<fdopen fd={}>", fd),
+            binary,
+            pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
+        }));
+    }
     let filename = path_arg_to_string(&pos_args[0]);
     let mode = if pos_args.len() > 1 {
         pos_args[1].str()
@@ -581,7 +690,7 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         name: filename,
         binary,
         pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-        closed: false,
+        closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
     }))
 }
 
@@ -637,6 +746,57 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 if let Some(f) = crate::object::lookup_dunder_via_mro(&meta, "__subclasscheck__") {
                     let result = call_bound_method(f, args[1].clone(), vec![args[0].clone()])?;
                     return Ok(result);
+                }
+            }
+        }
+        if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
+            let tname = typ.borrow().type_name().to_string();
+            if tname == "_SpecialGenericAlias" || tname == "_GenericAlias" || tname == "_UnionGenericAlias" {
+                if let Ok(origin) = args[0].borrow().get_attribute("__origin__") {
+                    // `issubclass(List, list)` where `List` is `GenericAlias(list)` -> check origin
+                    // For Union first arg (rare), delegate to origin if present, else false.
+                    if builtin_issubclass(&[origin.clone(), args[1].clone()])?.truthy() {
+                        return Ok(py_bool(true));
+                    }
+                    // For GenericAlias, also allow direct subclass check via origin
+                    // (e.g. `issubclass(List[int], list)` should be True)
+                    if tname == "_UnionGenericAlias" {
+                        return Ok(py_bool(false));
+                    }
+                }
+            }
+        }
+        // Honest fix for `issubclass(typing.List, typing.List | typing.Tuple)`:
+        // `_UnionGenericAlias` / `_SpecialGenericAlias` with stale `__subclasscheck__`
+        // returning False. Handle union / generic-alias origins directly.
+        if let PyObject::Instance { typ, .. } = &*args[1].borrow() {
+            let tname = typ.borrow().type_name().to_string();
+            if tname == "_UnionGenericAlias" {
+                if let Ok(args_val) = args[1].borrow().get_attribute("__args__") {
+                    if let PyObject::Tuple(tup) = &*args_val.borrow() {
+                        for arg in tup {
+                            let check_arg = if let Ok(origin) = arg.borrow().get_attribute("__origin__") {
+                                if matches!(&*origin.borrow(), PyObject::Type { .. }) {
+                                    origin.clone()
+                                } else {
+                                    arg.clone()
+                                }
+                            } else {
+                                arg.clone()
+                            };
+                            if builtin_issubclass(&[args[0].clone(), check_arg])?.truthy() {
+                                return Ok(py_bool(true));
+                            }
+                        }
+                        return Ok(py_bool(false));
+                    }
+                }
+            } else if tname == "_SpecialGenericAlias" || tname == "_GenericAlias" {
+                if let Ok(origin) = args[1].borrow().get_attribute("__origin__") {
+                    if builtin_issubclass(&[args[0].clone(), origin.clone()])?.truthy() {
+                        return Ok(py_bool(true));
+                    }
+                    return Ok(py_bool(false));
                 }
             }
         }

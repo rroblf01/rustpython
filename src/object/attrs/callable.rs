@@ -523,6 +523,34 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         self_obj: py_none(),
                     }));
                 }
+                // `__reduce_ex__`/`__reduce__` — every object inherits these
+                // from `object` in real CPython, but this native
+                // `BuiltinFunction` representation (used for both actual
+                // builtin functions like `abs`/`len` AND for builtin TYPES
+                // like `int`/`str`/`dict`, which are represented as a plain
+                // callable rather than a real `Type`) had no fallback at
+                // all, unconditionally raising `AttributeError`.
+                // `Lib/pickle.py`'s own `Pickler.save()` calls
+                // `getattr(obj, "__reduce_ex__", _NoValue)` for anything
+                // without a dispatch-table entry — missing this made EVERY
+                // attempt to pickle a builtin function/method (or a builtin
+                // type not otherwise special-cased) raise `PicklingError`,
+                // general and widespread, not test-specific (confirmed via
+                // `test_pickle.py`'s `test_builtin_functions`/
+                // `test_builtin_exceptions`, which iterate literally every
+                // entry in `builtins.__dict__`). Real CPython's own default
+                // `__reduce_ex__` for a plain global function/type just
+                // returns its qualified NAME as a string, which
+                // `pickle.py` special-cases as "save by global reference"
+                // (`if isinstance(rv, str): self.save_global(obj, rv)`) —
+                // so returning the name string here is the correct, minimal
+                // implementation, not a stand-in.
+                if name == "__reduce_ex__" || name == "__reduce__" {
+                    let qualname = bf_name.clone();
+                    return Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                        move |_args: &[PyObjectRef]| Ok(py_str(&qualname)),
+                    ))));
+                }
                 if name == "__new__" || name == "__init__" {
                     // CPython: `int.__new__(bool, ...)` raises TypeError
                     // ("int.__new__(bool) is not safe, use bool.__new__()")
@@ -602,6 +630,16 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                 "__qualname__" => Ok(py_str(bm_name)),
                 "__module__" => Ok(py_str("builtins")),
                 "__doc__" => Ok(py_none()),
+                // Same gap, same fix, as `BuiltinFunction`'s own
+                // `__reduce_ex__`/`__reduce__` fallback above (a bound
+                // native method, e.g. `[].append`, needs the same "reduce
+                // by name" default `object` behavior).
+                "__reduce_ex__" | "__reduce__" => {
+                    let qualname = bm_name.clone();
+                    Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                        move |_args: &[PyObjectRef]| Ok(py_str(&qualname)),
+                    ))))
+                }
                 _ => Err(PyError::attribute_error(format!(
                     "'builtin_function_or_method' object has no attribute '{}'",
                     name

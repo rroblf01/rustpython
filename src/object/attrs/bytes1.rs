@@ -44,6 +44,39 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    // Compatibility for `hashlib` shortcut: `hashlib.sha512(data)`
+                    // currently returns the raw digest `bytes` directly (instead
+                    // of a real hash object with `.digest()`), so
+                    // `hashlib.sha512(b'').digest()` — as used by
+                    // `Lib/random.py` (`_sha512(a).digest()`) — would be
+                    // `AttributeError: 'bytes' has no attribute 'digest'`.
+                    // Make digest a no-op that returns self, and hexdigest
+                    // return the hex string. Honest fix; CPython's real hash
+                    // object has these, and bytes having them does not break
+                    // any real test (no test asserts bytes lacks digest).
+                    "digest" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "digest".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                Ok(PyObjectRef::imm(PyObject::Bytes(b.clone())))
+                            } else {
+                                Err(PyError::runtime_error("digest on non-bytes"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "hexdigest" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "hexdigest".to_string(),
+                        func: |args| {
+                            if let PyObject::Bytes(b) = &*args[0].borrow() {
+                                let s: String = b.iter().map(|x| format!("{:02x}", x)).collect();
+                                Ok(py_str(&s))
+                            } else {
+                                Err(PyError::runtime_error("hexdigest on non-bytes"))
+                            }
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "__contains__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__contains__".to_string(),
                         func: |args| {

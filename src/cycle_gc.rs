@@ -88,6 +88,15 @@ pub fn is_trackable(obj: &PyObject) -> bool {
             | PyObject::Cell { .. }
             | PyObject::Partial { .. }
             | PyObject::Slice { .. }
+            // A suspended generator/coroutine's frame commonly holds the
+            // other end of a reference cycle (e.g. `email.feedparser`'s
+            // `_parsegen`, which recurses via `yield` while holding a
+            // reference to the enclosing parser/message state — see
+            // `trace_children`'s own doc comment on this arm for the full
+            // story). Without this, no cycle running through a suspended
+            // frame could ever be detected, let alone collected, at all.
+            | PyObject::Generator { .. }
+            | PyObject::Coroutine { .. }
     )
 }
 
@@ -356,6 +365,43 @@ fn trace_children(obj: &PyObject, out: &mut Vec<PyObjectRef>) {
             out.push(stop.clone());
             out.push(step.clone());
         }
+        // A suspended generator/coroutine's frame is a completely normal
+        // (and, for anything recursive — e.g. `email.feedparser`'s
+        // `_parsegen`, which `yield`s while holding a reference to the
+        // enclosing parser/message-building state — extremely common)
+        // place for a reference cycle to live: the frame's locals hold a
+        // ref to some object, which (directly or via another generator)
+        // holds a ref back to this generator. Without this arm, NONE of a
+        // suspended frame's contents were visible to the collector at all,
+        // so any such cycle was permanently unreachable to the trial-
+        // deletion pass and never collected — a genuine (not "hard to
+        // trigger") reference leak. Symptom: every ~700-allocation
+        // `collect()` pass (see `ALLOCS_SINCE_COLLECT`'s threshold above)
+        // costs more than the last, since the registry of tracked-but-
+        // uncollectible objects only grows — a plain call-in-a-loop of
+        // `email.message_from_string()` on a multipart message (which
+        // recurses through `_parsegen` once per MIME part) measurably
+        // degrades after a few hundred iterations and becomes
+        // catastrophically slow (indistinguishable from an infinite loop
+        // at normal test timeouts) after roughly a thousand — this is what
+        // actually sat behind `tests/cpython/test_mailbox.py`'s reported
+        // "hang", which reproduces with no mailbox involved at all.
+        PyObject::Generator { frame } | PyObject::Coroutine { frame } => {
+            if let Ok(f) = frame.try_borrow() {
+                if let Some(f) = f.as_ref() {
+                    out.extend(f.locals.values().cloned());
+                    out.extend(f.fast_locals.iter().flatten().cloned());
+                    out.extend(f.stack.iter().cloned());
+                    out.extend(f.closure.iter().cloned());
+                    if let Some(fo) = &f.frame_object {
+                        out.push(fo.clone());
+                    }
+                    if let Some(flo) = &f.frame_locals_obj {
+                        out.push(flo.clone());
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -387,6 +433,14 @@ fn clear_children(obj: &mut PyObject) {
             *start = crate::object::py_none();
             *stop = crate::object::py_none();
             *step = crate::object::py_none();
+        }
+        // Counterpart to the `trace_children` arm above: drop the
+        // suspended frame entirely (not just its contents) — a collected
+        // generator/coroutine is never resumed again, and this is the same
+        // "sever every outgoing reference" contract every other arm here
+        // follows.
+        PyObject::Generator { frame } | PyObject::Coroutine { frame } => {
+            *frame.borrow_mut() = None;
         }
         _ => {}
     }

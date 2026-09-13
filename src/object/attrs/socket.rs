@@ -408,7 +408,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 name: "<socket>".to_string(),
                                 binary,
                                 pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-                                closed: false,
+                                closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
                             }))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),

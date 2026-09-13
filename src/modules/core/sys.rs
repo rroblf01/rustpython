@@ -1114,7 +1114,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
             name: "<stdin>".to_string(),
             binary: false,
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-            closed: false,
+            closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
         }),
     );
     d.insert_str(
@@ -1126,7 +1126,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
             name: "<stdout>".to_string(),
             binary: false,
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-            closed: false,
+            closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
         }),
     );
     d.insert_str(
@@ -1138,7 +1138,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
             name: "<stderr>".to_string(),
             binary: false,
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-            closed: false,
+            closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
         }),
     );
     d.insert_str("platform", py_str(std::env::consts::OS));

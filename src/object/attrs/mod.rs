@@ -460,7 +460,7 @@ impl PyObject {
                                 name: "<pipe>".to_string(),
                                 binary: true,
                                 pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-                                closed: false,
+                                closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
                             }))
                         } else if let Ok(f) =
                             std::fs::OpenOptions::new().read(true).open("/dev/null")
@@ -470,7 +470,7 @@ impl PyObject {
                                 name: "<pipe>".to_string(),
                                 binary: true,
                                 pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-                                closed: false,
+                                closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
                             }))
                         } else {
                             Err(PyError::runtime_error(
@@ -643,16 +643,21 @@ impl PyObject {
                             // is visible through every outstanding clone,
                             // regardless of how many Python-level references
                             // to `p.stdin` exist.
+                            // Uses `close_owned_file` (src/object/attrs/file.rs)
+                            // rather than a plain `mem::replace`: closing a
+                            // pipe that some other code path already closed
+                            // by other means (e.g. `os.close(fileno())`)
+                            // must be a tolerated no-op, not a hard process
+                            // abort (`std::fs::File::drop`'s
+                            // debug_assert_fd_is_open` check) — same class
+                            // of bug as the file-object `close()`/`__exit__`
+                            // methods, real trigger confirmed in
+                            // `test_subprocess.py`'s `_test_bufsize_equal_one`.
                             let close_stdin = |stdin_pipe: &Option<
                                 std::rc::Rc<std::cell::RefCell<std::fs::File>>,
                             >| {
                                 if let Some(stdin) = stdin_pipe {
-                                    if let Ok(devnull) =
-                                        std::fs::OpenOptions::new().write(true).open("/dev/null")
-                                    {
-                                        let _ =
-                                            std::mem::replace(&mut *stdin.borrow_mut(), devnull);
-                                    }
+                                    file::close_owned_file(stdin);
                                 }
                                 if let PyObject::Process { stdin_pipe: sp, .. } =
                                     &mut *args[0].borrow_mut()
@@ -889,9 +894,34 @@ impl PyObject {
                         name: "__exit__".to_string(),
                         func: |args| {
                             if let PyObject::Process {
-                                child, returncode, ..
+                                child,
+                                returncode,
+                                stdin_pipe,
+                                stdout_pipe,
+                                stderr_pipe,
+                                ..
                             } = &*args[0].borrow()
                             {
+                                // Real CPython's `Popen.__exit__` always
+                                // closes stdin/stdout/stderr BEFORE waiting
+                                // — without this, a child still blocked
+                                // reading stdin (never seeing EOF) never
+                                // exits, so `wait()` below hangs forever
+                                // whenever a `with Popen(...) as p:` block
+                                // unwinds (return, exception, or just falling
+                                // off the end) without the caller itself
+                                // having already closed the pipes (real
+                                // trigger: `test_subprocess.py`'s
+                                // `test_universal_newlines_and_text`).
+                                if let Some(stdin) = stdin_pipe {
+                                    file::close_owned_file(stdin);
+                                }
+                                if let Some(stdout) = stdout_pipe {
+                                    file::close_owned_file(stdout);
+                                }
+                                if let Some(stderr) = stderr_pipe {
+                                    file::close_owned_file(stderr);
+                                }
                                 if returncode.borrow().is_none() {
                                     if let Some(c) = child.borrow_mut().as_mut() {
                                         if let Ok(status) = c.wait() {

@@ -682,6 +682,29 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
         }
     });
 
+    sock_func!("getfqdn", |args| {
+        let name = if let Some(first) = args.first() {
+            first.str().trim().to_string()
+        } else {
+            String::new()
+        };
+        if name.is_empty() || name == "0.0.0.0" || name == "::" {
+            match std::process::Command::new("hostname").output() {
+                Ok(output) => {
+                    let hostname = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !hostname.is_empty() {
+                        Ok(py_str(&hostname))
+                    } else {
+                        Ok(py_str("localhost"))
+                    }
+                }
+                Err(_) => Ok(py_str("localhost")),
+            }
+        } else {
+            Ok(py_str(&name))
+        }
+    });
+
     sock_func!("gethostbyname", |args| {
         if args.is_empty() {
             return Err(PyError::type_error(

@@ -264,6 +264,213 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
+                    "frombytes" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "frombytes".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("frombytes() takes exactly one argument"));
+                            }
+                            let (typecode, isz, is_float) = if let PyObject::Array(arr) = &*args[0].borrow() {
+                                (arr.typecode, mv_itemsize(&arr.typecode.to_string()), array_typecode_is_float(arr.typecode))
+                            } else {
+                                return Err(PyError::runtime_error("frombytes on non-array"));
+                            };
+                            let bytes: Vec<u8> = match &*args[1].borrow() {
+                                PyObject::Bytes(b) => b.clone(),
+                                PyObject::ByteArray(b) => b.clone(),
+                                _ => return Err(PyError::type_error("a bytes-like object is required, not this type")),
+                            };
+                            if bytes.len() % isz != 0 {
+                                return Err(PyError::value_error("bytes length not a multiple of item size"));
+                            }
+                            let mut vals = Vec::with_capacity(bytes.len() / isz);
+                            for chunk in bytes.chunks(isz) {
+                                let v = if is_float {
+                                    match isz {
+                                        4 => f32::from_ne_bytes(chunk.try_into().unwrap()) as f64,
+                                        _ => f64::from_ne_bytes(chunk.try_into().unwrap()),
+                                    }
+                                } else {
+                                    match isz {
+                                        1 => {
+                                            if typecode == 'b' {
+                                                chunk[0] as i8 as f64
+                                            } else {
+                                                chunk[0] as f64
+                                            }
+                                        }
+                                        2 => {
+                                            if typecode.is_uppercase() {
+                                                u16::from_ne_bytes(chunk.try_into().unwrap()) as f64
+                                            } else {
+                                                i16::from_ne_bytes(chunk.try_into().unwrap()) as f64
+                                            }
+                                        }
+                                        4 => {
+                                            if typecode.is_uppercase() || typecode == 'L' {
+                                                u32::from_ne_bytes(chunk.try_into().unwrap()) as f64
+                                            } else {
+                                                i32::from_ne_bytes(chunk.try_into().unwrap()) as f64
+                                            }
+                                        }
+                                        _ => {
+                                            if typecode.is_uppercase() {
+                                                u64::from_ne_bytes(chunk.try_into().unwrap()) as f64
+                                            } else {
+                                                i64::from_ne_bytes(chunk.try_into().unwrap()) as f64
+                                            }
+                                        }
+                                    }
+                                };
+                                vals.push(v);
+                            }
+                            if let PyObject::Array(arr) = &mut *args[0].borrow_mut() {
+                                arr.data.extend(vals);
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "fromfile" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "fromfile".to_string(),
+                        func: |args| {
+                            if args.len() < 3 {
+                                return Err(PyError::type_error("fromfile() takes exactly 2 arguments"));
+                            }
+                            let isz = if let PyObject::Array(arr) = &*args[0].borrow() {
+                                mv_itemsize(&arr.typecode.to_string())
+                            } else {
+                                return Err(PyError::runtime_error("fromfile on non-array"));
+                            };
+                            let n = args[2].as_i64().unwrap_or(0).max(0) as usize;
+                            let nbytes = n * isz;
+                            let read_method = args[1].borrow().get_attribute("read")?;
+                            let data = {
+                                let borrowed = read_method.borrow();
+                                match &*borrowed {
+                                    PyObject::BuiltinMethod { func, .. }
+                                    | PyObject::BuiltinFunction { func, .. } => {
+                                        let f = *func;
+                                        let so = args[1].clone();
+                                        drop(borrowed);
+                                        f(&[so, py_int(nbytes as i64)])?
+                                    }
+                                    PyObject::Closure(cl) => {
+                                        let cl = cl.clone();
+                                        let so = args[1].clone();
+                                        drop(borrowed);
+                                        cl(&[so, py_int(nbytes as i64)])?
+                                    }
+                                    _ => {
+                                        return Err(PyError::type_error(
+                                            "fromfile() argument must have a read() method",
+                                        ));
+                                    }
+                                }
+                            };
+                            let bytes: Vec<u8> = match &*data.borrow() {
+                                PyObject::Bytes(b) => b.clone(),
+                                PyObject::ByteArray(b) => b.clone(),
+                                PyObject::Str(s) => s.as_bytes().to_vec(),
+                                _ => return Err(PyError::type_error("read() didn't return bytes")),
+                            };
+                            // Real `array.fromfile` still appends whatever
+                            // complete items it managed to read before
+                            // raising `EOFError` on a short read (CPython:
+                            // "the items that were read are inserted into
+                            // the array") — trim to a whole number of items
+                            // first so a trailing partial item isn't fed to
+                            // `frombytes` (which requires an exact multiple).
+                            let short_read = bytes.len() < nbytes;
+                            let usable_len = (bytes.len() / isz) * isz;
+                            let usable_bytes = bytes[..usable_len].to_vec();
+                            let frombytes = args[0].borrow().get_attribute("frombytes")?;
+                            let borrowed = frombytes.borrow();
+                            let append_result = if let PyObject::BuiltinMethod { func, .. } = &*borrowed {
+                                let f = *func;
+                                let so = args[0].clone();
+                                drop(borrowed);
+                                f(&[so, PyObjectRef::imm(PyObject::Bytes(usable_bytes))])
+                            } else {
+                                Err(PyError::runtime_error("frombytes lookup failed"))
+                            };
+                            append_result?;
+                            if short_read {
+                                return Err(PyError::Exception(
+                                    "EOFError".to_string(),
+                                    PyObjectRef::new(PyObject::Exception {
+                                        typ: "EOFError".to_string(),
+                                        args: vec![py_str("read() didn't return enough bytes")],
+                                        cause: None,
+                                        suppress_context: false,
+                                        context: None,
+                                        traceback: None,
+                                        extra: None,
+                                    }),
+                                ));
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
+                    "tofile" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "tofile".to_string(),
+                        func: |args| {
+                            if args.len() < 2 {
+                                return Err(PyError::type_error("tofile() takes exactly one argument"));
+                            }
+                            let is_float = if let PyObject::Array(arr) = &*args[0].borrow() {
+                                array_typecode_is_float(arr.typecode)
+                            } else {
+                                return Err(PyError::runtime_error("tofile on non-array"));
+                            };
+                            let tobytes = args[0].borrow().get_attribute("tobytes")?;
+                            let bytes_obj = {
+                                let borrowed = tobytes.borrow();
+                                match &*borrowed {
+                                    PyObject::BuiltinMethod { func, .. }
+                                    | PyObject::BuiltinFunction { func, .. } => {
+                                        let f = *func;
+                                        let so = args[0].clone();
+                                        drop(borrowed);
+                                        f(&[so])?
+                                    }
+                                    PyObject::Closure(cl) => {
+                                        let cl = cl.clone();
+                                        let so = args[0].clone();
+                                        drop(borrowed);
+                                        cl(&[so])?
+                                    }
+                                    _ => return Err(PyError::runtime_error("tobytes lookup failed")),
+                                }
+                            };
+                            let _ = is_float;
+                            let write_method = args[1].borrow().get_attribute("write")?;
+                            let borrowed = write_method.borrow();
+                            match &*borrowed {
+                                PyObject::BuiltinMethod { func, .. }
+                                | PyObject::BuiltinFunction { func, .. } => {
+                                    let f = *func;
+                                    let so = args[1].clone();
+                                    drop(borrowed);
+                                    f(&[so, bytes_obj])?;
+                                }
+                                PyObject::Closure(cl) => {
+                                    let cl = cl.clone();
+                                    let so = args[1].clone();
+                                    drop(borrowed);
+                                    cl(&[so, bytes_obj])?;
+                                }
+                                _ => {
+                                    return Err(PyError::type_error(
+                                        "tofile() argument must have a write() method",
+                                    ));
+                                }
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(PyObject::None),
+                    })),
                     "index" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "index".to_string(),
                         func: |args| {

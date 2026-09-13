@@ -647,7 +647,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             name: format!("<fdopen>"),
             binary,
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-            closed: false,
+            closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
         }))
     });
 

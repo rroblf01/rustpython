@@ -10,6 +10,25 @@ impl VirtualMachine {
                 let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let val = self.frames[fi].pop()?;
                 let obj = self.frames[fi].pop()?;
+                // Invalidate the JIT's `jit_load_attr` ATTR_CACHE (keyed by
+                // (type_name, name), not per-instance) for this attribute —
+                // it's populated by JIT-compiled code, but this STORE_ATTR
+                // may be running via the plain interpreter (e.g. inside a
+                // non-loop callee invoked FROM a JIT-compiled loop), so the
+                // JIT side has no other way to learn the value changed.
+                // Without this, a JIT-compiled `while self.attr: ...`-style
+                // loop whose body calls a (non-JIT'd) function that
+                // reassigns `self.attr` spins forever re-reading the
+                // pre-mutation cached value — the exact cause of
+                // `Lib/profile.py`'s `Profile.simulate_cmd_complete` hang
+                // (its `while self.cur[-1]:` calls `trace_dispatch_return`,
+                // which has no loop of its own so is never JIT-compiled, to
+                // reassign `self.cur`).
+                #[cfg(feature = "jit")]
+                {
+                    let type_name = obj.borrow().type_name();
+                    crate::jit::runtime::invalidate_attr_cache(&type_name, &name);
+                }
                 if std::env::var("RPY_DEBUG_ATTR").is_ok() {
                     let kind = match &*obj.borrow() {
                         PyObject::Type { name: n, .. } => format!("Type({})", n),

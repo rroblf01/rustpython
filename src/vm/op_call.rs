@@ -75,7 +75,21 @@ impl VirtualMachine {
                                     crate::modules::zipimporter_method_marker as crate::object::BuiltinFunc,
                                 )
                         );
-                        if !is_special_throw && !is_context_run && !is_iobase_exit && !is_zipimporter_method {
+                        // Same exclusion, same reason, for
+                        // `TextIOWrapper.read`/`readline`/`write`/`seek`/...
+                        // (see `tiw_delegate_marker`'s doc comment in
+                        // `src/modules/dev/io.rs`) — this fast path's normal
+                        // `func(&na)?` call would otherwise hit the bare
+                        // marker directly and always raise.
+                        let is_tiw_delegate = matches!(
+                            &*callable.borrow(),
+                            PyObject::BuiltinMethod { func, .. }
+                                if std::ptr::fn_addr_eq(
+                                    *func,
+                                    crate::modules::tiw_delegate_marker as crate::object::BuiltinFunc,
+                                )
+                        );
+                        if !is_special_throw && !is_context_run && !is_iobase_exit && !is_zipimporter_method && !is_tiw_delegate {
                             if let PyObject::BuiltinMethod { name, func, self_obj } =
                                 &*callable.borrow()
                             {

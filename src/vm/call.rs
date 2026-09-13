@@ -466,6 +466,39 @@ impl VirtualMachine {
             }
         }
 
+        // `TextIOWrapper`'s `read`/`readline`/`write`/`seek`/`tell`/`flush`/
+        // `close`/`truncate`/`fileno`/`isatty`/`writelines`/`readlines`/
+        // `name`/`mode` all share ONE marker (`tiw_delegate_marker`), same
+        // convention as `zipimporter_method_marker` right above — see
+        // `tiw_delegate_marker`'s own doc comment for why this needs the
+        // live VM instead of `with_vm_mut`. Must handle both the auto-bound
+        // `BuiltinMethod` shape (ordinary `f.read()` dot-call syntax) and
+        // the bare unbound `BuiltinFunction` shape (a property getter, e.g.
+        // `f.name`, is invoked as `getter(self)` directly, never auto-bound
+        // — mirrors `iobase_exit_marker`'s own dual-shape handling above).
+        if let PyObject::BuiltinMethod { func, self_obj, name } = &*callable.borrow() {
+            if std::ptr::fn_addr_eq(
+                *func,
+                crate::modules::tiw_delegate_marker as crate::object::BuiltinFunc,
+            ) {
+                let method = name.clone();
+                let mut all_args = vec![self_obj.clone()];
+                all_args.extend_from_slice(args);
+                return crate::modules::tiw_delegate_with_vm(self, &method, &all_args)
+                    .map(Some);
+            }
+        }
+        if let PyObject::BuiltinFunction { func, name } = &*callable.borrow() {
+            if std::ptr::fn_addr_eq(
+                *func,
+                crate::modules::tiw_delegate_marker as crate::object::BuiltinFunc,
+            ) {
+                let method = name.clone();
+                return crate::modules::tiw_delegate_with_vm(self, &method, args)
+                    .map(Some);
+            }
+        }
+
         // `contextvars.Context.run(callable, *args, **kwargs)` — needs the
         // live VM to call `callable` with its OWN real positional/keyword
         // arguments forwarded, not this project's usual "pack kwargs into a

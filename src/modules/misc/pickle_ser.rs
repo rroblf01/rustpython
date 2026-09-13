@@ -133,11 +133,15 @@ pub fn pickle_serialize(
             pickle_serialize(&py_int(*start_len as i64), buf, memo, protocol)?;
         }
         PyObject::Tuple(items) => {
-            buf.push(b'(');
-            for item in items {
-                pickle_serialize(item, buf, memo, protocol)?;
+            if items.is_empty() {
+                buf.push(b')');
+            } else {
+                buf.push(b'(');
+                for item in items {
+                    pickle_serialize(item, buf, memo, protocol)?;
+                }
+                buf.push(b't');
             }
-            buf.push(b')');
         }
         PyObject::Dict(d) => {
             if let Some(ptr) = container_ptr(obj) {

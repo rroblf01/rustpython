@@ -4,6 +4,60 @@ use super::*;
 use crate::interner;
 use std::rc::Rc;
 
+/// Replace the `std::fs::File` living inside a shared `Rc<RefCell<File>>`
+/// pipe/file handle with a fresh `/dev/null` placeholder, closing the real
+/// OS fd exactly once — WITHOUT ever letting `std::fs::File`'s own `Drop`
+/// run on the old value.
+///
+/// Why this exists: real CPython tolerates closing an fd that's already
+/// been closed by other means (e.g. `os.close(f.fileno())` followed by
+/// `f.close()` — `tests/cpython/test_subprocess.py`'s own
+/// `_test_bufsize_equal_one` does exactly this, wrapping the second close
+/// in `except OSError: pass`) — the raw `close(2)` syscall just returns
+/// `EBADF`, which CPython surfaces as a normal, catchable `OSError`. This
+/// Rust toolchain's `std::fs::File::drop` carries a `debug_assert_fd_is_open`
+/// check that instead calls `rtabort!` — a hard process abort, not a panic,
+/// not something any Python-level `try`/`except` can catch — the instant it
+/// observes an owned fd that's already invalid. Plain
+/// `std::mem::replace(&mut *file.borrow_mut(), new_file)` (the previous
+/// pattern used at every close site) drops the OLD `File` normally, running
+/// straight into that abort whenever something else already closed the same
+/// fd out from under it (confirmed real crash: `test_subprocess.py`'s
+/// `_test_bufsize_equal_one`, "IO Safety violation: owned file descriptor
+/// already closed").
+///
+/// Fix: extract the raw fd ourselves, `ManuallyDrop` the old `File` so
+/// `std::fs::File::drop` (and its debug assertion) never runs on it, and
+/// close the fd via a direct libc `close(2)` call whose result is ignored —
+/// matching CPython's tolerant "double close is a silent/catchable no-op"
+/// semantics instead of aborting the whole interpreter. No new dependency:
+/// declared directly, like the existing `raise`/`signal` FFI calls in
+/// `src/main.rs`.
+pub(crate) fn close_owned_file(file: &Rc<std::cell::RefCell<std::fs::File>>) {
+    use std::os::unix::io::AsRawFd;
+    let devnull = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")
+        .or_else(|_| std::fs::File::open("/dev/null"));
+    if let Ok(new_file) = devnull {
+        let old = std::mem::replace(&mut *file.borrow_mut(), new_file);
+        let fd = old.as_raw_fd();
+        // SAFETY: `old` is never used again after this — wrapping it in
+        // `ManuallyDrop` prevents `std::fs::File::drop`'s own close (and
+        // its abort-on-already-closed debug check) from running; we do the
+        // actual close ourselves via a raw libc call and ignore its result,
+        // matching CPython's tolerant EBADF-on-double-close behavior.
+        let _old = std::mem::ManuallyDrop::new(old);
+        extern "C" {
+            fn close(fd: i32) -> i32;
+        }
+        unsafe {
+            close(fd);
+        }
+    }
+}
+
 pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
     match o {
             PyObject::File { file: f_rc, .. } => {
@@ -23,7 +77,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 name: fname.clone(),
                                 binary: true,
                                 pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
-                                closed: false,
+                                closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
                             }))
                         } else {
                             Err(PyError::runtime_error("buffer access on non-file"))
@@ -38,7 +92,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     }
                     "closed" => {
                         if let PyObject::File { closed, .. } = o {
-                            Ok(py_bool(*closed))
+                            Ok(py_bool(*closed.borrow()))
                         } else {
                             Err(PyError::runtime_error("closed access on non-file"))
                         }
@@ -384,15 +438,8 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         func: |args| {
                             if let PyObject::File { file, closed, .. } = &mut *args[0].borrow_mut()
                             {
-                                *closed = true;
-                                // Flush and drop by replacing with a closed file
-                                let _ = std::mem::replace(
-                                    &mut *file.borrow_mut(),
-                                    std::fs::File::create("/dev/null").unwrap_or(
-                                        std::fs::File::open("/dev/null")
-                                            .unwrap_or_else(|_| panic!()),
-                                    ),
-                                );
+                                *closed.borrow_mut() = true;
+                                close_owned_file(file);
                                 Ok(py_none())
                             } else {
                                 Err(PyError::runtime_error("close on non-file"))
@@ -430,13 +477,8 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             if let PyObject::File { file, closed, .. } =
                                 &mut *args[file_obj_idx].borrow_mut()
                             {
-                                *closed = true;
-                                let _ = std::mem::replace(
-                                    &mut *file.borrow_mut(),
-                                    std::fs::File::open("/dev/null").unwrap_or_else(|_| {
-                                        std::fs::File::create("/dev/null").unwrap()
-                                    }),
-                                );
+                                *closed.borrow_mut() = true;
+                                close_owned_file(file);
                             }
                             Ok(py_none())
                         },

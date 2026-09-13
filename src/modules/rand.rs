@@ -143,9 +143,44 @@ fn put_mt(self_obj: &PyObjectRef, mt: Mt) {
     if let PyObject::Instance { dict, .. } = &mut *b {
         dict.insert_str(
             "_mt_state",
-            PyObjectRef::imm(PyObject::Bytes(mt.to_bytes())),
+            // `Mut` (not `imm`) deliberately: `with_mt` below mutates this
+            // private, never-Python-visible blob's bytes IN PLACE via
+            // `borrow_mut()` on every getrandbits()/random() call, which
+            // panics on an `Imm`-tagged `PyObjectRef`.
+            PyObjectRef::new(PyObject::Bytes(mt.to_bytes())),
         );
     }
+}
+
+/// Run `f` against the live MT state, mutating the SAME `_mt_state` bytes
+/// blob in place (overwriting its existing `Vec<u8>` contents) instead of
+/// allocating a fresh `Bytes`/`PyObjectRef` and re-inserting it into the
+/// instance dict on every single call. `getrandbits`/`random`/`randrange`
+/// (via `Lib/random.py`'s `_randbelow`) are called extremely often — a
+/// rejection-sampling loop can invoke `getrandbits` several times per
+/// logical draw — so the two heap allocations `get_mt`+`put_mt` used to
+/// do on every call (a new 2504-byte `Vec<u8>` plus a new
+/// `Rc<RefCell<PyObject>>`) measurably dominated runtime in call-heavy
+/// tests (e.g. `test_set.py`'s `TestOperationsMutating`, which drives
+/// `randrange()` from inside `__hash__`/`__eq__` for up to 50*50 pairs
+/// across 100 outer iterations per sub-test) — slow enough to look like a
+/// hang against a per-test timeout even though it always terminates.
+fn with_mt<R>(self_obj: &PyObjectRef, f: impl FnOnce(&mut Mt) -> R) -> PyResult<R> {
+    let b = self_obj.borrow();
+    if let PyObject::Instance { dict, .. } = &*b {
+        if let Some(st) = dict.get_str("_mt_state") {
+            let mut st_b = st.borrow_mut();
+            if let PyObject::Bytes(bytes) = &mut *st_b {
+                let mut mt = Mt::from_bytes(bytes)
+                    .ok_or_else(|| PyError::runtime_error("corrupt _random state"))?;
+                let r = f(&mut mt);
+                let fresh = mt.to_bytes();
+                bytes.copy_from_slice(&fresh);
+                return Ok(r);
+            }
+        }
+    }
+    Err(PyError::runtime_error("_random.Random state missing"))
 }
 
 /// int → little-endian u32 words of its absolute value (CPython's
@@ -224,21 +259,22 @@ fn make_random_type() -> PyObjectRef {
         if k == 0 {
             return Ok(py_int(0i64));
         }
-        let mut mt = get_mt(&args[0])?;
         let words = (((k as u64) + 31) / 32) as usize;
         let last_bits = (k % 32) as u32;
         // Build the result as raw little-endian 32-bit words and convert
         // ONCE at the end — per-word `BigInt` OR/shift is O(n^2) and made
         // getrandbits(2**31) take effectively forever.
-        let mut buf = vec![0u8; words * 4];
-        for i in 0..words {
-            let mut w = mt.next_u32();
-            if i + 1 == words && last_bits > 0 {
-                w >>= 32 - last_bits;
+        let mut buf = with_mt(&args[0], |mt| {
+            let mut buf = vec![0u8; words * 4];
+            for i in 0..words {
+                let mut w = mt.next_u32();
+                if i + 1 == words && last_bits > 0 {
+                    w >>= 32 - last_bits;
+                }
+                buf[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
             }
-            buf[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
-        }
-        put_mt(&args[0], mt);
+            buf
+        })?;
         // Trim trailing zero bytes so from_bytes_le never sees an empty
         // sign issue and stays cheap.
         while let Some(&0) = buf.last() {
@@ -252,10 +288,10 @@ fn make_random_type() -> PyObjectRef {
     });
 
     rm!("random", |args| {
-        let mut mt = get_mt(&args.first().cloned().unwrap())?;
-        let a = (mt.next_u32() >> 5) as f64;
-        let b = (mt.next_u32() >> 6) as f64;
-        put_mt(&args[0].clone(), mt);
+        let self_obj = args.first().cloned().ok_or_else(|| PyError::type_error("random(self) missing"))?;
+        let (a, b) = with_mt(&self_obj, |mt| {
+            ((mt.next_u32() >> 5) as f64, (mt.next_u32() >> 6) as f64)
+        })?;
         Ok(py_float((a * 67_108_864.0 + b) * (1.0 / 9_007_199_254_740_992.0)))
     });
 

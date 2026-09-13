@@ -709,6 +709,20 @@ pub fn create_struct_dict() -> HashMap<String, PyObjectRef> {
                 struct_unpack_impl(&pack_args)
             },
         }));
+        struct_type_dict.insert("__repr__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__repr__".to_string(),
+            func: |args| {
+                if let Some(inst) = args.first() {
+                    if let PyObject::Instance { dict, .. } = &*inst.borrow() {
+                        if let Some(fmt) = dict.get("format") {
+                            let fmt_str = fmt.str();
+                            return Ok(py_str(&format!("Struct('{}')", fmt_str)));
+                        }
+                    }
+                }
+                Ok(py_str("Struct(?)"))
+            },
+        }));
         let struct_type = PyObjectRef::new(PyObject::Type {
             name: "Struct".to_string(),
             dict: Box::new(str_map_to_typedict(struct_type_dict)),
