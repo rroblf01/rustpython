@@ -106,8 +106,32 @@ fn run_compress(inner: &mut Compress, input: &[u8], flush: FlushCompress) -> PyR
         consumed += (inner.total_in() - before_in) as usize;
         match status {
             Status::StreamEnd => break,
-            Status::Ok | Status::BufError => {
-                if consumed >= input.len() && produced == 0 {
+            // `BufError` means OUR 32KB output buffer filled up mid-call —
+            // there's necessarily more to drain, so always loop again
+            // regardless of `flush`/`consumed` (the old `produced == 0`
+            // check below never applies here since a full buffer implies
+            // produced > 0, but being explicit avoids relying on that).
+            Status::BufError => continue,
+            Status::Ok => {
+                // Used to keep looping as long as this call had produced
+                // ANY bytes at all — correct for the very first plain
+                // `compress()` call (which legitimately emits a large
+                // chunk once, then a trailing no-op call with `produced ==
+                // 0` broke the loop), but wrong for `Z_SYNC_FLUSH`/
+                // `Z_FULL_FLUSH`: those flush modes emit a small
+                // (non-empty) sync-marker block on EVERY call by design,
+                // so `produced` is never 0 and the old condition spun
+                // forever re-flushing an already-empty stream (confirmed
+                // hang: `zlib.compressobj().flush(Z_SYNC_FLUSH)` on any
+                // real payload). Real zlib/flate2 semantics: `Ok` means
+                // this call's unit of work (consume `input`, honor
+                // `flush`) is DONE within the given output buffer — the
+                // only reason to call again is `flush == Finish` (which
+                // isn't "done" until `StreamEnd`) or leftover unconsumed
+                // input (shouldn't normally happen since the whole
+                // remaining slice is passed every time, but kept as a
+                // defensive check).
+                if flush != FlushCompress::Finish && consumed >= input.len() {
                     break;
                 }
             }
