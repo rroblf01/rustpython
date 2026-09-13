@@ -106,12 +106,25 @@ fn run_compress(inner: &mut Compress, input: &[u8], flush: FlushCompress) -> PyR
         consumed += (inner.total_in() - before_in) as usize;
         match status {
             Status::StreamEnd => break,
-            // `BufError` means OUR 32KB output buffer filled up mid-call —
-            // there's necessarily more to drain, so always loop again
-            // regardless of `flush`/`consumed` (the old `produced == 0`
-            // check below never applies here since a full buffer implies
-            // produced > 0, but being explicit avoids relying on that).
-            Status::BufError => continue,
+            // `BufError` is ambiguous by itself: zlib returns it BOTH when
+            // our 32KB output buffer genuinely filled up mid-call (real
+            // "more to drain", confirmed by `produced == buf.len()`) AND
+            // when there's simply no progress possible at all — e.g.
+            // `compress(b"")` with `flush=None` on a stream with nothing
+            // buffered — which produces 0 bytes into a buffer nowhere near
+            // full. Unconditionally looping on ANY `BufError` (as a first
+            // version of this fix did) spun forever on the latter case:
+            // `zlib.compressobj().compress(b"")` hung instead of returning
+            // immediately (regression caught by `test_zipimport.py`'s
+            // `testEmptyPy`, which zips a zero-byte `.py` file — real
+            // CPython returns 2 bytes, the zlib header, right away).
+            Status::BufError => {
+                if produced == buf.len() {
+                    continue;
+                } else {
+                    break;
+                }
+            }
             Status::Ok => {
                 // Used to keep looping as long as this call had produced
                 // ANY bytes at all — correct for the very first plain
