@@ -299,9 +299,14 @@ impl VirtualMachine {
                         frame.fast_locals[var_idx] = Some(val.clone());
                     }
                 }
-                let name = crate::interner::lookup_str(frame.code.varnames[var_idx]);
-                frame.insert_local(name, val);
+                // Fast path: skip HashMap insert unless frame locals are
+                // actually observed (via `locals()` / frame object). LOAD_FAST
+                // reads directly from fast_locals, so keeping the map in sync
+                // on every store is pure overhead for tight loops (quickbench
+                // b_arith etc pay a hash insert per STORE_FAST otherwise).
                 if frame.frame_locals_obj.is_some() {
+                    let name = crate::interner::lookup_str(frame.code.varnames[var_idx]);
+                    frame.insert_local(name, val);
                     self.sync_frame_locals(fi);
                 }
             }

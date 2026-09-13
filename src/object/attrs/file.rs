@@ -109,7 +109,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 Err(PyError::runtime_error("fileno on non-file"))
                             }
                         },
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "read" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "read".to_string(),
@@ -209,7 +209,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 Err(PyError::runtime_error("read on non-file"))
                             }
                         },
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     // `readline()`/`readlines()`/iteration (`for line in f:`)
                     // were missing entirely — one of the single most common
@@ -257,7 +257,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 Err(PyError::runtime_error("readline on non-file"))
                             }
                         },
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "readlines" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "readlines".to_string(),
@@ -293,12 +293,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 Err(PyError::runtime_error("readlines on non-file"))
                             }
                         },
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "__iter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__iter__".to_string(),
                         func: |args| Ok(args[0].clone()),
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "__next__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__next__".to_string(),
@@ -331,7 +331,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 Err(PyError::runtime_error("__next__ on non-file"))
                             }
                         },
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "write" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "write".to_string(),
@@ -362,7 +362,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 Err(PyError::runtime_error("write on non-file"))
                             }
                         },
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "flush" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "flush".to_string(),
@@ -377,7 +377,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 Err(PyError::runtime_error("flush on non-file"))
                             }
                         },
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "close" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "close".to_string(),
@@ -398,12 +398,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 Err(PyError::runtime_error("close on non-file"))
                             }
                         },
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "__enter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__enter__".to_string(),
                         func: |args| Ok(args[0].clone()),
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "__exit__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "__exit__".to_string(),
@@ -440,7 +440,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             }
                             Ok(py_none())
                         },
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "seek" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "seek".to_string(),
@@ -472,7 +472,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 Err(PyError::runtime_error("seek on non-file"))
                             }
                         },
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "tell" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "tell".to_string(),
@@ -488,7 +488,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 Err(PyError::runtime_error("tell on non-file"))
                             }
                         },
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "isatty" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "isatty".to_string(),
@@ -507,17 +507,17 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 Err(PyError::runtime_error("isatty on non-file"))
                             }
                         },
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "readable" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "readable".to_string(),
                         func: |_| Ok(py_bool(true)),
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "writable" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "writable".to_string(),
                         func: |_| Ok(py_bool(true)),
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "truncate" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "truncate".to_string(),
@@ -537,12 +537,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 Err(PyError::runtime_error("truncate on non-file"))
                             }
                         },
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     "seekable" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "seekable".to_string(),
                         func: |_| Ok(py_bool(true)),
-                        self_obj: PyObjectRef::new(PyObject::None),
+                        self_obj: PyObjectRef::new(o.clone()),
                     })),
                     _ => Err(PyError::attribute_error(format!(
                         "'file' object has no attribute '{}'",

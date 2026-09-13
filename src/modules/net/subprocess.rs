@@ -85,6 +85,155 @@ fn make_called_process_error(
 }
 
 thread_local! {
+    static TIMEOUT_EXPIRED_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
+}
+
+/// `subprocess.TimeoutExpired` — was missing entirely, and `run`/
+/// `check_call`/`check_output` never enforced their `timeout=` kwarg at
+/// all (they always ran the child to completion via a single blocking
+/// `Command::output()`), so any real test relying on it to bound a
+/// runaway/long-sleeping child (`tests/cpython/test_subprocess.py`'s
+/// `test_call_timeout`/`test_timeout_exception`/`test_check_output_
+/// timeout`) either ran to full completion (slow but not wrong) or, for
+/// a genuinely infinite child (`"while True: pass"`), hung the whole test
+/// process forever. Same real `Type`/`Instance` shape as
+/// `CalledProcessError`/`CompletedProcess` above.
+fn get_timeout_expired_type() -> PyObjectRef {
+    let existing = TIMEOUT_EXPIRED_TYPE.with(|c| c.borrow().clone());
+    if let Some(t) = existing {
+        return t;
+    }
+    let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
+    type_dict.insert_str(
+        "__str__",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "__str__".to_string(),
+            func: |args| {
+                if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                    let cmd = dict.get_str("cmd").map(|v| v.str()).unwrap_or_default();
+                    // Match CPython's `str(timeout)` formatting: a caller
+                    // passing a plain `int` (e.g. `timeout=-1`, the exact
+                    // form `test_timeout_exception` asserts on: `"-1
+                    // seconds"`, not `"-1.0 seconds"`) should not grow a
+                    // spurious `.0` just because this is stored as an f64
+                    // internally.
+                    let timeout = dict
+                        .get_str("timeout")
+                        .and_then(|v| v.as_f64())
+                        .map(|f| {
+                            if f.fract() == 0.0 && f.is_finite() {
+                                format!("{}", f as i64)
+                            } else {
+                                format!("{}", f)
+                            }
+                        })
+                        .unwrap_or_else(|| "None".to_string());
+                    Ok(py_str(&format!(
+                        "Command '{}' timed out after {} seconds",
+                        cmd, timeout
+                    )))
+                } else {
+                    Ok(py_str(""))
+                }
+            },
+        }),
+    );
+    let typ = PyObjectRef::new(PyObject::Type {
+        name: "TimeoutExpired".to_string(),
+        dict: Box::new(str_map_to_typedict(type_dict)),
+        bases: vec![],
+        mro: vec![],
+    });
+    if let PyObject::Type { mro, .. } = &mut *typ.borrow_mut() {
+        *mro = vec![typ.clone()];
+    }
+    TIMEOUT_EXPIRED_TYPE.with(|c| {
+        *c.borrow_mut() = Some(typ.clone());
+    });
+    typ
+}
+
+fn make_timeout_expired(cmd: &str, timeout: f64, output: Vec<u8>, stderr: Vec<u8>) -> PyObjectRef {
+    let mut dict = crate::object::AttrMap::new();
+    dict.insert_str("cmd", py_str(cmd));
+    dict.insert_str("timeout", py_float(timeout));
+    dict.insert_str("output", PyObjectRef::imm(PyObject::Bytes(output.clone())));
+    dict.insert_str("stdout", PyObjectRef::imm(PyObject::Bytes(output)));
+    dict.insert_str("stderr", PyObjectRef::imm(PyObject::Bytes(stderr)));
+    PyObjectRef::new(PyObject::Instance {
+        typ: get_timeout_expired_type(),
+        dict,
+    })
+}
+
+/// Spawn `cmd`, then poll (`try_wait`, sleeping briefly between checks)
+/// until it exits or `timeout_secs` elapses. On timeout, kills the child,
+/// reaps it, and returns `Err` with a `TimeoutExpired` instance ready to
+/// raise. On normal exit, returns the collected `Output` (stdout/stderr
+/// read to completion via `wait_with_output`, which itself drains both
+/// pipes concurrently via internal threads — safe here because, unlike
+/// `Popen`, this path never hands the pipes back out to Python code, so
+/// there's no risk of `Popen.communicate()`'s "extra live `Rc` clone kept
+/// stdin's fd open" class of bug).
+fn spawn_with_timeout(
+    mut command: std::process::Command,
+    cmd_str: &str,
+    timeout_secs: Option<f64>,
+) -> Result<std::process::Output, PyError> {
+    match timeout_secs {
+        None => command.output().map_err(|e| PyError::os_error_from_io(&e)),
+        Some(t) => {
+            command.stdout(std::process::Stdio::piped());
+            command.stderr(std::process::Stdio::piped());
+            let mut child = command.spawn().map_err(|e| PyError::os_error_from_io(&e))?;
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs_f64(t.max(0.0));
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_status)) => {
+                        let out = child.wait_with_output();
+                        return out.map_err(|e| PyError::os_error_from_io(&e));
+                    }
+                    Ok(None) => {
+                        if std::time::Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(PyError::Exception(
+                                "TimeoutExpired".to_string(),
+                                make_timeout_expired(cmd_str, t, Vec::new(), Vec::new()),
+                            ));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(e) => return Err(PyError::os_error_from_io(&e)),
+                }
+            }
+        }
+    }
+}
+
+/// Extract a `timeout=` kwarg (float seconds) from the trailing kwargs
+/// pack, if present and not `None`.
+fn kwarg_timeout(args: &[PyObjectRef]) -> Option<f64> {
+    match args.last() {
+        Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
+            if let PyObject::Dict(d) = &*last.borrow() {
+                d.get(&py_str("timeout")).ok().flatten().and_then(|v| {
+                    if matches!(&*v.borrow(), PyObject::None) {
+                        None
+                    } else {
+                        v.as_f64()
+                    }
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+thread_local! {
     static COMPLETED_PROCESS_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
 }
 
@@ -198,6 +347,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         };
     }
     d.insert_str("CalledProcessError", get_called_process_error_type());
+    d.insert_str("TimeoutExpired", get_timeout_expired_type());
 
     // Real `subprocess.run`/`check_call`/`check_output` all have `shell` as
     // a KEYWORD-ONLY parameter (`def run(args, *, shell=False, ...)`) — this
@@ -277,16 +427,17 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         if cmd_str.is_empty() {
             return Err(PyError::ValueError("empty command".to_string()));
         }
+        let timeout = kwarg_timeout(args);
         let output = if shell {
             let mut cmd = std::process::Command::new("/bin/sh");
             cmd.arg("-c").arg(&cmd_str);
             apply_env(&mut cmd, args);
-            cmd.output().map_err(|e| PyError::os_error_from_io(&e))?
+            spawn_with_timeout(cmd, &cmd_str, timeout)?
         } else {
             let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
                 items.iter().map(|a| a.str()).collect()
             } else {
-                vec![cmd_str]
+                vec![cmd_str.clone()]
             };
             if cmd_args.is_empty() {
                 return Err(PyError::ValueError("empty command".to_string()));
@@ -294,7 +445,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             let mut cmd = std::process::Command::new(&cmd_args[0]);
             cmd.args(&cmd_args[1..]);
             apply_env(&mut cmd, args);
-            cmd.output().map_err(|e| PyError::os_error_from_io(&e))?
+            spawn_with_timeout(cmd, &cmd_str, timeout)?
         };
         let returncode = output.status.code().unwrap_or(-1) as i64;
         let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
@@ -307,6 +458,40 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         ))
     });
 
+    // `subprocess.call` — was missing entirely (`AttributeError`), even
+    // though it's one of the most common convenience wrappers real code
+    // uses (`tests/cpython/test_subprocess.py`'s `test_call_timeout`
+    // among others). Same shape as `check_call` just below, minus the
+    // non-zero-exit-status check — just returns the returncode.
+    sub_func!("call", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error("call() missing required argument"));
+        }
+        let cmd_str = args[0].str();
+        let shell = kwarg_bool(args, "shell");
+        let timeout = kwarg_timeout(args);
+        let output = if shell {
+            let mut cmd = std::process::Command::new("sh");
+            cmd.arg("-c").arg(&cmd_str);
+            apply_env(&mut cmd, args);
+            spawn_with_timeout(cmd, &cmd_str, timeout)?
+        } else {
+            let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
+                items.iter().map(|a| a.str()).collect()
+            } else {
+                cmd_str.split_whitespace().map(|s| s.to_string()).collect()
+            };
+            if cmd_args.is_empty() {
+                return Err(PyError::type_error("call() requires a non-empty command"));
+            }
+            let mut cmd = std::process::Command::new(&cmd_args[0]);
+            cmd.args(&cmd_args[1..]);
+            apply_env(&mut cmd, args);
+            spawn_with_timeout(cmd, &cmd_str, timeout)?
+        };
+        Ok(py_int(output.status.code().unwrap_or(-1) as i64))
+    });
+
     sub_func!("check_call", |args| {
         // Run a command and check return code
         if args.is_empty() {
@@ -316,11 +501,12 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         }
         let cmd_str = args[0].str();
         let shell = kwarg_bool(args, "shell");
+        let timeout = kwarg_timeout(args);
         let output = if shell {
             let mut cmd = std::process::Command::new("sh");
             cmd.arg("-c").arg(&cmd_str);
             apply_env(&mut cmd, args);
-            cmd.output().map_err(|e| PyError::os_error_from_io(&e))?
+            spawn_with_timeout(cmd, &cmd_str, timeout)?
         } else {
             // Was: `cmd_str.split_whitespace()` — the LIST form (the common
             // case, e.g. `[sys.executable, '-E', '-c', code]`) was stringified
@@ -343,7 +529,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             let mut cmd = std::process::Command::new(&cmd_args[0]);
             cmd.args(&cmd_args[1..]);
             apply_env(&mut cmd, args);
-            cmd.output().map_err(|e| PyError::os_error_from_io(&e))?
+            spawn_with_timeout(cmd, &cmd_str, timeout)?
         };
         let returncode = output.status.code().unwrap_or(-1);
         if returncode != 0 {
@@ -366,16 +552,17 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         if cmd_str.is_empty() {
             return Err(PyError::ValueError("empty command".to_string()));
         }
+        let timeout = kwarg_timeout(args);
         let output = if shell {
             let mut cmd = std::process::Command::new("/bin/sh");
             cmd.arg("-c").arg(&cmd_str);
             apply_env(&mut cmd, args);
-            cmd.output().map_err(|e| PyError::os_error_from_io(&e))?
+            spawn_with_timeout(cmd, &cmd_str, timeout)?
         } else {
             let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
                 items.iter().map(|a| a.str()).collect()
             } else {
-                vec![cmd_str]
+                vec![cmd_str.clone()]
             };
             if cmd_args.is_empty() {
                 return Err(PyError::ValueError("empty command".to_string()));
@@ -383,7 +570,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             let mut cmd = std::process::Command::new(&cmd_args[0]);
             cmd.args(&cmd_args[1..]);
             apply_env(&mut cmd, args);
-            cmd.output().map_err(|e| PyError::os_error_from_io(&e))?
+            spawn_with_timeout(cmd, &cmd_str, timeout)?
         };
         if !output.status.success() {
             let rc = output.status.code().unwrap_or(-1) as i64;
@@ -439,6 +626,18 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
     // all block synchronously with no background-process registry, so
     // there is nothing to reap — a no-op is behavior-equivalent.
     sub_func!("_cleanup", |_args| Ok(py_none()));
+
+    // `subprocess._active` — the list of `Popen` instances not yet
+    // `.wait()`-ed, real CPython's own background-reap registry. Missing
+    // entirely broke `tests/cpython/test_subprocess.py`'s
+    // `BaseTestCase.tearDown` (run after EVERY test in the file) with
+    // `AttributeError: module 'subprocess' has no attribute '_active'` —
+    // it iterates `subprocess._active` unconditionally. Same rationale as
+    // `_cleanup` just above: this module's `Popen`/`run`/`check_call` all
+    // block synchronously with no background registry, so an always-empty
+    // list is behavior-equivalent (nothing is ever "still active" to
+    // report) and satisfies `assertFalse(subprocess._active)`.
+    d.insert_str("_active", PyObjectRef::new(PyObject::List(vec![])));
 
     // Constants
     d.insert_str("PIPE", py_int(-1));
@@ -515,12 +714,39 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
         }
         // Sentinel ints (matching this module's own PIPE/STDOUT/DEVNULL
         // constants just above) map to the corresponding `Stdio` mode;
-        // anything else (including the real default, `None`) inherits the
-        // parent's stream, matching real Python's own default.
+        // a non-negative int is a real, already-open file descriptor the
+        // caller wants the child to inherit AS that specific stream (real
+        // CPython: `Popen(..., stdout=some_fd)`) — this used to fall
+        // through to `Stdio::inherit()` same as the `None` default,
+        // silently handing the child THIS PROCESS's own real stdout/
+        // stderr/stdin instead of the fd the caller actually asked for.
+        // Real trigger: `test_pass_fds_redirected` passes a pipe's write
+        // end as `stdout=`, then does a blocking `os.read()` on the read
+        // end expecting the child's output there — with the fd ignored,
+        // the child wrote to the test HARNESS's own terminal instead, and
+        // the `os.read()` waiting for data that would now never arrive
+        // hung forever. Duplicate the fd (matching CPython's own
+        // dup-into-the-child semantics: the ORIGINAL fd must stay open
+        // and valid in the parent, e.g. for the caller's own cleanup
+        // logic) via a raw `File` wrapper's `try_clone()`, which
+        // duplicates without taking ownership of/closing the original.
+        // Anything else (including the real default, `None`) inherits
+        // the parent's stream, matching real Python's own default.
         let stdio_for = |v: &PyObjectRef| -> std::process::Stdio {
             match v.as_i64() {
                 Some(-1) => std::process::Stdio::piped(),
                 Some(-3) => std::process::Stdio::null(),
+                Some(fd) if fd >= 0 => {
+                    use std::os::unix::io::FromRawFd;
+                    let borrowed =
+                        std::mem::ManuallyDrop::new(unsafe {
+                            std::fs::File::from_raw_fd(fd as i32)
+                        });
+                    match borrowed.try_clone() {
+                        Ok(dup) => std::process::Stdio::from(dup),
+                        Err(_) => std::process::Stdio::inherit(),
+                    }
+                }
                 _ => std::process::Stdio::inherit(),
             }
         };

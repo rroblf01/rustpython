@@ -579,39 +579,252 @@ impl PyObject {
                             let input = args
                                 .get(1)
                                 .filter(|v| !matches!(&*v.borrow(), PyObject::None));
-                            // Write the input to the child's stdin pipe.
-                            if let (Some(inp), Some(stdin)) = (input, &stdin_pipe) {
-                                use std::io::Write;
-                                let bytes = match &*inp.borrow() {
+                            let input_bytes: Vec<u8> = match input {
+                                Some(inp) => match &*inp.borrow() {
                                     PyObject::Bytes(b) => b.clone(),
                                     other => other.str().into_bytes(),
-                                };
-                                let _ = stdin.borrow_mut().write_all(&bytes);
-                            }
+                                },
+                                None => Vec::new(),
+                            };
+                            // Writing `input` to stdin used to be one
+                            // blocking `write_all` done BEFORE any output
+                            // draining started. That deadlocks whenever
+                            // `input` is large enough to fill the stdin
+                            // pipe's OS buffer while the child isn't
+                            // draining stdin fast enough (real trigger:
+                            // `test_communicate_pipe_buf` writes
+                            // `PIPE_MAX_SIZE` bytes of input, but the child
+                            // only reads the first 47 bytes before writing
+                            // a large chunk to stderr) — this process would
+                            // block forever inside `write_all`, before ever
+                            // reaching the code that reads stdout/stderr to
+                            // unblock the child. Folded into the same
+                            // poll(2) loop as the output draining below so
+                            // stdin writes, stdout reads, and stderr reads
+                            // all happen concurrently, exactly like real
+                            // CPython's `selectors`-based `_communicate`.
+                            let mut stdin_offset: usize = 0;
+                            let mut stdin_open = stdin_pipe.is_some() && !input_bytes.is_empty();
                             // CLOSE stdin so the child sees EOF and can
                             // finish (a child reading stdin blocks until the
                             // write end closes — not closing here deadlocked
                             // communicate() against -mquopri, which reads all
-                            // of stdin before producing output). The Process's
-                            // slot AND our own cloned handle must both drop.
-                            if stdin_pipe.is_some() {
+                            // of stdin before producing output).
+                            //
+                            // This USED to just drop the Process's own
+                            // `stdin_pipe` slot and our locally-cloned `Rc`
+                            // handle, relying on the `Rc`'s strong count
+                            // hitting zero to run `std::fs::File`'s `Drop`
+                            // (which closes the real fd). That's unsound the
+                            // moment ANY other `Rc` clone of the same pipe is
+                            // alive elsewhere — and it very often is: every
+                            // `p.stdin`/`.stdout`/`.stderr` attribute access
+                            // (see the `"stdin" | "stdout" | "stderr"` case
+                            // above) hands back a FRESH `PyObject::File`
+                            // wrapping a `.clone()` of the same `Rc`, so
+                            // completely ordinary real-world code like
+                            // `self.addCleanup(p.stdin.close)` (real CPython
+                            // test suite pattern, `tests/cpython/
+                            // test_subprocess.py`'s `test_communicate`) keeps
+                            // an extra `Rc` clone alive for the lifetime of
+                            // the test, silently keeping the strong count
+                            // above zero — the write-end fd was never
+                            // actually closed, the child's `stdin.read()`
+                            // never saw EOF, and `communicate()`'s own
+                            // subsequent blocking `read_to_end` on stdout/
+                            // stderr hung forever (both processes deadlocked
+                            // for the whole test-corpus timeout).
+                            //
+                            // Fix: explicitly replace the FILE INSIDE the
+                            // shared `RefCell` (not just drop one handle to
+                            // it) with a closed placeholder. Because the
+                            // `RefCell` is the thing every `Rc` clone points
+                            // at, this closes the real OS fd immediately and
+                            // is visible through every outstanding clone,
+                            // regardless of how many Python-level references
+                            // to `p.stdin` exist.
+                            let close_stdin = |stdin_pipe: &Option<
+                                std::rc::Rc<std::cell::RefCell<std::fs::File>>,
+                            >| {
+                                if let Some(stdin) = stdin_pipe {
+                                    if let Ok(devnull) =
+                                        std::fs::OpenOptions::new().write(true).open("/dev/null")
+                                    {
+                                        let _ =
+                                            std::mem::replace(&mut *stdin.borrow_mut(), devnull);
+                                    }
+                                }
                                 if let PyObject::Process { stdin_pipe: sp, .. } =
                                     &mut *args[0].borrow_mut()
                                 {
                                     *sp = None;
                                 }
+                            };
+                            if !stdin_open {
+                                // No input to send (or no stdin pipe at
+                                // all): close right away, matching
+                                // CPython's `if not input: self.stdin.
+                                // close()`.
+                                close_stdin(&stdin_pipe);
                             }
-                            drop(stdin_pipe);
-                            // Read stdout + stderr pipes to EOF.
-                            use std::io::Read;
-                            let read_all =
-                                |p: &std::rc::Rc<std::cell::RefCell<std::fs::File>>| -> Vec<u8> {
-                                    let mut buf = Vec::new();
-                                    let _ = p.borrow_mut().read_to_end(&mut buf);
-                                    buf
-                                };
-                            let stdout = stdout_pipe.as_ref().map(read_all).unwrap_or_default();
-                            let stderr = stderr_pipe.as_ref().map(read_all).unwrap_or_default();
+                            // Read stdout + stderr pipes to EOF (and, if
+                            // `stdin_open`, write the remaining input) —
+                            // all multiplexed together below.
+                            //
+                            // MUST be done concurrently, not one fd fully
+                            // drained before the other is even touched: a
+                            // child that interleaves writes to stdout AND
+                            // stderr (real trigger: `tests/cpython/
+                            // test_subprocess.py`'s `test_communicate_pipe_
+                            // buf`, which writes more than the OS pipe
+                            // buffer size to stderr in between two stdout
+                            // writes) can fill the SECOND pipe's buffer
+                            // while blocked writing to it, while this
+                            // process is still blocked doing a full
+                            // `read_to_end` on the FIRST pipe waiting for
+                            // EOF that will never come until the child's
+                            // stderr write unblocks — a classic two-process
+                            // pipe deadlock. Poll both fds (POSIX `poll(2)`,
+                            // no extra crate — same minimal-FFI pattern as
+                            // `select.select`'s own implementation in
+                            // `src/modules/net.rs`) and drain whichever is
+                            // ready in each iteration instead.
+                            use std::os::fd::AsRawFd;
+                            #[repr(C)]
+                            struct PollFd {
+                                fd: i32,
+                                events: i16,
+                                revents: i16,
+                            }
+                            const POLLIN: i16 = 0x0001;
+                            const POLLOUT: i16 = 0x0004;
+                            const POLLERR: i16 = 0x0008;
+                            const POLLHUP: i16 = 0x0010;
+                            extern "C" {
+                                fn poll(fds: *mut PollFd, nfds: u32, timeout: i32) -> i32;
+                            }
+                            let mut stdout_buf = Vec::new();
+                            let mut stderr_buf = Vec::new();
+                            let mut stdout_open = stdout_pipe.is_some();
+                            let mut stderr_open = stderr_pipe.is_some();
+                            use std::io::{Read, Write};
+                            while stdout_open || stderr_open || stdin_open {
+                                let mut fds = Vec::new();
+                                // Order: stdin (write), stdout (read),
+                                // stderr (read) — indices tracked below.
+                                if stdin_open {
+                                    if let Some(p) = &stdin_pipe {
+                                        fds.push(PollFd {
+                                            fd: p.borrow().as_raw_fd(),
+                                            events: POLLOUT,
+                                            revents: 0,
+                                        });
+                                    }
+                                }
+                                if stdout_open {
+                                    if let Some(p) = &stdout_pipe {
+                                        fds.push(PollFd {
+                                            fd: p.borrow().as_raw_fd(),
+                                            events: POLLIN,
+                                            revents: 0,
+                                        });
+                                    }
+                                }
+                                if stderr_open {
+                                    if let Some(p) = &stderr_pipe {
+                                        fds.push(PollFd {
+                                            fd: p.borrow().as_raw_fd(),
+                                            events: POLLIN,
+                                            revents: 0,
+                                        });
+                                    }
+                                }
+                                if fds.is_empty() {
+                                    break;
+                                }
+                                let rc =
+                                    unsafe { poll(fds.as_mut_ptr(), fds.len() as u32, -1) };
+                                if rc < 0 {
+                                    break;
+                                }
+                                let mut idx = 0;
+                                if stdin_open {
+                                    let pf = &fds[idx];
+                                    idx += 1;
+                                    if pf.revents & POLLOUT != 0 {
+                                        if let Some(p) = &stdin_pipe {
+                                            // Chunk each write (matches
+                                            // CPython's `_PIPE_BUF`-sized
+                                            // chunks) so one `write()` call
+                                            // can't itself block for the
+                                            // whole remaining input.
+                                            let end =
+                                                (stdin_offset + 65536).min(input_bytes.len());
+                                            match p.borrow_mut().write(&input_bytes[stdin_offset..end]) {
+                                                Ok(0) | Err(_) => stdin_open = false,
+                                                Ok(n) => {
+                                                    stdin_offset += n;
+                                                    if stdin_offset >= input_bytes.len() {
+                                                        stdin_open = false;
+                                                    }
+                                                }
+                                            }
+                                            if !stdin_open {
+                                                close_stdin(&stdin_pipe);
+                                            }
+                                        }
+                                    } else if pf.revents & (POLLHUP | POLLERR) != 0 {
+                                        // Child closed its end (e.g. it
+                                        // never reads stdin, or already
+                                        // exited) — stop trying to write,
+                                        // matching CPython's `except
+                                        // BrokenPipeError`. Checking only
+                                        // `POLLHUP` here missed the (very
+                                        // common) case where the kernel
+                                        // reports a broken pipe as
+                                        // `POLLERR` WITHOUT `POLLOUT` —
+                                        // `stdin_open` then never became
+                                        // `false` and every subsequent
+                                        // `poll()` call reported the exact
+                                        // same `revents` forever, an
+                                        // infinite loop (real trigger:
+                                        // `test_communicate_epipe`, a
+                                        // large `communicate(input=...)`
+                                        // against a child that exits
+                                        // immediately without reading
+                                        // stdin at all).
+                                        stdin_open = false;
+                                        close_stdin(&stdin_pipe);
+                                    }
+                                }
+                                if stdout_open {
+                                    let pf = &fds[idx];
+                                    idx += 1;
+                                    if pf.revents & (POLLIN | POLLHUP) != 0 {
+                                        if let Some(p) = &stdout_pipe {
+                                            let mut chunk = [0u8; 32768];
+                                            match p.borrow_mut().read(&mut chunk) {
+                                                Ok(0) | Err(_) => stdout_open = false,
+                                                Ok(n) => stdout_buf.extend_from_slice(&chunk[..n]),
+                                            }
+                                        }
+                                    }
+                                }
+                                if stderr_open {
+                                    let pf = &fds[idx];
+                                    if pf.revents & (POLLIN | POLLHUP) != 0 {
+                                        if let Some(p) = &stderr_pipe {
+                                            let mut chunk = [0u8; 32768];
+                                            match p.borrow_mut().read(&mut chunk) {
+                                                Ok(0) | Err(_) => stderr_open = false,
+                                                Ok(n) => stderr_buf.extend_from_slice(&chunk[..n]),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let stdout = stdout_buf;
+                            let stderr = stderr_buf;
                             // Reap the child for its returncode.
                             let taken = child.borrow_mut().take();
                             let rc = match taken {

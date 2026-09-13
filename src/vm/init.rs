@@ -672,7 +672,33 @@ pub(crate) fn register_native_modules(
 
         // Native shelve module (persistent dict wrapper)
         modules.insert_str("shelve", create_module("shelve", create_shelve_dict()));
-        modules.insert_str("selectors", create_module("selectors", create_selectors_dict()));
+
+        // Native selectors module — DISABLED: it only ever supported
+        // socket file objects (see src/modules/misc/selectors.rs's
+        // `obj_readable`/`sock_fd`, which special-case `PyObject::Socket`
+        // and treat any other object, e.g. a plain pipe fd used by
+        // `subprocess.Popen.communicate()`, as always-ready without ever
+        // actually polling it) and it preempted the real vendored
+        // `Lib/selectors.py` entirely: `import_cached_or_fresh`
+        // (src/vm/execute.rs) checks `vm.modules` — populated with every
+        // native module at startup — before ever trying a Lib/-file
+        // import, so as long as this native stub was registered under
+        // the same name, `Lib/selectors.py` could never load, regardless
+        // of the "Lib/ wins when both exist" convention documented
+        // elsewhere in this file (see the `weakref`/`copy`/`shutil`/etc.
+        // comments below). That made `subprocess.communicate()`'s
+        // `_PopenSelector.select()` calls always report every registered
+        // fd as ready, so its output-draining loop never actually waited
+        // for the child to produce data (or its pipe to close) —
+        // combined with `communicate()` also not honoring `timeout`, any
+        // subprocess test moving real bytes through a pipe deadlocked
+        // both processes for the full test-corpus timeout
+        // (`tests/cpython/test_subprocess.py`'s `test_communicate`,
+        // `test_communicate_pipe_buf`, `test_timeout_exception`, etc.).
+        // `select.select`/`select.poll` (src/modules/net.rs) are real,
+        // generic (fd-based, not socket-specific) syscall wrappers, so
+        // the vendored `Lib/selectors.py`'s `SelectSelector`/
+        // `PollSelector` work correctly once this shadow is removed.
 
         // "mimetypes" intentionally NOT registered natively: the
         // pure-Python Lib/mimetypes.py is the full CPython module

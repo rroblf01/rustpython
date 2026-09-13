@@ -361,14 +361,51 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("repeat() missing argument"));
         }
-        let obj = args[0].clone();
+        // `repeat(object=..., times=...)` is a legal call (real CPython
+        // accepts both keyword names) but this is a plain `BuiltinFunction`,
+        // so per this project's kwargs-as-trailing-dict calling convention
+        // (see CLAUDE.md gotchas) any keyword arguments arrive packed into a
+        // dict appended as the LAST positional arg — reading `args[0]`/
+        // `args[1]` unconditionally treated that dict itself as the object
+        // to repeat and silently dropped `times`, e.g.
+        // `repeat(object='a', times=3)` repeated the whole `{'object':...}`
+        // dict 1000 times instead of repeating `'a'` 3 times.
+        let mut positional: Vec<PyObjectRef> = Vec::new();
+        let mut kw_object: Option<PyObjectRef> = None;
+        let mut kw_times: Option<PyObjectRef> = None;
+        if args.len() >= 1 {
+            let last = &args[args.len() - 1];
+            let is_kwargs_dict = if let PyObject::Dict(d) = &*last.borrow() {
+                d.contains(&crate::object::py_str("object")).unwrap_or(false)
+                    || d.contains(&crate::object::py_str("times")).unwrap_or(false)
+            } else {
+                false
+            };
+            if is_kwargs_dict {
+                if let PyObject::Dict(d) = &*last.borrow() {
+                    kw_object = d.get(&crate::object::py_str("object")).ok().flatten();
+                    kw_times = d.get(&crate::object::py_str("times")).ok().flatten();
+                }
+                positional.extend_from_slice(&args[..args.len() - 1]);
+            } else {
+                positional.extend_from_slice(args);
+            }
+        }
+        let obj = if let Some(v) = positional.first().cloned() {
+            v
+        } else if let Some(v) = kw_object {
+            v
+        } else {
+            return Err(PyError::type_error("repeat() missing argument"));
+        };
         // `None` distinguishes "no count given" (real infinite repeat) from
         // an explicit `times=0` (a real, valid call meaning "repeat zero
         // times" — an empty iterator) — these used to collapse onto the
         // same `0` sentinel, so `itertools.repeat(x, 0)` wrongly produced
         // 1000 items instead of none.
-        let times: Option<usize> = if args.len() > 1 {
-            let n = args[1]
+        let times_arg = positional.get(1).cloned().or(kw_times);
+        let times: Option<usize> = if let Some(t) = times_arg {
+            let n = t
                 .as_i64()
                 .ok_or_else(|| PyError::type_error("times must be int"))?;
             Some(n.max(0) as usize)

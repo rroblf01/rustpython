@@ -1064,6 +1064,22 @@ Sequence.register(str)
 Sequence.register(bytes)
 Sequence.register(range)
 Sequence.register(memoryview)
+# RustPython: `range`/`memoryview` are `BuiltinFunction` constructors but
+# `type(range(0))` is a synthetic `Type` distinct from `builtins.range`,
+# so the ABCMeta virtual-subclass registry holds the constructor while
+# instances carry the synthetic type — `isinstance(range(...), Sequence)`
+# stays False. Register the synthetic types as well (CPython's range is
+# a single Type, so the extra registration is a no-op there). This fixes
+# `Lib/random.py:sample` which gates on `isinstance(population, Sequence)`
+# with `range` populations (test_random).
+try:
+    Sequence.register(type(range(0)))
+except Exception:
+    pass
+try:
+    Sequence.register(type(memoryview(b'')))
+except Exception:
+    pass
 
 class _DeprecateByteStringMeta(ABCMeta):
     def __new__(cls, name, bases, namespace, **kwargs):

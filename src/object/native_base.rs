@@ -186,6 +186,15 @@ pub(crate) fn is_builtin_exception_class_name(name: &str) -> bool {
         // no real `Exception` base to walk), needed so the catch-all name
         // check in `find_exception_base_name` doesn't need its own
         // ungated `is_exception_subclass` fallback (see that function).
+        // `subprocess.TimeoutExpired` — same shape/reason as
+        // `CalledProcessError` just above (bare `PyObject::Type`, empty
+        // bases/mro): without it, `find_exception_base_name` returned
+        // `None` for it, so a caught `TimeoutExpired` instance had no
+        // `__cause__`/`__context__`/`__traceback__`/etc. fallback and
+        // raised `AttributeError` the moment anything read one of those
+        // (real trigger: `unittest`'s own exception-reporting machinery
+        // touches `__cause__` on every caught exception).
+        "TimeoutExpired" |
         "CalledProcessError" |
         // `zipimport.ZipImportError` — same shape as `binascii.Error`
         // above (bare `PyObject::BuiltinFunction` building a
@@ -552,22 +561,50 @@ pub(crate) fn get_instance_slots(typ: &PyObjectRef) -> Option<Vec<String>> {
     {
         let mut all_slots = Vec::new();
 
+        // Real Python only restricts instances to `__slots__` when EVERY
+        // class in the MRO (other than `object` itself, which is always
+        // slotted with no dict by design) explicitly declares `__slots__`.
+        // If even ONE base omits it — e.g. a mixin with no `__slots__` line
+        // at all, which implicitly gets a `__dict__` — the WHOLE class gets
+        // a `__dict__` and every other base's slot restriction becomes
+        // irrelevant. This used to union every MRO member's `__slots__`
+        // together and enforce that union unconditionally, so a class like
+        // `typing.TypeVar` (bases: `_Final` with `__slots__ =
+        // ('__weakref__',)`, `_Immutable` with `__slots__ = ()`, but
+        // `_BoundVarianceMixin`/`_PickleUsingNameMixin` with NO `__slots__`
+        // at all) wrongly got treated as slot-restricted to just
+        // `__weakref__` — `self.__name__ = name` in `TypeVar.__init__`
+        // raised "no __dict__ for setting new attributes" instead of just
+        // working, breaking `import typing` itself before any test could
+        // even run.
+        let mut all_bases_slotted = true;
+
         // Check the type's own __slots__
         if let Some(slots_val) = type_dict.get_str("__slots__") {
             extract_slots(slots_val, &mut all_slots);
+        } else {
+            all_bases_slotted = false;
         }
 
         // Check bases' __slots__ (skip self at index 0)
         for base in mro.iter().skip(1) {
             let base_ref = base.borrow();
             if let PyObject::Type {
-                dict: base_dict, ..
+                dict: base_dict,
+                name: base_name,
+                ..
             } = &*base_ref
             {
                 if let Some(slots_val) = base_dict.get_str("__slots__") {
                     extract_slots(slots_val, &mut all_slots);
+                } else if base_name != "object" {
+                    all_bases_slotted = false;
                 }
             }
+        }
+
+        if !all_bases_slotted {
+            return None;
         }
 
         if !all_slots.is_empty() {

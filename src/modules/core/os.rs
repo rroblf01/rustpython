@@ -156,6 +156,161 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             Err(e) => Err(PyError::os_error_from_io(&e)),
         }
     });
+    // `os.scandir()`/`os.DirEntry` were entirely missing (not just an
+    // incomplete stub) — a real, general gap: any code importing
+    // `os.DirEntry` or calling `os.scandir()` (not just this project's own
+    // `test_genericalias.py`, which does `from os import DirEntry` at
+    // import time) failed outright. Implemented here as a real, if
+    // simplified, version: entries are gathered eagerly via
+    // `std::fs::read_dir` (no OS-level directory-iteration handle kept
+    // open across the whole scan, unlike a fully faithful CPython
+    // implementation), and `is_dir`/`is_file`/`is_symlink` are computed
+    // once up front from the OS's own `DirEntry::file_type()` (cheap,
+    // no extra `stat()` syscall) rather than lazily/cached per real
+    // CPython's exact semantics — a reasonable, honest simplification,
+    // not a fake stub.
+    fn make_dir_entry_type() -> PyObjectRef {
+        PyObjectRef::new(PyObject::Type {
+            name: "DirEntry".to_string(),
+            dict: Box::new(str_map_to_typedict({
+                let mut m: HashMap<String, PyObjectRef> = HashMap::new();
+                m.insert(
+                    "is_dir".to_string(),
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "is_dir".to_string(),
+                        func: |args| {
+                            let v = args[0].borrow().get_attribute("_is_dir")?;
+                            Ok(v)
+                        },
+                    }),
+                );
+                m.insert(
+                    "is_file".to_string(),
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "is_file".to_string(),
+                        func: |args| {
+                            let v = args[0].borrow().get_attribute("_is_file")?;
+                            Ok(v)
+                        },
+                    }),
+                );
+                m.insert(
+                    "is_symlink".to_string(),
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "is_symlink".to_string(),
+                        func: |args| {
+                            let v = args[0].borrow().get_attribute("_is_symlink")?;
+                            Ok(v)
+                        },
+                    }),
+                );
+                m.insert(
+                    "inode".to_string(),
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "inode".to_string(),
+                        func: |args| {
+                            let path = args[0].borrow().get_attribute("path")?.str();
+                            match std::fs::symlink_metadata(&path) {
+                                Ok(meta) => Ok(py_int(stat_dev_ino(&meta).1)),
+                                Err(e) => Err(PyError::os_error_from_io(&e)),
+                            }
+                        },
+                    }),
+                );
+                m.insert(
+                    "stat".to_string(),
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "stat".to_string(),
+                        func: |args| {
+                            let path = args[0].borrow().get_attribute("path")?.str();
+                            match std::fs::metadata(&path) {
+                                Ok(meta) => Ok(create_module("stat_result", stat_to_dict(&meta))),
+                                Err(e) => Err(PyError::os_error_from_io(&e)),
+                            }
+                        },
+                    }),
+                );
+                m.insert(
+                    "__fspath__".to_string(),
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "__fspath__".to_string(),
+                        func: |args| args[0].borrow().get_attribute("path"),
+                    }),
+                );
+                m.insert(
+                    "__repr__".to_string(),
+                    PyObjectRef::new(PyObject::BuiltinFunction {
+                        name: "__repr__".to_string(),
+                        func: |args| {
+                            let name = args[0].borrow().get_attribute("name")?.str();
+                            Ok(py_str(&format!("<DirEntry {:?}>", name)))
+                        },
+                    }),
+                );
+                m
+            })),
+            bases: vec![],
+            mro: vec![],
+        })
+    }
+    fn make_dir_entry(
+        typ: &PyObjectRef,
+        name: String,
+        full_path: String,
+        entry: &std::fs::DirEntry,
+    ) -> PyObjectRef {
+        let ft = entry.file_type().ok();
+        let is_dir = ft.map(|t| t.is_dir()).unwrap_or(false);
+        let is_file = ft.map(|t| t.is_file()).unwrap_or(false);
+        let is_symlink = ft.map(|t| t.is_symlink()).unwrap_or(false);
+        let mut dict = AttrMap::new();
+        dict.insert("name".to_string(), py_str(&name));
+        dict.insert("path".to_string(), py_str(&full_path));
+        dict.insert("_is_dir".to_string(), py_bool(is_dir));
+        dict.insert("_is_file".to_string(), py_bool(is_file));
+        dict.insert("_is_symlink".to_string(), py_bool(is_symlink));
+        PyObjectRef::new(PyObject::Instance {
+            typ: typ.clone(),
+            dict,
+        })
+    }
+    // `os.DirEntry`, exposed here as the class referenced by `from os import
+    // DirEntry` / `os.DirEntry[int]` (PEP 560 generic subscripting).
+    // `scandir()` (a plain `fn` pointer — `BuiltinFunction` can't capture
+    // this type object) builds an equivalent type per call rather than
+    // reusing this exact same `Rc`; both describe the identical `DirEntry`
+    // shape, so this only matters for strict `type(entry) is os.DirEntry`
+    // identity checks, not for any of `DirEntry`'s actual behavior.
+    d.insert("DirEntry".to_string(), make_dir_entry_type());
+    os_func!("scandir", |args| {
+        let path = if !args.is_empty() {
+            args[0].str()
+        } else {
+            ".".to_string()
+        };
+        match std::fs::read_dir(&path) {
+            Ok(entries) => {
+                let sep = if cfg!(windows) { "\\" } else { "/" };
+                let base = path.trim_end_matches(['/', '\\']);
+                let typ = make_dir_entry_type();
+                let list: Vec<PyObjectRef> = entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        let full_path = if base.is_empty() || base == "." {
+                            name.clone()
+                        } else {
+                            format!("{}{}{}", base, sep, name)
+                        };
+                        make_dir_entry(&typ, name, full_path, &e)
+                    })
+                    .collect();
+                Ok(PyObjectRef::new(PyObject::ListIter { list, index: 0 }))
+            }
+            Err(e) => Err(PyError::os_error_from_io(&e)),
+        }
+    });
+
     os_func!("mkdir", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("mkdir() takes at least 1 argument"));

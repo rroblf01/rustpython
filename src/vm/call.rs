@@ -12,6 +12,20 @@ impl VirtualMachine {
         args: &[PyObjectRef],
         keywords: &[(String, PyObjectRef)],
     ) -> PyResult<Option<PyObjectRef>> {
+        // Fast reject: every special case below only ever fires for a
+        // `BuiltinFunction` or `BuiltinMethod` callable matched against a
+        // specific known function pointer (`fn_addr_eq`) — never for a
+        // plain user-defined `Function`/`Instance`/etc. Checking that ONCE
+        // here, instead of letting every one of the ~24 `matches!(...)`
+        // probes below run unconditionally, turns 24 separate
+        // `RefCell::borrow()` + enum-match checks per call into 1 for the
+        // common case (calling an ordinary Python `def`).
+        if !matches!(
+            &*callable.borrow(),
+            PyObject::BuiltinFunction { .. } | PyObject::BuiltinMethod { .. }
+        ) {
+            return Ok(None);
+        }
         {
             let is_type_new = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::type_new_builtin as crate::object::BuiltinFunc));
             if is_type_new {

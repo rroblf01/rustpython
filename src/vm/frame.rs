@@ -134,10 +134,12 @@ impl Frame {
         }
     }
 
+    #[inline(always)]
     pub fn push(&mut self, obj: PyObjectRef) {
         self.stack.push(obj);
     }
 
+    #[inline(always)]
     pub fn pop(&mut self) -> PyResult<PyObjectRef> {
         self.stack.pop().ok_or_else(|| {
             let instr_ip = if self.ip > 0 { self.ip - 1 } else { 0 };
@@ -163,6 +165,7 @@ impl Frame {
         })
     }
 
+    #[inline(always)]
     pub fn peek(&self, depth: usize) -> PyResult<PyObjectRef> {
         if depth >= self.stack.len() {
             let instr_ip = if self.ip > 0 { self.ip - 1 } else { 0 };

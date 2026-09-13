@@ -145,3 +145,33 @@ pub fn create_signal_dict() -> HashMap<String, PyObjectRef> {
 
     d
 }
+
+/// Real CPython installs `default_int_handler` as SIGINT's handler
+/// automatically at interpreter startup (`PyOS_InitInterrupts`), so
+/// `os.kill(os.getpid(), SIGINT)`/`signal.raise_signal(SIGINT)` raise
+/// `KeyboardInterrupt` even when user code never calls `signal.signal()`
+/// itself. `SIGNAL_HANDLERS` here started out permanently empty until
+/// something called `signal.signal()`, so self-delivered SIGINT was
+/// silently swallowed (`invoke_signal_handler_impl`'s `_ => Ok(py_none())`
+/// fallback) instead of terminating the process — hung any test/script
+/// that raises SIGINT at itself expecting the default `KeyboardInterrupt`
+/// behavior (e.g. `test_signal.py::test_keyboard_interrupt_exit_code`).
+/// Called once after the `signal` module's Python-source extras
+/// (`default_int_handler` itself) are installed.
+pub(crate) fn register_default_sigint_handler(vm: &mut crate::vm::VirtualMachine) {
+    const SIGINT: i64 = 2;
+    if signal_handlers().with(|h| h.borrow().contains_key(&SIGINT)) {
+        return;
+    }
+    let Some(module) = vm.modules.get("signal") else {
+        return;
+    };
+    let handler = if let PyObject::Module { dict, .. } = &*module.borrow() {
+        dict.get_str("default_int_handler").cloned()
+    } else {
+        None
+    };
+    if let Some(handler) = handler {
+        signal_handlers().with(|h| h.borrow_mut().insert(SIGINT, handler));
+    }
+}

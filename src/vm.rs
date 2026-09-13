@@ -253,6 +253,7 @@ impl VirtualMachine {
                 crate::modules::SIGNAL_EXTRA_SOURCE,
                 &["Signals", "Handlers", "default_int_handler"],
             );
+            crate::modules::register_default_sigint_handler(&mut vm);
             vm.install_source_defined_stdlib(
                 "asyncio",
                 crate::modules::ASYNCIO_RUNNER_SOURCE,
@@ -636,6 +637,7 @@ impl VirtualMachine {
             crate::modules::SIGNAL_EXTRA_SOURCE,
             &["Signals", "Handlers", "default_int_handler"],
         );
+        crate::modules::register_default_sigint_handler(&mut vm);
         vm.install_source_defined_stdlib(
             "asyncio",
             crate::modules::ASYNCIO_RUNNER_SOURCE,
@@ -657,15 +659,25 @@ impl VirtualMachine {
         args: Vec<PyObjectRef>,
         keywords: Vec<(String, PyObjectRef)>,
     ) -> PyResult<PyObjectRef> {
-        let type_name = callable.borrow().type_name();
+        // `std::env::var` takes a process-wide lock and scans the
+        // environment on every call — reading it unconditionally here (as
+        // this used to) made every single Python-level call pay for a debug
+        // flag nobody has set. Cache the one-time result in a thread-local
+        // instead; `type_name`/`repr()` (also non-trivial: a borrow +
+        // formatting) are now only computed when actually printing.
+        thread_local! {
+            static DEBUG_CALL: bool = std::env::var("RPY_DEBUG_CALL").is_ok();
+        }
         if cfg!(feature = "profile") {
+            let type_name = callable.borrow().type_name();
             eprintln!(
                 "DEBUG call_function: type={} name={:?}",
                 type_name,
                 callable.repr()
             );
         }
-        if std::env::var("RPY_DEBUG_CALL").is_ok() {
+        if DEBUG_CALL.with(|b| *b) {
+            let type_name = callable.borrow().type_name();
             eprintln!("CALL_FUNCTION: type={} repr={}", type_name, callable.repr());
         }
         if let Some(val) = self.try_handle_special_builtin(&callable, &args, &keywords)? {
@@ -1077,7 +1089,7 @@ impl VirtualMachine {
 
         Err(PyError::type_error(format!(
             "'{}' object is not callable",
-            type_name
+            callable.borrow().type_name()
         )))
     }
 

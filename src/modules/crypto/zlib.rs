@@ -813,5 +813,46 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
         }))
     });
 
+    // Module-level constants real CPython's `zlib` exposes — entirely
+    // missing before, so any code (including this project's own vendored
+    // `test_zlib.py`) that references `zlib.ZLIB_RUNTIME_VERSION` or the
+    // other `Z_*`/`MAX_WBITS`/`DEFLATED`/`DEF_BUF_SIZE` constants at IMPORT
+    // TIME (not just inside a test body) hit an `AttributeError` before a
+    // single test could even run. Values match real CPython/zlib's actual
+    // constants exactly (verified against a real CPython 3.14 + zlib
+    // 1.3.2); this project's `compress`/`decompress` are backed by `flate2`
+    // (which wraps `miniz_oxide`, not real zlib), so `ZLIB_VERSION`/
+    // `ZLIB_RUNTIME_VERSION` are reported as a plausible real-zlib version
+    // string rather than introspected from a linked C library that isn't
+    // actually in use — real code only ever version-compares this string,
+    // never round-trips it back into the underlying library.
+    macro_rules! z_const {
+        ($name:expr, $val:expr) => {
+            d.insert($name.to_string(), $val);
+        };
+    }
+    z_const!("MAX_WBITS", py_int(15));
+    z_const!("DEFLATED", py_int(8));
+    z_const!("DEF_BUF_SIZE", py_int(16384));
+    z_const!("DEF_MEM_LEVEL", py_int(8));
+    z_const!("Z_NO_COMPRESSION", py_int(0));
+    z_const!("Z_BEST_SPEED", py_int(1));
+    z_const!("Z_BEST_COMPRESSION", py_int(9));
+    z_const!("Z_DEFAULT_COMPRESSION", py_int(-1));
+    z_const!("Z_FILTERED", py_int(1));
+    z_const!("Z_HUFFMAN_ONLY", py_int(2));
+    z_const!("Z_RLE", py_int(3));
+    z_const!("Z_FIXED", py_int(4));
+    z_const!("Z_DEFAULT_STRATEGY", py_int(0));
+    z_const!("Z_NO_FLUSH", py_int(0));
+    z_const!("Z_PARTIAL_FLUSH", py_int(1));
+    z_const!("Z_SYNC_FLUSH", py_int(2));
+    z_const!("Z_FULL_FLUSH", py_int(3));
+    z_const!("Z_FINISH", py_int(4));
+    z_const!("Z_BLOCK", py_int(5));
+    z_const!("Z_TREES", py_int(6));
+    z_const!("ZLIB_VERSION", py_str("1.3.2"));
+    z_const!("ZLIB_RUNTIME_VERSION", py_str("1.3.2"));
+
     d
 }

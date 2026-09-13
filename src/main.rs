@@ -81,6 +81,46 @@ fn system_exit_code(e: &PyError) -> Option<i32> {
     }
 }
 
+/// Real CPython, on an uncaught `KeyboardInterrupt` reaching the top of the
+/// interpreter, resets SIGINT to its default disposition and re-raises it at
+/// itself so the process actually dies BY the signal — `subprocess`'s
+/// `returncode` only reports the negative `-signum` convention when the
+/// child was `WIFSIGNALED` (killed by a real, uncaught signal), never for a
+/// plain `sys.exit(1)`-style process. Verified against a real CPython 3.14:
+/// `os.kill(os.getpid(), SIGINT)` uncaught → exit status 130 (128+SIGINT),
+/// `WIFSIGNALED`. This interpreter used to just `std::process::exit(1)` for
+/// every uncaught exception including this one, so `os.kill(self, SIGINT)`/
+/// `signal.raise_signal(SIGINT)` never actually terminated the process the
+/// way real Python scripts (and `test_signal.py`'s
+/// `test_keyboard_interrupt_exit_code`) expect. No `libc` crate needed —
+/// any Rust binary on Linux already links against the system libc for its
+/// own runtime, so these two C functions can be declared directly.
+fn is_keyboard_interrupt(e: &PyError) -> bool {
+    match e {
+        PyError::Exception(t, _) if t == "KeyboardInterrupt" => true,
+        PyError::Exception(t, o) if t == "re-raise" => {
+            matches!(&*o.borrow(), PyObject::Exception { typ, .. } if typ == "KeyboardInterrupt")
+        }
+        _ => false,
+    }
+}
+
+fn exit_after_uncaught(e: &PyError) -> ! {
+    if is_keyboard_interrupt(e) {
+        unsafe {
+            extern "C" {
+                fn signal(signum: i32, handler: usize) -> usize;
+                fn raise(sig: i32) -> i32;
+            }
+            const SIG_DFL: usize = 0;
+            const SIGINT: i32 = 2;
+            signal(SIGINT, SIG_DFL);
+            raise(SIGINT);
+        }
+    }
+    std::process::exit(1);
+}
+
 fn print_traceback(vm: &VirtualMachine, e: &PyError, fallback_file: &str) {
     eprintln!("Traceback (most recent call last):");
     if vm.last_traceback.is_empty() {
@@ -652,7 +692,7 @@ fn real_main() {
                         }
                         print_traceback(&vm, &e, "<string>");
                         crate::modules::run_atexit_handlers(&mut vm);
-                        std::process::exit(1);
+                        exit_after_uncaught(&e);
                     }
                 }
                 return;
@@ -726,7 +766,7 @@ fn real_main() {
                         }
                         print_traceback(&vm, &e, "<module>");
                         crate::modules::run_atexit_handlers(&mut vm);
-                        std::process::exit(1);
+                        exit_after_uncaught(&e);
                     }
                 }
                 return;
@@ -809,7 +849,7 @@ fn real_main() {
                         // Use sys.excepthook for proper formatting (SyntaxError caret, etc.)
                         print_py_error(&e, filename);
                         crate::modules::run_atexit_handlers(&mut vm);
-                        std::process::exit(1);
+                        exit_after_uncaught(&e);
                     }
                 }
             }
