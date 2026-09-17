@@ -1,8 +1,8 @@
 use crate::object::*;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicI64;
 use num_traits::{Signed, ToPrimitive};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::AtomicI64;
 
 mod helpers;
 mod path;
@@ -10,8 +10,10 @@ mod uname;
 
 pub(crate) use helpers::dup_std_fd;
 pub use helpers::os_kill_builtin;
+pub(crate) use helpers::{
+    close_fd, fstat_result, lseek_fd, os_path_arg, read_fd, stat_dev_ino, stat_to_dict, write_fd,
+};
 pub use path::create_os_path_dict;
-pub(crate) use helpers::{close_fd, fstat_result, lseek_fd, os_path_arg, read_fd, stat_dev_ino, stat_to_dict, write_fd};
 
 pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
@@ -590,15 +592,23 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             .as_i64()
             .ok_or_else(|| PyError::type_error("fd must be an integer"))? as i32;
         let (pos_args, kwargs) = match args.last() {
-            Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => (&args[..args.len()-1], Some(last)),
+            Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
+                (&args[..args.len() - 1], Some(last))
+            }
             _ => (args, None),
         };
         let mode = if pos_args.len() > 1 {
             pos_args[1].str()
         } else if let Some(kw) = kwargs {
             if let PyObject::Dict(d) = &*kw.borrow() {
-                d.get(&py_str("mode")).ok().flatten().map(|v| v.str()).unwrap_or_else(|| "r".to_string())
-            } else { "r".to_string() }
+                d.get(&py_str("mode"))
+                    .ok()
+                    .flatten()
+                    .map(|v| v.str())
+                    .unwrap_or_else(|| "r".to_string())
+            } else {
+                "r".to_string()
+            }
         } else {
             "r".to_string()
         };
@@ -636,10 +646,14 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         let binary = mode.contains('b');
         if binary {
             if encoding.is_some() {
-                return Err(PyError::value_error("binary mode doesn't take an encoding argument"));
+                return Err(PyError::value_error(
+                    "binary mode doesn't take an encoding argument",
+                ));
             }
             if errors.is_some() {
-                return Err(PyError::value_error("binary mode doesn't take an errors argument"));
+                return Err(PyError::value_error(
+                    "binary mode doesn't take an errors argument",
+                ));
             }
         }
         // Validate the fd is actually open BEFORE wrapping it in a
@@ -925,8 +939,14 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
                     _ => return Err(PyError::type_error("ns must be a 2-tuple")),
                 }
             };
-            let atime = filetime::FileTime::from_unix_time(atime_ns / 1_000_000_000, (atime_ns % 1_000_000_000) as u32);
-            let mtime = filetime::FileTime::from_unix_time(mtime_ns / 1_000_000_000, (mtime_ns % 1_000_000_000) as u32);
+            let atime = filetime::FileTime::from_unix_time(
+                atime_ns / 1_000_000_000,
+                (atime_ns % 1_000_000_000) as u32,
+            );
+            let mtime = filetime::FileTime::from_unix_time(
+                mtime_ns / 1_000_000_000,
+                (mtime_ns % 1_000_000_000) as u32,
+            );
             filetime::set_file_times(&path, atime, mtime)
                 .map_err(|e| PyError::os_error_from_io(&e))?;
         } else if let Some(tv) = times_val {
@@ -960,8 +980,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         } else {
             // No times/ns -> set to now.
             let now = filetime::FileTime::now();
-            filetime::set_file_times(&path, now, now)
-                .map_err(|e| PyError::os_error_from_io(&e))?;
+            filetime::set_file_times(&path, now, now).map_err(|e| PyError::os_error_from_io(&e))?;
         }
         Ok(py_none())
     });
@@ -1064,12 +1083,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     // is true, matching real `os.walk`'s default (a symlink to a
     // directory is reported in `filenames`... actually `dirnames`, per
     // CPython, but not recursed into).
-    fn walk_visit(
-        dir: &str,
-        topdown: bool,
-        followlinks: bool,
-        results: &mut Vec<PyObjectRef>,
-    ) {
+    fn walk_visit(dir: &str, topdown: bool, followlinks: bool, results: &mut Vec<PyObjectRef>) {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return, // unreadable directory: skip silently (no onerror support)
@@ -1084,10 +1098,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             }
             // `metadata()` follows symlinks (like `entry.is_dir()` in real
             // CPython's default `os.walk`); `symlink_metadata()` doesn't.
-            let is_dir = entry
-                .metadata()
-                .map(|m| m.is_dir())
-                .unwrap_or(false);
+            let is_dir = entry.metadata().map(|m| m.is_dir()).unwrap_or(false);
             if is_dir {
                 dirname_strs.push(name.clone());
                 let is_symlink = entry
@@ -1224,45 +1235,64 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     // os._walk_symlinks_as_files — sentinel object used by Lib/os.py's walk()
     // to implement followlinks=os._walk_symlinks_as_files mode.
     // Defined in CPython's Lib/os.py as: _walk_symlinks_as_files = object()
-    d.insert_str("_walk_symlinks_as_files", PyObjectRef::new(PyObject::Type {
-        name: "_walk_symlinks_as_files".to_string(),
-        dict: Box::new(crate::object::str_map_to_typedict(std::collections::HashMap::new())),
-        bases: vec![],
-        mro: vec![],
-    }));
+    d.insert_str(
+        "_walk_symlinks_as_files",
+        PyObjectRef::new(PyObject::Type {
+            name: "_walk_symlinks_as_files".to_string(),
+            dict: Box::new(crate::object::str_map_to_typedict(
+                std::collections::HashMap::new(),
+            )),
+            bases: vec![],
+            mro: vec![],
+        }),
+    );
 
     // os.DirEntry — type for directory entries from os.scandir().
     // Stub: provides isinstance check only. shutil.py uses isinstance(src, os.DirEntry)
     // to decide whether to call .stat()/.is_symlink() on the entry directly.
     {
-        let mut de_dict: std::collections::HashMap<String, PyObjectRef> = std::collections::HashMap::new();
+        let mut de_dict: std::collections::HashMap<String, PyObjectRef> =
+            std::collections::HashMap::new();
         de_dict.insert_str("__doc__", py_str("DirEntry from os.scandir()"));
         // is_dir, is_file, is_symlink methods (return False stub)
-        de_dict.insert("is_dir".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "is_dir".to_string(),
-            func: |_args| Ok(py_bool(false)),
-        }));
-        de_dict.insert("is_file".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "is_file".to_string(),
-            func: |_args| Ok(py_bool(false)),
-        }));
-        de_dict.insert("is_symlink".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "is_symlink".to_string(),
-            func: |_args| Ok(py_bool(false)),
-        }));
-        d.insert_str("DirEntry", PyObjectRef::new(PyObject::Type {
-            name: "DirEntry".to_string(),
-            dict: Box::new(crate::object::str_map_to_typedict(de_dict)),
-            bases: vec![],
-            mro: vec![],
-        }));
+        de_dict.insert(
+            "is_dir".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "is_dir".to_string(),
+                func: |_args| Ok(py_bool(false)),
+            }),
+        );
+        de_dict.insert(
+            "is_file".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "is_file".to_string(),
+                func: |_args| Ok(py_bool(false)),
+            }),
+        );
+        de_dict.insert(
+            "is_symlink".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "is_symlink".to_string(),
+                func: |_args| Ok(py_bool(false)),
+            }),
+        );
+        d.insert_str(
+            "DirEntry",
+            PyObjectRef::new(PyObject::Type {
+                name: "DirEntry".to_string(),
+                dict: Box::new(crate::object::str_map_to_typedict(de_dict)),
+                bases: vec![],
+                mro: vec![],
+            }),
+        );
     }
 
     // os.terminal_size — namedtuple type defined in CPython's posixmodule.c.
     // Needed by shutil.get_terminal_size and tests that access it directly.
     {
         // Build the type dict as a HashMap<String, PyObjectRef>
-        let mut ts_type_dict: std::collections::HashMap<String, PyObjectRef> = std::collections::HashMap::new();
+        let mut ts_type_dict: std::collections::HashMap<String, PyObjectRef> =
+            std::collections::HashMap::new();
         ts_type_dict.insert_str("__doc__", py_str("A tuple subclass representing the size of the terminal in characters.\n\nIt has two attributes: columns and lines."));
         // __new__ — os.terminal_size((columns, lines)) or os.terminal_size(columns=80, lines=24)
         // args[0] is the type itself (cls). This is a function pointer (no captures).
@@ -1274,7 +1304,9 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
                     let typ = args.first().cloned().unwrap_or_else(|| {
                         PyObjectRef::new(PyObject::Type {
                             name: "os.terminal_size".to_string(),
-                            dict: Box::new(crate::object::str_map_to_typedict(std::collections::HashMap::new())),
+                            dict: Box::new(crate::object::str_map_to_typedict(
+                                std::collections::HashMap::new(),
+                            )),
                             bases: vec![],
                             mro: vec![],
                         })
@@ -1321,7 +1353,10 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
                         if let PyObject::Instance { dict, .. } = &*inst.borrow() {
                             let cols = dict.get("columns").and_then(|v| v.as_i64()).unwrap_or(80);
                             let lns = dict.get("lines").and_then(|v| v.as_i64()).unwrap_or(24);
-                            return Ok(py_str(&format!("os.terminal_size(columns={}, lines={})", cols, lns)));
+                            return Ok(py_str(&format!(
+                                "os.terminal_size(columns={}, lines={})",
+                                cols, lns
+                            )));
                         }
                     }
                     Ok(py_str("os.terminal_size(columns=80, lines=24)"))
@@ -1344,7 +1379,10 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
                             ]));
                         }
                     }
-                    Ok(py_tuple(vec![py_str("os.terminal_size"), py_tuple(vec![py_int(80), py_int(24)])]))
+                    Ok(py_tuple(vec![
+                        py_str("os.terminal_size"),
+                        py_tuple(vec![py_int(80), py_int(24)]),
+                    ]))
                 },
             }),
         );
@@ -1376,8 +1414,14 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
                     inst_dict.insert_str("columns", py_int(columns));
                     inst_dict.insert_str("lines", py_int(lines));
                     // Create type inline (function pointer can't capture)
-                    let mut td: std::collections::HashMap<String, PyObjectRef> = std::collections::HashMap::new();
-                    td.insert_str("__doc__", py_str("A tuple subclass representing the size of the terminal in characters."));
+                    let mut td: std::collections::HashMap<String, PyObjectRef> =
+                        std::collections::HashMap::new();
+                    td.insert_str(
+                        "__doc__",
+                        py_str(
+                            "A tuple subclass representing the size of the terminal in characters.",
+                        ),
+                    );
                     let ts_type = PyObjectRef::new(PyObject::Type {
                         name: "os.terminal_size".to_string(),
                         dict: Box::new(crate::object::str_map_to_typedict(td)),

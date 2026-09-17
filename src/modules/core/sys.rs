@@ -1,11 +1,10 @@
 use crate::object::*;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicI64;
 use num_traits::{Signed, ToPrimitive};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::AtomicI64;
 
 use super::os::dup_std_fd;
-
 
 // `sys.exc_info()` — a real top-level fn (not an inline closure in
 // `create_sys_dict`) so `vm.rs`'s `call_function` can special-case it by
@@ -129,11 +128,7 @@ pub fn sys_intern_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let b = s.borrow();
         match &*b {
             PyObject::Str(_) => {}
-            _ => {
-                return Err(PyError::type_error(
-                    "sys.intern() argument must be str",
-                ))
-            }
+            _ => return Err(PyError::type_error("sys.intern() argument must be str")),
         }
     }
     INTERN_TABLE.with(|t| {
@@ -557,12 +552,15 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
                         if let PyObject::Slice { start, stop, step } = &*args[1].borrow() {
                             use crate::object::extract_slice_fields;
                             let n = order.len() as isize;
-                            let (s0, s1, step_v) =
-                                extract_slice_fields(start, stop, step)?;
+                            let (s0, s1, step_v) = extract_slice_fields(start, stop, step)?;
                             let norm = |v: Option<isize>, dflt: isize| -> isize {
                                 match v {
                                     Some(v) => {
-                                        if v < 0 { (n + v).max(0) } else { v.min(n) }
+                                        if v < 0 {
+                                            (n + v).max(0)
+                                        } else {
+                                            v.min(n)
+                                        }
                                     }
                                     None => dflt,
                                 }
@@ -572,7 +570,9 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
                                 let (mut i, stop) = (norm(s0, 0), norm(s1, n));
                                 while i < stop {
                                     if let Some(name) = order.get(i as usize) {
-                                        out.push(dict.get_str(name).cloned().unwrap_or_else(py_none));
+                                        out.push(
+                                            dict.get_str(name).cloned().unwrap_or_else(py_none),
+                                        );
                                     }
                                     i += step_v;
                                 }
@@ -580,7 +580,11 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
                                 let (mut i, stop) = (
                                     match s0 {
                                         Some(v) => {
-                                            if v < 0 { (n + v).max(-1) } else { v.min(n - 1) }
+                                            if v < 0 {
+                                                (n + v).max(-1)
+                                            } else {
+                                                v.min(n - 1)
+                                            }
                                         }
                                         None => n - 1,
                                     },
@@ -588,17 +592,23 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
                                 );
                                 while i > stop {
                                     if let Some(name) = order.get(i as usize) {
-                                        out.push(dict.get_str(name).cloned().unwrap_or_else(py_none));
+                                        out.push(
+                                            dict.get_str(name).cloned().unwrap_or_else(py_none),
+                                        );
                                     }
                                     i += step_v;
                                 }
                             }
                             return Ok(py_tuple(out));
                         }
-                        let idx = args[1].as_i64().ok_or_else(|| {
-                            PyError::type_error("tuple indices must be integers")
-                        })?;
-                        let i = if idx < 0 { idx + order.len() as i64 } else { idx };
+                        let idx = args[1]
+                            .as_i64()
+                            .ok_or_else(|| PyError::type_error("tuple indices must be integers"))?;
+                        let i = if idx < 0 {
+                            idx + order.len() as i64
+                        } else {
+                            idx
+                        };
                         let name = order.get(i as usize).ok_or_else(|| {
                             PyError::index_error("version_info index out of range")
                         })?;
@@ -627,7 +637,10 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
                             .iter()
                             .map(|f| dict.get_str(f).cloned().unwrap_or_else(py_none))
                             .collect();
-                        Ok(PyObjectRef::new(PyObject::ListIter { list: items, index: 0 }))
+                        Ok(PyObjectRef::new(PyObject::ListIter {
+                            list: items,
+                            index: 0,
+                        }))
                     } else {
                         Err(PyError::runtime_error("__iter__ on non-version_info"))
                     }
@@ -681,9 +694,8 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
             if args.len() < 2 {
                 return Err(PyError::type_error("comparison missing argument"));
             }
-            let self_tup = vi_as_tuple(&args[0]).ok_or_else(|| {
-                PyError::runtime_error("comparison on non-version_info")
-            })?;
+            let self_tup = vi_as_tuple(&args[0])
+                .ok_or_else(|| PyError::runtime_error("comparison on non-version_info"))?;
             let self_tup = py_tuple(self_tup);
             let other = &args[1];
             let other_tup: Option<PyObjectRef> = match &*other.borrow() {
@@ -1198,9 +1210,24 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         "builtin_module_names",
         py_tuple(
             [
-                "sys", "builtins", "_abc", "_codecs", "_collections", "_functools", "_io",
-                "_warnings", "_thread", "_imp", "_ast", "gc", "itertools", "marshal", "math",
-                "time", "posix", "errno",
+                "sys",
+                "builtins",
+                "_abc",
+                "_codecs",
+                "_collections",
+                "_functools",
+                "_io",
+                "_warnings",
+                "_thread",
+                "_imp",
+                "_ast",
+                "gc",
+                "itertools",
+                "marshal",
+                "math",
+                "time",
+                "posix",
+                "errno",
             ]
             .iter()
             .map(|s| py_str(s))

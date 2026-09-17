@@ -1,12 +1,12 @@
-use crate::object::*;
-use std::collections::HashMap;
-use num_bigint::{BigInt, Sign};
-use num_traits::{One, Signed, Zero};
-use num_traits::ToPrimitive;
-use std::rc::Rc;
 use crate::modules::data::decimal::*;
 use crate::modules::data::fractions::*;
 use crate::modules::data::fractions_ops::*;
+use crate::object::*;
+use num_bigint::{BigInt, Sign};
+use num_traits::ToPrimitive;
+use num_traits::{One, Signed, Zero};
+use std::collections::HashMap;
+use std::rc::Rc;
 pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     let mut frac_dict: HashMap<String, PyObjectRef> = HashMap::new();
@@ -880,4 +880,3 @@ pub fn create_fractions_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("Fraction", frac_type);
     d
 }
-

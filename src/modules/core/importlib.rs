@@ -1,9 +1,8 @@
 use crate::object::*;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicI64;
 use num_traits::{Signed, ToPrimitive};
+use std::collections::HashMap;
 use std::rc::Rc;
-
+use std::sync::atomic::AtomicI64;
 
 /// Helper: resolve a module name with relative import support
 fn resolve_name(name: &str, package: Option<&str>) -> Result<String, PyError> {
@@ -253,7 +252,9 @@ pub fn create_importlib_util_dict() -> HashMap<String, PyObjectRef> {
     });
     util_func!("spec_from_file_location", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("spec_from_file_location() missing required argument 'name'"));
+            return Err(PyError::type_error(
+                "spec_from_file_location() missing required argument 'name'",
+            ));
         }
         let name = args[0].str();
         let location = args.get(1).map(|a| a.str()).unwrap_or_default();
@@ -271,16 +272,30 @@ pub fn create_importlib_util_dict() -> HashMap<String, PyObjectRef> {
         spec_dict.insert("name".to_string(), py_str(&name));
         spec_dict.insert("origin".to_string(), py_str(&location));
         spec_dict.insert("loader".to_string(), py_none());
-        spec_dict.insert("parent".to_string(), py_str(&name.rsplit('.').skip(1).collect::<Vec<_>>().join(".")));
+        spec_dict.insert(
+            "parent".to_string(),
+            py_str(&name.rsplit('.').skip(1).collect::<Vec<_>>().join(".")),
+        );
         Ok(create_module("ModuleSpec", spec_dict))
     });
     util_func!("module_from_spec", |args| {
-        if args.is_empty() { return Err(PyError::type_error("module_from_spec() missing required argument 'spec'")); }
+        if args.is_empty() {
+            return Err(PyError::type_error(
+                "module_from_spec() missing required argument 'spec'",
+            ));
+        }
         let spec = &args[0];
-        let name = spec.borrow().get_attribute("name").map(|v| v.str()).unwrap_or_default();
+        let name = spec
+            .borrow()
+            .get_attribute("name")
+            .map(|v| v.str())
+            .unwrap_or_default();
         Ok(create_module(&name, HashMap::new()))
     });
-    d.insert_str("MAGIC_NUMBER", PyObjectRef::new(PyObject::Bytes(vec![0x6f,0x0d,0x0d,0x0a])));
+    d.insert_str(
+        "MAGIC_NUMBER",
+        PyObjectRef::new(PyObject::Bytes(vec![0x6f, 0x0d, 0x0d, 0x0a])),
+    );
 
     d
 }

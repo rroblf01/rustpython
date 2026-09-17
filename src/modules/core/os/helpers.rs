@@ -1,8 +1,8 @@
 use crate::object::*;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicI64;
 use num_traits::{Signed, ToPrimitive};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::AtomicI64;
 
 pub(crate) fn read_fd(fd: i32, buf: &mut Vec<u8>) -> std::io::Result<usize> {
     use std::io::Read;
@@ -83,7 +83,6 @@ pub(crate) fn dup_std_fd(fd: i32) -> std::io::Result<std::fs::File> {
     std::mem::forget(borrowed);
     dup
 }
-
 
 pub fn os_kill_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 {
@@ -172,4 +171,3 @@ pub(crate) fn fstat_result(fd: i64) -> PyResult<PyObjectRef> {
         Err(e) => Err(PyError::os_error_from_io(&e)),
     }
 }
-

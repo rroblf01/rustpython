@@ -1,6 +1,6 @@
 use crate::object::*;
-use std::collections::HashMap;
 use num_traits::ToPrimitive;
+use std::collections::HashMap;
 
 // Class-level rich-comparison dunders (`__lt__`/`__le__`/`__ge__`/`__gt__`)
 // for scalar native types (int/str/float/...). Instance-level comparisons
@@ -53,7 +53,10 @@ macro_rules! scalar_richcmp {
     };
 }
 
-pub fn register_primitive_types(builtins: &mut HashMap<String, PyObjectRef>, object_type: &PyObjectRef) {
+pub fn register_primitive_types(
+    builtins: &mut HashMap<String, PyObjectRef>,
+    object_type: &PyObjectRef,
+) {
     // `int` — the first of the "native value" types (int/str/list/dict/...)
     // migrated from a plain `PyObject::BuiltinFunction` constructor to a
     // real, subclassable `PyObject::Type`, closing the long-standing
@@ -150,7 +153,6 @@ pub fn register_primitive_types(builtins: &mut HashMap<String, PyObjectRef>, obj
     }
     builtins.insert_str("int", int_type.clone());
     crate::object::seed_primitive_type_cache("int", int_type.clone());
-
 
     // `str` — the second type migrated to the `NATIVE_VALUE_CTOR_KEY`
     // mechanism, same shape as `int` above. Unlike `int` (which needed

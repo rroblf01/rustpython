@@ -1,11 +1,11 @@
 use crate::object::*;
-use std::collections::HashMap;
-#[allow(unused_imports)]
-use std::sync::atomic::AtomicI64;
 #[allow(unused_imports)]
 use num_traits::{Signed, ToPrimitive};
+use std::collections::HashMap;
 #[allow(unused_imports)]
 use std::rc::Rc;
+#[allow(unused_imports)]
+use std::sync::atomic::AtomicI64;
 
 /// Encode a string as UTF-8/ASCII/Latin-1 (used by codecs.lookup() results).
 pub(crate) fn _codecs_encode(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -207,11 +207,27 @@ macro_rules! utf_codec_fn {
 }
 
 utf_codec_fn!(_codecs_utf_16_encode, _codecs_utf_16_decode, "utf-16");
-utf_codec_fn!(_codecs_utf_16_le_encode, _codecs_utf_16_le_decode, "utf-16-le");
-utf_codec_fn!(_codecs_utf_16_be_encode, _codecs_utf_16_be_decode, "utf-16-be");
+utf_codec_fn!(
+    _codecs_utf_16_le_encode,
+    _codecs_utf_16_le_decode,
+    "utf-16-le"
+);
+utf_codec_fn!(
+    _codecs_utf_16_be_encode,
+    _codecs_utf_16_be_decode,
+    "utf-16-be"
+);
 utf_codec_fn!(_codecs_utf_32_encode, _codecs_utf_32_decode, "utf-32");
-utf_codec_fn!(_codecs_utf_32_le_encode, _codecs_utf_32_le_decode, "utf-32-le");
-utf_codec_fn!(_codecs_utf_32_be_encode, _codecs_utf_32_be_decode, "utf-32-be");
+utf_codec_fn!(
+    _codecs_utf_32_le_encode,
+    _codecs_utf_32_le_decode,
+    "utf-32-le"
+);
+utf_codec_fn!(
+    _codecs_utf_32_be_encode,
+    _codecs_utf_32_be_decode,
+    "utf-32-be"
+);
 
 /// `codecs.utf_16_ex_decode(input, errors, byteorder, final)` — like
 /// `utf_16_decode` but also reports the detected byte order (`-1` = BE,

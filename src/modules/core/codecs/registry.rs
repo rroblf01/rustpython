@@ -1,8 +1,8 @@
 use crate::object::*;
 #[allow(unused_imports)]
-use std::collections::HashMap;
-#[allow(unused_imports)]
 use num_traits::{Signed, ToPrimitive};
+#[allow(unused_imports)]
+use std::collections::HashMap;
 
 pub(crate) fn _codecs_charmap_build(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {

@@ -1,11 +1,11 @@
-use crate::object::*;
-use std::collections::HashMap;
-use num_bigint::{BigInt, Sign};
-use num_traits::{One, Signed, Zero};
-use num_traits::ToPrimitive;
-use std::rc::Rc;
 use crate::modules::data::decimal::*;
 use crate::modules::data::fractions::*;
+use crate::object::*;
+use num_bigint::{BigInt, Sign};
+use num_traits::ToPrimitive;
+use num_traits::{One, Signed, Zero};
+use std::collections::HashMap;
+use std::rc::Rc;
 /// Format a Fraction exactly for float-style presentation types — port of
 /// CPython's `Fraction._format_float_style`. `den` must be positive.
 pub fn frac_format_exact(num: BigInt, den: BigInt, spec: &str) -> PyResult<String> {
@@ -268,15 +268,21 @@ pub fn frac_format_exact(num: BigInt, den: BigInt, spec: &str) -> PyResult<Strin
 /// resort the fallback itself grabs the active VM via the VM_PTR
 /// thread-local (always set while interpreter bytecode is running).
 pub fn fraction_init_fallback(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    Ok(crate::object::with_vm_mut(|vm| fraction_init_with_vm(vm, args))??)
+    Ok(crate::object::with_vm_mut(|vm| {
+        fraction_init_with_vm(vm, args)
+    })??)
 }
 
 pub fn fraction_from_number_fallback(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    Ok(crate::object::with_vm_mut(|vm| fraction_from_number_with_vm(vm, args))??)
+    Ok(crate::object::with_vm_mut(|vm| {
+        fraction_from_number_with_vm(vm, args)
+    })??)
 }
 
 pub fn fraction_from_decimal_fallback(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    Ok(crate::object::with_vm_mut(|vm| fraction_from_decimal_with_vm(vm, args))??)
+    Ok(crate::object::with_vm_mut(|vm| {
+        fraction_from_decimal_with_vm(vm, args)
+    })??)
 }
 
 pub fn fraction_from_number_with_vm(
@@ -668,4 +674,3 @@ pub fn fraction_init_with_vm(
     }
     Ok(py_none())
 }
-

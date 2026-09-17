@@ -323,8 +323,7 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
     macro_rules! openssl_alias {
         ($name:expr, $digest:ty) => {
             hl_func!($name, |args| {
-                let is_kwargs_dict =
-                    |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::Dict(_));
+                let is_kwargs_dict = |v: &PyObjectRef| matches!(&*v.borrow(), PyObject::Dict(_));
                 let data_arg = args.last().filter(|a| !is_kwargs_dict(a));
                 let bytes = match data_arg {
                     Some(a) => match &*a.borrow() {
@@ -355,7 +354,11 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
             Some(a) => match &*a.borrow() {
                 PyObject::Bytes(b) => b.clone(),
                 PyObject::Str(s) => s.as_bytes().to_vec(),
-                _ => return Err(PyError::type_error("openssl_sha1() argument must be bytes or str")),
+                _ => {
+                    return Err(PyError::type_error(
+                        "openssl_sha1() argument must be bytes or str",
+                    ))
+                }
             },
             None => vec![],
         };
@@ -482,7 +485,9 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
             name: "shake_128".to_string(),
             func: |args| {
                 if args.len() != 1 {
-                    return Err(PyError::type_error("shake_128() takes exactly one argument"));
+                    return Err(PyError::type_error(
+                        "shake_128() takes exactly one argument",
+                    ));
                 }
                 let data = args[0].borrow();
                 let bytes = match &*data {
@@ -510,7 +515,9 @@ pub fn create_hashlib_dict() -> HashMap<String, PyObjectRef> {
             name: "shake_256".to_string(),
             func: |args| {
                 if args.len() != 1 {
-                    return Err(PyError::type_error("shake_256() takes exactly one argument"));
+                    return Err(PyError::type_error(
+                        "shake_256() takes exactly one argument",
+                    ));
                 }
                 let data = args[0].borrow();
                 let bytes = match &*data {
@@ -1055,7 +1062,12 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     // truncated back down when the input needed zero-byte padding to reach
     // a multiple of 4 (real CPython's `pad=True` keeps the full 5-byte
     // chunk instead, producing exact-multiple-of-5 output).
-    fn encode85_words(data: &[u8], alphabet: &[u8], fold_zero: Option<u8>, pad: bool) -> Vec<Vec<u8>> {
+    fn encode85_words(
+        data: &[u8],
+        alphabet: &[u8],
+        fold_zero: Option<u8>,
+        pad: bool,
+    ) -> Vec<Vec<u8>> {
         let padding = (4 - data.len() % 4) % 4;
         let mut padded = data.to_vec();
         padded.extend(std::iter::repeat(0u8).take(padding));
@@ -1168,7 +1180,10 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
                 acc = acc * 85 + v as u64;
             }
             if acc > u32::MAX as u64 {
-                return Err(format!("base85 overflow in hunk starting at byte {}", i * 5));
+                return Err(format!(
+                    "base85 overflow in hunk starting at byte {}",
+                    i * 5
+                ));
             }
             out.extend_from_slice(&(acc as u32).to_be_bytes());
         }
@@ -1208,7 +1223,9 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
 
     b64_func!("a85encode", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("a85encode() takes at least one argument"));
+            return Err(PyError::type_error(
+                "a85encode() takes at least one argument",
+            ));
         }
         let data = arg_bytes(&args[0])
             .ok_or_else(|| PyError::type_error("a85encode() argument must be bytes"))?;
@@ -1235,7 +1252,9 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     });
     b64_func!("a85decode", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("a85decode() takes at least one argument"));
+            return Err(PyError::type_error(
+                "a85decode() takes at least one argument",
+            ));
         }
         let mut data = if let PyObject::Str(s) = &*args[0].borrow() {
             s.as_bytes().to_vec()
@@ -1264,7 +1283,9 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     });
     b64_func!("b85encode", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("b85encode() takes at least one argument"));
+            return Err(PyError::type_error(
+                "b85encode() takes at least one argument",
+            ));
         }
         let data = arg_bytes(&args[0])
             .ok_or_else(|| PyError::type_error("b85encode() argument must be bytes"))?;
@@ -1273,7 +1294,9 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     });
     b64_func!("b85decode", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("b85decode() takes at least one argument"));
+            return Err(PyError::type_error(
+                "b85decode() takes at least one argument",
+            ));
         }
         let data = if let PyObject::Str(s) = &*args[0].borrow() {
             s.as_bytes().to_vec()
@@ -1294,7 +1317,8 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     // transliteration — same 85-symbol alphabet, different character
     // assignment. Ported directly from CPython's own `base64.py` (which
     // itself just wraps b85encode/b85decode with `bytes.translate`).
-    const Z85_ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
+    const Z85_ALPHABET: &[u8] =
+        b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
 
     fn z85_encode(data: &[u8]) -> Vec<u8> {
         b85_encode(data, false)
@@ -1326,7 +1350,9 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
 
     b64_func!("z85encode", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("z85encode() takes at least one argument"));
+            return Err(PyError::type_error(
+                "z85encode() takes at least one argument",
+            ));
         }
         let data = arg_bytes(&args[0])
             .ok_or_else(|| PyError::type_error("z85encode() argument must be bytes"))?;
@@ -1334,7 +1360,9 @@ pub fn create_base64_dict() -> HashMap<String, PyObjectRef> {
     });
     b64_func!("z85decode", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("z85decode() takes at least one argument"));
+            return Err(PyError::type_error(
+                "z85decode() takes at least one argument",
+            ));
         }
         let data = if let PyObject::Str(s) = &*args[0].borrow() {
             s.as_bytes().to_vec()
@@ -1541,4 +1569,3 @@ pub fn create_secrets_dict() -> HashMap<String, PyObjectRef> {
 
     d
 }
-

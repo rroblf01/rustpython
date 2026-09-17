@@ -1,9 +1,8 @@
 use crate::object::*;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicI64;
 use num_traits::{Signed, ToPrimitive};
+use std::collections::HashMap;
 use std::rc::Rc;
-
+use std::sync::atomic::AtomicI64;
 
 /// Looks up `name` on `obj` the same way the VM's own `LOAD_ATTR` opcode
 /// does — as opposed to the raw `get_attribute()` free function, which does
@@ -738,7 +737,10 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
             _ => Vec::new(),
         };
         let parts: Vec<String> = items.iter().map(|i| i.repr()).collect();
-        Ok(py_str(&format!("operator.itemgetter({})", parts.join(", "))))
+        Ok(py_str(&format!(
+            "operator.itemgetter({})",
+            parts.join(", ")
+        )))
     }
     d.insert_str(
         "itemgetter",
@@ -807,7 +809,10 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
             _ => Vec::new(),
         };
         let parts: Vec<String> = items.iter().map(|i| i.repr()).collect();
-        Ok(py_str(&format!("operator.attrgetter({})", parts.join(", "))))
+        Ok(py_str(&format!(
+            "operator.attrgetter({})",
+            parts.join(", ")
+        )))
     }
     d.insert_str(
         "attrgetter",
@@ -855,7 +860,9 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
             _ => Vec::new(),
         };
         if items.is_empty() {
-            return Err(PyError::type_error("methodcaller requires at least 1 argument"));
+            return Err(PyError::type_error(
+                "methodcaller requires at least 1 argument",
+            ));
         }
         let method_name = items[0].str();
         let extra_args = &items[1..];
@@ -932,7 +939,10 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
                 {
                     (&args[..args.len() - 1], args[args.len() - 1].clone())
                 } else {
-                    (args, PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new()))))
+                    (
+                        args,
+                        PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new()))),
+                    )
                 };
                 let mut attrs = crate::object::AttrMap::new();
                 attrs.insert(OG_ITEMS_KEY.to_string(), py_tuple(positional.to_vec()));
@@ -967,4 +977,3 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
 
     d
 }
-

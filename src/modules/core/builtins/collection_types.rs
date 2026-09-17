@@ -3,7 +3,10 @@ use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 use std::collections::HashMap;
 
-pub fn register_collection_types(builtins: &mut HashMap<String, PyObjectRef>, object_type: &PyObjectRef) {
+pub fn register_collection_types(
+    builtins: &mut HashMap<String, PyObjectRef>,
+    object_type: &PyObjectRef,
+) {
     // `list` — same shape as `int`/`str` above. No method is reached ONLY
     // at the class level (unlike `int.from_bytes`) — every instance method
     // (`.append()`, `.sort()`, etc.) keeps resolving via native-backing
@@ -169,7 +172,10 @@ pub fn register_collection_types(builtins: &mut HashMap<String, PyObjectRef>, ob
                     None => list_instance_state(&receiver).unwrap_or_else(py_none),
                 };
                 let items = list_items_of(&receiver).unwrap_or_default();
-                let iter = PyObjectRef::new(PyObject::ListIter { list: items, index: 0 });
+                let iter = PyObjectRef::new(PyObject::ListIter {
+                    list: items,
+                    index: 0,
+                });
                 Ok(py_tuple(vec![
                     PyObjectRef::new(PyObject::BuiltinFunction {
                         name: "list__reduce_new__".to_string(),
@@ -188,17 +194,15 @@ pub fn register_collection_types(builtins: &mut HashMap<String, PyObjectRef>, ob
     /// native backing attached (plain `cls.__new__(cls)` returns a
     /// backing-less instance for native subclasses).
     fn list_reduce_new(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-        let cls = args.first().ok_or_else(|| {
-            PyError::type_error("list reconstruction missing class argument")
-        })?;
+        let cls = args
+            .first()
+            .ok_or_else(|| PyError::type_error("list reconstruction missing class argument"))?;
         if crate::object::get_primitive_type("list").map_or(false, |t| cls.is(&t)) {
             return Ok(py_list(vec![]));
         }
         match crate::object::native_base_of_type(cls).as_deref() {
             Some("list") => Ok(crate::object::make_subclass_instance(cls, py_list(vec![]))),
-            _ => Err(PyError::type_error(
-                "list reconstruction of non-list class",
-            )),
+            _ => Err(PyError::type_error("list reconstruction of non-list class")),
         }
     }
     // In-place operators return the SAME object (identity!), including a
@@ -366,7 +370,10 @@ pub fn register_collection_types(builtins: &mut HashMap<String, PyObjectRef>, ob
             return None;
         };
         for base in mro {
-            if let PyObject::Type { name: bname, dict, .. } = &*base.borrow() {
+            if let PyObject::Type {
+                name: bname, dict, ..
+            } = &*base.borrow()
+            {
                 if bname == "object" {
                     continue;
                 }
@@ -454,7 +461,9 @@ pub fn register_collection_types(builtins: &mut HashMap<String, PyObjectRef>, ob
                         v.extend(w);
                         Ok(py_list(v))
                     }
-                    _ => Err(PyError::type_error("can only concatenate list (not other) to list")),
+                    _ => Err(PyError::type_error(
+                        "can only concatenate list (not other) to list",
+                    )),
                 }
             },
         }),
@@ -559,7 +568,6 @@ pub fn register_collection_types(builtins: &mut HashMap<String, PyObjectRef>, ob
     }
     builtins.insert_str("list", list_type.clone());
     crate::object::seed_primitive_type_cache("list", list_type);
-
 
     // `dict` — same shape as the others above. Unlike `list`/`str`
     // (nothing class-level-only), `dict` DOES have genuine class-level

@@ -20,9 +20,19 @@ pub fn create_json_dict() -> HashMap<String, PyObjectRef> {
         }
         let indent = if args.len() > 1 {
             let v = args[1].as_i64().unwrap_or(-1);
-            if v >= 0 { Some(v as usize) } else { None }
-        } else { None };
-        let sort_keys = if args.len() > 2 { args[2].truthy() } else { false };
+            if v >= 0 {
+                Some(v as usize)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let sort_keys = if args.len() > 2 {
+            args[2].truthy()
+        } else {
+            false
+        };
         json_encode_full(&args[0], indent, sort_keys, 0)
     });
     json_func!("loads", |args| {

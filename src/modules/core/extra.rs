@@ -1,9 +1,8 @@
 use crate::object::*;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicI64;
 use num_traits::{Signed, ToPrimitive};
+use std::collections::HashMap;
 use std::rc::Rc;
-
+use std::sync::atomic::AtomicI64;
 
 /// Native errno module — POSIX error code constants
 pub fn create_errno_dict() -> HashMap<String, PyObjectRef> {

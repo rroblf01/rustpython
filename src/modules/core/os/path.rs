@@ -1,8 +1,8 @@
 use crate::object::*;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicI64;
 use num_traits::{Signed, ToPrimitive};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::AtomicI64;
 
 use super::helpers::{os_path_arg, stat_dev_ino};
 
@@ -455,7 +455,9 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
     // and relative path specifiers. On POSIX, the drive is always empty.
     path_func!("splitdrive", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("splitdrive() missing required argument: 'p'"));
+            return Err(PyError::type_error(
+                "splitdrive() missing required argument: 'p'",
+            ));
         }
         let p = args[0].str();
         Ok(py_tuple(vec![py_str(""), py_str(&p)]))
@@ -465,12 +467,15 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
     // splitroot: POSIX uses single sep semantics; mimic Lib/posixpath.splitroot
     path_func!("splitroot", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("splitroot() missing required argument: 'p'"));
+            return Err(PyError::type_error(
+                "splitroot() missing required argument: 'p'",
+            ));
         }
         let p = crate::object::path_arg_to_string(&args[0]);
         if !p.starts_with('/') {
             return Ok(py_tuple(vec![py_str(""), py_str(""), py_str(&p)]));
-        } else if p.len() >= 2 && p.as_bytes()[1] != b'/' || p.len() >= 3 && p.as_bytes()[2] == b'/' {
+        } else if p.len() >= 2 && p.as_bytes()[1] != b'/' || p.len() >= 3 && p.as_bytes()[2] == b'/'
+        {
             // Absolute path, e.g. '/foo', '///foo'
             return Ok(py_tuple(vec![py_str(""), py_str("/"), py_str(&p[1..])]));
         } else {
@@ -481,19 +486,25 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
 
     path_func!("commonpath", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("commonpath() takes at least 1 argument"));
+            return Err(PyError::type_error(
+                "commonpath() takes at least 1 argument",
+            ));
         }
         let paths: Vec<String> = crate::object::collect_iterable(&args[0])?
             .iter()
             .map(|p| crate::object::path_arg_to_string(p))
             .collect();
         if paths.is_empty() {
-            return Err(PyError::value_error("commonpath() arg is an empty sequence"));
+            return Err(PyError::value_error(
+                "commonpath() arg is an empty sequence",
+            ));
         }
         let isabs = paths[0].starts_with('/');
         for p in &paths {
             if p.starts_with('/') != isabs {
-                return Err(PyError::value_error("Can't mix absolute and relative paths"));
+                return Err(PyError::value_error(
+                    "Can't mix absolute and relative paths",
+                ));
             }
         }
         let split_paths: Vec<Vec<String>> = paths
@@ -525,7 +536,9 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
 
     path_func!("relpath", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("relpath() missing required argument: 'path'"));
+            return Err(PyError::type_error(
+                "relpath() missing required argument: 'path'",
+            ));
         }
         // Handle optional second arg or kw `start`
         let mut path = crate::object::path_arg_to_string(&args[0]);
@@ -583,7 +596,9 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
             for seg in abs.split('/') {
                 match seg {
                     "" | "." => continue,
-                    ".." => { parts.pop(); }
+                    ".." => {
+                        parts.pop();
+                    }
                     c => parts.push(c),
                 }
             }
@@ -599,15 +614,27 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
         let path_abs = abspath_fn(&path);
         let start_tail = start_abs.trim_start_matches('/').to_string();
         let path_tail = path_abs.trim_start_matches('/').to_string();
-        let start_list: Vec<&str> = if start_tail.is_empty() { vec![] } else { start_tail.split('/').collect() };
-        let path_list: Vec<&str> = if path_tail.is_empty() { vec![] } else { path_tail.split('/').collect() };
+        let start_list: Vec<&str> = if start_tail.is_empty() {
+            vec![]
+        } else {
+            start_tail.split('/').collect()
+        };
+        let path_list: Vec<&str> = if path_tail.is_empty() {
+            vec![]
+        } else {
+            path_tail.split('/').collect()
+        };
         // commonprefix
         let mut i = 0;
         for (a, b) in start_list.iter().zip(path_list.iter()) {
-            if a != b { break; }
+            if a != b {
+                break;
+            }
             i += 1;
         }
-        let mut rel: Vec<String> = std::iter::repeat("..".to_string()).take(start_list.len() - i).collect();
+        let mut rel: Vec<String> = std::iter::repeat("..".to_string())
+            .take(start_list.len() - i)
+            .collect();
         rel.extend(path_list[i..].iter().map(|s| s.to_string()));
         if rel.is_empty() {
             Ok(py_str("."))
@@ -618,7 +645,9 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
 
     path_func!("expandvars", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("expandvars() missing required argument: 'path'"));
+            return Err(PyError::type_error(
+                "expandvars() missing required argument: 'path'",
+            ));
         }
         let path = crate::object::path_arg_to_string(&args[0]);
         // Simple POSIX expansion: $var and ${var}
@@ -633,7 +662,10 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
                         let mut var = String::new();
                         let mut closed = false;
                         for ch in chars.by_ref() {
-                            if ch == '}' { closed = true; break; }
+                            if ch == '}' {
+                                closed = true;
+                                break;
+                            }
                             var.push(ch);
                         }
                         if closed {
@@ -651,7 +683,9 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
                             if ch.is_alphanumeric() || ch == '_' {
                                 var.push(ch);
                                 chars.next();
-                            } else { break; }
+                            } else {
+                                break;
+                            }
                         }
                         if let Ok(val) = std::env::var(&var) {
                             result.push_str(&val);
@@ -673,12 +707,17 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
 
     path_func!("ismount", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("ismount() missing required argument: 'path'"));
+            return Err(PyError::type_error(
+                "ismount() missing required argument: 'path'",
+            ));
         }
         let p = crate::object::path_arg_to_string(&args[0]);
         // Use stat-based heuristic: compare st_dev of path and parent
         let path_stat = std::fs::metadata(&p).ok();
-        let parent = std::path::Path::new(&p).parent().map(|pp| pp.to_string_lossy().to_string()).unwrap_or("/".to_string());
+        let parent = std::path::Path::new(&p)
+            .parent()
+            .map(|pp| pp.to_string_lossy().to_string())
+            .unwrap_or("/".to_string());
         let parent_stat = std::fs::metadata(&parent).ok();
         if let (Some(ps), Some(pps)) = (path_stat, parent_stat) {
             let (ino1, dev1) = stat_dev_ino(&ps);
@@ -692,7 +731,9 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
 
     path_func!("isjunction", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("isjunction() missing required argument: 'path'"));
+            return Err(PyError::type_error(
+                "isjunction() missing required argument: 'path'",
+            ));
         }
         // Junctions only on Windows; always false on POSIX
         let _ = crate::object::path_arg_to_string(&args[0]);
@@ -701,7 +742,9 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
 
     path_func!("isdevdrive", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("isdevdrive() missing required argument: 'path'"));
+            return Err(PyError::type_error(
+                "isdevdrive() missing required argument: 'path'",
+            ));
         }
         let _ = crate::object::path_arg_to_string(&args[0]);
         Ok(py_bool(false))
@@ -717,9 +760,15 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
         let get = |obj: &PyObjectRef, key: &str| -> Option<u64> {
             if let Ok(val) = obj.borrow().get_attribute(key) {
                 val.as_i64().map(|v| v as u64).or_else(|| {
-                    if let PyObject::Float(f) = &*val.borrow() { Some(*f as u64) } else { None }
+                    if let PyObject::Float(f) = &*val.borrow() {
+                        Some(*f as u64)
+                    } else {
+                        None
+                    }
                 })
-            } else { None }
+            } else {
+                None
+            }
         };
         // Fallback to dict access if PyObject::Dict
         let get_dict = |obj: &PyObjectRef, key: &str| -> Option<u64> {
@@ -742,7 +791,9 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
 
     path_func!("sameopenfile", |args| {
         if args.len() < 2 {
-            return Err(PyError::type_error("sameopenfile() takes at least 2 arguments"));
+            return Err(PyError::type_error(
+                "sameopenfile() takes at least 2 arguments",
+            ));
         }
         // args are file objects or fds; compare via fstat dev/ino if possible
         let get_fd = |obj: &PyObjectRef| -> Option<i32> {
@@ -862,4 +913,3 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
 
     d
 }
-

@@ -1,6 +1,6 @@
 use crate::object::*;
-use std::collections::HashMap;
 use num_traits::{Signed, ToPrimitive};
+use std::collections::HashMap;
 
 use super::helpers::{exact_fsum, math_arg_f64, math_int_value, tl_fma, tl_to_d};
 

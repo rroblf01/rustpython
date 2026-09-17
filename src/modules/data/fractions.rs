@@ -1,10 +1,10 @@
-use crate::object::*;
-use std::collections::HashMap;
-use num_bigint::{BigInt, Sign};
-use num_traits::{One, Signed, Zero};
-use num_traits::ToPrimitive;
-use std::rc::Rc;
 use crate::modules::data::decimal::*;
+use crate::object::*;
+use num_bigint::{BigInt, Sign};
+use num_traits::ToPrimitive;
+use num_traits::{One, Signed, Zero};
+use std::collections::HashMap;
+use std::rc::Rc;
 // ---------------------------------------------------------------------------
 // fractions.Fraction — a real rational-number type, replacing a former
 // complete stub whose constructor just returned a formatted `"num/den"`
@@ -22,7 +22,6 @@ use crate::modules::data::decimal::*;
 // arithmetic/comparison dispatch (`try_dunder_binop`/`try_rich_compare`)
 // with no changes needed to `ops_binary.rs`/`ops_compare.rs` at all.
 // ---------------------------------------------------------------------------
-
 
 pub fn frac_bigint_gcd(a: &BigInt, b: &BigInt) -> BigInt {
     let mut a = a.abs();
@@ -418,13 +417,13 @@ pub fn frac_to_f64(num: &BigInt, den: &BigInt) -> f64 {
             // `float(Fraction(10**400, 1))`; this call site predates a
             // fallible signature here, so saturate to +-inf instead of
             // threading a PyResult through every caller).
-            let sign =
-                if (num.sign() == num_bigint::Sign::Minus) != (den.sign() == num_bigint::Sign::Minus)
-                {
-                    -1.0
-                } else {
-                    1.0
-                };
+            let sign = if (num.sign() == num_bigint::Sign::Minus)
+                != (den.sign() == num_bigint::Sign::Minus)
+            {
+                -1.0
+            } else {
+                1.0
+            };
             sign * f64::INFINITY
         }
     }
@@ -690,4 +689,3 @@ pub fn frac_format_general(num: BigInt, den: &BigInt, p: &FracGeneralSpec) -> Py
         _ => format!("{}{}{}", padding, sign_out, body),
     })
 }
-

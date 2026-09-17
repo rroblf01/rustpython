@@ -1,14 +1,15 @@
 use crate::object::*;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicI64;
 use num_traits::{Signed, ToPrimitive};
+use std::collections::HashMap;
 use std::rc::Rc;
-
+use std::sync::atomic::AtomicI64;
 
 mod helpers;
 mod special;
-use helpers::{dl_fast_sum, exact_fsum, log_frexp_int, math_arg_f64, math_call_int_dunder, math_float_value, math_int_value, math_log2_value, vector_norm};
-
+use helpers::{
+    dl_fast_sum, exact_fsum, log_frexp_int, math_arg_f64, math_call_int_dunder, math_float_value,
+    math_int_value, math_log2_value, vector_norm,
+};
 
 pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
@@ -491,13 +492,19 @@ pub fn create_math_dict() -> HashMap<String, PyObjectRef> {
         let is_int_like = {
             let b = args[0].borrow();
             matches!(&*b, PyObject::Int(_) | PyObject::Bool(_))
-                || matches!(args[0], PyObjectRef::SmallInt(_)| PyObjectRef::SmallBool(_))
+                || matches!(
+                    args[0],
+                    PyObjectRef::SmallInt(_) | PyObjectRef::SmallBool(_)
+                )
         };
         if is_int_like && !args[0].is_float_typed() {
             return Ok(py_bool(true));
         }
         // Fast path for plain floats (SmallFloat / Float)
-        if args[0].is_float_typed() || matches!(&*args[0].borrow(), PyObject::Float(_)) || matches!(args[0], PyObjectRef::SmallFloat(_)) {
+        if args[0].is_float_typed()
+            || matches!(&*args[0].borrow(), PyObject::Float(_))
+            || matches!(args[0], PyObjectRef::SmallFloat(_))
+        {
             if let Some(f) = args[0].as_f64() {
                 return Ok(py_bool(f.is_finite()));
             }

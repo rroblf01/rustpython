@@ -1,9 +1,9 @@
-use crate::object::*;
-use std::collections::HashMap;
-use num_bigint::{BigInt, Sign};
-use num_traits::{Zero, One, Signed, ToPrimitive};
-use crate::modules::data::fractions::{frac_instance_num_den, frac_to_f64, frac_normalize};
 use crate::modules::data::decimal_types::build_decimal_type;
+use crate::modules::data::fractions::{frac_instance_num_den, frac_normalize, frac_to_f64};
+use crate::object::*;
+use num_bigint::{BigInt, Sign};
+use num_traits::{One, Signed, ToPrimitive, Zero};
+use std::collections::HashMap;
 // ===================== Real decimal.Decimal =====================
 //
 // Arbitrary-precision decimal arithmetic per (a practical subset of) IBM's
@@ -904,4 +904,3 @@ pub fn get_decimal_type() -> PyObjectRef {
     });
     typ
 }
-

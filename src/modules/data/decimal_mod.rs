@@ -1,9 +1,9 @@
-use crate::object::*;
-use std::collections::HashMap;
-use num_bigint::{BigInt, Sign};
-use num_traits::{Zero, One, Signed, ToPrimitive};
 use crate::modules::data::decimal::*;
 use crate::modules::data::decimal_types::*;
+use crate::object::*;
+use num_bigint::{BigInt, Sign};
+use num_traits::{One, Signed, ToPrimitive, Zero};
+use std::collections::HashMap;
 pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! dec_func {
@@ -68,7 +68,10 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
                 .get_str("rounding")
                 .map(|v| v.str())
                 .unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
-            let is_basic = dict.get_str("_is_basic").map(|v| v.truthy()).unwrap_or(false);
+            let is_basic = dict
+                .get_str("_is_basic")
+                .map(|v| v.truthy())
+                .unwrap_or(false);
             DECIMAL_CURRENT_CONTEXT.with(|c| {
                 *c.borrow_mut() = (precision, rounding);
             });
@@ -90,7 +93,9 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
                     dict.get_str("rounding")
                         .map(|v| v.str())
                         .unwrap_or_else(|| "ROUND_HALF_EVEN".to_string()),
-                    dict.get_str("_is_basic").map(|v| v.truthy()).unwrap_or(false),
+                    dict.get_str("_is_basic")
+                        .map(|v| v.truthy())
+                        .unwrap_or(false),
                 )
             } else {
                 let (p, r) = current_decimal_context();
@@ -117,7 +122,10 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
                             .get_str("rounding")
                             .map(|v| v.str())
                             .unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
-                        let is_basic = dict.get_str("_is_basic").map(|v| v.truthy()).unwrap_or(false);
+                        let is_basic = dict
+                            .get_str("_is_basic")
+                            .map(|v| v.truthy())
+                            .unwrap_or(false);
                         DECIMAL_CURRENT_CONTEXT.with(|c| {
                             *c.borrow_mut() = (precision, rounding);
                         });

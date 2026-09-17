@@ -376,7 +376,8 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
         if args.len() >= 1 {
             let last = &args[args.len() - 1];
             let is_kwargs_dict = if let PyObject::Dict(d) = &*last.borrow() {
-                d.contains(&crate::object::py_str("object")).unwrap_or(false)
+                d.contains(&crate::object::py_str("object"))
+                    .unwrap_or(false)
                     || d.contains(&crate::object::py_str("times")).unwrap_or(false)
             } else {
                 false
@@ -639,7 +640,7 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
         loop {
             match builtin_next(&[iterable.clone()]) {
                 Ok(item) => {
-                     let should_keep = match &predicate {
+                    let should_keep = match &predicate {
                         Some(f) => {
                             // Call predicate directly; it may already be a bound
                             // method (e.g. `dict.__contains__` via `b.__contains__`)
@@ -671,9 +672,9 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
                 "batched() requires 2 arguments (iterable, n)",
             ));
         }
-        let n = args[1].as_i64().ok_or_else(|| {
-            PyError::type_error("batched() n must be an integer")
-        })?;
+        let n = args[1]
+            .as_i64()
+            .ok_or_else(|| PyError::type_error("batched() n must be an integer"))?;
         if n < 1 {
             return Err(PyError::value_error("n must be at least one"));
         }
@@ -706,9 +707,7 @@ pub fn create_itertools_dict() -> HashMap<String, PyObjectRef> {
                 break;
             }
             if strict && (batch.len() as i64) != n {
-                return Err(PyError::value_error(
-                    "batched(): incomplete batch",
-                ));
+                return Err(PyError::value_error("batched(): incomplete batch"));
             }
             batches.push(py_tuple(batch));
         }

@@ -215,12 +215,14 @@ fn build_compressobj(level: i64, wbits: i64) -> PyResult<PyObjectRef> {
 
     type_dict.insert_str(
         "copy",
-        PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| {
-            // A fully faithful `copy()` would need to clone the live
-            // zlib/deflate state, which `flate2::Compress` doesn't expose;
-            // approximate with a fresh compressor at the same parameters.
-            build_compressobj(level, wbits)
-        }))),
+        PyObjectRef::new(PyObject::Closure(Rc::new(
+            move |_args: &[PyObjectRef]| {
+                // A fully faithful `copy()` would need to clone the live
+                // zlib/deflate state, which `flate2::Compress` doesn't expose;
+                // approximate with a fresh compressor at the same parameters.
+                build_compressobj(level, wbits)
+            },
+        ))),
     );
 
     Ok(PyObjectRef::new(PyObject::Instance {
@@ -254,7 +256,9 @@ fn build_decompressobj(wbits: i64) -> PyResult<PyObjectRef> {
         "decompress",
         PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
             if args.is_empty() {
-                return Err(PyError::type_error("decompress() takes at least 1 argument"));
+                return Err(PyError::type_error(
+                    "decompress() takes at least 1 argument",
+                ));
             }
             let data = bytes_arg(&args[0])?;
             let max_length: i64 = if args.len() > 1 {
@@ -338,9 +342,7 @@ fn build_decompressobj(wbits: i64) -> PyResult<PyObjectRef> {
             if !args.is_empty() {
                 if let Some(n) = args[0].as_i64() {
                     if n <= 0 {
-                        return Err(PyError::value_error(
-                            "length must be greater than zero",
-                        ));
+                        return Err(PyError::value_error("length must be greater than zero"));
                     }
                 } else {
                     return Err(PyError::value_error("length must be greater than zero"));
@@ -378,9 +380,9 @@ fn build_decompressobj(wbits: i64) -> PyResult<PyObjectRef> {
 
     type_dict.insert_str(
         "copy",
-        PyObjectRef::new(PyObject::Closure(Rc::new(move |_args: &[PyObjectRef]| {
-            build_decompressobj(wbits)
-        }))),
+        PyObjectRef::new(PyObject::Closure(Rc::new(
+            move |_args: &[PyObjectRef]| build_decompressobj(wbits),
+        ))),
     );
 
     // `unused_data`/`unconsumed_tail`/`eof` need to reflect LIVE state
@@ -395,9 +397,7 @@ fn build_decompressobj(wbits: i64) -> PyResult<PyObjectRef> {
         "unused_data",
         PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
             getter: Some(PyObjectRef::new(PyObject::Closure(Rc::new(
-                move |_: &[PyObjectRef]| {
-                    Ok(PyObjectRef::imm(PyObject::Bytes(ud.borrow().clone())))
-                },
+                move |_: &[PyObjectRef]| Ok(PyObjectRef::imm(PyObject::Bytes(ud.borrow().clone()))),
             )))),
             setter: None,
             deleter: None,
@@ -409,9 +409,7 @@ fn build_decompressobj(wbits: i64) -> PyResult<PyObjectRef> {
         "unconsumed_tail",
         PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
             getter: Some(PyObjectRef::new(PyObject::Closure(Rc::new(
-                move |_: &[PyObjectRef]| {
-                    Ok(PyObjectRef::imm(PyObject::Bytes(ut.borrow().clone())))
-                },
+                move |_: &[PyObjectRef]| Ok(PyObjectRef::imm(PyObject::Bytes(ut.borrow().clone()))),
             )))),
             setter: None,
             deleter: None,
@@ -484,7 +482,11 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
                     if let Ok(Some(v)) = dct.get(&py_str("level")) {
                         level = v.as_i64().unwrap_or(-1);
                     }
-                    if dct.get(&py_str("data")).map(|v| v.is_some()).unwrap_or(false) {
+                    if dct
+                        .get(&py_str("data"))
+                        .map(|v| v.is_some())
+                        .unwrap_or(false)
+                    {
                         return Err(PyError::type_error(
                             "compress() got multiple values for argument 'data'",
                         ));
@@ -749,7 +751,9 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
             "decompress",
             PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
                 if args.is_empty() {
-                    return Err(PyError::type_error("decompress() takes at least 1 argument"));
+                    return Err(PyError::type_error(
+                        "decompress() takes at least 1 argument",
+                    ));
                 }
                 let data = bytes_arg(&args[0])?;
                 let mut st = s.borrow_mut();
@@ -825,7 +829,9 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
         type_dict.insert_str(
             "__reduce__",
             PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
-                Err(PyError::type_error("cannot pickle '_ZlibDecompressor' object"))
+                Err(PyError::type_error(
+                    "cannot pickle '_ZlibDecompressor' object",
+                ))
             }))),
         );
 

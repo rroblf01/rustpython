@@ -1,8 +1,8 @@
 use crate::object::*;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicI64;
 use num_traits::{Signed, ToPrimitive};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::AtomicI64;
 
 thread_local! {
     pub(crate) static CODEC_SEARCH_FUNCTIONS: std::cell::RefCell<Vec<crate::object::PyObjectRef>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -23,9 +23,8 @@ thread_local! {
 /// Move deferred registrations into the main search list. Call after
 /// lookup iteration ends (borrow released).
 pub(crate) fn drain_pending_search_functions() {
-    let pending: Vec<crate::object::PyObjectRef> = PENDING_SEARCH_FUNCTIONS.with(|p| {
-        p.borrow_mut().drain(..).collect()
-    });
+    let pending: Vec<crate::object::PyObjectRef> =
+        PENDING_SEARCH_FUNCTIONS.with(|p| p.borrow_mut().drain(..).collect());
     if pending.is_empty() {
         return;
     }
@@ -140,7 +139,9 @@ fn _codecs_charmap_decode(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                                 }
                             }
                             PyObject::Str(s) => {
-                                if s.chars().count() == 1 && s.chars().next().unwrap() as u32 == 0xFFFE {
+                                if s.chars().count() == 1
+                                    && s.chars().next().unwrap() as u32 == 0xFFFE
+                                {
                                     None
                                 } else {
                                     drop(vt);
@@ -179,7 +180,8 @@ fn _codecs_charmap_decode(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                             }
                         }
                         PyObject::Str(s) => {
-                            if s.chars().count() == 1 && s.chars().next().unwrap() as u32 == 0xFFFE {
+                            if s.chars().count() == 1 && s.chars().next().unwrap() as u32 == 0xFFFE
+                            {
                                 None
                             } else {
                                 drop(vt);
@@ -282,7 +284,10 @@ fn _codecs_charmap_decode(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                                 let br = res.borrow();
                                 if let PyObject::Tuple(t) = &*br {
                                     if t.len() >= 2 {
-                                        (t[0].str(), t[1].as_i64().unwrap_or((i + 1) as i64) as usize)
+                                        (
+                                            t[0].str(),
+                                            t[1].as_i64().unwrap_or((i + 1) as i64) as usize,
+                                        )
                                     } else {
                                         (String::new(), i + 1)
                                     }
@@ -502,16 +507,17 @@ fn _codecs_charmap_encode(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             "replace" => {
                 // try to lookup '?' mapping
                 let qkey = py_int('?' as i64);
-                let rep_opt: Option<PyObjectRef> = if matches!(&*mapping.borrow(), PyObject::Dict(_)) {
-                    let db = mapping.borrow();
-                    if let PyObject::Dict(d) = &*db {
-                        d.get(&qkey).ok().flatten()
+                let rep_opt: Option<PyObjectRef> =
+                    if matches!(&*mapping.borrow(), PyObject::Dict(_)) {
+                        let db = mapping.borrow();
+                        if let PyObject::Dict(d) = &*db {
+                            d.get(&qkey).ok().flatten()
+                        } else {
+                            None
+                        }
                     } else {
-                        None
-                    }
-                } else {
-                    crate::object::py_getitem(&mapping, &qkey).ok()
-                };
+                        crate::object::py_getitem(&mapping, &qkey).ok()
+                    };
                 if let Some(rv) = rep_opt {
                     let rbb = rv.borrow();
                     match &*rbb {
@@ -568,7 +574,10 @@ fn _codecs_charmap_encode(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                                 let br = res.borrow();
                                 if let PyObject::Tuple(t) = &*br {
                                     if t.len() >= 2 {
-                                        (t[0].str(), t[1].as_i64().unwrap_or((idx + 1) as i64) as usize)
+                                        (
+                                            t[0].str(),
+                                            t[1].as_i64().unwrap_or((idx + 1) as i64) as usize,
+                                        )
                                     } else {
                                         (res.str(), idx + 1)
                                     }
@@ -689,16 +698,14 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
                 // Never panic on re-entrant registration (search function
                 // calling register during lookup iteration): defer to the
                 // pending list, drained after the lookup ends.
-                CODEC_SEARCH_FUNCTIONS.with(|fns| {
-                    match fns.try_borrow_mut() {
-                        Ok(mut g) => {
-                            g.push(args[0].clone());
-                        }
-                        Err(_) => {
-                            PENDING_SEARCH_FUNCTIONS.with(|p| {
-                                p.borrow_mut().push(args[0].clone());
-                            });
-                        }
+                CODEC_SEARCH_FUNCTIONS.with(|fns| match fns.try_borrow_mut() {
+                    Ok(mut g) => {
+                        g.push(args[0].clone());
+                    }
+                    Err(_) => {
+                        PENDING_SEARCH_FUNCTIONS.with(|p| {
+                            p.borrow_mut().push(args[0].clone());
+                        });
                     }
                 });
                 Ok(py_none())

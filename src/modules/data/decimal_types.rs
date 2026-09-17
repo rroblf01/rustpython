@@ -1,9 +1,9 @@
-use crate::object::*;
-use std::collections::HashMap;
-use num_bigint::{BigInt, Sign};
-use num_traits::{Zero, One, Signed, ToPrimitive};
 use crate::modules::data::decimal::*;
-use crate::modules::data::fractions::{frac_normalize, frac_instance_num_den, frac_to_f64};
+use crate::modules::data::fractions::{frac_instance_num_den, frac_normalize, frac_to_f64};
+use crate::object::*;
+use num_bigint::{BigInt, Sign};
+use num_traits::{One, Signed, ToPrimitive, Zero};
+use std::collections::HashMap;
 pub fn build_decimal_type() -> PyObjectRef {
     let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
     macro_rules! bf {
@@ -385,13 +385,14 @@ pub fn build_decimal_type() -> PyObjectRef {
                 if af_direct < 0.0 && bf.fract() != 0.0 {
                     return Err(decimal_invalid_op("(-x) ** (1/2)"));
                 }
-                let rf = if af_direct.is_infinite() && a.special == DecSpecial::Finite && !a.is_zero() {
-                    let coeff_f = a.coeff.to_string().parse::<f64>().unwrap_or(f64::INFINITY);
-                    let log_a = coeff_f.ln() + a.exp as f64 * 10f64.ln();
-                    (bf * log_a).exp()
-                } else {
-                    af_direct.powf(bf)
-                };
+                let rf =
+                    if af_direct.is_infinite() && a.special == DecSpecial::Finite && !a.is_zero() {
+                        let coeff_f = a.coeff.to_string().parse::<f64>().unwrap_or(f64::INFINITY);
+                        let log_a = coeff_f.ln() + a.exp as f64 * 10f64.ln();
+                        (bf * log_a).exp()
+                    } else {
+                        af_direct.powf(bf)
+                    };
                 return Ok(decval_to_instance(&float_to_decvalue(rf)));
             }
             let n = (&b.coeff * ten_pow(b.exp))
@@ -948,4 +949,3 @@ pub fn make_context_instance(precision: usize, rounding: &str) -> PyObjectRef {
     dict.insert_str("_is_basic", py_bool(false));
     PyObjectRef::new(PyObject::Instance { typ, dict })
 }
-

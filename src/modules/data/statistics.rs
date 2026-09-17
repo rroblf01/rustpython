@@ -208,4 +208,3 @@ pub fn create_statistics_dict() -> HashMap<String, PyObjectRef> {
 
     d
 }
-

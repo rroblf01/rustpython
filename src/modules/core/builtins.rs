@@ -1,15 +1,14 @@
 use crate::object::*;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicI64;
 use num_traits::{Signed, ToPrimitive};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::AtomicI64;
 
 use super::codecs::create_codecs_dict;
 use super::math::create_math_dict;
 
-mod primitive_types;
 mod collection_types;
-
+mod primitive_types;
 
 /// `object.__reduce__`'s default body — a named `fn` (not an inline closure)
 /// specifically so `__reduce_ex__` can recognize "this class didn't
@@ -861,9 +860,9 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "__reduce_ex__".to_string(),
             func: |args| {
-                let self_obj = args.first().ok_or_else(|| {
-                    PyError::type_error("__reduce_ex__() missing self argument")
-                })?;
+                let self_obj = args
+                    .first()
+                    .ok_or_else(|| PyError::type_error("__reduce_ex__() missing self argument"))?;
                 let reduce = self_obj.borrow().get_attribute("__reduce__")?;
                 // Only the DEFAULT `object.__reduce__` stub above is a
                 // `BuiltinFunction` wrapping this exact named fn — any real
