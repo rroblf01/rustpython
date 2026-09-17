@@ -516,26 +516,20 @@ pub fn create_heapq_dict() -> HashMap<String, PyObjectRef> {
         // on ties, e.g. heappushpop([10], 10.0) -> ([10], 10.0)).
         let top: Option<PyObjectRef> = heap_get_live(&args[0], 0);
         match top {
-            Some(t) => {
-                match py_lt(&t, &item) {
-                    Ok(true) => {
-                        let old = if let PyObject::List(list) =
-                            &mut *args[0].borrow_mut()
-                        {
-                            let old = list[0].clone();
-                            list[0] = item;
-                            old
-                        } else {
-                            return Err(PyError::type_error(
-                                "heappushpop() argument must be a list",
-                            ));
-                        };
-                        _siftup_live(&args[0], 0);
-                        Ok(old)
-                    }
-                    _ => Ok(item),
+            Some(t) => match py_lt(&t, &item) {
+                Ok(true) => {
+                    let old = if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                        let old = list[0].clone();
+                        list[0] = item;
+                        old
+                    } else {
+                        return Err(PyError::type_error("heappushpop() argument must be a list"));
+                    };
+                    _siftup_live(&args[0], 0);
+                    Ok(old)
                 }
-            }
+                _ => Ok(item),
+            },
             None => Ok(item),
         }
     });

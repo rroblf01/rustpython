@@ -22,26 +22,25 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
     // not wired into the object model at all).
     gc_func!("collect", |args| {
         // Optional generation argument (default: collect all, reported as 2).
-        let generation = args
-            .first()
-            .and_then(|a| a.as_i64())
-            .unwrap_or(2);
+        let generation = args.first().and_then(|a| a.as_i64()).unwrap_or(2);
         // Snapshot callbacks (a callback may mutate the list).
-        let callbacks: Vec<PyObjectRef> =
-            crate::modules::get_module("gc").and_then(|m| {
+        let callbacks: Vec<PyObjectRef> = crate::modules::get_module("gc")
+            .and_then(|m| {
                 let b = m.borrow();
                 if let PyObject::Module { dict, .. } = &*b {
                     dict.get_str("callbacks").cloned()
                 } else {
                     None
                 }
-            }).and_then(|c| {
+            })
+            .and_then(|c| {
                 if let PyObject::List(items) = &*c.borrow() {
                     Some(items.clone())
                 } else {
                     None
                 }
-            }).unwrap_or_default();
+            })
+            .unwrap_or_default();
         let fire = |phase: &str, collected: i64, uncollectable: i64| -> PyResult<()> {
             if callbacks.is_empty() {
                 return Ok(());
@@ -52,10 +51,7 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
             let _ = info.set(py_str("uncollectable"), py_int(uncollectable));
             let info = PyObjectRef::new(PyObject::Dict(Box::new(info)));
             for cb in &callbacks {
-                crate::object::builtin_call(
-                    cb,
-                    &[py_str(phase), info.clone()],
-                )?;
+                crate::object::builtin_call(cb, &[py_str(phase), info.clone()])?;
             }
             Ok(())
         };
@@ -92,7 +88,9 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
 
     gc_func!("is_tracked", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("is_tracked() missing required argument 'obj'"));
+            return Err(PyError::type_error(
+                "is_tracked() missing required argument 'obj'",
+            ));
         }
         let obj = &args[0];
         // Inline scalars are never tracked.

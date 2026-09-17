@@ -360,7 +360,11 @@ pub fn make_match_object_detailed(
                         let names = self_obj
                             .borrow()
                             .get_attribute("_group_names")
-                            .unwrap_or_else(|_| PyObjectRef::new(PyObject::Dict(Box::new(crate::object::PyDict::new()))));
+                            .unwrap_or_else(|_| {
+                                PyObjectRef::new(PyObject::Dict(Box::new(
+                                    crate::object::PyDict::new(),
+                                )))
+                            });
                         let mut result = String::new();
                         let chars: Vec<char> = translated.chars().collect();
                         let mut i = 0;
@@ -380,9 +384,17 @@ pub fn make_match_object_detailed(
                                 } else {
                                     let names_b = names.borrow();
                                     if let PyObject::Dict(d) = &*names_b {
-                                        if let Some(v) = d.get(&py_str(&key)).ok().flatten().and_then(|v| v.as_i64()) {
+                                        if let Some(v) = d
+                                            .get(&py_str(&key))
+                                            .ok()
+                                            .flatten()
+                                            .and_then(|v| v.as_i64())
+                                        {
                                             if let PyObject::Tuple(items) = &*group_texts.borrow() {
-                                                items.get(v as usize).cloned().unwrap_or_else(py_none)
+                                                items
+                                                    .get(v as usize)
+                                                    .cloned()
+                                                    .unwrap_or_else(py_none)
                                             } else {
                                                 py_none()
                                             }
@@ -397,7 +409,8 @@ pub fn make_match_object_detailed(
                                     result.push_str(&val.str());
                                 }
                                 i = if j < chars.len() { j + 1 } else { j };
-                            } else if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '$' {
+                            } else if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '$'
+                            {
                                 result.push('$');
                                 i += 2;
                             } else {
@@ -416,10 +429,25 @@ pub fn make_match_object_detailed(
                     name: "__repr__".to_string(),
                     func: |args| {
                         let self_obj = &args[0];
-                        let text = self_obj.borrow().get_attribute("_text").unwrap_or_else(|_| py_str("")).str();
-                        let s = self_obj.borrow().get_attribute("_start").unwrap_or_else(|_| py_int(0)).str();
-                        let e = self_obj.borrow().get_attribute("_end").unwrap_or_else(|_| py_int(0)).str();
-                        Ok(py_str(&format!("<re.Match object; span=({}, {}), match={}>", s, e, text)))
+                        let text = self_obj
+                            .borrow()
+                            .get_attribute("_text")
+                            .unwrap_or_else(|_| py_str(""))
+                            .str();
+                        let s = self_obj
+                            .borrow()
+                            .get_attribute("_start")
+                            .unwrap_or_else(|_| py_int(0))
+                            .str();
+                        let e = self_obj
+                            .borrow()
+                            .get_attribute("_end")
+                            .unwrap_or_else(|_| py_int(0))
+                            .str();
+                        Ok(py_str(&format!(
+                            "<re.Match object; span=({}, {}), match={}>",
+                            s, e, text
+                        )))
                     },
                 }),
             );
@@ -445,10 +473,22 @@ pub fn make_match_object_detailed(
                     break;
                 }
             }
-            let regs_items: Vec<PyObjectRef> = starts.iter().zip(ends.iter()).map(|(s, e)| py_tuple(vec![s.clone(), e.clone()])).collect();
+            let regs_items: Vec<PyObjectRef> = starts
+                .iter()
+                .zip(ends.iter())
+                .map(|(s, e)| py_tuple(vec![s.clone(), e.clone()]))
+                .collect();
             let effective_pos = pos;
-            let effective_endpos = if endpos == 0 { original_string.len() } else { endpos };
-            let effective_string = if original_string.is_empty() { text.clone() } else { original_string.to_string() };
+            let effective_endpos = if endpos == 0 {
+                original_string.len()
+            } else {
+                endpos
+            };
+            let effective_string = if original_string.is_empty() {
+                text.clone()
+            } else {
+                original_string.to_string()
+            };
             let re_obj = PyObjectRef::new(PyObject::CompiledRegex {
                 regex: Box::new(re.clone()),
                 pattern: pattern.to_string(),
@@ -476,7 +516,10 @@ pub fn make_match_object_detailed(
             instance_dict.insert_str("endpos", py_int(effective_endpos as i64));
             instance_dict.insert_str("regs", py_tuple(regs_items));
             instance_dict.insert_str("lastindex", lastindex.map(py_int).unwrap_or_else(py_none));
-            instance_dict.insert_str("lastgroup", lastgroup.map(|s| py_str(&s)).unwrap_or_else(py_none));
+            instance_dict.insert_str(
+                "lastgroup",
+                lastgroup.map(|s| py_str(&s)).unwrap_or_else(py_none),
+            );
             instance_dict.insert_str("_re", re_obj.clone());
 
             PyObjectRef::new(PyObject::Instance {
@@ -487,4 +530,3 @@ pub fn make_match_object_detailed(
         None => py_none(),
     }
 }
-

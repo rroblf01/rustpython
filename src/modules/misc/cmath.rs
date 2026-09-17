@@ -74,31 +74,70 @@ fn c_ln(re: f64, im: f64) -> (f64, f64) {
     // Scale to avoid spurious overflow: hypot(1.6e308, 1.5e308) is inf,
     // but log|z| ~ 710 is finite (test_cmath log0103). Conversely scale
     // UP for subnormals to keep full precision (log0121).
-    let r = if re.abs() < f64::MIN_POSITIVE
-        && im.abs() < f64::MIN_POSITIVE
-        && (re != 0.0 || im != 0.0)
-    {
-        const UP: f64 = 4503599627370496.0; // 2^52
-        (re * UP).hypot(im * UP).ln() - 52.0 * std::f64::consts::LN_2
-    } else {
-        let h = re.hypot(im);
-        if h.is_infinite() && re.is_finite() && im.is_finite() {
-            (re / 2.0).hypot(im / 2.0).ln() + std::f64::consts::LN_2
+    let r =
+        if re.abs() < f64::MIN_POSITIVE && im.abs() < f64::MIN_POSITIVE && (re != 0.0 || im != 0.0)
+        {
+            const UP: f64 = 4503599627370496.0; // 2^52
+            (re * UP).hypot(im * UP).ln() - 52.0 * std::f64::consts::LN_2
         } else {
-            h.ln()
-        }
-    };
+            let h = re.hypot(im);
+            if h.is_infinite() && re.is_finite() && im.is_finite() {
+                (re / 2.0).hypot(im / 2.0).ln() + std::f64::consts::LN_2
+            } else {
+                h.ln()
+            }
+        };
     (r, c_phase(re, im))
 }
 
 const EXP_TABLE: SpecialTable = [
-    [(0.0, 0.0), U, (0.0, -0.0), (0.0, 0.0), U, (0.0, 0.0), (0.0, 0.0)],
+    [
+        (0.0, 0.0),
+        U,
+        (0.0, -0.0),
+        (0.0, 0.0),
+        U,
+        (0.0, 0.0),
+        (0.0, 0.0),
+    ],
     [(NAN, NAN), U, U, U, U, (NAN, NAN), (NAN, NAN)],
-    [(NAN, NAN), U, (1.0, -0.0), (1.0, 0.0), U, (NAN, NAN), (NAN, NAN)],
-    [(NAN, NAN), U, (1.0, -0.0), (1.0, 0.0), U, (NAN, NAN), (NAN, NAN)],
+    [
+        (NAN, NAN),
+        U,
+        (1.0, -0.0),
+        (1.0, 0.0),
+        U,
+        (NAN, NAN),
+        (NAN, NAN),
+    ],
+    [
+        (NAN, NAN),
+        U,
+        (1.0, -0.0),
+        (1.0, 0.0),
+        U,
+        (NAN, NAN),
+        (NAN, NAN),
+    ],
     [(NAN, NAN), U, U, U, U, (NAN, NAN), (NAN, NAN)],
-    [(INF, NAN), U, (INF, -0.0), (INF, 0.0), U, (INF, NAN), (INF, NAN)],
-    [(NAN, NAN), (NAN, NAN), (NAN, -0.0), (NAN, 0.0), (NAN, NAN), (NAN, NAN), (NAN, NAN)],
+    [
+        (INF, NAN),
+        U,
+        (INF, -0.0),
+        (INF, 0.0),
+        U,
+        (INF, NAN),
+        (INF, NAN),
+    ],
+    [
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, -0.0),
+        (NAN, 0.0),
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, NAN),
+    ],
 ];
 
 fn c_exp(re: f64, im: f64) -> PyResult<(f64, f64)> {
@@ -150,17 +189,11 @@ fn c_div(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
     if b.0.abs() >= b.1.abs() {
         let ratio = b.1 / b.0;
         let denom = b.0 + b.1 * ratio;
-        (
-            (a.0 + a.1 * ratio) / denom,
-            (a.1 - a.0 * ratio) / denom,
-        )
+        ((a.0 + a.1 * ratio) / denom, (a.1 - a.0 * ratio) / denom)
     } else {
         let ratio = b.0 / b.1;
         let denom = b.0 * ratio + b.1;
-        (
-            (a.0 * ratio + a.1) / denom,
-            (a.1 * ratio - a.0) / denom,
-        )
+        ((a.0 * ratio + a.1) / denom, (a.1 * ratio - a.0) / denom)
     }
 }
 
@@ -173,13 +206,53 @@ fn c_sub(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
 }
 
 const TANH_TABLE: SpecialTable = [
-    [(-1.0, 0.0), U, (-1.0, -0.0), (-1.0, 0.0), U, (-1.0, 0.0), (-1.0, 0.0)],
+    [
+        (-1.0, 0.0),
+        U,
+        (-1.0, -0.0),
+        (-1.0, 0.0),
+        U,
+        (-1.0, 0.0),
+        (-1.0, 0.0),
+    ],
     [(NAN, NAN), U, U, U, U, (NAN, NAN), (NAN, NAN)],
-    [(-0.0, NAN), U, (-0.0, -0.0), (-0.0, 0.0), U, (-0.0, NAN), (-0.0, NAN)],
-    [(0.0, NAN), U, (0.0, -0.0), (0.0, 0.0), U, (0.0, NAN), (0.0, NAN)],
+    [
+        (-0.0, NAN),
+        U,
+        (-0.0, -0.0),
+        (-0.0, 0.0),
+        U,
+        (-0.0, NAN),
+        (-0.0, NAN),
+    ],
+    [
+        (0.0, NAN),
+        U,
+        (0.0, -0.0),
+        (0.0, 0.0),
+        U,
+        (0.0, NAN),
+        (0.0, NAN),
+    ],
     [(NAN, NAN), U, U, U, U, (NAN, NAN), (NAN, NAN)],
-    [(1.0, 0.0), U, (1.0, -0.0), (1.0, 0.0), U, (1.0, 0.0), (1.0, 0.0)],
-    [(NAN, NAN), (NAN, NAN), (NAN, -0.0), (NAN, 0.0), (NAN, NAN), (NAN, NAN), (NAN, NAN)],
+    [
+        (1.0, 0.0),
+        U,
+        (1.0, -0.0),
+        (1.0, 0.0),
+        U,
+        (1.0, 0.0),
+        (1.0, 0.0),
+    ],
+    [
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, -0.0),
+        (NAN, 0.0),
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, NAN),
+    ],
 ];
 
 fn c_tanh(re: f64, im: f64) -> PyResult<(f64, f64)> {
@@ -273,43 +346,203 @@ fn special_lookup(table: &SpecialTable, re: f64, im: f64) -> Option<(f64, f64)> 
 }
 
 const ACOS_TABLE: SpecialTable = [
-    [(P34, INF), (P, INF), (P, INF), (P, -INF), (P, -INF), (P34, -INF), (NAN, INF)],
+    [
+        (P34, INF),
+        (P, INF),
+        (P, INF),
+        (P, -INF),
+        (P, -INF),
+        (P34, -INF),
+        (NAN, INF),
+    ],
     [(P12, INF), U, U, U, U, (P12, -INF), (NAN, NAN)],
-    [(P12, INF), U, (P12, 0.0), (P12, -0.0), U, (P12, -INF), (P12, NAN)],
-    [(P12, INF), U, (P12, 0.0), (P12, -0.0), U, (P12, -INF), (P12, NAN)],
+    [
+        (P12, INF),
+        U,
+        (P12, 0.0),
+        (P12, -0.0),
+        U,
+        (P12, -INF),
+        (P12, NAN),
+    ],
+    [
+        (P12, INF),
+        U,
+        (P12, 0.0),
+        (P12, -0.0),
+        U,
+        (P12, -INF),
+        (P12, NAN),
+    ],
     [(P12, INF), U, U, U, U, (P12, -INF), (NAN, NAN)],
-    [(P14, INF), (0.0, INF), (0.0, INF), (0.0, -INF), (0.0, -INF), (P14, -INF), (NAN, INF)],
-    [(NAN, INF), (NAN, NAN), (NAN, NAN), (NAN, NAN), (NAN, NAN), (NAN, -INF), (NAN, NAN)],
+    [
+        (P14, INF),
+        (0.0, INF),
+        (0.0, INF),
+        (0.0, -INF),
+        (0.0, -INF),
+        (P14, -INF),
+        (NAN, INF),
+    ],
+    [
+        (NAN, INF),
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, -INF),
+        (NAN, NAN),
+    ],
 ];
 
 const ASINH_TABLE: SpecialTable = [
-    [(-INF, -P14), (-INF, -0.0), (-INF, -0.0), (-INF, 0.0), (-INF, 0.0), (-INF, P14), (-INF, NAN)],
+    [
+        (-INF, -P14),
+        (-INF, -0.0),
+        (-INF, -0.0),
+        (-INF, 0.0),
+        (-INF, 0.0),
+        (-INF, P14),
+        (-INF, NAN),
+    ],
     [(-INF, -P12), U, U, U, U, (-INF, P12), (NAN, NAN)],
-    [(-INF, -P12), U, (-0.0, -0.0), (-0.0, 0.0), U, (-INF, P12), (NAN, NAN)],
-    [(INF, -P12), U, (0.0, -0.0), (0.0, 0.0), U, (INF, P12), (NAN, NAN)],
+    [
+        (-INF, -P12),
+        U,
+        (-0.0, -0.0),
+        (-0.0, 0.0),
+        U,
+        (-INF, P12),
+        (NAN, NAN),
+    ],
+    [
+        (INF, -P12),
+        U,
+        (0.0, -0.0),
+        (0.0, 0.0),
+        U,
+        (INF, P12),
+        (NAN, NAN),
+    ],
     [(INF, -P12), U, U, U, U, (INF, P12), (NAN, NAN)],
-    [(INF, -P14), (INF, -0.0), (INF, -0.0), (INF, 0.0), (INF, 0.0), (INF, P14), (INF, NAN)],
-    [(INF, NAN), (NAN, NAN), (NAN, -0.0), (NAN, 0.0), (NAN, NAN), (INF, NAN), (NAN, NAN)],
+    [
+        (INF, -P14),
+        (INF, -0.0),
+        (INF, -0.0),
+        (INF, 0.0),
+        (INF, 0.0),
+        (INF, P14),
+        (INF, NAN),
+    ],
+    [
+        (INF, NAN),
+        (NAN, NAN),
+        (NAN, -0.0),
+        (NAN, 0.0),
+        (NAN, NAN),
+        (INF, NAN),
+        (NAN, NAN),
+    ],
 ];
 
 const ATANH_TABLE: SpecialTable = [
-    [(-0.0, -P12), (-0.0, -P12), (-0.0, -P12), (-0.0, P12), (-0.0, P12), (-0.0, P12), (-0.0, NAN)],
+    [
+        (-0.0, -P12),
+        (-0.0, -P12),
+        (-0.0, -P12),
+        (-0.0, P12),
+        (-0.0, P12),
+        (-0.0, P12),
+        (-0.0, NAN),
+    ],
     [(-0.0, -P12), U, U, U, U, (-0.0, P12), (NAN, NAN)],
-    [(-0.0, -P12), U, (-0.0, -0.0), (-0.0, 0.0), U, (-0.0, P12), (-0.0, NAN)],
-    [(0.0, -P12), U, (0.0, -0.0), (0.0, 0.0), U, (0.0, P12), (0.0, NAN)],
+    [
+        (-0.0, -P12),
+        U,
+        (-0.0, -0.0),
+        (-0.0, 0.0),
+        U,
+        (-0.0, P12),
+        (-0.0, NAN),
+    ],
+    [
+        (0.0, -P12),
+        U,
+        (0.0, -0.0),
+        (0.0, 0.0),
+        U,
+        (0.0, P12),
+        (0.0, NAN),
+    ],
     [(0.0, -P12), U, U, U, U, (0.0, P12), (NAN, NAN)],
-    [(0.0, -P12), (0.0, -P12), (0.0, -P12), (0.0, P12), (0.0, P12), (0.0, P12), (0.0, NAN)],
-    [(0.0, -P12), (NAN, NAN), (NAN, NAN), (NAN, NAN), (NAN, NAN), (0.0, P12), (NAN, NAN)],
+    [
+        (0.0, -P12),
+        (0.0, -P12),
+        (0.0, -P12),
+        (0.0, P12),
+        (0.0, P12),
+        (0.0, P12),
+        (0.0, NAN),
+    ],
+    [
+        (0.0, -P12),
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, NAN),
+        (0.0, P12),
+        (NAN, NAN),
+    ],
 ];
 
 const SQRT_TABLE: SpecialTable = [
-    [(INF, -INF), (0.0, -INF), (0.0, -INF), (0.0, INF), (0.0, INF), (INF, INF), (NAN, INF)],
+    [
+        (INF, -INF),
+        (0.0, -INF),
+        (0.0, -INF),
+        (0.0, INF),
+        (0.0, INF),
+        (INF, INF),
+        (NAN, INF),
+    ],
     [(INF, -INF), U, U, U, U, (INF, INF), (NAN, NAN)],
-    [(INF, -INF), U, (0.0, -0.0), (0.0, 0.0), U, (INF, INF), (NAN, NAN)],
-    [(INF, -INF), U, (0.0, -0.0), (0.0, 0.0), U, (INF, INF), (NAN, NAN)],
+    [
+        (INF, -INF),
+        U,
+        (0.0, -0.0),
+        (0.0, 0.0),
+        U,
+        (INF, INF),
+        (NAN, NAN),
+    ],
+    [
+        (INF, -INF),
+        U,
+        (0.0, -0.0),
+        (0.0, 0.0),
+        U,
+        (INF, INF),
+        (NAN, NAN),
+    ],
     [(INF, -INF), U, U, U, U, (INF, INF), (NAN, NAN)],
-    [(INF, -INF), (INF, -0.0), (INF, -0.0), (INF, 0.0), (INF, 0.0), (INF, INF), (INF, NAN)],
-    [(INF, -INF), (NAN, NAN), (NAN, NAN), (NAN, NAN), (NAN, NAN), (INF, INF), (NAN, NAN)],
+    [
+        (INF, -INF),
+        (INF, -0.0),
+        (INF, -0.0),
+        (INF, 0.0),
+        (INF, 0.0),
+        (INF, INF),
+        (INF, NAN),
+    ],
+    [
+        (INF, -INF),
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, NAN),
+        (INF, INF),
+        (NAN, NAN),
+    ],
 ];
 
 const CM_LARGE_DOUBLE: f64 = f64::MAX / 4.0;
@@ -347,23 +580,103 @@ fn c_sqrt(re: f64, im: f64) -> (f64, f64) {
 }
 
 const SINH_TABLE: SpecialTable = [
-    [(INF, NAN), U, (-INF, -0.0), (-INF, 0.0), U, (INF, NAN), (INF, NAN)],
+    [
+        (INF, NAN),
+        U,
+        (-INF, -0.0),
+        (-INF, 0.0),
+        U,
+        (INF, NAN),
+        (INF, NAN),
+    ],
     [(NAN, NAN), U, U, U, U, (NAN, NAN), (NAN, NAN)],
-    [(0.0, NAN), U, (-0.0, -0.0), (-0.0, 0.0), U, (0.0, NAN), (0.0, NAN)],
-    [(0.0, NAN), U, (0.0, -0.0), (0.0, 0.0), U, (0.0, NAN), (0.0, NAN)],
+    [
+        (0.0, NAN),
+        U,
+        (-0.0, -0.0),
+        (-0.0, 0.0),
+        U,
+        (0.0, NAN),
+        (0.0, NAN),
+    ],
+    [
+        (0.0, NAN),
+        U,
+        (0.0, -0.0),
+        (0.0, 0.0),
+        U,
+        (0.0, NAN),
+        (0.0, NAN),
+    ],
     [(NAN, NAN), U, U, U, U, (NAN, NAN), (NAN, NAN)],
-    [(INF, NAN), U, (INF, -0.0), (INF, 0.0), U, (INF, NAN), (INF, NAN)],
-    [(NAN, NAN), (NAN, NAN), (NAN, -0.0), (NAN, 0.0), (NAN, NAN), (NAN, NAN), (NAN, NAN)],
+    [
+        (INF, NAN),
+        U,
+        (INF, -0.0),
+        (INF, 0.0),
+        U,
+        (INF, NAN),
+        (INF, NAN),
+    ],
+    [
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, -0.0),
+        (NAN, 0.0),
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, NAN),
+    ],
 ];
 
 const COSH_TABLE: SpecialTable = [
-    [(INF, NAN), U, (INF, 0.0), (INF, -0.0), U, (INF, NAN), (INF, NAN)],
+    [
+        (INF, NAN),
+        U,
+        (INF, 0.0),
+        (INF, -0.0),
+        U,
+        (INF, NAN),
+        (INF, NAN),
+    ],
     [(NAN, NAN), U, U, U, U, (NAN, NAN), (NAN, NAN)],
-    [(NAN, 0.0), U, (1.0, 0.0), (1.0, -0.0), U, (NAN, 0.0), (NAN, 0.0)],
-    [(NAN, 0.0), U, (1.0, -0.0), (1.0, 0.0), U, (NAN, 0.0), (NAN, 0.0)],
+    [
+        (NAN, 0.0),
+        U,
+        (1.0, 0.0),
+        (1.0, -0.0),
+        U,
+        (NAN, 0.0),
+        (NAN, 0.0),
+    ],
+    [
+        (NAN, 0.0),
+        U,
+        (1.0, -0.0),
+        (1.0, 0.0),
+        U,
+        (NAN, 0.0),
+        (NAN, 0.0),
+    ],
     [(NAN, NAN), U, U, U, U, (NAN, NAN), (NAN, NAN)],
-    [(INF, NAN), U, (INF, -0.0), (INF, 0.0), U, (INF, NAN), (INF, NAN)],
-    [(NAN, NAN), (NAN, NAN), (NAN, 0.0), (NAN, 0.0), (NAN, NAN), (NAN, NAN), (NAN, NAN)],
+    [
+        (INF, NAN),
+        U,
+        (INF, -0.0),
+        (INF, 0.0),
+        U,
+        (INF, NAN),
+        (INF, NAN),
+    ],
+    [
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, 0.0),
+        (NAN, 0.0),
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, NAN),
+    ],
 ];
 
 fn c_sinh(re: f64, im: f64) -> PyResult<(f64, f64)> {
@@ -450,13 +763,53 @@ fn c_asinh(re: f64, im: f64) -> (f64, f64) {
 }
 
 const ACOSH_TABLE: SpecialTable = [
-    [(INF, -P34), (INF, -P), (INF, -P), (INF, P), (INF, P), (INF, P34), (INF, NAN)],
+    [
+        (INF, -P34),
+        (INF, -P),
+        (INF, -P),
+        (INF, P),
+        (INF, P),
+        (INF, P34),
+        (INF, NAN),
+    ],
     [(INF, -P12), U, U, U, U, (INF, P12), (NAN, NAN)],
-    [(INF, -P12), U, (0.0, -P12), (0.0, P12), U, (INF, P12), (NAN, P12)],
-    [(INF, -P12), U, (0.0, -P12), (0.0, P12), U, (INF, P12), (NAN, P12)],
+    [
+        (INF, -P12),
+        U,
+        (0.0, -P12),
+        (0.0, P12),
+        U,
+        (INF, P12),
+        (NAN, P12),
+    ],
+    [
+        (INF, -P12),
+        U,
+        (0.0, -P12),
+        (0.0, P12),
+        U,
+        (INF, P12),
+        (NAN, P12),
+    ],
     [(INF, -P12), U, U, U, U, (INF, P12), (NAN, NAN)],
-    [(INF, -P14), (INF, -0.0), (INF, -0.0), (INF, 0.0), (INF, 0.0), (INF, P14), (INF, NAN)],
-    [(INF, NAN), (NAN, NAN), (NAN, NAN), (NAN, NAN), (NAN, NAN), (INF, NAN), (NAN, NAN)],
+    [
+        (INF, -P14),
+        (INF, -0.0),
+        (INF, -0.0),
+        (INF, 0.0),
+        (INF, 0.0),
+        (INF, P14),
+        (INF, NAN),
+    ],
+    [
+        (INF, NAN),
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, NAN),
+        (NAN, NAN),
+        (INF, NAN),
+        (NAN, NAN),
+    ],
 ];
 
 fn c_acosh(re: f64, im: f64) -> (f64, f64) {
@@ -554,15 +907,9 @@ pub fn create_cmath_dict() -> HashMap<String, PyObjectRef> {
     d.insert("pi".to_string(), py_float(std::f64::consts::PI));
     d.insert("e".to_string(), py_float(std::f64::consts::E));
     d.insert("tau".to_string(), py_float(std::f64::consts::TAU));
-    d.insert(
-        "inf".to_string(),
-        py_float(f64::INFINITY),
-    );
+    d.insert("inf".to_string(), py_float(f64::INFINITY));
     d.insert("nan".to_string(), py_float(f64::NAN));
-    d.insert(
-        "infj".to_string(),
-        py_complex_or_float(0.0, f64::INFINITY),
-    );
+    d.insert("infj".to_string(), py_complex_or_float(0.0, f64::INFINITY));
     d.insert("nanj".to_string(), py_complex_or_float(0.0, f64::NAN));
 
     cm_func!("sqrt", |args| {
@@ -704,13 +1051,53 @@ pub fn create_cmath_dict() -> HashMap<String, PyObjectRef> {
                 return Err(PyError::value_error("math domain error"));
             }
             const RECT_TABLE: SpecialTable = [
-                [(INF, NAN), U, (-INF, 0.0), (-INF, -0.0), U, (INF, NAN), (INF, NAN)],
+                [
+                    (INF, NAN),
+                    U,
+                    (-INF, 0.0),
+                    (-INF, -0.0),
+                    U,
+                    (INF, NAN),
+                    (INF, NAN),
+                ],
                 [(NAN, NAN), U, U, U, U, (NAN, NAN), (NAN, NAN)],
-                [(0.0, 0.0), U, (-0.0, 0.0), (-0.0, -0.0), U, (0.0, 0.0), (0.0, 0.0)],
-                [(0.0, 0.0), U, (0.0, -0.0), (0.0, 0.0), U, (0.0, 0.0), (0.0, 0.0)],
+                [
+                    (0.0, 0.0),
+                    U,
+                    (-0.0, 0.0),
+                    (-0.0, -0.0),
+                    U,
+                    (0.0, 0.0),
+                    (0.0, 0.0),
+                ],
+                [
+                    (0.0, 0.0),
+                    U,
+                    (0.0, -0.0),
+                    (0.0, 0.0),
+                    U,
+                    (0.0, 0.0),
+                    (0.0, 0.0),
+                ],
                 [(NAN, NAN), U, U, U, U, (NAN, NAN), (NAN, NAN)],
-                [(INF, NAN), U, (INF, -0.0), (INF, 0.0), U, (INF, NAN), (INF, NAN)],
-                [(NAN, NAN), (NAN, NAN), (NAN, 0.0), (NAN, 0.0), (NAN, NAN), (NAN, NAN), (NAN, NAN)],
+                [
+                    (INF, NAN),
+                    U,
+                    (INF, -0.0),
+                    (INF, 0.0),
+                    U,
+                    (INF, NAN),
+                    (INF, NAN),
+                ],
+                [
+                    (NAN, NAN),
+                    (NAN, NAN),
+                    (NAN, 0.0),
+                    (NAN, 0.0),
+                    (NAN, NAN),
+                    (NAN, NAN),
+                    (NAN, NAN),
+                ],
             ];
             if let Some((rr, ii)) = special_lookup(&RECT_TABLE, r, phi) {
                 return Ok(py_complex_or_float(rr, ii));
@@ -746,23 +1133,21 @@ pub fn create_cmath_dict() -> HashMap<String, PyObjectRef> {
             if let PyObject::Dict(kwargs) = &*last.borrow() {
                 if let Ok(Some(v)) = kwargs.get(&py_str("rel_tol")) {
                     let b = v.borrow();
-                    let (r, i) = as_complex_parts(&b)
-                        .ok_or_else(|| PyError::type_error("isclose() argument must be a number"))?;
+                    let (r, i) = as_complex_parts(&b).ok_or_else(|| {
+                        PyError::type_error("isclose() argument must be a number")
+                    })?;
                     if i != 0.0 {
-                        return Err(PyError::type_error(
-                            "isclose() argument must be a number",
-                        ));
+                        return Err(PyError::type_error("isclose() argument must be a number"));
                     }
                     rel_tol = r;
                 }
                 if let Ok(Some(v)) = kwargs.get(&py_str("abs_tol")) {
                     let b = v.borrow();
-                    let (r, i) = as_complex_parts(&b)
-                        .ok_or_else(|| PyError::type_error("isclose() argument must be a number"))?;
+                    let (r, i) = as_complex_parts(&b).ok_or_else(|| {
+                        PyError::type_error("isclose() argument must be a number")
+                    })?;
                     if i != 0.0 {
-                        return Err(PyError::type_error(
-                            "isclose() argument must be a number",
-                        ));
+                        return Err(PyError::type_error("isclose() argument must be a number"));
                     }
                     abs_tol = r;
                 }
@@ -780,9 +1165,7 @@ pub fn create_cmath_dict() -> HashMap<String, PyObjectRef> {
         let diff = c_abs(are - bre, aim - bim);
         let a_abs = c_abs(are, aim);
         let b_abs = c_abs(bre, bim);
-        Ok(py_bool(
-            diff <= (rel_tol * a_abs.max(b_abs)).max(abs_tol),
-        ))
+        Ok(py_bool(diff <= (rel_tol * a_abs.max(b_abs)).max(abs_tol)))
     });
 
     d

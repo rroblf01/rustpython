@@ -125,14 +125,17 @@ pub fn create_signal_dict() -> HashMap<String, PyObjectRef> {
     // `signal.alarm(sec)` — real deadline stored thread-locally; delivery
     // happens at cooperative checkpoints (selectors' select loop, time.sleep)
     // which invoke the registered SIGALRM handler via with_vm_mut.
-    d.insert_str("alarm", PyObjectRef::new(PyObject::BuiltinFunction {
-        name: "alarm".into(),
-        func: |args| {
-            let sec = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
-            let prev = crate::modules::misc_alarm_set(sec);
-            Ok(py_int(prev as i64))
-        },
-    }));
+    d.insert_str(
+        "alarm",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "alarm".into(),
+            func: |args| {
+                let sec = args.first().and_then(|a| a.as_f64()).unwrap_or(0.0);
+                let prev = crate::modules::misc_alarm_set(sec);
+                Ok(py_int(prev as i64))
+            },
+        }),
+    );
     // `signal.raise_signal(signum)` — was a no-op even after real handler
     // STORAGE was added just above, because actually CALLING a registered
     // Python-level handler needs a live `&mut VirtualMachine` (same

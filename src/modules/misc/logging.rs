@@ -10,7 +10,6 @@ thread_local! {
     pub static LOG_LEVEL: std::cell::RefCell<String> = std::cell::RefCell::new("WARNING".to_string());
 }
 
-
 pub fn logging_debug(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 2 {
         return Ok(py_none());
@@ -98,7 +97,6 @@ pub fn logging_error(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     eprintln!("ERROR:{}:{}", logger_name, msg);
     Ok(py_none())
 }
-
 
 pub fn create_logging_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();

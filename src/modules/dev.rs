@@ -5,7 +5,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-
 mod pdb;
 pub use pdb::*;
 mod traceback;
@@ -511,7 +510,6 @@ pub fn create_imp_dict() -> HashMap<String, PyObjectRef> {
 
 /// Native _io module — CPython C extension replacement
 
-
 pub(crate) fn io_get_raw(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::attribute_error("no underlying raw object"));
@@ -535,9 +533,7 @@ pub(crate) fn io_ensure_open(args: &[PyObjectRef]) -> PyResult<()> {
             if let PyObject::Instance { dict, .. } = &*b {
                 if let Some(c) = dict.get("_closed") {
                     if c.truthy() {
-                        return Err(PyError::value_error(
-                            "I/O operation on closed file",
-                        ));
+                        return Err(PyError::value_error("I/O operation on closed file"));
                     }
                 }
             }
@@ -553,18 +549,24 @@ macro_rules! buffered_class {
     ($name:expr, $buf:expr) => {{
         let mut td: HashMap<String, PyObjectRef> = HashMap::new();
         let bf = |name: &'static str, f: crate::object::BuiltinFunc| {
-            PyObjectRef::new(PyObject::BuiltinFunction { name: name.to_string(), func: f })
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: name.to_string(),
+                func: f,
+            })
         };
-        td.insert("__init__".into(), bf("__init__", |args| {
-            if args.len() < 2 {
-                return Err(PyError::type_error("missing required argument 'raw'"));
-            }
-            if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-                dict.insert_str("_raw", args[1].clone());
-                dict.insert_str("_closed", py_bool(false));
-            }
-            Ok(py_none())
-        }));
+        td.insert(
+            "__init__".into(),
+            bf("__init__", |args| {
+                if args.len() < 2 {
+                    return Err(PyError::type_error("missing required argument 'raw'"));
+                }
+                if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                    dict.insert_str("_raw", args[1].clone());
+                    dict.insert_str("_closed", py_bool(false));
+                }
+                Ok(py_none())
+            }),
+        );
         td.insert(
             "raw".into(),
             PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
@@ -578,150 +580,238 @@ macro_rules! buffered_class {
             }))),
         );
         macro_rules! read_arm {
-            ($m:literal) => { bf($m, |args: &[PyObjectRef]| {
-                crate::modules::dev::io_ensure_open(args)?;
-                let raw = crate::modules::dev::io_get_raw(args)?;
-                let mut margs: Vec<PyObjectRef> = Vec::new();
-                if let Some(n) = args.get(1) { margs.push(n.clone()); }
-                match crate::object::with_vm_mut(|vm| {
-                    crate::object::call_method_rebound(vm, &raw, $m, margs)
-                }) {
-                    Ok(Ok(v)) => Ok(v),
-                    Ok(Err(e)) => Err(e),
-                    Err(e) => Err(e),
-                }
-            })};
+            ($m:literal) => {
+                bf($m, |args: &[PyObjectRef]| {
+                    crate::modules::dev::io_ensure_open(args)?;
+                    let raw = crate::modules::dev::io_get_raw(args)?;
+                    let mut margs: Vec<PyObjectRef> = Vec::new();
+                    if let Some(n) = args.get(1) {
+                        margs.push(n.clone());
+                    }
+                    match crate::object::with_vm_mut(|vm| {
+                        crate::object::call_method_rebound(vm, &raw, $m, margs)
+                    }) {
+                        Ok(Ok(v)) => Ok(v),
+                        Ok(Err(e)) => Err(e),
+                        Err(e) => Err(e),
+                    }
+                })
+            };
         }
         td.insert("read".into(), read_arm!("read"));
         td.insert("read1".into(), read_arm!("read1"));
         td.insert("readline".into(), read_arm!("readline"));
-        td.insert("readlines".into(), bf("readlines", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "readlines", vec![]))?
-        }));
-        td.insert("readinto".into(), bf("readinto", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            // Validate argument is a writable buffer BEFORE forwarding.
-            if args.len() > 1 {
-                match &*args[1].borrow() {
-                    PyObject::ByteArray(_) | PyObject::MemoryView { .. } => {}
-                    _ => return Err(PyError::type_error(
-                        "'int' object does not support the buffer interface",
-                    )),
-                }
-            }
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let b = args.get(1).cloned().unwrap_or_else(py_none);
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "readinto", vec![b]))?
-        }));
-        td.insert("write".into(), bf("write", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let data = args.get(1).cloned().ok_or_else(|| PyError::type_error("write missing data"))?;
-            let n = match &*data.borrow() {
-                PyObject::Bytes(b) => b.len() as i64,
-                PyObject::Str(s2) => s2.chars().count() as i64,
-                _ => 0,
-            };
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let r = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "write", vec![data]))??;
-            if matches!(&*r.borrow(), PyObject::None) {
-                Ok(py_int(n))
-            } else { Ok(r) }
-        }));
-        td.insert("seek".into(), bf("seek", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let pos = args.get(1).cloned().unwrap_or_else(|| py_int(0));
-            let wh = args.get(2).cloned().unwrap_or_else(|| py_int(0));
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "seek", vec![pos, wh]))?
-        }));
-        td.insert("tell".into(), bf("tell", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "tell", vec![]))?
-        }));
-        td.insert("truncate".into(), bf("truncate", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let pos = args.get(1).cloned().unwrap_or_else(py_none);
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "truncate", vec![pos]))?
-        }));
-        td.insert("flush".into(), bf("flush", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "flush", vec![]))?
-        }));
-        td.insert("close".into(), bf("close", |args: &[PyObjectRef]| {
-            let already = args[0].borrow().get_attribute("_closed").ok().map(|v| v.truthy()).unwrap_or(false);
-            if !already {
+        td.insert(
+            "readlines".into(),
+            bf("readlines", |args: &[PyObjectRef]| {
+                crate::modules::dev::io_ensure_open(args)?;
                 let raw = crate::modules::dev::io_get_raw(args)?;
-                let _ = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "close", vec![]));
-                if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-                    dict.insert_str("_closed", py_bool(true));
+                crate::object::with_vm_mut(|vm| {
+                    crate::object::call_method_rebound(vm, &raw, "readlines", vec![])
+                })?
+            }),
+        );
+        td.insert(
+            "readinto".into(),
+            bf("readinto", |args: &[PyObjectRef]| {
+                crate::modules::dev::io_ensure_open(args)?;
+                // Validate argument is a writable buffer BEFORE forwarding.
+                if args.len() > 1 {
+                    match &*args[1].borrow() {
+                        PyObject::ByteArray(_) | PyObject::MemoryView { .. } => {}
+                        _ => {
+                            return Err(PyError::type_error(
+                                "'int' object does not support the buffer interface",
+                            ))
+                        }
+                    }
                 }
-            }
-            Ok(py_none())
-        }));
+                let raw = crate::modules::dev::io_get_raw(args)?;
+                let b = args.get(1).cloned().unwrap_or_else(py_none);
+                crate::object::with_vm_mut(|vm| {
+                    crate::object::call_method_rebound(vm, &raw, "readinto", vec![b])
+                })?
+            }),
+        );
+        td.insert(
+            "write".into(),
+            bf("write", |args: &[PyObjectRef]| {
+                crate::modules::dev::io_ensure_open(args)?;
+                let data = args
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| PyError::type_error("write missing data"))?;
+                let n = match &*data.borrow() {
+                    PyObject::Bytes(b) => b.len() as i64,
+                    PyObject::Str(s2) => s2.chars().count() as i64,
+                    _ => 0,
+                };
+                let raw = crate::modules::dev::io_get_raw(args)?;
+                let r = crate::object::with_vm_mut(|vm| {
+                    crate::object::call_method_rebound(vm, &raw, "write", vec![data])
+                })??;
+                if matches!(&*r.borrow(), PyObject::None) {
+                    Ok(py_int(n))
+                } else {
+                    Ok(r)
+                }
+            }),
+        );
+        td.insert(
+            "seek".into(),
+            bf("seek", |args: &[PyObjectRef]| {
+                crate::modules::dev::io_ensure_open(args)?;
+                let raw = crate::modules::dev::io_get_raw(args)?;
+                let pos = args.get(1).cloned().unwrap_or_else(|| py_int(0));
+                let wh = args.get(2).cloned().unwrap_or_else(|| py_int(0));
+                crate::object::with_vm_mut(|vm| {
+                    crate::object::call_method_rebound(vm, &raw, "seek", vec![pos, wh])
+                })?
+            }),
+        );
+        td.insert(
+            "tell".into(),
+            bf("tell", |args: &[PyObjectRef]| {
+                crate::modules::dev::io_ensure_open(args)?;
+                let raw = crate::modules::dev::io_get_raw(args)?;
+                crate::object::with_vm_mut(|vm| {
+                    crate::object::call_method_rebound(vm, &raw, "tell", vec![])
+                })?
+            }),
+        );
+        td.insert(
+            "truncate".into(),
+            bf("truncate", |args: &[PyObjectRef]| {
+                crate::modules::dev::io_ensure_open(args)?;
+                let raw = crate::modules::dev::io_get_raw(args)?;
+                let pos = args.get(1).cloned().unwrap_or_else(py_none);
+                crate::object::with_vm_mut(|vm| {
+                    crate::object::call_method_rebound(vm, &raw, "truncate", vec![pos])
+                })?
+            }),
+        );
+        td.insert(
+            "flush".into(),
+            bf("flush", |args: &[PyObjectRef]| {
+                crate::modules::dev::io_ensure_open(args)?;
+                let raw = crate::modules::dev::io_get_raw(args)?;
+                crate::object::with_vm_mut(|vm| {
+                    crate::object::call_method_rebound(vm, &raw, "flush", vec![])
+                })?
+            }),
+        );
+        td.insert(
+            "close".into(),
+            bf("close", |args: &[PyObjectRef]| {
+                let already = args[0]
+                    .borrow()
+                    .get_attribute("_closed")
+                    .ok()
+                    .map(|v| v.truthy())
+                    .unwrap_or(false);
+                if !already {
+                    let raw = crate::modules::dev::io_get_raw(args)?;
+                    let _ = crate::object::with_vm_mut(|vm| {
+                        crate::object::call_method_rebound(vm, &raw, "close", vec![])
+                    });
+                    if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                        dict.insert_str("_closed", py_bool(true));
+                    }
+                }
+                Ok(py_none())
+            }),
+        );
         td.insert("readable".into(), bf("readable", |_a| Ok(py_bool(true))));
         td.insert("writable".into(), bf("writable", |_a| Ok(py_bool(true))));
         td.insert("seekable".into(), bf("seekable", |_a| Ok(py_bool(true))));
-        td.insert("__enter__".into(), bf("__enter__", |args: &[PyObjectRef]| Ok(args[0].clone())));
+        td.insert(
+            "__enter__".into(),
+            bf("__enter__", |args: &[PyObjectRef]| Ok(args[0].clone())),
+        );
         td.insert("__exit__".into(), bf("__exit__", |_a| Ok(py_bool(false))));
         // peek — delegate to raw
-        td.insert("peek".into(), bf("peek", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let n = args.get(1).cloned().unwrap_or_else(|| py_int(0));
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "peek", vec![n]))?
-        }));
+        td.insert(
+            "peek".into(),
+            bf("peek", |args: &[PyObjectRef]| {
+                crate::modules::dev::io_ensure_open(args)?;
+                let raw = crate::modules::dev::io_get_raw(args)?;
+                let n = args.get(1).cloned().unwrap_or_else(|| py_int(0));
+                crate::object::with_vm_mut(|vm| {
+                    crate::object::call_method_rebound(vm, &raw, "peek", vec![n])
+                })?
+            }),
+        );
         // readinto1 — delegate to raw
-        td.insert("readinto1".into(), bf("readinto1", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            if args.len() > 1 {
-                match &*args[1].borrow() {
-                    PyObject::ByteArray(_) | PyObject::MemoryView { .. } => {}
-                    _ => return Err(PyError::type_error(
-                        "'int' object does not support the buffer interface",
-                    )),
-                }
-            }
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let b = args.get(1).cloned().unwrap_or_else(py_none);
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "readinto1", vec![b]))?
-        }));
-        // fileno — delegate to raw
-        td.insert("fileno".into(), bf("fileno", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "fileno", vec![]))?
-        }));
-        // isatty — delegate to raw
-        td.insert("isatty".into(), bf("isatty", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "isatty", vec![]))?
-        }));
-        // writelines — iterate and write each
-        td.insert("writelines".into(), bf("writelines", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            if args.len() < 2 {
-                return Err(PyError::type_error("writelines() takes exactly one argument"));
-            }
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let lines = &args[1];
-            let iter = crate::object::builtin_iter(&[lines.clone()])?;
-            loop {
-                match crate::object::builtin_next(&[iter.clone()]) {
-                    Ok(line) => {
-                        let _ = crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "write", vec![line]))?;
+        td.insert(
+            "readinto1".into(),
+            bf("readinto1", |args: &[PyObjectRef]| {
+                crate::modules::dev::io_ensure_open(args)?;
+                if args.len() > 1 {
+                    match &*args[1].borrow() {
+                        PyObject::ByteArray(_) | PyObject::MemoryView { .. } => {}
+                        _ => {
+                            return Err(PyError::type_error(
+                                "'int' object does not support the buffer interface",
+                            ))
+                        }
                     }
-                    Err(e) if crate::object::is_stop_iteration_error(&e) => break,
-                    Err(e) => return Err(e),
                 }
-            }
-            Ok(py_none())
-        }));
+                let raw = crate::modules::dev::io_get_raw(args)?;
+                let b = args.get(1).cloned().unwrap_or_else(py_none);
+                crate::object::with_vm_mut(|vm| {
+                    crate::object::call_method_rebound(vm, &raw, "readinto1", vec![b])
+                })?
+            }),
+        );
+        // fileno — delegate to raw
+        td.insert(
+            "fileno".into(),
+            bf("fileno", |args: &[PyObjectRef]| {
+                crate::modules::dev::io_ensure_open(args)?;
+                let raw = crate::modules::dev::io_get_raw(args)?;
+                crate::object::with_vm_mut(|vm| {
+                    crate::object::call_method_rebound(vm, &raw, "fileno", vec![])
+                })?
+            }),
+        );
+        // isatty — delegate to raw
+        td.insert(
+            "isatty".into(),
+            bf("isatty", |args: &[PyObjectRef]| {
+                crate::modules::dev::io_ensure_open(args)?;
+                let raw = crate::modules::dev::io_get_raw(args)?;
+                crate::object::with_vm_mut(|vm| {
+                    crate::object::call_method_rebound(vm, &raw, "isatty", vec![])
+                })?
+            }),
+        );
+        // writelines — iterate and write each
+        td.insert(
+            "writelines".into(),
+            bf("writelines", |args: &[PyObjectRef]| {
+                crate::modules::dev::io_ensure_open(args)?;
+                if args.len() < 2 {
+                    return Err(PyError::type_error(
+                        "writelines() takes exactly one argument",
+                    ));
+                }
+                let raw = crate::modules::dev::io_get_raw(args)?;
+                let lines = &args[1];
+                let iter = crate::object::builtin_iter(&[lines.clone()])?;
+                loop {
+                    match crate::object::builtin_next(&[iter.clone()]) {
+                        Ok(line) => {
+                            let _ = crate::object::with_vm_mut(|vm| {
+                                crate::object::call_method_rebound(vm, &raw, "write", vec![line])
+                            })?;
+                        }
+                        Err(e) if crate::object::is_stop_iteration_error(&e) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(py_none())
+            }),
+        );
         // closed — property
         td.insert(
             "closed".into(),
@@ -729,7 +819,12 @@ macro_rules! buffered_class {
                 getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "closed".to_string(),
                     func: |args: &[PyObjectRef]| {
-                        let closed = args[0].borrow().get_attribute("_closed").ok().map(|v| v.truthy()).unwrap_or(false);
+                        let closed = args[0]
+                            .borrow()
+                            .get_attribute("_closed")
+                            .ok()
+                            .map(|v| v.truthy())
+                            .unwrap_or(false);
                         Ok(py_bool(closed))
                     },
                 })),
@@ -746,7 +841,9 @@ macro_rules! buffered_class {
                     name: "name".to_string(),
                     func: |args: &[PyObjectRef]| {
                         let raw = crate::modules::dev::io_get_raw(args)?;
-                        Ok(crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "name", vec![]))??)
+                        Ok(crate::object::with_vm_mut(|vm| {
+                            crate::object::call_method_rebound(vm, &raw, "name", vec![])
+                        })??)
                     },
                 })),
                 setter: None,
@@ -762,7 +859,9 @@ macro_rules! buffered_class {
                     name: "mode".to_string(),
                     func: |args: &[PyObjectRef]| {
                         let raw = crate::modules::dev::io_get_raw(args)?;
-                        Ok(crate::object::with_vm_mut(|vm| crate::object::call_method_rebound(vm, &raw, "mode", vec![]))??)
+                        Ok(crate::object::with_vm_mut(|vm| {
+                            crate::object::call_method_rebound(vm, &raw, "mode", vec![])
+                        })??)
                     },
                 })),
                 setter: None,

@@ -64,7 +64,10 @@ fn children_of(obj: &PyObjectRef) -> Vec<PyObjectRef> {
         .unwrap_or_default()
 }
 
-fn with_children_mut<R>(obj: &PyObjectRef, f: impl FnOnce(&mut Vec<PyObjectRef>) -> R) -> Option<R> {
+fn with_children_mut<R>(
+    obj: &PyObjectRef,
+    f: impl FnOnce(&mut Vec<PyObjectRef>) -> R,
+) -> Option<R> {
     let children = get_field(obj, "children")?;
     let mut borrowed = children.borrow_mut();
     if let PyObject::List(list) = &mut *borrowed {
@@ -225,18 +228,16 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_ws(&mut self) {
-        while matches!(self.peek(), Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')) {
+        while matches!(
+            self.peek(),
+            Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
+        ) {
             self.advance();
         }
     }
 
     fn err(&self, msg: &str) -> PyError {
-        PyError::syntax_error(format!(
-            "{}: line {}, column {}",
-            msg,
-            self.line,
-            self.col
-        ))
+        PyError::syntax_error(format!("{}: line {}, column {}", msg, self.line, self.col))
     }
 
     fn read_name(&mut self) -> String {
@@ -384,15 +385,23 @@ impl<'a> Parser<'a> {
                         while !self.starts_with("?>") && self.peek().is_some() {
                             self.advance();
                         }
-                        let pi_text = String::from_utf8_lossy(&self.s[start..self.pos]).into_owned();
+                        let pi_text =
+                            String::from_utf8_lossy(&self.s[start..self.pos]).into_owned();
                         self.skip(2);
                         let (target, rest) = match pi_text.find(char::is_whitespace) {
-                            Some(idx) => (pi_text[..idx].to_string(), pi_text[idx..].trim_start().to_string()),
+                            Some(idx) => (
+                                pi_text[..idx].to_string(),
+                                pi_text[idx..].trim_start().to_string(),
+                            ),
                             None => (pi_text.clone(), String::new()),
                         };
                         let marker = PI_MARKER.with(|c| c.borrow().clone().unwrap());
                         let pi_el = new_element(marker, py_dict());
-                        set_field(&pi_el, "text", py_str(&format!("{} {}", target, rest).trim_end()));
+                        set_field(
+                            &pi_el,
+                            "text",
+                            py_str(&format!("{} {}", target, rest).trim_end()),
+                        );
                         with_children_mut(el, |v| v.push(pi_el.clone()));
                         last_child = Some(pi_el);
                         have_text_slot = false;
@@ -695,9 +704,10 @@ fn path_find_all(root: &PyObjectRef, path: &str) -> Vec<PyObjectRef> {
     let steps: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     for (i, raw_step) in steps.iter().enumerate() {
         let (step, pred) = match raw_step.find('[') {
-            Some(idx) if raw_step.ends_with(']') => {
-                (&raw_step[..idx], Some(&raw_step[idx + 1..raw_step.len() - 1]))
-            }
+            Some(idx) if raw_step.ends_with(']') => (
+                &raw_step[..idx],
+                Some(&raw_step[idx + 1..raw_step.len() - 1]),
+            ),
             _ => (*raw_step, None),
         };
         let mut next = vec![];
@@ -890,7 +900,11 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
         let items: Vec<PyObjectRef> = match &*args[1].borrow() {
             PyObject::List(l) => l.clone(),
             PyObject::Tuple(t) => t.clone(),
-            _ => return Err(PyError::type_error("extend() expects an iterable of elements")),
+            _ => {
+                return Err(PyError::type_error(
+                    "extend() expects an iterable of elements",
+                ))
+            }
         };
         with_children_mut(&args[0], |v| v.extend(items))
             .ok_or_else(|| PyError::type_error("extend: self is not an Element"))?;
@@ -944,7 +958,9 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
 
     e_method!("makeelement", |args| {
         if args.len() < 3 {
-            return Err(PyError::type_error("makeelement() takes exactly 2 arguments"));
+            return Err(PyError::type_error(
+                "makeelement() takes exactly 2 arguments",
+            ));
         }
         let tag = args[1].clone();
         let attrib_src = &args[2];
@@ -1042,7 +1058,10 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
         if let Some(attrib) = get_field(&args[0], "attrib") {
             if let PyObject::Dict(ad) = &*attrib.borrow() {
                 return Ok(py_list(
-                    ad.items().into_iter().map(|(k, v)| py_tuple(vec![k, v])).collect(),
+                    ad.items()
+                        .into_iter()
+                        .map(|(k, v)| py_tuple(vec![k, v]))
+                        .collect(),
                 ));
             }
         }
@@ -1162,7 +1181,9 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
     });
 
     e_method!("__repr__", |args| {
-        let tag = get_field(&args[0], "tag").map(|t| t.str()).unwrap_or_default();
+        let tag = get_field(&args[0], "tag")
+            .map(|t| t.str())
+            .unwrap_or_default();
         Ok(py_str(&format!(
             "<Element {:?} at 0x{:012x}>",
             tag,
@@ -1170,10 +1191,7 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
         )))
     });
 
-    element_type_dict.insert(
-        "__module__".to_string(),
-        py_str("xml.etree.ElementTree"),
-    );
+    element_type_dict.insert("__module__".to_string(), py_str("xml.etree.ElementTree"));
     let element_type = PyObjectRef::new(PyObject::Type {
         name: "Element".to_string(),
         dict: Box::new(str_map_to_typedict(element_type_dict)),
@@ -1274,7 +1292,9 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
     });
 
     et_func!("iselement", |args| {
-        Ok(py_bool(args.first().map(is_element_instance).unwrap_or(false)))
+        Ok(py_bool(
+            args.first().map(is_element_instance).unwrap_or(false),
+        ))
     });
 
     et_func!("dump", |args| {
@@ -1340,7 +1360,9 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
 
     et_func!("tostringlist", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("tostringlist() missing required argument"));
+            return Err(PyError::type_error(
+                "tostringlist() missing required argument",
+            ));
         }
         let (encoding, short_empty, xml_declaration) = parse_serialize_opts(args, 1);
         let is_unicode = encoding.eq_ignore_ascii_case("unicode");
@@ -1463,7 +1485,10 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
             return Ok(py_none());
         }
         let path = args.get(1).map(|a| a.str()).unwrap_or_default();
-        Ok(path_find_all(&root, &path).into_iter().next().unwrap_or_else(py_none))
+        Ok(path_find_all(&root, &path)
+            .into_iter()
+            .next()
+            .unwrap_or_else(py_none))
     });
 
     et_method!("findall", |args| {
@@ -1506,10 +1531,7 @@ pub fn create_xml_etree_dict() -> HashMap<String, PyObjectRef> {
         crate::object::builtin_iter(&[py_list(all)])
     });
 
-    et_type_dict.insert(
-        "__module__".to_string(),
-        py_str("xml.etree.ElementTree"),
-    );
+    et_type_dict.insert("__module__".to_string(), py_str("xml.etree.ElementTree"));
     let et_type = PyObjectRef::new(PyObject::Type {
         name: "ElementTree".to_string(),
         dict: Box::new(str_map_to_typedict(et_type_dict)),
@@ -1529,8 +1551,7 @@ fn read_source_to_string(src: &PyObjectRef) -> PyResult<String> {
         PyObject::Str(s) => {
             let path = s.to_string();
             drop(b);
-            std::fs::read_to_string(&path)
-                .map_err(|e| PyError::OsError(e.to_string()))
+            std::fs::read_to_string(&path).map_err(|e| PyError::OsError(e.to_string()))
         }
         _ => {
             drop(b);
@@ -1542,7 +1563,9 @@ fn read_source_to_string(src: &PyObjectRef) -> PyResult<String> {
                 };
                 Ok(result)
             } else {
-                Err(PyError::type_error("parse() expects a path or file-like object"))
+                Err(PyError::type_error(
+                    "parse() expects a path or file-like object",
+                ))
             }
         }
     }
@@ -1564,13 +1587,12 @@ fn write_bytes_to_target(target: &PyObjectRef, data: Vec<u8>) -> PyResult<()> {
         _ => {
             drop(b);
             if let Ok(write_fn) = target.borrow().get_attribute("write") {
-                crate::object::builtin_call(
-                    &write_fn,
-                    &[PyObjectRef::new(PyObject::Bytes(data))],
-                )?;
+                crate::object::builtin_call(&write_fn, &[PyObjectRef::new(PyObject::Bytes(data))])?;
                 Ok(())
             } else {
-                Err(PyError::type_error("write() expects a path or file-like object"))
+                Err(PyError::type_error(
+                    "write() expects a path or file-like object",
+                ))
             }
         }
     }
@@ -1594,7 +1616,9 @@ fn write_str_to_target(target: &PyObjectRef, content: &str) -> PyResult<()> {
                 crate::object::builtin_call(&write_fn, &[py_str(content)])?;
                 Ok(())
             } else {
-                Err(PyError::type_error("write() expects a path or file-like object"))
+                Err(PyError::type_error(
+                    "write() expects a path or file-like object",
+                ))
             }
         }
     }

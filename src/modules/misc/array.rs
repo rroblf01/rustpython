@@ -84,7 +84,10 @@ pub fn create_array_dict() -> HashMap<String, PyObjectRef> {
                 };
                 drop(bytes_borrowed);
                 let data = decode_reconstructed_bytes(mformat_code, &bytes)?;
-                Ok(PyObjectRef::new(PyObject::Array(PyArray { typecode, data })))
+                Ok(PyObjectRef::new(PyObject::Array(PyArray {
+                    typecode,
+                    data,
+                })))
             },
         }),
     );

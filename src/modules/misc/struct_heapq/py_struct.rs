@@ -622,7 +622,11 @@ pub fn create_struct_dict() -> HashMap<String, PyObjectRef> {
             PyObject::Str(s) => s.to_string(),
             PyObject::Bytes(b) => match std::str::from_utf8(b) {
                 Ok(s) => s.to_string(),
-                Err(_) => return Err(PyError::type_error("struct format requires a string or bytes")),
+                Err(_) => {
+                    return Err(PyError::type_error(
+                        "struct format requires a string or bytes",
+                    ))
+                }
             },
             _ => args[0].str(),
         };
@@ -638,91 +642,117 @@ pub fn create_struct_dict() -> HashMap<String, PyObjectRef> {
     // struct.Struct class — used by zipfile and other modules
     // Simple wrapper that stores the format string and delegates to module functions
     {
-        let mut struct_type_dict: std::collections::HashMap<String, PyObjectRef> = std::collections::HashMap::new();
+        let mut struct_type_dict: std::collections::HashMap<String, PyObjectRef> =
+            std::collections::HashMap::new();
         struct_type_dict.insert("__doc__".to_string(), py_str("Struct(format)"));
-        struct_type_dict.insert("__init__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "__init__".to_string(),
-            func: |args| {
-                if args.len() < 2 {
-                    return Err(PyError::type_error("Struct() requires a format argument"));
-                }
-                let fmt = match &*args[1].borrow() {
-                    PyObject::Str(s) => s.to_string(),
-                    PyObject::Bytes(b) => match std::str::from_utf8(b) {
-                        Ok(s) => s.to_string(),
-                        Err(_) => return Err(PyError::type_error("Struct format requires a string or bytes")),
-                    },
-                    _ => args[1].str(),
-                };
-                // Store format in instance dict
-                if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-                    dict.insert("format".to_string(), py_str(&fmt));
-                    dict.insert("size".to_string(), py_int(struct_calcsize(&fmt)? as i64));
-                }
-                Ok(py_none())
-            },
-        }));
-        struct_type_dict.insert("calcsize".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "calcsize".to_string(),
-            func: |args| {
-                if let Some(inst) = args.first() {
-                    if let PyObject::Instance { dict, .. } = &*inst.borrow() {
-                        if let Some(size) = dict.get("size") {
-                            return Ok(size.clone());
+        struct_type_dict.insert(
+            "__init__".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error("Struct() requires a format argument"));
+                    }
+                    let fmt = match &*args[1].borrow() {
+                        PyObject::Str(s) => s.to_string(),
+                        PyObject::Bytes(b) => match std::str::from_utf8(b) {
+                            Ok(s) => s.to_string(),
+                            Err(_) => {
+                                return Err(PyError::type_error(
+                                    "Struct format requires a string or bytes",
+                                ))
+                            }
+                        },
+                        _ => args[1].str(),
+                    };
+                    // Store format in instance dict
+                    if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                        dict.insert("format".to_string(), py_str(&fmt));
+                        dict.insert("size".to_string(), py_int(struct_calcsize(&fmt)? as i64));
+                    }
+                    Ok(py_none())
+                },
+            }),
+        );
+        struct_type_dict.insert(
+            "calcsize".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "calcsize".to_string(),
+                func: |args| {
+                    if let Some(inst) = args.first() {
+                        if let PyObject::Instance { dict, .. } = &*inst.borrow() {
+                            if let Some(size) = dict.get("size") {
+                                return Ok(size.clone());
+                            }
                         }
                     }
-                }
-                Err(PyError::type_error("Struct.calcsize() called on invalid object"))
-            },
-        }));
-        struct_type_dict.insert("pack".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "pack".to_string(),
-            func: |args| {
-                if args.len() < 2 {
-                    return Err(PyError::type_error("pack() requires at least 1 argument"));
-                }
-                let fmt = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                    dict.get("format").map(|v| v.str()).unwrap_or_default()
-                } else {
-                    return Err(PyError::type_error("Struct.pack() called on invalid object"));
-                };
-                // Delegate to struct.pack
-                let mut pack_args = vec![py_str(&fmt)];
-                pack_args.extend_from_slice(&args[1..]);
-                struct_pack_impl(&pack_args)
-            },
-        }));
-        struct_type_dict.insert("unpack".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "unpack".to_string(),
-            func: |args| {
-                if args.len() < 2 {
-                    return Err(PyError::type_error("unpack() requires at least 1 argument"));
-                }
-                let fmt = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                    dict.get("format").map(|v| v.str()).unwrap_or_default()
-                } else {
-                    return Err(PyError::type_error("Struct.unpack() called on invalid object"));
-                };
-                // Delegate to struct.unpack
-                let mut pack_args = vec![py_str(&fmt)];
-                pack_args.extend_from_slice(&args[1..]);
-                struct_unpack_impl(&pack_args)
-            },
-        }));
-        struct_type_dict.insert("__repr__".to_string(), PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "__repr__".to_string(),
-            func: |args| {
-                if let Some(inst) = args.first() {
-                    if let PyObject::Instance { dict, .. } = &*inst.borrow() {
-                        if let Some(fmt) = dict.get("format") {
-                            let fmt_str = fmt.str();
-                            return Ok(py_str(&format!("Struct('{}')", fmt_str)));
+                    Err(PyError::type_error(
+                        "Struct.calcsize() called on invalid object",
+                    ))
+                },
+            }),
+        );
+        struct_type_dict.insert(
+            "pack".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "pack".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error("pack() requires at least 1 argument"));
+                    }
+                    let fmt = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                        dict.get("format").map(|v| v.str()).unwrap_or_default()
+                    } else {
+                        return Err(PyError::type_error(
+                            "Struct.pack() called on invalid object",
+                        ));
+                    };
+                    // Delegate to struct.pack
+                    let mut pack_args = vec![py_str(&fmt)];
+                    pack_args.extend_from_slice(&args[1..]);
+                    struct_pack_impl(&pack_args)
+                },
+            }),
+        );
+        struct_type_dict.insert(
+            "unpack".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "unpack".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error("unpack() requires at least 1 argument"));
+                    }
+                    let fmt = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
+                        dict.get("format").map(|v| v.str()).unwrap_or_default()
+                    } else {
+                        return Err(PyError::type_error(
+                            "Struct.unpack() called on invalid object",
+                        ));
+                    };
+                    // Delegate to struct.unpack
+                    let mut pack_args = vec![py_str(&fmt)];
+                    pack_args.extend_from_slice(&args[1..]);
+                    struct_unpack_impl(&pack_args)
+                },
+            }),
+        );
+        struct_type_dict.insert(
+            "__repr__".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__repr__".to_string(),
+                func: |args| {
+                    if let Some(inst) = args.first() {
+                        if let PyObject::Instance { dict, .. } = &*inst.borrow() {
+                            if let Some(fmt) = dict.get("format") {
+                                let fmt_str = fmt.str();
+                                return Ok(py_str(&format!("Struct('{}')", fmt_str)));
+                            }
                         }
                     }
-                }
-                Ok(py_str("Struct(?)"))
-            },
-        }));
+                    Ok(py_str("Struct(?)"))
+                },
+            }),
+        );
         let struct_type = PyObjectRef::new(PyObject::Type {
             name: "Struct".to_string(),
             dict: Box::new(str_map_to_typedict(struct_type_dict)),

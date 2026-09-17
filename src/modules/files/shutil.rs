@@ -168,14 +168,15 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
             .map_err(|e| PyError::os_error_from_io(&e))?;
         let atime = filetime::FileTime::from_last_access_time(&meta);
         let mtime = filetime::FileTime::from_last_modification_time(&meta);
-        filetime::set_file_times(&dst, atime, mtime)
-            .map_err(|e| PyError::os_error_from_io(&e))?;
+        filetime::set_file_times(&dst, atime, mtime).map_err(|e| PyError::os_error_from_io(&e))?;
         Ok(py_none())
     });
 
     shutil_func!("which", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("which() missing 1 required argument: 'cmd'"));
+            return Err(PyError::type_error(
+                "which() missing 1 required argument: 'cmd'",
+            ));
         }
         let cmd = args[0].str();
         // If cmd contains a path separator, check directly
@@ -310,17 +311,75 @@ pub fn create_shutil_dict() -> HashMap<String, PyObjectRef> {
     shutil_func!("unregister_unpack_format", |_args| Ok(py_none()));
     shutil_func!("unpack_archive", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("unpack_archive() missing 1 required argument: 'filename'"));
+            return Err(PyError::type_error(
+                "unpack_archive() missing 1 required argument: 'filename'",
+            ));
         }
         // Stub: do nothing, pretend success
         Ok(py_none())
     });
-    d.insert_str("Error", PyObjectRef::new(PyObject::Type { name: "Error".to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())), bases: vec![], mro: vec![] }));
-    d.insert_str("SameFileError", PyObjectRef::new(PyObject::Type { name: "SameFileError".to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())), bases: vec![], mro: vec![] }));
-    d.insert_str("RegistryError", PyObjectRef::new(PyObject::Type { name: "RegistryError".to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())), bases: vec![], mro: vec![] }));
-    d.insert_str("ReadError", PyObjectRef::new(PyObject::Type { name: "ReadError".to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())), bases: vec![], mro: vec![] }));
-    d.insert_str("SpecialFileError", PyObjectRef::new(PyObject::Type { name: "SpecialFileError".to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())), bases: vec![], mro: vec![] }));
-    d.insert_str("ExecError", PyObjectRef::new(PyObject::Type { name: "ExecError".to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())), bases: vec![], mro: vec![] }));
-    d.insert_str("_GiveupOnFastCopy", PyObjectRef::new(PyObject::Type { name: "_GiveupOnFastCopy".to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())), bases: vec![], mro: vec![] }));
+    d.insert_str(
+        "Error",
+        PyObjectRef::new(PyObject::Type {
+            name: "Error".to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+            bases: vec![],
+            mro: vec![],
+        }),
+    );
+    d.insert_str(
+        "SameFileError",
+        PyObjectRef::new(PyObject::Type {
+            name: "SameFileError".to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+            bases: vec![],
+            mro: vec![],
+        }),
+    );
+    d.insert_str(
+        "RegistryError",
+        PyObjectRef::new(PyObject::Type {
+            name: "RegistryError".to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+            bases: vec![],
+            mro: vec![],
+        }),
+    );
+    d.insert_str(
+        "ReadError",
+        PyObjectRef::new(PyObject::Type {
+            name: "ReadError".to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+            bases: vec![],
+            mro: vec![],
+        }),
+    );
+    d.insert_str(
+        "SpecialFileError",
+        PyObjectRef::new(PyObject::Type {
+            name: "SpecialFileError".to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+            bases: vec![],
+            mro: vec![],
+        }),
+    );
+    d.insert_str(
+        "ExecError",
+        PyObjectRef::new(PyObject::Type {
+            name: "ExecError".to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+            bases: vec![],
+            mro: vec![],
+        }),
+    );
+    d.insert_str(
+        "_GiveupOnFastCopy",
+        PyObjectRef::new(PyObject::Type {
+            name: "_GiveupOnFastCopy".to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+            bases: vec![],
+            mro: vec![],
+        }),
+    );
     d
 }

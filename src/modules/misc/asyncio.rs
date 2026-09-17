@@ -1,7 +1,7 @@
 use crate::object::*;
+use num_bigint::BigInt;
 use std::collections::HashMap;
 use std::rc::Rc;
-use num_bigint::BigInt;
 
 pub(crate) fn asyncio_run_impl(
     vm: &mut crate::vm::VirtualMachine,

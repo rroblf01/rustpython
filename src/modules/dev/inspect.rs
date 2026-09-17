@@ -291,15 +291,201 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
         d.insert_str("opmap", PyObjectRef::new(PyObject::Dict(Box::new(opmap))));
     }
     d.insert_str("hasconst", py_list(vec![py_int(82)]));
-    d.insert_str("hasname", py_list(vec![py_int(61), py_int(64), py_int(65), py_int(72), py_int(73), py_int(80), py_int(91), py_int(92), py_int(93), py_int(96), py_int(110), py_int(115), py_int(116), py_int(249)]));
-    d.insert_str("hasjrel", py_list(vec![py_int(68), py_int(70), py_int(75), py_int(76), py_int(77), py_int(100), py_int(101), py_int(102), py_int(103), py_int(106), py_int(237), py_int(248), py_int(257), py_int(258), py_int(259), py_int(260)]));
+    d.insert_str(
+        "hasname",
+        py_list(vec![
+            py_int(61),
+            py_int(64),
+            py_int(65),
+            py_int(72),
+            py_int(73),
+            py_int(80),
+            py_int(91),
+            py_int(92),
+            py_int(93),
+            py_int(96),
+            py_int(110),
+            py_int(115),
+            py_int(116),
+            py_int(249),
+        ]),
+    );
+    d.insert_str(
+        "hasjrel",
+        py_list(vec![
+            py_int(68),
+            py_int(70),
+            py_int(75),
+            py_int(76),
+            py_int(77),
+            py_int(100),
+            py_int(101),
+            py_int(102),
+            py_int(103),
+            py_int(106),
+            py_int(237),
+            py_int(248),
+            py_int(257),
+            py_int(258),
+            py_int(259),
+            py_int(260),
+        ]),
+    );
     d.insert_str("hasjabs", py_list(vec![]));
-    d.insert_str("haslocal", py_list(vec![py_int(63), py_int(83), py_int(84), py_int(85), py_int(86), py_int(87), py_int(88), py_int(89), py_int(112), py_int(113), py_int(114), py_int(261), py_int(266)]));
+    d.insert_str(
+        "haslocal",
+        py_list(vec![
+            py_int(63),
+            py_int(83),
+            py_int(84),
+            py_int(85),
+            py_int(86),
+            py_int(87),
+            py_int(88),
+            py_int(89),
+            py_int(112),
+            py_int(113),
+            py_int(114),
+            py_int(261),
+            py_int(266),
+        ]),
+    );
     d.insert_str("hascompare", py_list(vec![py_int(56)]));
-    d.insert_str("hasfree", py_list(vec![py_int(62), py_int(90), py_int(97), py_int(111)]));
-    d.insert_str("hasexc", py_list(vec![py_int(263), py_int(264), py_int(265)]));
-    d.insert_str("hasarg", py_list(vec![py_int(128), py_int(255), py_int(44), py_int(45), py_int(46), py_int(47), py_int(48), py_int(49), py_int(50), py_int(51), py_int(52), py_int(53), py_int(54), py_int(55), py_int(56), py_int(57), py_int(58), py_int(59), py_int(60), py_int(61), py_int(62), py_int(63), py_int(64), py_int(65), py_int(66), py_int(67), py_int(68), py_int(69), py_int(70), py_int(71), py_int(72), py_int(73), py_int(74), py_int(75), py_int(76), py_int(77), py_int(78), py_int(79), py_int(80), py_int(81), py_int(82), py_int(83), py_int(84), py_int(85), py_int(86), py_int(87), py_int(88), py_int(89), py_int(90), py_int(91), py_int(92), py_int(93), py_int(94), py_int(95), py_int(96), py_int(97), py_int(98), py_int(99), py_int(100), py_int(101), py_int(102), py_int(103), py_int(104), py_int(105), py_int(106), py_int(107), py_int(108), py_int(109), py_int(110), py_int(111), py_int(112), py_int(113), py_int(114), py_int(115), py_int(116), py_int(117), py_int(118), py_int(119), py_int(120), py_int(237), py_int(239), py_int(241), py_int(242), py_int(243), py_int(244), py_int(245), py_int(247), py_int(248), py_int(249), py_int(250), py_int(251), py_int(253), py_int(257), py_int(258), py_int(259), py_int(260), py_int(261), py_int(263), py_int(264), py_int(265), py_int(266)]));
-    d.insert_str("hasjump", py_list(vec![py_int(68), py_int(70), py_int(75), py_int(76), py_int(77), py_int(100), py_int(101), py_int(102), py_int(103), py_int(106), py_int(237), py_int(248), py_int(257), py_int(258), py_int(259), py_int(260)]));
+    d.insert_str(
+        "hasfree",
+        py_list(vec![py_int(62), py_int(90), py_int(97), py_int(111)]),
+    );
+    d.insert_str(
+        "hasexc",
+        py_list(vec![py_int(263), py_int(264), py_int(265)]),
+    );
+    d.insert_str(
+        "hasarg",
+        py_list(vec![
+            py_int(128),
+            py_int(255),
+            py_int(44),
+            py_int(45),
+            py_int(46),
+            py_int(47),
+            py_int(48),
+            py_int(49),
+            py_int(50),
+            py_int(51),
+            py_int(52),
+            py_int(53),
+            py_int(54),
+            py_int(55),
+            py_int(56),
+            py_int(57),
+            py_int(58),
+            py_int(59),
+            py_int(60),
+            py_int(61),
+            py_int(62),
+            py_int(63),
+            py_int(64),
+            py_int(65),
+            py_int(66),
+            py_int(67),
+            py_int(68),
+            py_int(69),
+            py_int(70),
+            py_int(71),
+            py_int(72),
+            py_int(73),
+            py_int(74),
+            py_int(75),
+            py_int(76),
+            py_int(77),
+            py_int(78),
+            py_int(79),
+            py_int(80),
+            py_int(81),
+            py_int(82),
+            py_int(83),
+            py_int(84),
+            py_int(85),
+            py_int(86),
+            py_int(87),
+            py_int(88),
+            py_int(89),
+            py_int(90),
+            py_int(91),
+            py_int(92),
+            py_int(93),
+            py_int(94),
+            py_int(95),
+            py_int(96),
+            py_int(97),
+            py_int(98),
+            py_int(99),
+            py_int(100),
+            py_int(101),
+            py_int(102),
+            py_int(103),
+            py_int(104),
+            py_int(105),
+            py_int(106),
+            py_int(107),
+            py_int(108),
+            py_int(109),
+            py_int(110),
+            py_int(111),
+            py_int(112),
+            py_int(113),
+            py_int(114),
+            py_int(115),
+            py_int(116),
+            py_int(117),
+            py_int(118),
+            py_int(119),
+            py_int(120),
+            py_int(237),
+            py_int(239),
+            py_int(241),
+            py_int(242),
+            py_int(243),
+            py_int(244),
+            py_int(245),
+            py_int(247),
+            py_int(248),
+            py_int(249),
+            py_int(250),
+            py_int(251),
+            py_int(253),
+            py_int(257),
+            py_int(258),
+            py_int(259),
+            py_int(260),
+            py_int(261),
+            py_int(263),
+            py_int(264),
+            py_int(265),
+            py_int(266),
+        ]),
+    );
+    d.insert_str(
+        "hasjump",
+        py_list(vec![
+            py_int(68),
+            py_int(70),
+            py_int(75),
+            py_int(76),
+            py_int(77),
+            py_int(100),
+            py_int(101),
+            py_int(102),
+            py_int(103),
+            py_int(106),
+            py_int(237),
+            py_int(248),
+            py_int(257),
+            py_int(258),
+            py_int(259),
+            py_int(260),
+        ]),
+    );
 
     d
 }
@@ -309,7 +495,6 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
 /// time (`ENABLE_SPECIALIZATION`/`ENABLE_SPECIALIZATION_FT`, both about
 /// CPython 3.11+'s adaptive specializing interpreter — always `False`
 /// here, correct since this interpreter has no such optimization to gate).
-
 
 pub fn create_doctest_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
@@ -1136,4 +1321,3 @@ pub fn getmembers_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 // ─── profile module ────────────────────────────────────────────────────────
-

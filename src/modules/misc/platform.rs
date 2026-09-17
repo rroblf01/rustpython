@@ -40,7 +40,9 @@ pub fn create_platform_dict() -> HashMap<String, PyObjectRef> {
     // Windows Server); always "" elsewhere, which is what non-Windows
     // `platform.py` itself falls back to.
     plat_func!("win32_edition", |_| { Ok(py_str("")) });
-    plat_func!("win32_is_iot", |_| { Ok(PyObjectRef::new(PyObject::Bool(false))) });
+    plat_func!("win32_is_iot", |_| {
+        Ok(PyObjectRef::new(PyObject::Bool(false)))
+    });
     plat_func!("win32_ver", |_| {
         Ok(py_tuple(vec![
             py_str(""),

@@ -1,8 +1,8 @@
 use crate::object::*;
-use std::collections::HashMap;
-use std::rc::Rc;
 #[allow(unused_imports)]
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 mod union;
 pub use union::{get_union_type, make_union, union_args};
@@ -142,23 +142,42 @@ fn build_simple_namespace_type() -> PyObjectRef {
             let mut insert_mapping = |src: &PyObjectRef| -> PyResult<()> {
                 // Try mapping path (has keys())
                 let type_name = src.borrow().type_name();
-                let is_view = matches!(type_name.as_str(), "dict_items" | "dict_keys" | "dict_values" | "KeysView" | "ItemsView" | "ValuesView" | "MappingView");
-                let keys_method = if is_view { None } else { src.borrow().get_attribute("keys").ok() };
+                let is_view = matches!(
+                    type_name.as_str(),
+                    "dict_items"
+                        | "dict_keys"
+                        | "dict_values"
+                        | "KeysView"
+                        | "ItemsView"
+                        | "ValuesView"
+                        | "MappingView"
+                );
+                let keys_method = if is_view {
+                    None
+                } else {
+                    src.borrow().get_attribute("keys").ok()
+                };
                 if let Some(keys_raw) = keys_method {
                     // It's a mapping: copy via keys() + __getitem__
-                    let keys_iterable = crate::object::call_bound_method(keys_raw, src.clone(), vec![])?;
+                    let keys_iterable =
+                        crate::object::call_bound_method(keys_raw, src.clone(), vec![])?;
                     let it = crate::object::builtin_iter(&[keys_iterable])?;
                     loop {
                         match crate::object::builtin_next(&[it.clone()]) {
                             Ok(key) => {
                                 let key_str = match &*key.borrow() {
                                     PyObject::Str(s) => s.to_string(),
-                                    _ => return Err(PyError::type_error("SimpleNamespace keys must be strings")),
+                                    _ => {
+                                        return Err(PyError::type_error(
+                                            "SimpleNamespace keys must be strings",
+                                        ))
+                                    }
                                 };
                                 // Hashability check via hash()
                                 let _ = key.hash()?;
                                 let value = crate::object::py_getitem(src, &key)?;
-                                if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+                                if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut()
+                                {
                                     dict.insert(key_str, value);
                                 }
                             }
@@ -170,7 +189,10 @@ fn build_simple_namespace_type() -> PyObjectRef {
                 }
                 // Not a mapping: treat as iterable of pairs
                 let it = crate::object::builtin_iter(&[src.clone()]).map_err(|_| {
-                    PyError::type_error(format!("'{}' object is not a mapping or iterable", type_name))
+                    PyError::type_error(format!(
+                        "'{}' object is not a mapping or iterable",
+                        type_name
+                    ))
                 })?;
                 loop {
                     match crate::object::builtin_next(&[it.clone()]) {
@@ -178,17 +200,26 @@ fn build_simple_namespace_type() -> PyObjectRef {
                             let pair_b = pair.borrow();
                             let items: Vec<PyObjectRef> = match &*pair_b {
                                 PyObject::Tuple(v) | PyObject::List(v) => v.clone(),
-                                _ => return Err(PyError::type_error("SimpleNamespace iterable must be mapping or iterable of pairs")),
+                                _ => return Err(PyError::type_error(
+                                    "SimpleNamespace iterable must be mapping or iterable of pairs",
+                                )),
                             };
                             if items.len() != 2 {
-                                return Err(PyError::value_error(format!("SimpleNamespace iterable element has length {}; 2 is required", items.len())));
+                                return Err(PyError::value_error(format!(
+                                    "SimpleNamespace iterable element has length {}; 2 is required",
+                                    items.len()
+                                )));
                             }
                             drop(pair_b);
                             let key = &items[0];
                             let val = &items[1];
                             let key_str = match &*key.borrow() {
                                 PyObject::Str(s) => s.to_string(),
-                                _ => return Err(PyError::type_error("SimpleNamespace keys must be strings")),
+                                _ => {
+                                    return Err(PyError::type_error(
+                                        "SimpleNamespace keys must be strings",
+                                    ))
+                                }
                             };
                             let _ = key.hash()?;
                             if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
@@ -210,7 +241,9 @@ fn build_simple_namespace_type() -> PyObjectRef {
                         let key_str = k.str();
                         // Validate key is string (already) but also check original key was str
                         if !matches!(&*k.borrow(), PyObject::Str(_)) {
-                            return Err(PyError::type_error("SimpleNamespace keys must be strings"));
+                            return Err(PyError::type_error(
+                                "SimpleNamespace keys must be strings",
+                            ));
                         }
                         let _ = k.hash()?;
                         if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
@@ -244,7 +277,6 @@ fn get_simple_namespace_type() -> PyObjectRef {
     });
     typ
 }
-
 
 pub fn create_types_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();

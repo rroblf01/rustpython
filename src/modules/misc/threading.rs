@@ -31,12 +31,15 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("_CRLock", py_none());
     // `threading.local` — thread-local storage.
     // Missing entirely broke `test_threading_local.py`.
-    d.insert_str("local", PyObjectRef::new(PyObject::Type {
-        name: "_thread._local".to_string(),
-        dict: Box::new(str_map_to_typedict(HashMap::new())),
-        bases: vec![],
-        mro: vec![],
-    }));
+    d.insert_str(
+        "local",
+        PyObjectRef::new(PyObject::Type {
+            name: "_thread._local".to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+            bases: vec![],
+            mro: vec![],
+        }),
+    );
 
     // `threading.Thread` is a REAL subclassable `PyObject::Type`, not a
     // plain `BuiltinFunction` factory. It used to be a bare
@@ -196,12 +199,12 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
     thr_func!("Condition", |args| {
         let lock = match args.first() {
             Some(l) if !matches!(&*l.borrow(), PyObject::Dict(_) | PyObject::None) => l.clone(),
-            _ => PyObjectRef::new(PyObject::RLock(std::sync::Arc::new(
-                std::sync::Mutex::new(RLockInner {
+            _ => PyObjectRef::new(PyObject::RLock(std::sync::Arc::new(std::sync::Mutex::new(
+                RLockInner {
                     owner: None,
                     count: 0,
-                }),
-            ))),
+                },
+            )))),
         };
         Ok(PyObjectRef::new(PyObject::ThreadCondition {
             lock: Some(lock),
@@ -252,9 +255,10 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::ThreadTimer {
             interval,
             func,
-            args: args.get(2..).map(|a| {
-                a.iter().map(|a| a.clone()).collect()
-            }).unwrap_or_default(),
+            args: args
+                .get(2..)
+                .map(|a| a.iter().map(|a| a.clone()).collect())
+                .unwrap_or_default(),
             cancelled: std::sync::Arc::new(std::sync::Mutex::new(false)),
             started: std::sync::Arc::new(std::sync::Mutex::new(false)),
             finished: std::sync::Arc::new(std::sync::Mutex::new(false)),
@@ -330,7 +334,11 @@ fn thread_init(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         kwargs_dict.unwrap_or_else(|| PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new())))),
     );
     thread_dict_set(&self_obj, "name", name.unwrap_or_else(|| py_str("Thread")));
-    thread_dict_set(&self_obj, "daemon", daemon.unwrap_or_else(|| py_bool(false)));
+    thread_dict_set(
+        &self_obj,
+        "daemon",
+        daemon.unwrap_or_else(|| py_bool(false)),
+    );
     thread_dict_set(&self_obj, "_started", py_bool(false));
     thread_dict_set(&self_obj, "_finished", py_bool(false));
     thread_dict_set(&self_obj, "_result", py_none());

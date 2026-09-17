@@ -1,10 +1,10 @@
+use crate::modules::misc::pickle_ser::PICKLE_CLASS_REGISTRY;
 use crate::object::*;
-use std::collections::HashMap;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
-use crate::modules::misc::pickle_ser::PICKLE_CLASS_REGISTRY;
 
 pub fn try_unpickle_rangeiter_compat(data: &[u8]) -> Option<PyObjectRef> {
     // Quick reject: must contain "iter" and ("xrange" or "range").
@@ -28,13 +28,17 @@ pub fn try_unpickle_rangeiter_compat(data: &[u8]) -> Option<PyObjectRef> {
     // Helper to parse BigInt from decimal string.
     let parse_bigint = |s: &str| -> Option<BigInt> {
         let t = s.trim().trim_end_matches('L');
-        if t.is_empty() { return None; }
+        if t.is_empty() {
+            return None;
+        }
         t.parse::<BigInt>().ok()
     };
     // Helper to decode LONG1 n bytes LE signed.
     let decode_long1 = |n: usize, bytes: &[u8]| -> BigInt {
-        if n == 0 { return BigInt::from(0); }
-        let negative = bytes[n-1] & 0x80 != 0;
+        if n == 0 {
+            return BigInt::from(0);
+        }
+        let negative = bytes[n - 1] & 0x80 != 0;
         let mut mag = BigInt::from(0);
         for &b in bytes.iter().rev() {
             mag = (mag << 8) | BigInt::from(b);
@@ -43,7 +47,9 @@ pub fn try_unpickle_rangeiter_compat(data: &[u8]) -> Option<PyObjectRef> {
             let bits = (n * 8) as u32;
             let modulus = BigInt::from(1u32) << bits;
             mag - modulus
-        } else { mag }
+        } else {
+            mag
+        }
     };
     while pos < data.len() {
         let op = data[pos];
@@ -51,25 +57,39 @@ pub fn try_unpickle_rangeiter_compat(data: &[u8]) -> Option<PyObjectRef> {
         match op {
             0x80 => {
                 // PROTO version byte
-                if pos < data.len() { pos += 1; }
+                if pos < data.len() {
+                    pos += 1;
+                }
             }
             0x95 => {
                 // FRAME: 8-byte LE length
-                if pos + 8 > data.len() { return None; }
+                if pos + 8 > data.len() {
+                    return None;
+                }
                 let len = u64::from_le_bytes([
-                    data[pos], data[pos+1], data[pos+2], data[pos+3],
-                    data[pos+4], data[pos+5], data[pos+6], data[pos+7],
+                    data[pos],
+                    data[pos + 1],
+                    data[pos + 2],
+                    data[pos + 3],
+                    data[pos + 4],
+                    data[pos + 5],
+                    data[pos + 6],
+                    data[pos + 7],
                 ]) as usize;
                 pos += 8;
                 _frame_end = Some(pos + len);
             }
             0x8c => {
                 // SHORT_BINUNICODE: 1-byte len + bytes
-                if pos >= data.len() { return None; }
+                if pos >= data.len() {
+                    return None;
+                }
                 let n = data[pos] as usize;
                 pos += 1;
-                if pos + n > data.len() { return None; }
-                let s = std::str::from_utf8(&data[pos..pos+n]).ok()?;
+                if pos + n > data.len() {
+                    return None;
+                }
+                let s = std::str::from_utf8(&data[pos..pos + n]).ok()?;
                 pos += n;
                 // This is a unicode string value; for our hack we just push Val
                 // It will be consumed by STACK_GLOBAL.
@@ -77,45 +97,68 @@ pub fn try_unpickle_rangeiter_compat(data: &[u8]) -> Option<PyObjectRef> {
             }
             0x8a => {
                 // LONG1: 1-byte n then n bytes LE
-                if pos >= data.len() { return None; }
+                if pos >= data.len() {
+                    return None;
+                }
                 let n = data[pos] as usize;
                 pos += 1;
-                if pos + n > data.len() { return None; }
-                let v = decode_long1(n, &data[pos..pos+n]);
+                if pos + n > data.len() {
+                    return None;
+                }
+                let v = decode_long1(n, &data[pos..pos + n]);
                 pos += n;
                 stack.push(StackVal::Val(py_int(v)));
             }
             0x8b => {
                 // LONG4: 4-byte LE n then n bytes
-                if pos + 4 > data.len() { return None; }
-                let n = u32::from_le_bytes([data[pos],data[pos+1],data[pos+2],data[pos+3]]) as usize;
+                if pos + 4 > data.len() {
+                    return None;
+                }
+                let n = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
                 pos += 4;
-                if pos + n > data.len() { return None; }
-                let v = decode_long1(n, &data[pos..pos+n]);
+                if pos + n > data.len() {
+                    return None;
+                }
+                let v = decode_long1(n, &data[pos..pos + n]);
                 pos += n;
                 stack.push(StackVal::Val(py_int(v)));
             }
             b'c' => {
                 // GLOBAL: module\n name\n
                 let start = pos;
-                while pos < data.len() && data[pos] != b'\n' { pos += 1; }
-                if pos >= data.len() { return None; }
+                while pos < data.len() && data[pos] != b'\n' {
+                    pos += 1;
+                }
+                if pos >= data.len() {
+                    return None;
+                }
                 let module = std::str::from_utf8(&data[start..pos]).ok()?.to_string();
                 pos += 1;
                 let start2 = pos;
-                while pos < data.len() && data[pos] != b'\n' { pos += 1; }
-                if pos >= data.len() { return None; }
+                while pos < data.len() && data[pos] != b'\n' {
+                    pos += 1;
+                }
+                if pos >= data.len() {
+                    return None;
+                }
                 let name = std::str::from_utf8(&data[start2..pos]).ok()?.to_string();
                 pos += 1;
                 match (module.as_str(), name.as_str()) {
-                    ("__builtin__", "iter") | ("builtins", "iter") => stack.push(StackVal::GlobalIter),
-                    ("__builtin__", "xrange") | ("__builtin__", "range") | ("builtins", "range") => stack.push(StackVal::GlobalRange),
+                    ("__builtin__", "iter") | ("builtins", "iter") => {
+                        stack.push(StackVal::GlobalIter)
+                    }
+                    ("__builtin__", "xrange")
+                    | ("__builtin__", "range")
+                    | ("builtins", "range") => stack.push(StackVal::GlobalRange),
                     _ => return None,
                 }
             }
             0x93 => {
                 // STACK_GLOBAL: pops module and name (previously pushed by BINUNICODE)
-                if stack.len() < 2 { return None; }
+                if stack.len() < 2 {
+                    return None;
+                }
                 let name_v = stack.pop().unwrap();
                 let module_v = stack.pop().unwrap();
                 let (module, name) = match (module_v, name_v) {
@@ -131,35 +174,50 @@ pub fn try_unpickle_rangeiter_compat(data: &[u8]) -> Option<PyObjectRef> {
             b'(' => stack.push(StackVal::Mark),
             b'I' => {
                 let start = pos;
-                while pos < data.len() && data[pos] != b'\n' { pos += 1; }
-                if pos >= data.len() { return None; }
+                while pos < data.len() && data[pos] != b'\n' {
+                    pos += 1;
+                }
+                if pos >= data.len() {
+                    return None;
+                }
                 let s = std::str::from_utf8(&data[start..pos]).ok()?;
                 pos += 1;
                 let v = parse_bigint(s)?;
                 stack.push(StackVal::Val(py_int(v)));
             }
             b'K' => {
-                if pos >= data.len() { return None; }
+                if pos >= data.len() {
+                    return None;
+                }
                 let v = data[pos] as i64;
                 pos += 1;
                 stack.push(StackVal::Val(py_int(v)));
             }
             b'M' => {
-                if pos + 2 > data.len() { return None; }
-                let v = u16::from_le_bytes([data[pos], data[pos+1]]) as i64;
+                if pos + 2 > data.len() {
+                    return None;
+                }
+                let v = u16::from_le_bytes([data[pos], data[pos + 1]]) as i64;
                 pos += 2;
                 stack.push(StackVal::Val(py_int(v)));
             }
             b'J' => {
-                if pos + 4 > data.len() { return None; }
-                let v = i32::from_le_bytes([data[pos],data[pos+1],data[pos+2],data[pos+3]]) as i64;
+                if pos + 4 > data.len() {
+                    return None;
+                }
+                let v = i32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as i64;
                 pos += 4;
                 stack.push(StackVal::Val(py_int(v)));
             }
             b'L' => {
                 let start = pos;
-                while pos < data.len() && data[pos] != b'\n' { pos += 1; }
-                if pos >= data.len() { return None; }
+                while pos < data.len() && data[pos] != b'\n' {
+                    pos += 1;
+                }
+                if pos >= data.len() {
+                    return None;
+                }
                 let s = std::str::from_utf8(&data[start..pos]).ok()?;
                 pos += 1;
                 let v = parse_bigint(s)?;
@@ -182,22 +240,43 @@ pub fn try_unpickle_rangeiter_compat(data: &[u8]) -> Option<PyObjectRef> {
                 // TUPLE1
                 if let Some(StackVal::Val(v)) = stack.pop() {
                     stack.push(StackVal::Val(py_tuple(vec![v])));
-                } else { return None; }
+                } else {
+                    return None;
+                }
             }
             0x86 => {
                 // TUPLE2
-                if stack.len() < 2 { return None; }
-                let b = match stack.pop().unwrap() { StackVal::Val(v)=>v, _=>return None };
-                let a = match stack.pop().unwrap() { StackVal::Val(v)=>v, _=>return None };
-                stack.push(StackVal::Val(py_tuple(vec![a,b])));
+                if stack.len() < 2 {
+                    return None;
+                }
+                let b = match stack.pop().unwrap() {
+                    StackVal::Val(v) => v,
+                    _ => return None,
+                };
+                let a = match stack.pop().unwrap() {
+                    StackVal::Val(v) => v,
+                    _ => return None,
+                };
+                stack.push(StackVal::Val(py_tuple(vec![a, b])));
             }
             0x87 => {
                 // TUPLE3
-                if stack.len() < 3 { return None; }
-                let c = match stack.pop().unwrap() { StackVal::Val(v)=>v, _=>return None };
-                let b = match stack.pop().unwrap() { StackVal::Val(v)=>v, _=>return None };
-                let a = match stack.pop().unwrap() { StackVal::Val(v)=>v, _=>return None };
-                stack.push(StackVal::Val(py_tuple(vec![a,b,c])));
+                if stack.len() < 3 {
+                    return None;
+                }
+                let c = match stack.pop().unwrap() {
+                    StackVal::Val(v) => v,
+                    _ => return None,
+                };
+                let b = match stack.pop().unwrap() {
+                    StackVal::Val(v) => v,
+                    _ => return None,
+                };
+                let a = match stack.pop().unwrap() {
+                    StackVal::Val(v) => v,
+                    _ => return None,
+                };
+                stack.push(StackVal::Val(py_tuple(vec![a, b, c])));
             }
             b'R' => {
                 // REDUCE
@@ -205,7 +284,11 @@ pub fn try_unpickle_rangeiter_compat(data: &[u8]) -> Option<PyObjectRef> {
                 let callable = stack.pop()?;
                 let args = match args_v {
                     StackVal::Val(v) => {
-                        if let PyObject::Tuple(items) = &*v.borrow() { items.clone() } else { return None; }
+                        if let PyObject::Tuple(items) = &*v.borrow() {
+                            items.clone()
+                        } else {
+                            return None;
+                        }
                     }
                     _ => return None,
                 };
@@ -221,17 +304,29 @@ pub fn try_unpickle_rangeiter_compat(data: &[u8]) -> Option<PyObjectRef> {
                         let s = crate::object::to_index(&start_v).ok()?;
                         let e = crate::object::to_index(&stop_v).ok()?;
                         let p = crate::object::to_index(&step_v).ok()?;
-                        let r = PyObjectRef::imm(PyObject::Range { start: s, stop: e, step: p });
+                        let r = PyObjectRef::imm(PyObject::Range {
+                            start: s,
+                            stop: e,
+                            step: p,
+                        });
                         stack.push(StackVal::Val(r));
                     }
                     StackVal::GlobalIter => {
-                        if args.len() != 1 { return None; }
+                        if args.len() != 1 {
+                            return None;
+                        }
                         let range_obj = args[0].clone();
                         let (start, stop, step) = match &*range_obj.borrow() {
-                            PyObject::Range { start, stop, step } => (start.clone(), stop.clone(), step.clone()),
+                            PyObject::Range { start, stop, step } => {
+                                (start.clone(), stop.clone(), step.clone())
+                            }
                             _ => return None,
                         };
-                        let iter = PyObjectRef::new(PyObject::RangeIter { current: start.clone(), stop, step });
+                        let iter = PyObjectRef::new(PyObject::RangeIter {
+                            current: start.clone(),
+                            stop,
+                            step,
+                        });
                         stack.push(StackVal::Val(iter));
                     }
                     _ => return None,
@@ -245,18 +340,30 @@ pub fn try_unpickle_rangeiter_compat(data: &[u8]) -> Option<PyObjectRef> {
                     StackVal::Val(v) => crate::object::to_index(&v).ok()?,
                     _ => return None,
                 };
-                let obj = match obj_v { StackVal::Val(v)=>v, _=>return None };
+                let obj = match obj_v {
+                    StackVal::Val(v) => v,
+                    _ => return None,
+                };
                 // RangeIter BUILD: state is index
                 let (cur, st, stop_c) = {
                     let b = obj.borrow();
-                    if let PyObject::RangeIter { current, stop, step } = &*b {
+                    if let PyObject::RangeIter {
+                        current,
+                        stop,
+                        step,
+                    } = &*b
+                    {
                         (current.clone(), step.clone(), stop.clone())
                     } else {
                         return None;
                     }
                 };
                 let new_current = cur + &st * &state;
-                let new_iter = PyObjectRef::new(PyObject::RangeIter { current: new_current, stop: stop_c, step: st });
+                let new_iter = PyObjectRef::new(PyObject::RangeIter {
+                    current: new_current,
+                    stop: stop_c,
+                    step: st,
+                });
                 stack.push(StackVal::Val(new_iter));
             }
             0x81 => {
@@ -308,7 +415,7 @@ pub fn pickle_deserialize(
     }
     let marker = data[*pos];
     *pos += 1;
-            match marker {
+    match marker {
         b'N' => Ok(py_none()),
         b'T' => Ok(py_bool(true)),
         b'F' => Ok(py_bool(false)),
@@ -387,9 +494,7 @@ pub fn pickle_deserialize(
             // Class reference by name.
             let name_val = pickle_deserialize(data, pos, memo)?;
             let cname = name_val.str();
-            if let Some(t) =
-                PICKLE_CLASS_REGISTRY.with(|r| r.borrow().get(&cname).cloned())
-            {
+            if let Some(t) = PICKLE_CLASS_REGISTRY.with(|r| r.borrow().get(&cname).cloned()) {
                 return Ok(t);
             }
             // Fallback: resolve through live builtins/modules tables.
@@ -398,10 +503,8 @@ pub fn pickle_deserialize(
                     return Ok(b.clone());
                 }
                 for m in vm.modules.values() {
-                    if let Ok(v) = crate::object::ObjectAccess::get_attribute(
-                        &*m.borrow(),
-                        &cname,
-                    ) {
+                    if let Ok(v) = crate::object::ObjectAccess::get_attribute(&*m.borrow(), &cname)
+                    {
                         if matches!(&*v.borrow(), PyObject::Type { .. }) {
                             return Ok(v);
                         }
@@ -582,9 +685,7 @@ pub fn pickle_deserialize(
                             }
                         }
                         if module_str == "builtins" {
-                            if let Some(b) =
-                                vm.builtins.get(&crate::interner::intern(&name_str))
-                            {
+                            if let Some(b) = vm.builtins.get(&crate::interner::intern(&name_str)) {
                                 return Some(b.clone());
                             }
                         }

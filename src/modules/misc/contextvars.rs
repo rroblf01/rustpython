@@ -144,7 +144,10 @@ fn is_str_like(v: &PyObjectRef) -> bool {
 
 fn new_context_raw() -> PyObjectRef {
     let mut dict = AttrMap::new();
-    dict.insert_str("_data", PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new()))));
+    dict.insert_str(
+        "_data",
+        PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new()))),
+    );
     PyObjectRef::new(PyObject::Instance {
         typ: context_instance_type(),
         dict,
@@ -165,7 +168,9 @@ fn current_context() -> PyObjectRef {
 
 fn context_data(ctx: &PyObjectRef) -> PyObjectRef {
     if let PyObject::Instance { dict, .. } = &*ctx.borrow() {
-        dict.get_str("_data").expect("Context missing _data").clone()
+        dict.get_str("_data")
+            .expect("Context missing _data")
+            .clone()
     } else {
         unreachable!("not a _ContextRaw instance")
     }
@@ -245,10 +250,7 @@ fn context_var_repr(var: &PyObjectRef) -> String {
 
 fn token_repr(token: &PyObjectRef) -> String {
     if let PyObject::Instance { dict, .. } = &*token.borrow() {
-        let used = dict
-            .get_str("_used")
-            .map(|v| v.truthy())
-            .unwrap_or(false);
+        let used = dict.get_str("_used").map(|v| v.truthy()).unwrap_or(false);
         let var = dict.get_str("_var").cloned().unwrap_or_else(py_none);
         if used {
             format!(
@@ -334,7 +336,9 @@ fn positional_len(args: &[PyObjectRef]) -> usize {
     }
 }
 
-pub fn create_contextvars_dict(object_type: PyObjectRef) -> std::collections::HashMap<String, PyObjectRef> {
+pub fn create_contextvars_dict(
+    object_type: PyObjectRef,
+) -> std::collections::HashMap<String, PyObjectRef> {
     let mut d = std::collections::HashMap::new();
 
     macro_rules! method {
@@ -596,10 +600,15 @@ pub fn create_contextvars_dict(object_type: PyObjectRef) -> std::collections::Ha
         let has_extra_positional = positional_len(&args[1..]) > 0;
         let has_extra_kwargs = matches!(args.last(), Some(l) if matches!(&*l.borrow(), PyObject::Dict(d) if !d.is_empty()));
         if has_extra_positional || has_extra_kwargs {
-            return Err(PyError::type_error("Context() does not accept any arguments"));
+            return Err(PyError::type_error(
+                "Context() does not accept any arguments",
+            ));
         }
         if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-            dict.insert_str("_data", PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new()))));
+            dict.insert_str(
+                "_data",
+                PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new()))),
+            );
         }
         Ok(py_none())
     });

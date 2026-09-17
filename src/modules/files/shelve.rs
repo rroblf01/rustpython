@@ -20,9 +20,7 @@ fn shelf_get_data(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match &*args[0].borrow() {
         PyObject::Instance { dict, .. } => {
             if matches!(dict.get("_closed"), Some(v) if v.truthy()) {
-                return Err(PyError::value_error(
-                    "invalid operation on closed shelf",
-                ));
+                return Err(PyError::value_error("invalid operation on closed shelf"));
             }
             match dict.get("_data") {
                 Some(data) => Ok(data.clone()),

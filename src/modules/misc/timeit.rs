@@ -1,9 +1,9 @@
 use crate::object::*;
-use std::collections::HashMap;
-use std::cell::RefCell;
-use std::rc::Rc;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 /// Compile `stmt` once and run it `number` times in pooled VMs.
 /// Returns elapsed total seconds.
@@ -33,7 +33,10 @@ fn timeit_native_compile(src: &str) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::imm(PyObject::Code(Rc::new(code))))
 }
 
-fn timeit_native_run_in_globals(code_obj: &PyObjectRef, globals: &PyObjectRef) -> PyResult<PyObjectRef> {
+fn timeit_native_run_in_globals(
+    code_obj: &PyObjectRef,
+    globals: &PyObjectRef,
+) -> PyResult<PyObjectRef> {
     let code_rc = match &*code_obj.borrow() {
         PyObject::Code(c) => c.clone(),
         _ => return Err(PyError::type_error("_run_in_globals expects a code object")),
@@ -60,7 +63,6 @@ fn timeit_native_run_in_globals(code_obj: &PyObjectRef, globals: &PyObjectRef) -
     r
 }
 
-
 /// Native `timeit.Timer`.
 ///
 /// Faithful enough for CPython's own `test_timeit.py`:
@@ -76,10 +78,8 @@ fn split_kwargs(args: &[PyObjectRef]) -> (usize, Vec<(String, PyObjectRef)>) {
         if let PyObject::Dict(d) = &*b {
             if args.len() >= 2 {
                 let pairs = d.items();
-                let kw: Vec<(String, PyObjectRef)> = pairs
-                    .iter()
-                    .map(|(k, v)| (k.str(), v.clone()))
-                    .collect();
+                let kw: Vec<(String, PyObjectRef)> =
+                    pairs.iter().map(|(k, v)| (k.str(), v.clone())).collect();
                 return (args.len() - 1, kw);
             }
         }
@@ -120,7 +120,11 @@ fn make_timeit_type() -> PyObjectRef {
 
     t_method!("__init__", |args| {
         if std::env::var("RPY_DBG_TT").is_ok() {
-            eprintln!("NATIVE Timer.__init__ nargs={} a1={:?}", args.len(), args.get(1).map(|v| v.str()));
+            eprintln!(
+                "NATIVE Timer.__init__ nargs={} a1={:?}",
+                args.len(),
+                args.get(1).map(|v| v.str())
+            );
         }
         let self_obj = args
             .first()
@@ -140,14 +144,8 @@ fn make_timeit_type() -> PyObjectRef {
             if let PyObject::Instance { dict, .. } = &mut *b {
                 dict.insert_str("_stmt", stmt.clone().unwrap_or_else(|| py_str("pass")));
                 dict.insert_str("_setup", setup.clone().unwrap_or_else(|| py_str("pass")));
-                dict.insert_str(
-                    "_timer",
-                    timer.unwrap_or_else(|| py_none()),
-                );
-                dict.insert_str(
-                    "_globals",
-                    globals_v.unwrap_or_else(|| py_none()),
-                );
+                dict.insert_str("_timer", timer.unwrap_or_else(|| py_none()));
+                dict.insert_str("_globals", globals_v.unwrap_or_else(|| py_none()));
             }
         }
         Ok(py_none())
@@ -155,10 +153,7 @@ fn make_timeit_type() -> PyObjectRef {
 
     // Runs one timed measurement. Returns elapsed seconds per CPython rules:
     // uses the injected timer when present.
-    fn run_timed(
-        self_obj: &PyObjectRef,
-        number: u64,
-    ) -> PyResult<f64> {
+    fn run_timed(self_obj: &PyObjectRef, number: u64) -> PyResult<f64> {
         let (stmt_v, setup_v, timer_v, globals_v) = {
             let b = self_obj.borrow();
             let get = |k: &str| -> Option<PyObjectRef> {
@@ -243,15 +238,16 @@ fn make_timeit_type() -> PyObjectRef {
 
         // Clock
         use std::time::Instant;
-        let timer_is_usable = timer_v.as_ref().map(|t| {
-            match &*t.borrow() {
+        let timer_is_usable = timer_v
+            .as_ref()
+            .map(|t| match &*t.borrow() {
                 PyObject::None => false,
                 PyObject::Instance { typ, .. } => {
                     crate::object::lookup_dunder_via_mro(typ, "__call__").is_some()
                 }
                 _ => true,
-            }
-        }).unwrap_or(false);
+            })
+            .unwrap_or(false);
         let has_py_timer = timer_is_usable;
 
         if has_py_timer {
@@ -335,19 +331,29 @@ fn make_timeit_type() -> PyObjectRef {
     // Uses CPython's 1-2-5-per-decade search sequence.
     t_method!("autorange", |args| {
         let self_obj = args.first().cloned().unwrap();
-        let callback: Option<PyObjectRef> = args.get(1).and_then(|c| {
-            if matches!(&*c.borrow(), PyObject::None) { None } else { Some(c.clone()) }
-        }).or_else(|| {
-            // kwargs form: callback=<callable> in trailing Dict
-            args.last().and_then(|d| {
-                let b = d.borrow();
-                if let PyObject::Dict(dd) = &*b {
-                    dd.items().into_iter()
-                        .find(|(k, _)| k.str() == "callback")
-                        .map(|(_, v)| v.clone())
-                } else { None }
+        let callback: Option<PyObjectRef> = args
+            .get(1)
+            .and_then(|c| {
+                if matches!(&*c.borrow(), PyObject::None) {
+                    None
+                } else {
+                    Some(c.clone())
+                }
             })
-        });
+            .or_else(|| {
+                // kwargs form: callback=<callable> in trailing Dict
+                args.last().and_then(|d| {
+                    let b = d.borrow();
+                    if let PyObject::Dict(dd) = &*b {
+                        dd.items()
+                            .into_iter()
+                            .find(|(k, _)| k.str() == "callback")
+                            .map(|(_, v)| v.clone())
+                    } else {
+                        None
+                    }
+                })
+            });
         let report = |callback: &Option<PyObjectRef>, n: usize, secs: f64| -> PyResult<()> {
             if let Some(cb) = callback {
                 crate::object::call_function_disposable(
@@ -366,10 +372,7 @@ fn make_timeit_type() -> PyObjectRef {
                 report(&callback, number, secs)?;
                 if secs >= 0.2 {
                     // CPython returns TOTAL time for the whole run.
-                    return Ok(py_tuple(vec![
-                        py_int(number as i64),
-                        py_float(secs),
-                    ]));
+                    return Ok(py_tuple(vec![py_int(number as i64), py_float(secs)]));
                 }
             }
             base *= 10;
@@ -407,34 +410,46 @@ pub fn create_timeit_dict() -> HashMap<String, PyObjectRef> {
             Some(d) => {
                 let b = d.borrow();
                 if let PyObject::Dict(dd) = &*b {
-                    let mut p: Vec<PyObjectRef> = args[..args.len()-1].to_vec();
+                    let mut p: Vec<PyObjectRef> = args[..args.len() - 1].to_vec();
                     // drop a positional None/placeholder setup if kw supplies one
                     let wrapped = PyObjectRef::imm(PyObject::Dict(dd.clone()));
                     let (_, kwd) = split_kwargs(&[py_none(), wrapped]);
-                    if let Some(sv) = kw_lookup(&kwd, "setup") { if p.len() > 1 { p.truncate(1); } }
+                    if let Some(sv) = kw_lookup(&kwd, "setup") {
+                        if p.len() > 1 {
+                            p.truncate(1);
+                        }
+                    }
                     (p, kwd)
-                } else { (args.to_vec(), Vec::new()) }
+                } else {
+                    (args.to_vec(), Vec::new())
+                }
             }
             None => (args.to_vec(), Vec::new()),
         };
         let stmt_v = pos.first().cloned().unwrap_or_else(|| py_str("pass"));
-        let setup_v = kw_lookup(&kw, "setup").cloned()
+        let setup_v = kw_lookup(&kw, "setup")
+            .cloned()
             .or_else(|| pos.get(1).cloned())
             .unwrap_or_else(|| py_str("pass"));
-        let timer_v = kw_lookup(&kw, "timer").cloned()
+        let timer_v = kw_lookup(&kw, "timer")
+            .cloned()
             .or_else(|| pos.get(2).cloned())
             .unwrap_or_else(|| py_none());
-        let globals_v = kw_lookup(&kw, "globals").cloned()
+        let globals_v = kw_lookup(&kw, "globals")
+            .cloned()
             .or_else(|| pos.get(3).cloned())
             .unwrap_or_else(|| py_none());
         let mut cargs = vec![stmt_v, setup_v, timer_v, globals_v];
         let timer_obj = make_timeit_type();
         let inst = crate::object::call_function(&timer_obj, cargs)?;
         let m = inst.borrow().get_attribute("timeit")?;
-        let nv_owned = kw_lookup(&kw, "number").map(|v| v.clone())
+        let nv_owned = kw_lookup(&kw, "number")
+            .map(|v| v.clone())
             .or_else(|| pos.get(1).cloned());
         let mut margs: Vec<PyObjectRef> = vec![];
-        if let Some(nv) = nv_owned { margs.push(nv); }
+        if let Some(nv) = nv_owned {
+            margs.push(nv);
+        }
         crate::object::call_function(&m, margs)
     });
 
@@ -447,33 +462,44 @@ pub fn create_timeit_dict() -> HashMap<String, PyObjectRef> {
                 if let PyObject::Dict(dd) = &*b {
                     let wrapped = PyObjectRef::imm(PyObject::Dict(dd.clone()));
                     let (_, kwd) = split_kwargs(&[py_none(), wrapped]);
-                    let p: Vec<PyObjectRef> = args[..args.len()-1].to_vec();
+                    let p: Vec<PyObjectRef> = args[..args.len() - 1].to_vec();
                     (p, kwd)
-                } else { (args.to_vec(), Vec::new()) }
+                } else {
+                    (args.to_vec(), Vec::new())
+                }
             }
             None => (args.to_vec(), Vec::new()),
         };
         let stmt_v = pos.first().cloned().unwrap_or_else(|| py_str("pass"));
-        let setup_v = kw_lookup(&kw, "setup").cloned()
+        let setup_v = kw_lookup(&kw, "setup")
+            .cloned()
             .or_else(|| pos.get(1).cloned())
             .unwrap_or_else(|| py_str("pass"));
-        let timer_v = kw_lookup(&kw, "timer").cloned()
+        let timer_v = kw_lookup(&kw, "timer")
+            .cloned()
             .or_else(|| pos.get(2).cloned())
             .unwrap_or_else(|| py_none());
-        let globals_v = kw_lookup(&kw, "globals").cloned()
+        let globals_v = kw_lookup(&kw, "globals")
+            .cloned()
             .or_else(|| pos.get(3).cloned())
             .unwrap_or_else(|| py_none());
         let mut cargs = vec![stmt_v, setup_v, timer_v, globals_v];
         let timer_obj = make_timeit_type();
         let inst = crate::object::call_function(&timer_obj, cargs)?;
         let m = inst.borrow().get_attribute("repeat")?;
-        let rv_owned = kw_lookup(&kw, "repeat").map(|v| v.clone())
+        let rv_owned = kw_lookup(&kw, "repeat")
+            .map(|v| v.clone())
             .or_else(|| pos.get(1).cloned());
-        let nv_owned = kw_lookup(&kw, "number").map(|v| v.clone())
+        let nv_owned = kw_lookup(&kw, "number")
+            .map(|v| v.clone())
             .or_else(|| pos.get(2).cloned());
         let mut margs: Vec<PyObjectRef> = vec![];
-        if let Some(rv) = rv_owned { margs.push(rv); }
-        if let Some(nv) = nv_owned { margs.push(nv); }
+        if let Some(rv) = rv_owned {
+            margs.push(rv);
+        }
+        if let Some(nv) = nv_owned {
+            margs.push(nv);
+        }
         crate::object::call_function(&m, margs)
     });
 
@@ -490,14 +516,21 @@ pub fn create_timeit_dict() -> HashMap<String, PyObjectRef> {
                 let n = args[1].as_i64().unwrap_or(0).max(0) as usize;
                 if n == 0 {
                     // strip common leading whitespace per line, preserving empties
-                    let out: Vec<String> = src
-                        .lines()
-                        .map(|l| l.trim_start().to_string())
-                        .collect();
+                    let out: Vec<String> =
+                        src.lines().map(|l| l.trim_start().to_string()).collect();
                     return Ok(py_str(&out.join("\n")));
                 }
                 let pad = " ".repeat(n);
-                let out: Vec<String> = src.lines().map(|l| if l.is_empty() { String::new() } else { format!("{}{}", pad, l) }).collect();
+                let out: Vec<String> = src
+                    .lines()
+                    .map(|l| {
+                        if l.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{}{}", pad, l)
+                        }
+                    })
+                    .collect();
                 Ok(py_str(&out.join("\n")))
             },
         }),

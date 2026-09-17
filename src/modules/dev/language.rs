@@ -64,9 +64,8 @@ pub fn warnings_emit(msg: &str, category: &str) {
             if let PyObject::List(items) = &mut *list.borrow_mut() {
                 let cat_obj = {
                     let mut found: Option<PyObjectRef> = None;
-                    let result = std::panic::catch_unwind(|| {
-                        crate::vm::get_shared_builtins_module()
-                    });
+                    let result =
+                        std::panic::catch_unwind(|| crate::vm::get_shared_builtins_module());
                     if let Ok(bmod) = result {
                         if let PyObject::Module { dict, .. } = &*bmod.borrow() {
                             if let Some(obj) = dict.get_str(category) {
@@ -97,7 +96,9 @@ pub fn warnings_emit(msg: &str, category: &str) {
                     traceback: None,
                     extra: None,
                 });
-                let _ = msg_obj.borrow_mut().set_attribute("__class__", cat_obj.clone());
+                let _ = msg_obj
+                    .borrow_mut()
+                    .set_attribute("__class__", cat_obj.clone());
                 dict.insert_str("message", msg_obj);
                 dict.insert_str("category", cat_obj.clone());
                 dict.insert_str("filename", py_str("<input>"));
@@ -150,9 +151,6 @@ pub fn warnings_pop_record() {
     });
 }
 
-
-
-
 pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! warn_func {
@@ -166,7 +164,7 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
             );
         };
     }
-// Real, shared `warnings.filters` state — was previously a fixed,
+    // Real, shared `warnings.filters` state — was previously a fixed,
     // disconnected empty list (`d.insert_str("filters", py_list(vec![]))`
     // below) with `filterwarnings`/`_get_filters` both no-ops, so nothing
     // ever actually got recorded. `Lib/test/support/__init__.py`'s
@@ -385,7 +383,6 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-
 pub fn create_warnings_c_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! warn_func {
@@ -410,7 +407,6 @@ pub fn create_warnings_c_dict() -> HashMap<String, PyObjectRef> {
     });
     d
 }
-
 
 pub fn create_dataclasses_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
@@ -592,7 +588,6 @@ pub fn create_dataclasses_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-
 pub fn create_unittest_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
 
@@ -723,7 +718,6 @@ pub fn create_unittest_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
-
 /// `zipimporter` method marker — every real zipimporter method (see
 /// `zipimporter_method_with_vm`) is registered under this SAME bare fn
 /// (never actually invoked; reaching it means the `call.rs`/`op_call.rs`
@@ -754,10 +748,7 @@ fn zi_get_str_attr(self_obj: &PyObjectRef, attr: &str) -> PyResult<String> {
 
 fn zi_arg_str(args: &[PyObjectRef], idx: usize, method: &str) -> PyResult<String> {
     args.get(idx).map(|a| a.str()).ok_or_else(|| {
-        PyError::type_error(format!(
-            "{}() missing required positional argument",
-            method
-        ))
+        PyError::type_error(format!("{}() missing required positional argument", method))
     })
 }
 
@@ -930,7 +921,9 @@ pub(crate) fn zipimporter_method_with_vm(
                     .map(|v| v.str())
                     .unwrap_or_default()
             } else {
-                return Err(PyError::type_error("exec_module() argument must be a module"));
+                return Err(PyError::type_error(
+                    "exec_module() argument must be a module",
+                ));
             };
             let base = zi_module_base(&prefix, &fullname);
             match zi_module_info(vm, &archive, &base) {
@@ -959,8 +952,8 @@ pub(crate) fn zipimporter_method_with_vm(
         "load_module" => {
             let fullname = zi_arg_str(args, 0, "load_module")?;
             let base = zi_module_base(&prefix, &fullname);
-            let (is_pkg, member, data) =
-                zi_module_info(vm, &archive, &base).ok_or_else(|| zi_zip_import_error(&fullname))?;
+            let (is_pkg, member, data) = zi_module_info(vm, &archive, &base)
+                .ok_or_else(|| zi_zip_import_error(&fullname))?;
             let virtual_path = format!("{}/{}", archive, member);
             let code = zi_code_from_member(&member, &data, &virtual_path)
                 .ok_or_else(|| zi_zip_import_error(&fullname))?;
@@ -1089,7 +1082,11 @@ pub fn create_zipimport_dict() -> HashMap<String, PyObjectRef> {
                 let msg = args.first().map(|a| a.str()).unwrap_or_default();
                 Ok(PyObjectRef::new(PyObject::Exception {
                     typ: "ZipImportError".to_string(),
-                    args: if args.is_empty() { vec![] } else { vec![py_str(&msg)] },
+                    args: if args.is_empty() {
+                        vec![]
+                    } else {
+                        vec![py_str(&msg)]
+                    },
                     cause: None,
                     suppress_context: false,
                     context: None,
@@ -1224,4 +1221,3 @@ pub fn zipimporter_new(args: &[PyObjectRef], zi_cls: PyObjectRef) -> PyResult<Py
         )),
     }
 }
-

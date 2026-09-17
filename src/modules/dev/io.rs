@@ -129,7 +129,8 @@ pub fn tiw_delegate_with_vm(
             // readline until EOF.
             let mut lines = Vec::new();
             loop {
-                let data = crate::object::call_method_rebound(vm, &raw, "readline", vec![py_int(-1)])?;
+                let data =
+                    crate::object::call_method_rebound(vm, &raw, "readline", vec![py_int(-1)])?;
                 let s = if let PyObject::Bytes(ref b) = &*data.borrow() {
                     py_str(&String::from_utf8_lossy(&b[..]))
                 } else {
@@ -148,14 +149,20 @@ pub fn tiw_delegate_with_vm(
             Ok(py_list(lines))
         }
         "write" => {
-            let text = args.get(1).cloned().ok_or_else(|| PyError::type_error("write missing text"))?;
+            let text = args
+                .get(1)
+                .cloned()
+                .ok_or_else(|| PyError::type_error("write missing text"))?;
             let payload = match &*text.borrow() {
                 PyObject::Str(s2) => PyObjectRef::imm(PyObject::Bytes(s2.as_bytes().to_vec())),
                 _ => text.clone(),
             };
             let r = crate::object::call_method_rebound(vm, &raw, "write", vec![payload])?;
             if matches!(&*r.borrow(), PyObject::None) {
-                let n = match &*text.borrow() { PyObject::Str(s2) => s2.chars().count() as i64, _ => 0 };
+                let n = match &*text.borrow() {
+                    PyObject::Str(s2) => s2.chars().count() as i64,
+                    _ => 0,
+                };
                 Ok(py_int(n))
             } else {
                 Ok(r)
@@ -169,7 +176,12 @@ pub fn tiw_delegate_with_vm(
         "tell" => crate::object::call_method_rebound(vm, &raw, "tell", vec![]),
         "flush" => crate::object::call_method_rebound(vm, &raw, "flush", vec![]),
         "close" => {
-            let already = args[0].borrow().get_attribute("_closed").ok().map(|v| v.truthy()).unwrap_or(false);
+            let already = args[0]
+                .borrow()
+                .get_attribute("_closed")
+                .ok()
+                .map(|v| v.truthy())
+                .unwrap_or(false);
             if !already {
                 let _ = crate::object::call_method_rebound(vm, &raw, "close", vec![]);
                 if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
@@ -186,7 +198,9 @@ pub fn tiw_delegate_with_vm(
         "isatty" => crate::object::call_method_rebound(vm, &raw, "isatty", vec![]),
         "writelines" => {
             if args.len() < 2 {
-                return Err(PyError::type_error("writelines() takes exactly one argument"));
+                return Err(PyError::type_error(
+                    "writelines() takes exactly one argument",
+                ));
             }
             let lines = &args[1];
             let iter = crate::object::builtin_iter(&[lines.clone()])?;
@@ -194,10 +208,13 @@ pub fn tiw_delegate_with_vm(
                 match crate::object::builtin_next(&[iter.clone()]) {
                     Ok(line) => {
                         let payload = match &*line.borrow() {
-                            PyObject::Str(s2) => PyObjectRef::imm(PyObject::Bytes(s2.as_bytes().to_vec())),
+                            PyObject::Str(s2) => {
+                                PyObjectRef::imm(PyObject::Bytes(s2.as_bytes().to_vec()))
+                            }
                             _ => line.clone(),
                         };
-                        let _ = crate::object::call_method_rebound(vm, &raw, "write", vec![payload])?;
+                        let _ =
+                            crate::object::call_method_rebound(vm, &raw, "write", vec![payload])?;
                     }
                     Err(e) if crate::object::is_stop_iteration_error(&e) => break,
                     Err(e) => return Err(e),
@@ -222,7 +239,9 @@ pub fn tiw_delegate_with_vm(
             }
             crate::object::call_method_rebound(vm, &raw, "mode", vec![])
         }
-        _ => Err(PyError::runtime_error("unknown TextIOWrapper delegate method")),
+        _ => Err(PyError::runtime_error(
+            "unknown TextIOWrapper delegate method",
+        )),
     }
 }
 
@@ -381,7 +400,11 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 let remaining = &data[pos..];
                 // Respect size limit if provided (CPython's readline(size) caps
                 // the returned bytes, even if the line is longer)
-                let size_limit = args.get(0).and_then(|a| a.as_i64()).filter(|&n| n >= 0).map(|n| n as usize);
+                let size_limit = args
+                    .get(0)
+                    .and_then(|a| a.as_i64())
+                    .filter(|&n| n >= 0)
+                    .map(|n| n as usize);
                 let mut end = remaining
                     .iter()
                     .position(|&c| c == b'\n')
@@ -508,7 +531,13 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 let end = if !args.is_empty() {
                     args[0]
                         .as_i64()
-                        .map(|n| if n < 0 { data.len() } else { (pos + n as usize).min(data.len()) })
+                        .map(|n| {
+                            if n < 0 {
+                                data.len()
+                            } else {
+                                (pos + n as usize).min(data.len())
+                            }
+                        })
                         .unwrap_or(data.len())
                 } else {
                     data.len()
@@ -549,7 +578,11 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 let b = buf_rc.clone();
                 let p = pos_rc.clone();
                 move |args: &[PyObjectRef]| {
-                    let size = args.get(0).and_then(|a| a.as_i64()).map(|n| n.max(0) as usize).unwrap_or(*p.borrow());
+                    let size = args
+                        .get(0)
+                        .and_then(|a| a.as_i64())
+                        .map(|n| n.max(0) as usize)
+                        .unwrap_or(*p.borrow());
                     let mut buf = b.borrow_mut();
                     if size < buf.len() {
                         buf.truncate(size);
@@ -1169,7 +1202,9 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                     name: "__iter__".to_string(),
                     func: |args: &[PyObjectRef]| {
                         if args.is_empty() {
-                            return Err(PyError::type_error("__iter__() missing 1 required positional argument: 'self'"));
+                            return Err(PyError::type_error(
+                                "__iter__() missing 1 required positional argument: 'self'",
+                            ));
                         }
                         Ok(args[0].clone())
                     },
@@ -1272,21 +1307,27 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     let tiw_inner = {
         let mut td: HashMap<String, PyObjectRef> = HashMap::new();
         let bf = |name: &'static str, f: crate::object::BuiltinFunc| {
-            PyObjectRef::new(PyObject::BuiltinFunction { name: name.to_string(), func: f })
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: name.to_string(),
+                func: f,
+            })
         };
-        td.insert("__init__".into(), bf("__init__", |args| {
-            if args.len() < 2 {
-                return Err(PyError::type_error("missing required argument 'buffer'"));
-            }
-            if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-                dict.insert_str("_raw", args[1].clone());
-                dict.insert_str("_closed", py_bool(false));
-                dict.insert_str("encoding", py_str("utf-8"));
-                dict.insert_str("errors", py_str("strict"));
-                dict.insert_str("newlines", py_none());
-            }
-            Ok(py_none())
-        }));
+        td.insert(
+            "__init__".into(),
+            bf("__init__", |args| {
+                if args.len() < 2 {
+                    return Err(PyError::type_error("missing required argument 'buffer'"));
+                }
+                if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                    dict.insert_str("_raw", args[1].clone());
+                    dict.insert_str("_closed", py_bool(false));
+                    dict.insert_str("encoding", py_str("utf-8"));
+                    dict.insert_str("errors", py_str("strict"));
+                    dict.insert_str("newlines", py_none());
+                }
+                Ok(py_none())
+            }),
+        );
         // read/readline/readlines/write/seek/tell/flush/close/truncate/
         // fileno/isatty/writelines all need to delegate to the raw object's
         // OWN (possibly Python-subclass-overridden) method, which requires a
@@ -1314,8 +1355,18 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         // already holds the genuinely live `&mut VirtualMachine` and can
         // pass it straight through — no second alias ever created.
         for name in [
-            "read", "readline", "readlines", "write", "seek", "tell",
-            "flush", "close", "truncate", "fileno", "isatty", "writelines",
+            "read",
+            "readline",
+            "readlines",
+            "write",
+            "seek",
+            "tell",
+            "flush",
+            "close",
+            "truncate",
+            "fileno",
+            "isatty",
+            "writelines",
         ] {
             td.insert(name.into(), bf(name, tiw_delegate_marker));
         }
@@ -1327,11 +1378,14 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         // directly). `__next__` delegates to the same `readline` path as
         // the explicit method, raising `StopIteration` on an empty read
         // (EOF) exactly like real Python's file iterator protocol.
-        td.insert("__iter__".into(), bf("__iter__", |args: &[PyObjectRef]| {
-            args.first().cloned().ok_or_else(|| {
-                PyError::type_error("__iter__() missing 1 required positional argument: 'self'")
-            })
-        }));
+        td.insert(
+            "__iter__".into(),
+            bf("__iter__", |args: &[PyObjectRef]| {
+                args.first().cloned().ok_or_else(|| {
+                    PyError::type_error("__iter__() missing 1 required positional argument: 'self'")
+                })
+            }),
+        );
         // `__next__` deliberately does NOT go through `tiw_delegate_marker`
         // (unlike `read`/`readline`/...): those all reach `call.rs`'s
         // interception through a live bytecode `CALL`, which holds the real
@@ -1350,49 +1404,59 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         // (never user Python subclasses in the tested paths), whose
         // `readline` is itself a plain `Closure`/`BuiltinMethod` needing no
         // VM either.
-        td.insert("__next__".into(), bf("__next__", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            let readline = raw.borrow().get_attribute("readline")?;
-            let bound = match &*readline.borrow() {
-                PyObject::BuiltinMethod { func, name, self_obj } if matches!(&*self_obj.borrow(), PyObject::None) => {
-                    PyObjectRef::imm(PyObject::BuiltinMethod {
-                        name: name.clone(),
-                        func: *func,
-                        self_obj: raw.clone(),
-                    })
+        td.insert(
+            "__next__".into(),
+            bf("__next__", |args: &[PyObjectRef]| {
+                crate::modules::dev::io_ensure_open(args)?;
+                let raw = crate::modules::dev::io_get_raw(args)?;
+                let readline = raw.borrow().get_attribute("readline")?;
+                let bound = match &*readline.borrow() {
+                    PyObject::BuiltinMethod {
+                        func,
+                        name,
+                        self_obj,
+                    } if matches!(&*self_obj.borrow(), PyObject::None) => {
+                        PyObjectRef::imm(PyObject::BuiltinMethod {
+                            name: name.clone(),
+                            func: *func,
+                            self_obj: raw.clone(),
+                        })
+                    }
+                    _ => readline.clone(),
+                };
+                let data = crate::object::builtin_call(&bound, &[py_int(-1)])?;
+                let s = if let PyObject::Bytes(ref b) = &*data.borrow() {
+                    py_str(&String::from_utf8_lossy(&b[..]))
+                } else {
+                    data.clone()
+                };
+                let is_empty = match &*s.borrow() {
+                    PyObject::Str(st) => st.is_empty(),
+                    PyObject::Bytes(b) => b.is_empty(),
+                    _ => false,
+                };
+                if is_empty {
+                    Err(PyError::StopIteration)
+                } else {
+                    Ok(s)
                 }
-                _ => readline.clone(),
-            };
-            let data = crate::object::builtin_call(&bound, &[py_int(-1)])?;
-            let s = if let PyObject::Bytes(ref b) = &*data.borrow() {
-                py_str(&String::from_utf8_lossy(&b[..]))
-            } else {
-                data.clone()
-            };
-            let is_empty = match &*s.borrow() {
-                PyObject::Str(st) => st.is_empty(),
-                PyObject::Bytes(b) => b.is_empty(),
-                _ => false,
-            };
-            if is_empty {
-                Err(PyError::StopIteration)
-            } else {
-                Ok(s)
-            }
-        }));
+            }),
+        );
         td.insert("reconfigure".into(), bf("reconfigure", |_a| Ok(py_none())));
         td.insert("readable".into(), bf("readable", |_a| Ok(py_bool(true))));
         td.insert("writable".into(), bf("writable", |_a| Ok(py_bool(true))));
         td.insert("seekable".into(), bf("seekable", |_a| Ok(py_bool(true))));
-        td.insert("detach".into(), bf("detach", |args: &[PyObjectRef]| {
-            crate::modules::dev::io_ensure_open(args)?;
-            let raw = crate::modules::dev::io_get_raw(args)?;
-            if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-                dict.insert_str("_closed", py_bool(true));
-            }
-            Ok(raw)
-        }));
+        td.insert(
+            "detach".into(),
+            bf("detach", |args: &[PyObjectRef]| {
+                crate::modules::dev::io_ensure_open(args)?;
+                let raw = crate::modules::dev::io_get_raw(args)?;
+                if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
+                    dict.insert_str("_closed", py_bool(true));
+                }
+                Ok(raw)
+            }),
+        );
         td.insert(
             "buffer".into(),
             PyObjectRef::new(PyObject::Property(Box::new(crate::object::PropertyData {
@@ -1412,7 +1476,12 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
                     name: "closed".to_string(),
                     func: |args: &[PyObjectRef]| {
-                        let closed = args[0].borrow().get_attribute("_closed").ok().map(|v| v.truthy()).unwrap_or(false);
+                        let closed = args[0]
+                            .borrow()
+                            .get_attribute("_closed")
+                            .ok()
+                            .map(|v| v.truthy())
+                            .unwrap_or(false);
                         Ok(py_bool(closed))
                     },
                 })),
@@ -1467,7 +1536,10 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 doc: None,
             }))),
         );
-        td.insert("__enter__".into(), bf("__enter__", |args: &[PyObjectRef]| Ok(args[0].clone())));
+        td.insert(
+            "__enter__".into(),
+            bf("__enter__", |args: &[PyObjectRef]| Ok(args[0].clone())),
+        );
         td.insert("__exit__".into(), bf("__exit__", |_a| Ok(py_bool(false))));
         td
     };

@@ -206,14 +206,21 @@ pub fn pickle_serialize(
         }
         PyObject::DictItemsIter { items, index, .. } => {
             buf.push(b'i');
-            let remaining: Vec<PyObjectRef> = items[*index..].iter().map(|(k, v)| py_tuple(vec![k.clone(), v.clone()])).collect();
+            let remaining: Vec<PyObjectRef> = items[*index..]
+                .iter()
+                .map(|(k, v)| py_tuple(vec![k.clone(), v.clone()]))
+                .collect();
             pickle_serialize(&py_list(remaining), buf, memo, protocol)?;
             pickle_serialize(&py_int(0), buf, memo, protocol)?;
         }
         PyObject::DictRevIter { keys, index, .. } => {
             buf.push(b'i');
             let idx = *index;
-            let remaining: Vec<PyObjectRef> = if idx < 0 { vec![] } else { keys[..=idx as usize].iter().rev().cloned().collect() };
+            let remaining: Vec<PyObjectRef> = if idx < 0 {
+                vec![]
+            } else {
+                keys[..=idx as usize].iter().rev().cloned().collect()
+            };
             pickle_serialize(&py_list(remaining), buf, memo, protocol)?;
             pickle_serialize(&py_int(0), buf, memo, protocol)?;
         }
@@ -410,13 +417,12 @@ pub fn pickle_serialize(
                     let mborrow = mref.borrow();
                     if let PyObject::Module { dict, .. } = &*mborrow {
                         for (k, v) in dict.iter() {
-                            let ptr_match = if let (Some(tp), Some(vp)) =
-                                (target_ptr, container_ptr(&v))
-                            {
-                                tp == vp
-                            } else {
-                                false
-                            };
+                            let ptr_match =
+                                if let (Some(tp), Some(vp)) = (target_ptr, container_ptr(&v)) {
+                                    tp == vp
+                                } else {
+                                    false
+                                };
                             let k_str = crate::interner::lookup_str(*k);
                             let name_match = !own_name.is_empty()
                                 && k_str == own_name
@@ -434,13 +440,12 @@ pub fn pickle_serialize(
                 if found.is_none() {
                     for (k, v) in vm.builtins.iter() {
                         let bname = crate::interner::lookup_str(*k);
-                        let ptr_match = if let (Some(tp), Some(vp)) =
-                            (target_ptr, container_ptr(&v))
-                        {
-                            tp == vp
-                        } else {
-                            false
-                        };
+                        let ptr_match =
+                            if let (Some(tp), Some(vp)) = (target_ptr, container_ptr(&v)) {
+                                tp == vp
+                            } else {
+                                false
+                            };
                         let name_match = !own_name.is_empty() && bname == own_name;
                         if ptr_match || name_match {
                             found = Some(("builtins".to_string(), bname.to_string()));
@@ -456,11 +461,43 @@ pub fn pickle_serialize(
                 pickle_serialize(&py_str(&attr_name), buf, memo, protocol)?;
             } else if !own_name.is_empty() {
                 let mod_guess = if [
-                    "add", "sub", "mul", "truediv", "floordiv", "mod", "pow", "lt", "le",
-                    "eq", "ne", "ge", "gt", "and_", "or_", "xor", "not_", "getitem",
-                    "setitem", "delitem", "contains", "index", "indexOf", "countOf",
-                    "truth", "neg", "pos", "abs", "inv", "lshift", "rshift", "length_hint",
-                    "is_", "is_not", "itemgetter", "attrgetter", "methodcaller",
+                    "add",
+                    "sub",
+                    "mul",
+                    "truediv",
+                    "floordiv",
+                    "mod",
+                    "pow",
+                    "lt",
+                    "le",
+                    "eq",
+                    "ne",
+                    "ge",
+                    "gt",
+                    "and_",
+                    "or_",
+                    "xor",
+                    "not_",
+                    "getitem",
+                    "setitem",
+                    "delitem",
+                    "contains",
+                    "index",
+                    "indexOf",
+                    "countOf",
+                    "truth",
+                    "neg",
+                    "pos",
+                    "abs",
+                    "inv",
+                    "lshift",
+                    "rshift",
+                    "length_hint",
+                    "is_",
+                    "is_not",
+                    "itemgetter",
+                    "attrgetter",
+                    "methodcaller",
                 ]
                 .contains(&own_name.as_str())
                 {
@@ -502,7 +539,9 @@ pub fn pickle_serialize(
                 buf.push(b'N');
             }
         }
-        PyObject::Type { name, dict: tdict, .. } => {
+        PyObject::Type {
+            name, dict: tdict, ..
+        } => {
             // Classes-as-values (e.g. defaultdict's factory argument):
             // register in the same name->type registry the instance
             // deserializer uses, then emit 'T' <name>.
@@ -540,7 +579,10 @@ pub fn pickle_serialize(
                 .get_str("kind_name")
                 .map(|v| v.str())
                 .unwrap_or_else(|| "keys".to_string());
-            return Err(PyError::type_error(format!("cannot pickle 'dict_{}' object", kind)));
+            return Err(PyError::type_error(format!(
+                "cannot pickle 'dict_{}' object",
+                kind
+            )));
         }
         PyObject::Instance { typ, dict } => {
             // Plain user-class instance (no native backing): memoize by
@@ -559,9 +601,7 @@ pub fn pickle_serialize(
                 let tb = typ.borrow();
                 match &*tb {
                     PyObject::Type { name, .. } => name.clone(),
-                    _ => {
-                        return Err(PyError::type_error("cannot pickle non-type instance"))
-                    }
+                    _ => return Err(PyError::type_error("cannot pickle non-type instance")),
                 }
             };
             PICKLE_CLASS_REGISTRY.with(|r| {

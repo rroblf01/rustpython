@@ -542,7 +542,9 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("rmdir() missing argument"));
         }
         let s = path_instance_str(&args[0]);
-        std::fs::remove_dir(&s).map(|_| py_none()).map_err(|e| PyError::os_error_from_io(&e))
+        std::fs::remove_dir(&s)
+            .map(|_| py_none())
+            .map_err(|e| PyError::os_error_from_io(&e))
     });
 
     // .chmod(mode)
@@ -734,7 +736,11 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
     // .glob(pattern) -> list[Path] (shallow: only "*"/plain-name patterns
     // and a leading "**/" are handled; enough for the common recursive-glob
     // idiom, not full fnmatch-on-every-component).
-    fn collect_glob(base: &std::path::Path, pattern: &str, recursive_all: bool) -> Vec<std::path::PathBuf> {
+    fn collect_glob(
+        base: &std::path::Path,
+        pattern: &str,
+        recursive_all: bool,
+    ) -> Vec<std::path::PathBuf> {
         let mut out = vec![];
         let entries = match std::fs::read_dir(base) {
             Ok(e) => e,
@@ -1153,4 +1159,3 @@ pub fn shelf_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 
     Ok(instance)
 }
-

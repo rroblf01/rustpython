@@ -379,25 +379,41 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex) -> PyResult<()> 
             let nxt = chars[i + 1];
             if nxt == 'g' {
                 if i + 2 >= chars.len() || chars[i + 2] != '<' {
-                    return Err(re_pattern_error("missing <".to_string(), Some(repl.to_string()), Some(2)));
+                    return Err(re_pattern_error(
+                        "missing <".to_string(),
+                        Some(repl.to_string()),
+                        Some(2),
+                    ));
                 }
                 let mut j = i + 3;
                 while j < chars.len() && chars[j] != '>' {
                     j += 1;
                 }
                 if j >= chars.len() {
-                    return Err(re_pattern_error("missing >, unterminated name".to_string(), Some(repl.to_string()), Some(3)));
+                    return Err(re_pattern_error(
+                        "missing >, unterminated name".to_string(),
+                        Some(repl.to_string()),
+                        Some(3),
+                    ));
                 }
                 let name: String = chars[i + 3..j].iter().collect();
                 if name.is_empty() {
-                    return Err(re_pattern_error("missing group name".to_string(), Some(repl.to_string()), Some(3)));
+                    return Err(re_pattern_error(
+                        "missing group name".to_string(),
+                        Some(repl.to_string()),
+                        Some(3),
+                    ));
                 }
                 let mut bad = false;
                 for (idx, ch) in name.chars().enumerate() {
                     if idx == 0 && ch.is_ascii_digit() {
                         if let Ok(num) = name.parse::<usize>() {
                             if num == 0 || num > n_groups {
-                                return Err(re_pattern_error(format!("invalid group reference {}", num), Some(repl.to_string()), Some(3)));
+                                return Err(re_pattern_error(
+                                    format!("invalid group reference {}", num),
+                                    Some(repl.to_string()),
+                                    Some(3),
+                                ));
                             }
                         } else {
                             bad = true;
@@ -413,7 +429,11 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex) -> PyResult<()> 
                     bad = true;
                 }
                 if bad {
-                    return Err(re_pattern_error(format!("bad character in group name '{}'", name), Some(repl.to_string()), Some(3)));
+                    return Err(re_pattern_error(
+                        format!("bad character in group name '{}'", name),
+                        Some(repl.to_string()),
+                        Some(3),
+                    ));
                 }
                 i = j + 1;
                 continue;
@@ -429,7 +449,11 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex) -> PyResult<()> 
                 }
                 if let Ok(num) = num_str.parse::<usize>() {
                     if num == 0 || num > n_groups {
-                        return Err(re_pattern_error(format!("invalid group reference {}", num), Some(repl.to_string()), Some(1)));
+                        return Err(re_pattern_error(
+                            format!("invalid group reference {}", num),
+                            Some(repl.to_string()),
+                            Some(1),
+                        ));
                     }
                 }
                 i = j;

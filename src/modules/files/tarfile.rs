@@ -16,7 +16,9 @@ use std::collections::HashMap;
 // fallback, PAX extended-header fallback) matches real CPython.
 
 fn ti_get_str(dict: &AttrMap, key: &str, default: &str) -> String {
-    dict.get(key).map(|v| v.str()).unwrap_or_else(|| default.to_string())
+    dict.get(key)
+        .map(|v| v.str())
+        .unwrap_or_else(|| default.to_string())
 }
 
 fn ti_get_i64(dict: &AttrMap, key: &str, default: i64) -> i64 {
@@ -230,7 +232,10 @@ fn tar_pax_record(keyword: &str, value: &str) -> Vec<u8> {
 /// A PAX extended-header block sequence (real CPython's
 /// `TarInfo._create_pax_generic_header()`, `encoding` simplified to
 /// UTF-8 — see this module's top-of-file note).
-fn tar_create_pax_generic_header(pax_headers: &[(String, String)], typeflag: u8) -> PyResult<Vec<u8>> {
+fn tar_create_pax_generic_header(
+    pax_headers: &[(String, String)],
+    typeflag: u8,
+) -> PyResult<Vec<u8>> {
     let mut records = Vec::new();
     for (k, v) in pax_headers {
         records.extend(tar_pax_record(k, v));
@@ -265,7 +270,9 @@ fn tar_create_pax_generic_header(pax_headers: &[(String, String)], typeflag: u8)
 /// positional — see `src/vm/call.rs`).
 fn ti_tobuf(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
-        return Err(PyError::type_error("tobuf() missing required argument: 'self'"));
+        return Err(PyError::type_error(
+            "tobuf() missing required argument: 'self'",
+        ));
     }
     let mut format: i64 = 2; // DEFAULT_FORMAT = PAX_FORMAT (real CPython's own default)
     for extra in &args[1..] {
@@ -313,8 +320,21 @@ fn ti_tobuf(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 (String::new(), name.clone())
             };
             tar_create_header(
-                &short_name, mode, uid, gid, size, mtime, typeflag, &linkname, POSIX_MAGIC,
-                &uname, &gname, devmajor, devminor, &prefix, false,
+                &short_name,
+                mode,
+                uid,
+                gid,
+                size,
+                mtime,
+                typeflag,
+                &linkname,
+                POSIX_MAGIC,
+                &uname,
+                &gname,
+                devmajor,
+                devminor,
+                &prefix,
+                false,
             )?
         }
         1 => {
@@ -331,8 +351,8 @@ fn ti_tobuf(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // it to the fixed 100-byte field silently); the GNU long-name
             // extension block above carries the real, full name.
             out.extend(tar_create_header(
-                &name, mode, uid, gid, size, mtime, typeflag, &linkname, GNU_MAGIC,
-                &uname, &gname, devmajor, devminor, "", true,
+                &name, mode, uid, gid, size, mtime, typeflag, &linkname, GNU_MAGIC, &uname, &gname,
+                devmajor, devminor, "", true,
             )?);
             out
         }
@@ -354,10 +374,24 @@ fn ti_tobuf(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let mut ustar_name = name.clone();
             let mut ustar_linkname = linkname.clone();
             if !ustar_name.is_ascii() || ustar_name.as_bytes().len() > 100 {
-                ustar_name.truncate(ustar_name.char_indices().nth(100).map(|(i, _)| i).unwrap_or(ustar_name.len()).min(100));
+                ustar_name.truncate(
+                    ustar_name
+                        .char_indices()
+                        .nth(100)
+                        .map(|(i, _)| i)
+                        .unwrap_or(ustar_name.len())
+                        .min(100),
+                );
             }
             if !ustar_linkname.is_ascii() || ustar_linkname.as_bytes().len() > 100 {
-                ustar_linkname.truncate(ustar_linkname.char_indices().nth(100).map(|(i, _)| i).unwrap_or(ustar_linkname.len()).min(100));
+                ustar_linkname.truncate(
+                    ustar_linkname
+                        .char_indices()
+                        .nth(100)
+                        .map(|(i, _)| i)
+                        .unwrap_or(ustar_linkname.len())
+                        .min(100),
+                );
             }
             let mut ustar_uid = uid;
             let mut ustar_gid = gid;
@@ -381,8 +415,21 @@ fn ti_tobuf(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 Vec::new()
             };
             out.extend(tar_create_header(
-                &ustar_name, mode, ustar_uid, ustar_gid, ustar_size, ustar_mtime, typeflag,
-                &ustar_linkname, POSIX_MAGIC, &uname, &gname, devmajor, devminor, "", false,
+                &ustar_name,
+                mode,
+                ustar_uid,
+                ustar_gid,
+                ustar_size,
+                ustar_mtime,
+                typeflag,
+                &ustar_linkname,
+                POSIX_MAGIC,
+                &uname,
+                &gname,
+                devmajor,
+                devminor,
+                "",
+                false,
             )?);
             out
         }
@@ -451,7 +498,9 @@ pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
     // checks `TarFile.taropen` attribute directly.
     tar_func!("taropen", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("taropen() missing required argument: 'name'"));
+            return Err(PyError::type_error(
+                "taropen() missing required argument: 'name'",
+            ));
         }
         // Delegate to open logic (first arg may be TarFile class itself)
         let name_arg = if args.len() >= 2 && matches!(&*args[0].borrow(), PyObject::Type { .. }) {
@@ -508,12 +557,18 @@ pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
             name: "taropen".to_string(),
             func: |args| {
                 // `TarFile.taropen(name, mode, ...)` — delegate to module-level open
-                let name_arg = if args.len() >= 2 && matches!(&*args[0].borrow(), PyObject::Type { .. } | PyObject::Instance { .. }) {
+                let name_arg = if args.len() >= 2
+                    && matches!(
+                        &*args[0].borrow(),
+                        PyObject::Type { .. } | PyObject::Instance { .. }
+                    ) {
                     &args[1]
                 } else if !args.is_empty() {
                     &args[0]
                 } else {
-                    return Err(PyError::type_error("taropen() missing required argument: 'name'"));
+                    return Err(PyError::type_error(
+                        "taropen() missing required argument: 'name'",
+                    ));
                 };
                 let _name = name_arg.borrow().str();
                 let mut inst_dict = AttrMap::new();
@@ -565,20 +620,50 @@ pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
             PyObjectRef::new(PyObject::BuiltinFunction {
                 name: n.clone(),
                 func: |args| {
-                    let name_arg = if args.len() >= 2 && matches!(&*args[0].borrow(), PyObject::Type { .. } | PyObject::Instance { .. }) {
+                    let name_arg = if args.len() >= 2
+                        && matches!(
+                            &*args[0].borrow(),
+                            PyObject::Type { .. } | PyObject::Instance { .. }
+                        ) {
                         &args[1]
                     } else if !args.is_empty() {
                         &args[0]
                     } else {
-                        return Err(PyError::type_error("gzopen() missing required argument: 'name'"));
+                        return Err(PyError::type_error(
+                            "gzopen() missing required argument: 'name'",
+                        ));
                     };
                     let _name = name_arg.borrow().str();
                     let mut inst_dict = AttrMap::new();
                     inst_dict.insert_str("name", py_str(&_name));
-                    inst_dict.insert_str("getnames", PyObjectRef::new(PyObject::BuiltinFunction { name: "getnames".to_string(), func: |_args| Ok(py_list(vec![])) }));
-                    inst_dict.insert_str("extractall", PyObjectRef::new(PyObject::BuiltinFunction { name: "extractall".to_string(), func: |_args| Ok(py_none()) }));
-                    inst_dict.insert_str("close", PyObjectRef::new(PyObject::BuiltinFunction { name: "close".to_string(), func: |_args| Ok(py_none()) }));
-                    Ok(PyObjectRef::new(PyObject::Instance { typ: PyObjectRef::new(PyObject::Module { name: "tarfile.TarFile".to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())) }), dict: inst_dict }))
+                    inst_dict.insert_str(
+                        "getnames",
+                        PyObjectRef::new(PyObject::BuiltinFunction {
+                            name: "getnames".to_string(),
+                            func: |_args| Ok(py_list(vec![])),
+                        }),
+                    );
+                    inst_dict.insert_str(
+                        "extractall",
+                        PyObjectRef::new(PyObject::BuiltinFunction {
+                            name: "extractall".to_string(),
+                            func: |_args| Ok(py_none()),
+                        }),
+                    );
+                    inst_dict.insert_str(
+                        "close",
+                        PyObjectRef::new(PyObject::BuiltinFunction {
+                            name: "close".to_string(),
+                            func: |_args| Ok(py_none()),
+                        }),
+                    );
+                    Ok(PyObjectRef::new(PyObject::Instance {
+                        typ: PyObjectRef::new(PyObject::Module {
+                            name: "tarfile.TarFile".to_string(),
+                            dict: Box::new(str_map_to_typedict(HashMap::new())),
+                        }),
+                        dict: inst_dict,
+                    }))
                 },
             }),
         );
@@ -595,10 +680,34 @@ pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
                     let _name = args[0].borrow().str();
                     let mut inst_dict = AttrMap::new();
                     inst_dict.insert_str("name", py_str(&_name));
-                    inst_dict.insert_str("getnames", PyObjectRef::new(PyObject::BuiltinFunction { name: "getnames".to_string(), func: |_args| Ok(py_list(vec![])) }));
-                    inst_dict.insert_str("extractall", PyObjectRef::new(PyObject::BuiltinFunction { name: "extractall".to_string(), func: |_args| Ok(py_none()) }));
-                    inst_dict.insert_str("close", PyObjectRef::new(PyObject::BuiltinFunction { name: "close".to_string(), func: |_args| Ok(py_none()) }));
-                    Ok(PyObjectRef::new(PyObject::Instance { typ: PyObjectRef::new(PyObject::Module { name: "tarfile.TarFile".to_string(), dict: Box::new(str_map_to_typedict(HashMap::new())) }), dict: inst_dict }))
+                    inst_dict.insert_str(
+                        "getnames",
+                        PyObjectRef::new(PyObject::BuiltinFunction {
+                            name: "getnames".to_string(),
+                            func: |_args| Ok(py_list(vec![])),
+                        }),
+                    );
+                    inst_dict.insert_str(
+                        "extractall",
+                        PyObjectRef::new(PyObject::BuiltinFunction {
+                            name: "extractall".to_string(),
+                            func: |_args| Ok(py_none()),
+                        }),
+                    );
+                    inst_dict.insert_str(
+                        "close",
+                        PyObjectRef::new(PyObject::BuiltinFunction {
+                            name: "close".to_string(),
+                            func: |_args| Ok(py_none()),
+                        }),
+                    );
+                    Ok(PyObjectRef::new(PyObject::Instance {
+                        typ: PyObjectRef::new(PyObject::Module {
+                            name: "tarfile.TarFile".to_string(),
+                            dict: Box::new(str_map_to_typedict(HashMap::new())),
+                        }),
+                        dict: inst_dict,
+                    }))
                 },
             }),
         );
@@ -643,7 +752,10 @@ pub fn create_tarfile_dict() -> HashMap<String, PyObjectRef> {
                         dict.insert_str("gname", py_str(""));
                         dict.insert_str("devmajor", py_int(0));
                         dict.insert_str("devminor", py_int(0));
-                        dict.insert_str("pax_headers", PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new()))));
+                        dict.insert_str(
+                            "pax_headers",
+                            PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new()))),
+                        );
                     }
                     Ok(py_none())
                 },

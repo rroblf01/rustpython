@@ -56,7 +56,7 @@ fn read_decimal(data: &[u8], pos: &mut usize) -> PyResult<i64> {
     let s = std::str::from_utf8(&data[start..*pos])
         .map_err(|_| unpickling_error("invalid utf-8 in pickle decimal"))?;
     *pos += 1; // skip '\n'
-    // Strip trailing 'L' (protocol 0/1 longs).
+               // Strip trailing 'L' (protocol 0/1 longs).
     let s = s.strip_suffix('L').unwrap_or(s);
     s.parse::<i64>()
         .map_err(|_| unpickling_error(format!("invalid integer: {s}")))
@@ -238,9 +238,7 @@ fn resolve_global(
             name: "_codecs.encode".to_string(),
             func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
                 if args.len() < 2 {
-                    return Err(PyError::type_error(
-                        "_codecs.encode() requires 2 arguments",
-                    ));
+                    return Err(PyError::type_error("_codecs.encode() requires 2 arguments"));
                 }
                 let enc = args[1].str().to_lowercase();
                 if enc != "latin1" && enc != "latin-1" && enc != "iso-8859-1" {
@@ -249,8 +247,7 @@ fn resolve_global(
                     )));
                 }
                 let text = args[0].str();
-                let bytes: Vec<u8> =
-                    text.chars().map(|c| (c as u32 & 0xFF) as u8).collect();
+                let bytes: Vec<u8> = text.chars().map(|c| (c as u32 & 0xFF) as u8).collect();
                 Ok(PyObjectRef::imm(PyObject::Bytes(bytes)))
             },
         }));
@@ -260,9 +257,7 @@ fn resolve_global(
             name: "_codecs.decode".to_string(),
             func: |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
                 if args.len() < 2 {
-                    return Err(PyError::type_error(
-                        "_codecs.decode() requires 2 arguments",
-                    ));
+                    return Err(PyError::type_error("_codecs.decode() requires 2 arguments"));
                 }
                 let enc = args[1].str().to_lowercase();
                 if enc != "latin1" && enc != "latin-1" && enc != "iso-8859-1" {
@@ -372,9 +367,9 @@ fn pop_mark(stack: &mut Vec<StackVal>) -> PyResult<Vec<PyObjectRef>> {
 }
 
 fn memo_get(memo: &[PyObjectRef], idx: usize) -> PyResult<PyObjectRef> {
-    memo.get(idx).cloned().ok_or_else(|| {
-        unpickling_error(format!("memo index out of range: {idx}"))
-    })
+    memo.get(idx)
+        .cloned()
+        .ok_or_else(|| unpickling_error(format!("memo index out of range: {idx}")))
 }
 
 /// Parse real-protocol pickle bytes with a stack machine.
@@ -442,9 +437,8 @@ pub fn unpickle_real(
                     if let Ok(v) = s.parse::<i64>() {
                         stack.push(StackVal::Val(py_int(v)));
                     } else {
-                        let big: num_bigint::BigInt = s
-                            .parse()
-                            .map_err(|_| unpickling_error("invalid INT"))?;
+                        let big: num_bigint::BigInt =
+                            s.parse().map_err(|_| unpickling_error("invalid INT"))?;
                         stack.push(StackVal::Val(py_int(big)));
                     }
                 }
@@ -477,9 +471,8 @@ pub fn unpickle_real(
                 if let Ok(v) = s.parse::<i64>() {
                     stack.push(StackVal::Val(py_int(v)));
                 } else {
-                    let big: num_bigint::BigInt = s
-                        .parse()
-                        .map_err(|_| unpickling_error("invalid LONG"))?;
+                    let big: num_bigint::BigInt =
+                        s.parse().map_err(|_| unpickling_error("invalid LONG"))?;
                     stack.push(StackVal::Val(py_int(big)));
                 }
             }
@@ -516,9 +509,7 @@ pub fn unpickle_real(
                     "nan" | "-nan" => f64::NAN,
                     "inf" | "Infinity" => f64::INFINITY,
                     "-inf" | "-Infinity" => f64::NEG_INFINITY,
-                    _ => s
-                        .parse()
-                        .map_err(|_| unpickling_error("invalid FLOAT"))?,
+                    _ => s.parse().map_err(|_| unpickling_error("invalid FLOAT"))?,
                 };
                 stack.push(StackVal::Val(py_float(f)));
             }
@@ -535,8 +526,8 @@ pub fn unpickle_real(
                 let b = take(data, &mut pos, 4)?;
                 let n = le_u32(b) as usize;
                 let raw = take(data, &mut pos, n)?;
-                let s = std::str::from_utf8(raw)
-                    .map_err(|_| unpickling_error("invalid BINUNICODE"))?;
+                let s =
+                    std::str::from_utf8(raw).map_err(|_| unpickling_error("invalid BINUNICODE"))?;
                 stack.push(StackVal::Val(py_str(s)));
             }
             0x8c => {
@@ -562,7 +553,9 @@ pub fn unpickle_real(
                     && ((body[0] == b'\'' && body[body.len() - 1] == b'\'')
                         || (body[0] == b'"' && body[body.len() - 1] == b'"'))
                 {
-                    stack.push(StackVal::Val(py_str(&unescape_string(&body[1..body.len() - 1]))));
+                    stack.push(StackVal::Val(py_str(&unescape_string(
+                        &body[1..body.len() - 1],
+                    ))));
                 } else {
                     return Err(unpickling_error("invalid STRING quoting"));
                 }
@@ -657,9 +650,7 @@ pub fn unpickle_real(
                 while let (Some(k), Some(v)) = (it.next(), it.next()) {
                     let _ = d.set(k, v);
                 }
-                stack.push(StackVal::Val(PyObjectRef::new(PyObject::Dict(Box::new(
-                    d,
-                )))));
+                stack.push(StackVal::Val(PyObjectRef::new(PyObject::Dict(Box::new(d)))));
             }
             b'e' => {
                 // APPENDS: extend list below mark
@@ -742,9 +733,7 @@ pub fn unpickle_real(
                 for item in items {
                     let _ = fs.add(item);
                 }
-                stack.push(StackVal::Val(PyObjectRef::new(PyObject::FrozenSet(
-                    fs,
-                ))));
+                stack.push(StackVal::Val(PyObjectRef::new(PyObject::FrozenSet(fs))));
             }
             0x85 => {
                 // TUPLE1
@@ -863,12 +852,11 @@ pub fn unpickle_real(
                 // REDUCE: pop args, pop callable, call
                 let args_v = pop_val(&mut stack)?;
                 let func = pop_val(&mut stack)?;
-                let arg_list: Vec<PyObjectRef> =
-                    if let PyObject::Tuple(items) = &*args_v.borrow() {
-                        items.clone()
-                    } else {
-                        return Err(unpickling_error("REDUCE args not tuple"));
-                    };
+                let arg_list: Vec<PyObjectRef> = if let PyObject::Tuple(items) = &*args_v.borrow() {
+                    items.clone()
+                } else {
+                    return Err(unpickling_error("REDUCE args not tuple"));
+                };
                 let res = crate::object::builtin_call(&func, &arg_list)?;
                 stack.push(StackVal::Val(res));
             }
@@ -883,21 +871,18 @@ pub fn unpickle_real(
                 // OBJ: pop args, pop callable; build without __init__
                 let args_v = pop_val(&mut stack)?;
                 let cls = pop_val(&mut stack)?;
-                let arg_list: Vec<PyObjectRef> =
-                    if let PyObject::Tuple(items) = &*args_v.borrow() {
-                        items.clone()
-                    } else {
-                        return Err(unpickling_error("OBJ args not tuple"));
-                    };
+                let arg_list: Vec<PyObjectRef> = if let PyObject::Tuple(items) = &*args_v.borrow() {
+                    items.clone()
+                } else {
+                    return Err(unpickling_error("OBJ args not tuple"));
+                };
                 stack.push(StackVal::Val(build_instance(&cls, &arg_list, None)?));
             }
             b'i' => {
                 // INST: pop args, pop callable (old-style, same as OBJ here)
                 let args_v = pop_val(&mut stack)?;
                 let cls = pop_val(&mut stack)?;
-                let arg_list: Vec<PyObjectRef> = if let PyObject::Tuple(items) =
-                    &*args_v.borrow()
-                {
+                let arg_list: Vec<PyObjectRef> = if let PyObject::Tuple(items) = &*args_v.borrow() {
                     items.clone()
                 } else {
                     return Err(unpickling_error("INST args not tuple"));
@@ -908,9 +893,7 @@ pub fn unpickle_real(
                 // NEWOBJ: pop args, pop cls
                 let args_v = pop_val(&mut stack)?;
                 let cls = pop_val(&mut stack)?;
-                let arg_list: Vec<PyObjectRef> = if let PyObject::Tuple(items) =
-                    &*args_v.borrow()
-                {
+                let arg_list: Vec<PyObjectRef> = if let PyObject::Tuple(items) = &*args_v.borrow() {
                     items.clone()
                 } else {
                     return Err(unpickling_error("NEWOBJ args not tuple"));
@@ -922,16 +905,16 @@ pub fn unpickle_real(
                 let kwargs_v = pop_val(&mut stack)?;
                 let args_v = pop_val(&mut stack)?;
                 let cls = pop_val(&mut stack)?;
-                let arg_list: Vec<PyObjectRef> = if let PyObject::Tuple(items) =
-                    &*args_v.borrow()
-                {
+                let arg_list: Vec<PyObjectRef> = if let PyObject::Tuple(items) = &*args_v.borrow() {
                     items.clone()
                 } else {
                     return Err(unpickling_error("NEWOBJ_EX args not tuple"));
                 };
-                stack.push(StackVal::Val(build_instance(&cls, &arg_list, Some(
-                    kwargs_v,
-                ))?));
+                stack.push(StackVal::Val(build_instance(
+                    &cls,
+                    &arg_list,
+                    Some(kwargs_v),
+                )?));
             }
             0x82 | 0x83 | 0x84 => {
                 // EXT1/EXT2/EXT4: extension registry (copyreg) — not wired.
@@ -940,16 +923,12 @@ pub fn unpickle_real(
             b'P' => {
                 // PERSID without persistent_load
                 let _ = read_line(data, &mut pos)?;
-                return Err(unpickling_error(
-                    "PERSID without persistent_load",
-                ));
+                return Err(unpickling_error("PERSID without persistent_load"));
             }
             b'Q' => {
                 // BINPERSID without persistent_load
                 let _ = pop_val(&mut stack)?;
-                return Err(unpickling_error(
-                    "BINPERSID without persistent_load",
-                ));
+                return Err(unpickling_error("BINPERSID without persistent_load"));
             }
             0x97 | 0x98 => {
                 return Err(unpickling_error(
@@ -957,9 +936,7 @@ pub fn unpickle_real(
                 ));
             }
             other => {
-                return Err(unpickling_error(format!(
-                    "unknown opcode 0x{other:02x}"
-                )));
+                return Err(unpickling_error(format!("unknown opcode 0x{other:02x}")));
             }
         }
     }

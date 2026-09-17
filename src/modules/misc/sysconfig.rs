@@ -83,13 +83,28 @@ pub fn create_sysconfig_dict() -> HashMap<String, PyObjectRef> {
                 None
             }
         });
-        let p = base.and_then(|pl| {
-            let pb = pl.borrow();
-            if let PyObject::List(items) = &*pb { items.first().map(|i| i.str()) } else { None }
-        }).unwrap_or_else(|| "/usr/local".to_string());
-        for k in ["stdlib","platstdlib","purelib","platlib","include","platinclude","scripts","data"] {
+        let p = base
+            .and_then(|pl| {
+                let pb = pl.borrow();
+                if let PyObject::List(items) = &*pb {
+                    items.first().map(|i| i.str())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "/usr/local".to_string());
+        for k in [
+            "stdlib",
+            "platstdlib",
+            "purelib",
+            "platlib",
+            "include",
+            "platinclude",
+            "scripts",
+            "data",
+        ] {
             let v = match k {
-                "stdlib"|"platstdlib" => format!("{}/Lib", p),
+                "stdlib" | "platstdlib" => format!("{}/Lib", p),
                 _ => p.clone(),
             };
             let _ = out.set(py_str(k), py_str(&v));
@@ -98,8 +113,21 @@ pub fn create_sysconfig_dict() -> HashMap<String, PyObjectRef> {
     });
     syscfg_func!("get_default_scheme", |_| Ok(py_str("posix_local")));
     syscfg_func!("_get_default_scheme", |_| Ok(py_str("posix_local")));
-    syscfg_func!("get_scheme_names", |_| Ok(py_list(vec![py_str("posix_local"), py_str("posix_prefix"), py_str("nt")])));
-    syscfg_func!("get_path_names", |_| Ok(py_list(vec![py_str("stdlib"), py_str("platstdlib"), py_str("purelib"), py_str("platlib"), py_str("include"), py_str("platinclude"), py_str("scripts"), py_str("data")])));
+    syscfg_func!("get_scheme_names", |_| Ok(py_list(vec![
+        py_str("posix_local"),
+        py_str("posix_prefix"),
+        py_str("nt")
+    ])));
+    syscfg_func!("get_path_names", |_| Ok(py_list(vec![
+        py_str("stdlib"),
+        py_str("platstdlib"),
+        py_str("purelib"),
+        py_str("platlib"),
+        py_str("include"),
+        py_str("platinclude"),
+        py_str("scripts"),
+        py_str("data")
+    ])));
     d.insert_str("_INSTALL_SCHEMES", py_dict());
     d.insert_str("_PYTHON_BUILD", py_bool(false));
     d.insert_str("_HAS_USER_BASE", py_bool(true));
@@ -120,7 +148,10 @@ pub fn create_sysconfig_dict() -> HashMap<String, PyObjectRef> {
                 .unwrap_or_else(|| "/usr/local".to_string()),
         ),
     );
-    syscfg_func!("_expand_vars", |args| Ok(args.get(0).cloned().unwrap_or_else(|| py_str(""))));
+    syscfg_func!("_expand_vars", |args| Ok(args
+        .get(0)
+        .cloned()
+        .unwrap_or_else(|| py_str(""))));
     syscfg_func!("_get_default_scheme", |_| Ok(py_str("posix_local")));
 
     d

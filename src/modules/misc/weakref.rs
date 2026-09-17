@@ -1,8 +1,8 @@
 use crate::object::*;
 use std::collections::HashMap;
 // ---- weakref registry ----
-use std::rc::Weak as RcWeak;
 use std::cell::RefCell as StdRefCell;
+use std::rc::Weak as RcWeak;
 
 thread_local! {
     static WEAKREF_REGISTRY: StdRefCell<HashMap<usize, Vec<WeakEntry>>> = StdRefCell::new(HashMap::new());
@@ -44,7 +44,10 @@ fn register_weakref(target: usize, weakref_obj: &PyObjectRef, callback: Option<P
     };
     WEAKREF_REGISTRY.with(|r| {
         let mut m = r.borrow_mut();
-        let entry = WeakEntry { weakref: weak, callback };
+        let entry = WeakEntry {
+            weakref: weak,
+            callback,
+        };
         m.entry(target).or_default().push(entry);
     });
 }
@@ -89,14 +92,21 @@ pub fn run_weakref_callbacks() {
                         let target_alive = {
                             let b = rc.borrow();
                             match &*b {
-                                PyObject::WeakRef { target, .. } | PyObject::WeakProxy { target, .. } => target.upgrade().is_some(),
+                                PyObject::WeakRef { target, .. }
+                                | PyObject::WeakProxy { target, .. } => target.upgrade().is_some(),
                                 _ => true,
                             }
                         };
                         if target_alive {
                             // Preserve original (creation) order for entries
                             // that survive this pass.
-                            live_entries.insert(0, WeakEntry { weakref: std::rc::Rc::downgrade(&rc), callback: e.callback.clone() });
+                            live_entries.insert(
+                                0,
+                                WeakEntry {
+                                    weakref: std::rc::Rc::downgrade(&rc),
+                                    callback: e.callback.clone(),
+                                },
+                            );
                         } else if let Some(cb) = e.callback.clone() {
                             let wr_obj = PyObjectRef::Imm(rc.clone());
                             dead_calls.push((wr_obj, cb));
@@ -175,7 +185,6 @@ pub fn create_weakref_weak_set() -> PyObjectRef {
     })
 }
 
-
 pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! wr_func {
@@ -208,7 +217,10 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
             }
         }
         if args.len() > 2 {
-            return Err(PyError::type_error(format!("ref() takes at most 2 arguments ({} given)", args.len())));
+            return Err(PyError::type_error(format!(
+                "ref() takes at most 2 arguments ({} given)",
+                args.len()
+            )));
         }
         let obj = &args[0];
         if !is_weakrefable(obj) {
@@ -219,7 +231,9 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
         }
         let callback = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) {
             Some(args[1].clone())
-        } else { None };
+        } else {
+            None
+        };
         let tptr = target_ptr(obj).unwrap();
         if callback.is_none() {
             if let Some(existing) = find_shared_weakref(tptr) {
@@ -230,7 +244,11 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
             PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => std::rc::Rc::downgrade(rc),
             _ => unreachable!(),
         };
-        let wr = PyObjectRef::imm(PyObject::WeakRef { target, callback: callback.clone(), hash_cache: std::cell::RefCell::new(None) });
+        let wr = PyObjectRef::imm(PyObject::WeakRef {
+            target,
+            callback: callback.clone(),
+            hash_cache: std::cell::RefCell::new(None),
+        });
         register_weakref(tptr, &wr, callback);
         Ok(wr)
     });
@@ -247,7 +265,10 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
             }
         }
         if args.len() > 2 {
-            return Err(PyError::type_error(format!("proxy() takes at most 2 arguments ({} given)", args.len())));
+            return Err(PyError::type_error(format!(
+                "proxy() takes at most 2 arguments ({} given)",
+                args.len()
+            )));
         }
         let obj = &args[0];
         if !is_weakrefable(obj) {
@@ -258,7 +279,9 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
         }
         let callback = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None) {
             Some(args[1].clone())
-        } else { None };
+        } else {
+            None
+        };
         let tptr = target_ptr(obj).unwrap();
         if callback.is_none() {
             let existing = WEAKREF_REGISTRY.with(|r| {
@@ -277,13 +300,18 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
                 }
                 None
             });
-            if let Some(e) = existing { return Ok(e); }
+            if let Some(e) = existing {
+                return Ok(e);
+            }
         }
         let target = match obj {
             PyObjectRef::Mut(rc) | PyObjectRef::Imm(rc) => std::rc::Rc::downgrade(rc),
             _ => unreachable!(),
         };
-        let wr = PyObjectRef::imm(PyObject::WeakProxy { target, callback: callback.clone() });
+        let wr = PyObjectRef::imm(PyObject::WeakProxy {
+            target,
+            callback: callback.clone(),
+        });
         register_weakref(tptr, &wr, callback);
         Ok(wr)
     });
@@ -293,7 +321,10 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("getweakrefcount() requires 1 argument"));
         }
         let obj = &args[0];
-        let tptr = match target_ptr(obj) { Some(p) => p, None => return Ok(py_int(0)) };
+        let tptr = match target_ptr(obj) {
+            Some(p) => p,
+            None => return Ok(py_int(0)),
+        };
         run_weakref_callbacks();
         let cnt = WEAKREF_REGISTRY.with(|r| {
             let mut m = r.borrow_mut();
@@ -302,13 +333,18 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
                     if let Some(rc) = e.weakref.upgrade() {
                         let b = rc.borrow();
                         match &*b {
-                            PyObject::WeakRef { target, .. } | PyObject::WeakProxy { target, .. } => target.upgrade().is_some(),
+                            PyObject::WeakRef { target, .. }
+                            | PyObject::WeakProxy { target, .. } => target.upgrade().is_some(),
                             _ => false,
                         }
-                    } else { false }
+                    } else {
+                        false
+                    }
                 });
                 vec.len() as i64
-            } else { 0 }
+            } else {
+                0
+            }
         });
         Ok(py_int(cnt))
     });
@@ -317,21 +353,35 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("getweakrefs() requires 1 argument"));
         }
         let obj = &args[0];
-        let tptr = match target_ptr(obj) { Some(p) => p, None => return Ok(py_list(vec![])) };
+        let tptr = match target_ptr(obj) {
+            Some(p) => p,
+            None => return Ok(py_list(vec![])),
+        };
         run_weakref_callbacks();
         let refs = WEAKREF_REGISTRY.with(|r| {
             let m = r.borrow();
             if let Some(vec) = m.get(&tptr) {
-                vec.iter().filter_map(|e| {
-                    if let Some(rc) = e.weakref.upgrade() {
-                        let b = rc.borrow();
-                        match &*b {
-                            PyObject::WeakRef { target, .. } | PyObject::WeakProxy { target, .. } if target.upgrade().is_some() => Some(PyObjectRef::Imm(rc.clone())),
-                            _ => None,
+                vec.iter()
+                    .filter_map(|e| {
+                        if let Some(rc) = e.weakref.upgrade() {
+                            let b = rc.borrow();
+                            match &*b {
+                                PyObject::WeakRef { target, .. }
+                                | PyObject::WeakProxy { target, .. }
+                                    if target.upgrade().is_some() =>
+                                {
+                                    Some(PyObjectRef::Imm(rc.clone()))
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
                         }
-                    } else { None }
-                }).collect::<Vec<_>>()
-            } else { vec![] }
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![]
+            }
         });
         Ok(py_list(refs))
     });
@@ -393,24 +443,45 @@ pub fn create_weakref_dict() -> HashMap<String, PyObjectRef> {
     {
         let mut dict = TypeDict::default();
         dict.insert_str("__module__", py_str("weakref"));
-        let ref_type = PyObjectRef::new(PyObject::Type { name: "ReferenceType".to_string(), dict: Box::new(dict), bases: vec![], mro: vec![] });
-        if let PyObject::Type { mro, .. } = &mut *ref_type.borrow_mut() { *mro = vec![ref_type.clone()]; }
+        let ref_type = PyObjectRef::new(PyObject::Type {
+            name: "ReferenceType".to_string(),
+            dict: Box::new(dict),
+            bases: vec![],
+            mro: vec![],
+        });
+        if let PyObject::Type { mro, .. } = &mut *ref_type.borrow_mut() {
+            *mro = vec![ref_type.clone()];
+        }
         crate::object::seed_primitive_type_cache("weakref", ref_type.clone());
         d.insert_str("ReferenceType", ref_type);
     }
     {
         let mut dict = TypeDict::default();
         dict.insert_str("__module__", py_str("weakref"));
-        let proxy_type = PyObjectRef::new(PyObject::Type { name: "ProxyType".to_string(), dict: Box::new(dict), bases: vec![], mro: vec![] });
-        if let PyObject::Type { mro, .. } = &mut *proxy_type.borrow_mut() { *mro = vec![proxy_type.clone()]; }
+        let proxy_type = PyObjectRef::new(PyObject::Type {
+            name: "ProxyType".to_string(),
+            dict: Box::new(dict),
+            bases: vec![],
+            mro: vec![],
+        });
+        if let PyObject::Type { mro, .. } = &mut *proxy_type.borrow_mut() {
+            *mro = vec![proxy_type.clone()];
+        }
         crate::object::seed_primitive_type_cache("weakproxy", proxy_type.clone());
         d.insert_str("ProxyType", proxy_type);
     }
     {
         let mut dict = TypeDict::default();
         dict.insert_str("__module__", py_str("weakref"));
-        let cproxy_type = PyObjectRef::new(PyObject::Type { name: "CallableProxyType".to_string(), dict: Box::new(dict), bases: vec![], mro: vec![] });
-        if let PyObject::Type { mro, .. } = &mut *cproxy_type.borrow_mut() { *mro = vec![cproxy_type.clone()]; }
+        let cproxy_type = PyObjectRef::new(PyObject::Type {
+            name: "CallableProxyType".to_string(),
+            dict: Box::new(dict),
+            bases: vec![],
+            mro: vec![],
+        });
+        if let PyObject::Type { mro, .. } = &mut *cproxy_type.borrow_mut() {
+            *mro = vec![cproxy_type.clone()];
+        }
         crate::object::seed_primitive_type_cache("weakcallableproxy", cproxy_type.clone());
         d.insert_str("CallableProxyType", cproxy_type);
     }

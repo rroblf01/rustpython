@@ -464,10 +464,7 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
     // but the plain list constant itself (checked via `cb_type not in
     // CHANNEL_BINDING_TYPES`, real trigger: `test_ssl.py`) is enough to
     // stop an `AttributeError` at import/attribute-access time.
-    d.insert_str(
-        "CHANNEL_BINDING_TYPES",
-        py_list(vec![py_str("tls-unique")]),
-    );
+    d.insert_str("CHANNEL_BINDING_TYPES", py_list(vec![py_str("tls-unique")]));
 
     // Additional `HAS_*` capability flags beyond the set already above —
     // same honest-best-effort-for-a-modern-OpenSSL-build rationale (see

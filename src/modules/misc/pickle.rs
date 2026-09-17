@@ -1,7 +1,7 @@
+use crate::modules::misc::pickle_de::{pickle_deserialize, try_unpickle_rangeiter_compat};
+use crate::modules::misc::pickle_ser::pickle_serialize;
 use crate::object::*;
 use std::collections::HashMap;
-use crate::modules::misc::pickle_ser::pickle_serialize;
-use crate::modules::misc::pickle_de::{pickle_deserialize, try_unpickle_rangeiter_compat};
 
 /// Shared `pickle.loads`/`_pickle.loads` implementation. `vm` is `Some` only
 /// when reached through the `fn_addr_eq` interception in `src/vm/call.rs`
@@ -329,12 +329,18 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
     // pickle.decode_long(data): Decode a long integer from little-endian bytes
     pickle_func!("decode_long", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("decode_long() missing required argument: 'data'"));
+            return Err(PyError::type_error(
+                "decode_long() missing required argument: 'data'",
+            ));
         }
         let bytes: Vec<u8> = match &*args[0].borrow() {
             PyObject::Bytes(b) => b.clone(),
             PyObject::Str(s) => s.as_bytes().to_vec(),
-            _ => return Err(PyError::type_error("decode_long() argument must be bytes-like")),
+            _ => {
+                return Err(PyError::type_error(
+                    "decode_long() argument must be bytes-like",
+                ))
+            }
         };
         if bytes.is_empty() {
             return Ok(py_int(0));
@@ -359,12 +365,18 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
     // pickle.encode_long(n): Encode an integer as little-endian bytes
     pickle_func!("encode_long", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("encode_long() missing required argument: 'n'"));
+            return Err(PyError::type_error(
+                "encode_long() missing required argument: 'n'",
+            ));
         }
         let n: num_bigint::BigInt = match &*args[0].borrow() {
             PyObject::Int(i) => i.clone(),
             PyObject::Bool(b) => num_bigint::BigInt::from(if *b { 1i32 } else { 0i32 }),
-            _ => return Err(PyError::type_error("encode_long() argument must be an integer")),
+            _ => {
+                return Err(PyError::type_error(
+                    "encode_long() argument must be an integer",
+                ))
+            }
         };
         let is_negative = n.sign() == num_bigint::Sign::Minus;
         let abs_bytes = n.magnitude().to_bytes_le();
@@ -447,9 +459,10 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
         buf.push(b'.');
         let data = PyObjectRef::imm(PyObject::Bytes(buf));
         let file = &args[1];
-        let write_m = file.borrow().get_attribute("write").map_err(|_| {
-            PyError::type_error("dump() file must have a write() method")
-        })?;
+        let write_m = file
+            .borrow()
+            .get_attribute("write")
+            .map_err(|_| PyError::type_error("dump() file must have a write() method"))?;
         crate::object::builtin_call(&write_m, &[data])?;
         Ok(py_none())
     });
@@ -467,9 +480,7 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
                 name: "__init__".to_string(),
                 func: |args| {
                     if args.len() < 2 {
-                        return Err(PyError::type_error(
-                            "Pickler() missing file argument",
-                        ));
+                        return Err(PyError::type_error("Pickler() missing file argument"));
                     }
                     // Optional protocol (positional or kwarg-packed dict).
                     let mut proto = 4i64;
@@ -522,9 +533,10 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
                         pickle_serialize(&args[1], &mut buf, &mut memo, proto)?;
                         buf.push(b'.');
                         let data = PyObjectRef::imm(PyObject::Bytes(buf));
-                        let write_m = f.borrow().get_attribute("write").map_err(|_| {
-                            PyError::type_error("dump() file must have write()")
-                        })?;
+                        let write_m = f
+                            .borrow()
+                            .get_attribute("write")
+                            .map_err(|_| PyError::type_error("dump() file must have write()"))?;
                         crate::object::builtin_call(&write_m, &[data])?;
                         return Ok(py_none());
                     }
@@ -550,9 +562,7 @@ pub fn create_pickle_dict() -> HashMap<String, PyObjectRef> {
                 name: "__init__".to_string(),
                 func: |args| {
                     if args.len() < 2 {
-                        return Err(PyError::type_error(
-                            "Unpickler() missing file argument",
-                        ));
+                        return Err(PyError::type_error("Unpickler() missing file argument"));
                     }
                     if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
                         dict.insert_str("file", args[1].clone());
