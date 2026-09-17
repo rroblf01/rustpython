@@ -604,6 +604,12 @@ impl Lexer {
                             literal.push(ch);
                         }
                         Some(c) => {
+                            // Backslash-newline is a line continuation
+                            // (removed, like the str/bytes lexer does),
+                            // not a literal newline.
+                            if c == '\n' {
+                                continue;
+                            }
                             literal.push(match c {
                                 'n' => '\n',
                                 't' => '\t',
