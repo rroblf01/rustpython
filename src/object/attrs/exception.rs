@@ -249,11 +249,24 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                 "__init__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                     name: "__init__".to_string(),
                     func: |args| {
-                        if let PyObject::Exception { args: a, extra, .. } =
-                            &mut *args[0].borrow_mut()
-                        {
+                        // Single borrow: an `if let ... borrow_mut()`
+                        // scrutinee guard would outlive into the `else if`
+                        // branch and panic on re-borrow.
+                        let mut borrowed = args[0].borrow_mut();
+                        if let PyObject::Exception { args: a, extra, .. } = &mut *borrowed {
                             *a = args.get(1..).unwrap_or(&[]).to_vec();
                             *extra = None;
+                        } else if let PyObject::Instance { dict, typ } = &mut *borrowed {
+                            // Explicit `BaseException.__init__(self, ...)`
+                            // on a user subclass instance: same storage
+                            // rule as construction (instance-dict "args").
+                            // Without this, `Exception.__init__(self, ...)`
+                            // calls (argparse's ArgumentParserError, unittest
+                            // internals, ...) silently left `.args` empty.
+                            if crate::object::find_exception_base_name(&*typ).is_some() {
+                                let rest = args.get(1..).unwrap_or(&[]).to_vec();
+                                dict.insert_str("args", py_tuple(rest));
+                            }
                         }
                         Ok(py_none())
                     },

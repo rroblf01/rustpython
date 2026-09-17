@@ -674,6 +674,41 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         func: int_new_checked,
                     }));
                 }
+                // Builtin EXCEPTION classes get a real `__init__` (store
+                // args on the instance, mirroring construction), not the
+                // constructor-stand-in below: explicit
+                // `Exception.__init__(self, ...)` calls (argparse's
+                // ArgumentParserError, unittest internals, ...) must
+                // actually populate `.args` instead of silently
+                // constructing-and-discarding a fresh exception.
+                if name == "__init__"
+                    && crate::object::native_base::is_builtin_exception_class_name(bf_name)
+                {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinFunction {
+                        name: "__init__".to_string(),
+                        func: |args| {
+                            if args.is_empty() {
+                                return Err(PyError::type_error(
+                                    "__init__() missing required argument: 'self'".to_string(),
+                                ));
+                            }
+                            // Single borrow: an `if let ... borrow_mut()`
+                            // scrutinee guard would outlive into the
+                            // `else if` branch and panic on re-borrow.
+                            let mut borrowed = args[0].borrow_mut();
+                            if let PyObject::Exception { args: a, extra, .. } = &mut *borrowed {
+                                *a = args.get(1..).unwrap_or(&[]).to_vec();
+                                *extra = None;
+                            } else if let PyObject::Instance { dict, typ } = &mut *borrowed {
+                                if crate::object::find_exception_base_name(&*typ).is_some() {
+                                    let rest = args.get(1..).unwrap_or(&[]).to_vec();
+                                    dict.insert_str("args", py_tuple(rest));
+                                }
+                            }
+                            Ok(py_none())
+                        },
+                    }));
+                }
                 // Pragmatic stand-in: real CPython's builtin `__new__`/
                 // `__init__` slots are the actual C-level allocators/
                 // initializers, not separately-callable Python-visible
