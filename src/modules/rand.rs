@@ -152,35 +152,37 @@ fn put_mt(self_obj: &PyObjectRef, mt: Mt) {
     }
 }
 
-/// Run `f` against the live MT state, mutating the SAME `_mt_state` bytes
-/// blob in place (overwriting its existing `Vec<u8>` contents) instead of
-/// allocating a fresh `Bytes`/`PyObjectRef` and re-inserting it into the
-/// instance dict on every single call. `getrandbits`/`random`/`randrange`
-/// (via `Lib/random.py`'s `_randbelow`) are called extremely often — a
-/// rejection-sampling loop can invoke `getrandbits` several times per
-/// logical draw — so the two heap allocations `get_mt`+`put_mt` used to
-/// do on every call (a new 2504-byte `Vec<u8>` plus a new
-/// `Rc<RefCell<PyObject>>`) measurably dominated runtime in call-heavy
-/// tests (e.g. `test_set.py`'s `TestOperationsMutating`, which drives
-/// `randrange()` from inside `__hash__`/`__eq__` for up to 50*50 pairs
-/// across 100 outer iterations per sub-test) — slow enough to look like a
-/// hang against a per-test timeout even though it always terminates.
+/// Run `f` against the live MT state — fast path mutates the SAME
+/// `_mt_state` bytes blob in place (via `borrow_mut_if_mut()`) to avoid
+/// the 2.5 KB alloc + `Rc` churn of `get_mt`+`put_mt` on every call;
+/// falls back to `get_mt`+`put_mt` when `_mt_state` is `Imm`-tagged
+/// (e.g. after `copy`/`pickle` round-trip where `Bytes` is cloned as
+/// `Imm`) which would otherwise panic.
 fn with_mt<R>(self_obj: &PyObjectRef, f: impl FnOnce(&mut Mt) -> R) -> PyResult<R> {
-    let b = self_obj.borrow();
-    if let PyObject::Instance { dict, .. } = &*b {
-        if let Some(st) = dict.get_str("_mt_state") {
-            let mut st_b = st.borrow_mut();
-            if let PyObject::Bytes(bytes) = &mut *st_b {
-                let mut mt = Mt::from_bytes(bytes)
-                    .ok_or_else(|| PyError::runtime_error("corrupt _random state"))?;
-                let r = f(&mut mt);
-                let fresh = mt.to_bytes();
-                bytes.copy_from_slice(&fresh);
-                return Ok(r);
+    // Fast path: in-place mutation when `_mt_state` is `Mut`.
+    {
+        let b = self_obj.borrow();
+        if let PyObject::Instance { dict, .. } = &*b {
+            if let Some(st) = dict.get_str("_mt_state") {
+                if let Some(mut st_b) = st.borrow_mut_if_mut() {
+                    if let PyObject::Bytes(bytes) = &mut *st_b {
+                        if let Some(mut mt) = Mt::from_bytes(bytes) {
+                            let r = f(&mut mt);
+                            let fresh = mt.to_bytes();
+                            // `bytes` is still borrowed here; copy in place
+                            bytes.copy_from_slice(&fresh);
+                            return Ok(r);
+                        }
+                    }
+                }
             }
         }
     }
-    Err(PyError::runtime_error("_random.Random state missing"))
+    // Slow path: `Imm` tag or corrupt — re-allocate.
+    let mut mt = get_mt(self_obj)?;
+    let r = f(&mut mt);
+    put_mt(self_obj, mt);
+    Ok(r)
 }
 
 /// int → little-endian u32 words of its absolute value (CPython's
