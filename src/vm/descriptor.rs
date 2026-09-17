@@ -105,18 +105,6 @@ impl VirtualMachine {
             PyObject::Property(ref d) if d.getter.is_some() => {
                 let g = d.getter.clone().unwrap();
                 drop(val_borrowed);
-                // A raised exception from the getter must propagate, not be
-                // silently swallowed into returning the bare, uninvoked
-                // `property` object as if that were the successful result
-                // (same bug, same fix, as `op_attr.rs`'s LOAD_ATTR handler —
-                // this function's own doc comment already notes the two are
-                // otherwise-independent copies of the same descriptor logic).
-                // `resolve_descriptor_attr` returns a plain `Option` (several
-                // call sites besides `getattr()`'s own special case treat a
-                // miss as "no descriptor here, fall back"), so the real error
-                // is stashed via `take_pending_descriptor_error()` (same
-                // thread-local-flag shape as `take_repr_recursion_overflow()`)
-                // for whichever caller actually wants to re-raise it.
                 match self.call_function(g, vec![obj.clone()], vec![]) {
                     Ok(v) => Some(v),
                     Err(e) => {
@@ -124,6 +112,16 @@ impl VirtualMachine {
                         None
                     }
                 }
+            }
+            PyObject::Property(_) => {
+                // property() with no getter — unreadable.
+                drop(val_borrowed);
+                set_pending_descriptor_error(PyError::attribute_error(format!(
+                    "property '{}' of '{}' object has no getter",
+                    name,
+                    obj.borrow().type_name(),
+                )));
+                None
             }
             PyObject::StaticMethod { func } => Some(func.clone()),
             PyObject::ClassMethod { func } => {

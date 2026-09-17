@@ -206,13 +206,36 @@ impl VirtualMachine {
                             None
                         };
                         if let Some(f) = getattr_fn {
+                            // Snapshot `sys.exc_info()` before calling the
+                            // Python-level `__getattr__` fallback so it can be
+                            // restored when its exception is swallowed below
+                            // (the `args.len() == 3` default-value case) — a
+                            // `raise AttributeError(...)` inside `__getattr__`
+                            // with no enclosing `try/except` sets
+                            // `exc_type`/`exc_value` (via `RAISE_VARARGS`) and
+                            // propagates out of `call_function` as a plain
+                            // `Err` with no `POP_EXCEPT` ever running to
+                            // restore them. Left uncorrected here,
+                            // `getattr(obj, name, default)` — which real
+                            // Python never lets affect `sys.exc_info()` at
+                            // all — permanently corrupted it for any caller
+                            // still inside its own `except:` block (real
+                            // trigger: `unittest.mock`'s `NonCallableMock.
+                            // __getattr__`, whose spec-checking machinery
+                            // uses exactly this raise-and-discard idiom
+                            // internally).
+                            let saved_exc = (self.exc_type.clone(), self.exc_value.clone());
                             match self.call_function(
                                 f,
                                 vec![obj.clone(), crate::object::py_str(&attr_name)],
                                 vec![],
                             ) {
                                 Ok(v) => return Ok(Some(v)),
-                                Err(_) if args.len() == 3 => return Ok(Some(args[2].clone())),
+                                Err(_) if args.len() == 3 => {
+                                    self.exc_type = saved_exc.0;
+                                    self.exc_value = saved_exc.1;
+                                    return Ok(Some(args[2].clone()));
+                                }
                                 Err(e) => return Err(e),
                             }
                         }
@@ -292,12 +315,22 @@ impl VirtualMachine {
                 // succeeds, hasattr is True; if it raises, hasattr is False.
                 if let PyObject::Instance { typ, .. } = &*obj.borrow() {
                     if let Some(f) = crate::object::lookup_dunder_via_mro(typ, "__getattr__") {
+                        // Same `sys.exc_info()` corruption risk as the
+                        // `getattr()` fallback above: `hasattr()` always
+                        // swallows whatever `__getattr__` raises (that's the
+                        // whole point — a raise means "no such attribute",
+                        // hence `False`), and real Python never lets that
+                        // leak into `sys.exc_info()`.
+                        let saved_exc = (self.exc_type.clone(), self.exc_value.clone());
                         let res = self.call_function(
                             f,
                             vec![obj.clone(), crate::object::py_str(&attr_name)],
                             vec![],
                         );
-                        return Ok(Some(py_bool(res.is_ok())));
+                        let is_ok = res.is_ok();
+                        self.exc_type = saved_exc.0;
+                        self.exc_value = saved_exc.1;
+                        return Ok(Some(py_bool(is_ok)));
                     }
                 }
                 return Ok(Some(py_bool(false)));

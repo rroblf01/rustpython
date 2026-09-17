@@ -246,12 +246,35 @@ impl VirtualMachine {
                     if let Some(prev) = self.frames[fi].active_exception_stack.pop() {
                         self.frames[fi].active_exception = prev;
                     }
-                    if self.frames[fi].active_exception.is_none() {
-                        let in_outer_handler = self
-                            .frames
-                            .iter()
-                            .any(|f| f.active_exception.is_some());
-                        if !in_outer_handler {
+                    // Recompute `sys.exc_info()` from the innermost still-active
+                    // handler (nearest `PUSH_EXC_INFO` with no matching
+                    // `POP_EXCEPT` yet), scanning this frame first and then
+                    // enclosing (caller) frames still suspended on the stack.
+                    // The old logic only ever CLEARED `exc_type`/`exc_value`
+                    // (when no handler was active anywhere) or left them
+                    // untouched otherwise — it never actually restored them to
+                    // an outer handler's exception. That left `sys.exc_info()`
+                    // permanently pointed at an INNER handler's exception after
+                    // that handler's body finished, e.g. a nested
+                    // `try: ... except AttributeError: pass` inside an outer
+                    // `except ValueError:` body left `sys.exc_info()` reporting
+                    // the AttributeError even after the inner handler returned
+                    // (real trigger: `unittest.mock`'s spec/wraps attribute
+                    // probing, which uses exactly this nested
+                    // try/except-AttributeError idiom internally — any code
+                    // calling into a mocked attribute from within its own
+                    // `except:` block got its `sys.exc_info()` corrupted).
+                    let restored = self.frames[..=fi]
+                        .iter()
+                        .rev()
+                        .find_map(|f| f.active_exception.as_ref())
+                        .map(|exc| (**exc).clone());
+                    match restored {
+                        Some(exc) => {
+                            self.exc_type = Some(self.exception_class_of(&exc));
+                            self.exc_value = Some(exc);
+                        }
+                        None => {
                             self.exc_type = None;
                             self.exc_value = None;
                         }

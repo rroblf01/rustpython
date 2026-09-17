@@ -29,6 +29,15 @@ impl VirtualMachine {
                     let type_name = obj.borrow().type_name();
                     crate::jit::runtime::invalidate_attr_cache(&type_name, &name);
                 }
+                // Also invalidate the frame-level inline attr_cache for
+                // this name_idx — without this, a property-like descriptor
+                // (e.g. DynamicClassAttribute) whose getter result was
+                // cached by a prior LOAD_ATTR in the same frame returns
+                // the stale value after the setter mutates the underlying
+                // data.
+                if name_idx < self.frames[fi].attr_cache.len() {
+                    self.frames[fi].attr_cache[name_idx] = None;
+                }
                 if std::env::var("RPY_DEBUG_ATTR").is_ok() {
                     let kind = match &*obj.borrow() {
                         PyObject::Type { name: n, .. } => format!("Type({})", n),
@@ -39,6 +48,26 @@ impl VirtualMachine {
                     eprintln!("STORE_ATTR: name={} obj_kind={}", name, kind);
                 }
 
+                // `__class__` assignment on instances (`obj.__class__ = NewClass`)
+                // must mutate the instance's `typ` field, not just store
+                // `"__class__"` in the instance dict (real trigger:
+                // `test_sort.py:test_unsafe_object_compare` where
+                // `WackyComparator.__lt__` does `elem.__class__ = WackyList2`
+                // mid-sort; without this the object's type stays `WackyList1`
+                // and the expected `ValueError` from `WackyList2.__lt__` never
+                // fires). Only allow if the new value is a `Type`.
+                if name == "__class__" {
+                    if let PyObject::Instance { typ, .. } = &mut *obj.borrow_mut() {
+                        if matches!(&*val.borrow(), PyObject::Type { .. }) {
+                            *typ = val.clone();
+                            return Ok(true);
+                        } else {
+                            return Err(PyError::type_error(
+                                "__class__ assignment: 'val' must be a class",
+                            ));
+                        }
+                    }
+                }
                 // Check for __setattr__ on Instance types first — walks the
                 // MRO (not just the leaf type's own dict), so a `__setattr__`
                 // defined on a BASE class (e.g. `unittest.mock.NonCallableMock`,
@@ -232,30 +261,13 @@ impl VirtualMachine {
                 let name_idx = arg as usize;
                 let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let obj = self.frames[fi].pop()?;
-                // Check for __delattr__ on Instance types first — walks the
-                // MRO like the matching STORE_ATTR check above, so an
-                // inherited `__delattr__` (e.g. `unittest.mock.NonCallableMock`'s,
-                // used by every mock subclass that never redefines it) is
-                // actually found instead of silently falling through to the
-                // generic instance-attribute-deletion path below.
-                {
-                    let obj_borrowed = obj.borrow();
-                    if let PyObject::Instance { typ, .. } = &*obj_borrowed {
-                        let typ_clone = typ.clone();
-                        drop(obj_borrowed);
-                        if let Some(delattr_method) =
-                            crate::object::lookup_dunder_via_mro(&typ_clone, "__delattr__")
-                        {
-                            self.call_function(
-                                delattr_method,
-                                vec![obj.clone(), py_str(&name)],
-                                vec![],
-                            )?;
-                            return Ok(true);
-                        }
-                    }
-                }
-                // Check for __delete__ descriptor protocol
+                // Check for __delete__ descriptor protocol FIRST (data
+                // descriptors like property/DynamicClassAttribute must
+                // intercept deletion before __delattr__ from the MRO,
+                // matching how STORE_ATTR checks __set__ first). Real
+                // CPython's object.__delattr__ itself calls tp_descr_delete
+                // internally; since our object.__delattr__ doesn't, we
+                // must check descriptors explicitly here.
                 let descriptor = {
                     let obj_borrowed = obj.borrow();
                     if let PyObject::Instance { typ, .. } = &*obj_borrowed {
@@ -273,12 +285,58 @@ impl VirtualMachine {
                     }
                 };
                 if let Some(ref desc) = descriptor {
+                    // Property is special-cased (matching STORE_ATTR): its
+                    // __delete__ is not exposed via get_attribute, so we must
+                    // check the Property variant directly.
+                    let property_deleter = {
+                        let d = desc.borrow();
+                        if let PyObject::Property(ref data) = &*d {
+                            data.deleter.clone()
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(del_fn) = property_deleter {
+                        self.call_function(
+                            del_fn,
+                            vec![obj.clone()],
+                            vec![],
+                        )?;
+                        return Ok(true);
+                    } else {
+                        return Err(PyError::attribute_error(format!(
+                            "property '{}' of '{}' object has no deleter",
+                            name,
+                            obj.borrow().type_name()
+                        )));
+                    }
                     if let Ok(deleter) = desc.borrow().get_attribute("__delete__") {
                         let result =
                             self.call_function(deleter, vec![desc.clone(), obj.clone()], vec![]);
                         match result {
                             Ok(_) => return Ok(true),
                             Err(e) => return Err(e),
+                        }
+                    }
+                }
+                // Fall through to __delattr__ on Instance types — walks
+                // the MRO so an inherited __delattr__ (e.g.
+                // unittest.mock.NonCallableMock's, used by every mock
+                // subclass that never redefines it) is actually found.
+                {
+                    let obj_borrowed = obj.borrow();
+                    if let PyObject::Instance { typ, .. } = &*obj_borrowed {
+                        let typ_clone = typ.clone();
+                        drop(obj_borrowed);
+                        if let Some(delattr_method) =
+                            crate::object::lookup_dunder_via_mro(&typ_clone, "__delattr__")
+                        {
+                            self.call_function(
+                                delattr_method,
+                                vec![obj.clone(), py_str(&name)],
+                                vec![],
+                            )?;
+                            return Ok(true);
                         }
                     }
                 }

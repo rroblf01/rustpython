@@ -325,9 +325,21 @@ impl VirtualMachine {
             (frame.code.line_number(idx) as i64, idx as i64)
         };
         let frame_obj = self.frame_object(frame_idx)?;
+        // Prefer the real `types` module, but it's only registered in
+        // `self.modules` once user code actually does `import types`
+        // (`Lib/types.py` is loaded lazily through the normal import
+        // machinery). `_types_native` — the Rust-backed module it wraps —
+        // is unconditionally preloaded at VM startup and carries the same
+        // `TracebackType`, so fall back to it. Without this, ANY caught
+        // exception in a script that hadn't (yet, or ever) imported `types`
+        // got a permanently `None` `__traceback__` — this silently no-ops
+        // (`?` on a failed lookup) rather than erroring, so it was easy to
+        // miss: `except E as e: e.__traceback__` simply stayed `None`
+        // instead of raising or crashing.
         let tb_type = self
             .modules
             .get("types")
+            .or_else(|| self.modules.get("_types_native"))
             .and_then(|t| t.borrow().get_attribute("TracebackType").ok())?;
         self.call_function(
             tb_type,
@@ -480,8 +492,6 @@ impl VirtualMachine {
         // return (None, None, None) — breaking traceback.format_exception,
         // unittest's error reporting, and `except E as e: sys.exc_info()`
         // introspection.
-        self.exc_type = Some(self.exception_class_of(&exc_obj));
-        self.exc_value = Some(exc_obj.clone());
         let total = self.frames.len();
         for i in (frame_floor..total).rev() {
             // Pop the innermost handler of this frame and set up control
@@ -526,6 +536,16 @@ impl VirtualMachine {
                 self.frames[i].ip = orig_ip;
                 self.prepend_traceback(&exc_obj, i);
                 self.frames[i].ip = saved_handler_ip;
+                // Set the current exception info so `sys.exc_info()` inside the
+                // handler returns the REAL caught exception (type, value, and the
+                // traceback we just attached). Previously only RAISE_VARARGS
+                // populated these, so a builtin-raised error (`[1,2].blah`,
+                // `1/0`, ...) caught by `except E as e:` made `sys.exc_info()`
+                // return (None, None, None) — breaking traceback.format_exception,
+                // unittest's error reporting, and `except E as e: sys.exc_info()`
+                // introspection.
+                self.exc_type = Some(self.exception_class_of(&exc_obj));
+                self.exc_value = Some(exc_obj.clone());
                 // The unwinding exception is now "in flight" — a `raise X`
                 // inside a `finally:` body chains it as __context__ (except
                 // handlers' PUSH_EXC_INFO immediately replaces this with the

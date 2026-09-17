@@ -72,6 +72,69 @@ pub fn builtin_setattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
     }
     let attr_name = args[1].str();
+    // Check for __set__ descriptor protocol on data descriptors first
+    // (property/DynamicClassAttribute must intercept before plain
+    // instance-dict assignment, matching LOAD_ATTR/STORE_ATTR opcode paths).
+    let descriptor = {
+        let obj_borrowed = args[0].borrow();
+        if let PyObject::Instance { typ, .. } = &*obj_borrowed {
+            let typ_ref = typ.borrow();
+            if let PyObject::Type {
+                dict: type_dict, ..
+            } = &*typ_ref
+            {
+                type_dict.get_str(&attr_name).cloned()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(ref desc) = descriptor {
+        // Property is special-cased: call the setter function via the
+        // live VM (not a disposable one) — matches STORE_ATTR opcode
+        // path and avoids import/global lookups failing.
+        let is_property = {
+            let d = desc.borrow();
+            matches!(&*d, PyObject::Property(_))
+        };
+        if is_property {
+            let property_setter = {
+                let d = desc.borrow();
+                if let PyObject::Property(ref data) = &*d {
+                    data.setter.clone()
+                } else {
+                    None
+                }
+            };
+            if let Some(setter_fn) = property_setter {
+                return with_vm_mut(|vm| {
+                    vm.call_function(
+                        setter_fn,
+                        vec![args[0].clone(), args[2].clone()],
+                        vec![],
+                    )
+                })?;
+            } else {
+                return Err(PyError::attribute_error(format!(
+                    "property '{}' of '{}' object has no setter",
+                    attr_name,
+                    args[0].borrow().type_name()
+                )));
+            }
+        }
+        // Generic __set__ for other descriptors (DynamicClassAttribute, etc.)
+        if let Ok(setter) = desc.borrow().get_attribute("__set__") {
+            return with_vm_mut(|vm| {
+                vm.call_function(
+                    setter,
+                    vec![desc.clone(), args[0].clone(), args[2].clone()],
+                    vec![],
+                )
+            })?;
+        }
+    }
     // `.borrow_mut()` panics unconditionally for anything that ISN'T
     // `PyObjectRef::Mut` — that's every inline variant (SmallInt/SmallBool/
     // SmallFloat/SmallStr/None, no backing RefCell at all) AND every
@@ -103,6 +166,66 @@ pub fn builtin_delattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("delattr() takes exactly 2 arguments"));
     }
     let attr_name = args[1].str();
+    // Check for __delete__ descriptor protocol first (data descriptors
+    // like property/DynamicClassAttribute must intercept deletion before
+    // __delattr__, matching how builtin_setattr checks __set__ first).
+    let descriptor = {
+        let obj_borrowed = args[0].borrow();
+        if let PyObject::Instance { typ, .. } = &*obj_borrowed {
+            let typ_ref = typ.borrow();
+            if let PyObject::Type {
+                dict: type_dict, ..
+            } = &*typ_ref
+            {
+                type_dict.get_str(&attr_name).cloned()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(ref desc) = descriptor {
+        let is_property = {
+            let d = desc.borrow();
+            matches!(&*d, PyObject::Property(_))
+        };
+        if is_property {
+            let property_deleter = {
+                let d = desc.borrow();
+                if let PyObject::Property(ref data) = &*d {
+                    data.deleter.clone()
+                } else {
+                    None
+                }
+            };
+            if let Some(del_fn) = property_deleter {
+                return with_vm_mut(|vm| {
+                    vm.call_function(
+                        del_fn,
+                        vec![args[0].clone()],
+                        vec![],
+                    )
+                })?;
+            } else {
+                return Err(PyError::attribute_error(format!(
+                    "property '{}' of '{}' object has no deleter",
+                    attr_name,
+                    args[0].borrow().type_name()
+                )));
+            }
+        }
+        // Generic __delete__ for other descriptors (DynamicClassAttribute, etc.)
+        if let Ok(deleter) = desc.borrow().get_attribute("__delete__") {
+            return with_vm_mut(|vm| {
+                vm.call_function(
+                    deleter,
+                    vec![desc.clone(), args[0].clone()],
+                    vec![],
+                )
+            })?;
+        }
+    }
     // Check for __delattr__ on Instance types first
     let f = {
         let obj_borrowed = args[0].borrow();
@@ -149,13 +272,19 @@ pub fn builtin_ord(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             }
             PyObject::Str(s) => {
-                let c = s.chars().next().ok_or_else(|| {
+                // Use WTF-8 codepoints to handle surrogates correctly.
+                let cps: Vec<u32> = if s.has_surrogates() {
+                    crate::object::pystring::Wtf8Chars::new(s.as_bytes()).collect()
+                } else {
+                    s.as_str().chars().map(|c| c as u32).collect()
+                };
+                let c = cps.first().copied().ok_or_else(|| {
                     PyError::type_error("ord() expected a character, but string of length 0 found")
                 })?;
-                if s.chars().count() != 1 {
-                    return Err(PyError::type_error(format!("ord() expected a character, but string of length {} found", s.chars().count())));
+                if cps.len() != 1 {
+                    return Err(PyError::type_error(format!("ord() expected a character, but string of length {} found", cps.len())));
                 }
-                return Ok(py_int(c as u32 as i64));
+                return Ok(py_int(c as i64));
             }
             _ => {}
         }

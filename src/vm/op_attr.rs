@@ -291,6 +291,15 @@ impl VirtualMachine {
                                                 // object as if that were the successful result.
                                                 return Ok(Some(self.call_function(g.clone(), vec![obj.clone()], vec![])?));
                                             }
+                                            PyObject::Property(_) => {
+                                                // property() with no getter — unreadable.
+                                                // Real CPython: "property 'foo' of 'cls' object has no getter"
+                                                return Err(PyError::attribute_error(format!(
+                                                    "property '{}' of '{}' object has no getter",
+                                                    name,
+                                                    obj.borrow().type_name(),
+                                                )));
+                                            }
                                             PyObject::StaticMethod { func } => {
                                                 return Ok(Some(func.clone()));
                                             }
