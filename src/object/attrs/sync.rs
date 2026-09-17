@@ -2,6 +2,13 @@
 use crate::object::*;
 use super::*;
 
+/// Mirrors `_thread.TIMEOUT_MAX` (`src/modules/misc/thread.rs`) — the
+/// largest timeout CPython's lock/semaphore `acquire()` accepts before
+/// raising `OverflowError`. Kept as a separate constant here (rather than
+/// importing the module's value) since this file has no dependency on
+/// `modules::misc::thread`.
+const THREAD_TIMEOUT_MAX: f64 = 4294967.0;
+
 // ── Shared helpers for Condition/Semaphore/Barrier/Timer ────────────────
 //
 // `BuiltinMethod.func` is a plain `fn(&[PyObjectRef]) -> PyResult<...>`
@@ -108,6 +115,38 @@ fn generic_lock_acquire(
     blocking: bool,
     timeout: Option<f64>,
 ) -> PyResult<bool> {
+    // CPython: a non-blocking acquire cannot also carry a real timeout —
+    // `lock.acquire(False, 1)` raises `ValueError: can't specify a timeout
+    // for a non-blocking call` (the sentinel "no timeout given" is -1, so
+    // that value alone is still allowed through). Was previously accepted
+    // silently and just fell through to the `!blocking` early return below.
+    if !blocking {
+        if let Some(t) = timeout {
+            if t != -1.0 {
+                return Err(PyError::value_error(
+                    "can't specify a timeout for a non-blocking call",
+                ));
+            }
+        }
+    } else if let Some(t) = timeout {
+        // CPython: any timeout other than the "none given" sentinel -1
+        // must be non-negative — `lock.acquire(timeout=-100)` raises
+        // ValueError rather than being treated as "no timeout".
+        if t < 0.0 && t != -1.0 {
+            return Err(PyError::value_error(
+                "timeout value must be a non-negative number",
+            ));
+        }
+        // CPython caps timeouts at `_thread.TIMEOUT_MAX` and raises
+        // OverflowError above it (`lock.acquire(timeout=1e100)`) — without
+        // this check the value flowed straight into
+        // `Duration::from_secs_f64`, which PANICS (aborting the whole
+        // process, not a catchable Python exception) once the value is too
+        // big to represent as a `Duration`.
+        if t > THREAD_TIMEOUT_MAX {
+            return Err(PyError::overflow_error("timeout value is too large"));
+        }
+    }
     if generic_lock_try_acquire(lock_ref) {
         return Ok(true);
     }
@@ -604,6 +643,30 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 let timeout = get_kw("timeout")
                                     .or_else(|| args.get(2).filter(|a| !is_kwargs_dict(a)).cloned())
                                     .and_then(|v| v.as_f64());
+                                // CPython: `acquire(False, timeout)` with a
+                                // REAL timeout (anything but the "none given"
+                                // sentinel -1) is a ValueError — a
+                                // non-blocking call can't also wait.
+                                if !blocking {
+                                    if let Some(t) = timeout {
+                                        if t != -1.0 {
+                                            return Err(PyError::value_error(
+                                                "can't specify a timeout for a non-blocking call",
+                                            ));
+                                        }
+                                    }
+                                } else if let Some(t) = timeout {
+                                    if t < 0.0 && t != -1.0 {
+                                        return Err(PyError::value_error(
+                                            "timeout value must be a non-negative number",
+                                        ));
+                                    }
+                                    if t > THREAD_TIMEOUT_MAX {
+                                        return Err(PyError::overflow_error(
+                                            "timeout value is too large",
+                                        ));
+                                    }
+                                }
                                 let locked = inner_arc.lock().unwrap();
                                 let try_take = || -> bool {
                                     if locked.lock.load(std::sync::atomic::Ordering::SeqCst) {

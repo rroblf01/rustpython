@@ -22,7 +22,7 @@ pub fn create_selectors_dict() -> HashMap<String, PyObjectRef> {
     }
     fn sock_fd(sock: &PyObjectRef) -> i64 {
         use std::os::fd::AsRawFd;
-        if let PyObject::Socket { inner } = &*sock.borrow() {
+        if let PyObject::Socket { inner, .. } = &*sock.borrow() {
             match &*inner.borrow() {
                 SocketInner::TcpListener(l) => l.as_raw_fd() as i64,
                 SocketInner::TcpStream(s) => s.as_raw_fd() as i64,
@@ -38,7 +38,7 @@ pub fn create_selectors_dict() -> HashMap<String, PyObjectRef> {
         matches!((&stream).peek(&mut buf), Ok(_))
     }
     fn obj_readable(obj: &PyObjectRef) -> bool {
-        if let PyObject::Socket { inner } = &*obj.borrow() {
+        if let PyObject::Socket { inner, .. } = &*obj.borrow() {
             return match &*inner.borrow() {
                 SocketInner::TcpStream(s) => stream_readable(s),
                 SocketInner::TcpListener(l) => {

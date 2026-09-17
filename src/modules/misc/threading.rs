@@ -38,56 +38,92 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
         mro: vec![],
     }));
 
-    thr_func!("Thread", |args| {
-        // Real `threading.Thread.__init__(self, group=None, target=None,
-        // name=None, args=(), kwargs=None, *, daemon=None)` is overwhelmingly
-        // called with `target`/`args` as KEYWORD arguments in real code
-        // (`Thread(target=f, args=(1, 2))`) — this used to treat `args[0]`/
-        // `args[1]` as ALWAYS being the positional `target`/`args`, so any
-        // keyword-argument call packed its kwargs into a trailing `Dict`
-        // (this project's own established calling convention) that got
-        // mistaken for the target itself, then failing to CALL it with
-        // `TypeError: 'dict' object is not callable` the moment the thread
-        // actually ran — i.e. `threading.Thread` was completely broken for
-        // the single most common way real code constructs one. Now checks
-        // for a trailing kwargs dict first and pulls `target`/`args` out of
-        // it if present, falling back to positional args only for whichever
-        // of the two a kwarg didn't already supply.
-        let (positional, kwargs) = match args.last() {
-            Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
-                (&args[..args.len() - 1], Some(last.clone()))
-            }
-            _ => (args, None),
-        };
-        let kwarg = |name: &str| -> Option<PyObjectRef> {
-            kwargs.as_ref().and_then(|d| {
-                if let PyObject::Dict(d) = &*d.borrow() {
-                    d.get(&py_str(name)).ok().flatten()
-                } else {
-                    None
-                }
-            })
-        };
-        let target = kwarg("target")
-            .or_else(|| positional.get(1).cloned())
-            .unwrap_or_else(py_none);
-        let args_tuple = kwarg("args").or_else(|| positional.get(3).cloned());
-        let thread_args = match args_tuple {
-            Some(t) => match &*t.borrow() {
-                PyObject::Tuple(items) => items.clone(),
-                _ => vec![],
-            },
-            None => vec![],
-        };
-        let inner = std::sync::Arc::new(std::sync::Mutex::new(ThreadInner {
-            handle: None,
-            result: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            target,
-            args: thread_args,
-            started: false,
-        }));
-        Ok(PyObjectRef::new(PyObject::Thread(inner)))
+    // `threading.Thread` is a REAL subclassable `PyObject::Type`, not a
+    // plain `BuiltinFunction` factory. It used to be a bare
+    // `BuiltinFunction` (calling it directly produced a `PyObject::Thread`
+    // native value) — that broke the extremely common
+    // `class Worker(threading.Thread): ...` pattern (e.g. `test_ftplib.py`'s
+    // `DummyFTPServer(asyncore.dispatcher, threading.Thread)`,
+    // `test_poplib.py`/`test_smtplib.py`'s analogous dummy servers) two
+    // ways: (1) `threading.Thread.__init__(self)`/`threading.Thread.start
+    // (self)` — the standard cooperative-multiple-inheritance idiom of
+    // calling an unbound base method — raised `AttributeError:
+    // 'builtin_function_or_method' object has no attribute 'start'`,
+    // because attribute access on a `BuiltinFunction` has no method table
+    // at all; (2) even where that idiom wasn't used, a real `type`
+    // subclass needs `Thread` to actually BE a class so the normal
+    // instance/dict/MRO machinery (identical to any pure-Python base
+    // class, e.g. `asyncore.dispatcher`) applies — overridden `run()`
+    // resolves via ordinary attribute lookup, `self.active`/etc. live in
+    // the same instance dict as every other attribute. State (`_target`,
+    // `_args`, `_kwargs`, `_started`, `_finished`, `_result`, `name`,
+    // `daemon`) is now stored directly as plain instance attributes rather
+    // than a separate native `PyObject::Thread` value.
+    let thread_dict: HashMap<String, PyObjectRef> = {
+        let mut m: HashMap<String, PyObjectRef> = HashMap::new();
+        m.insert(
+            "__init__".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__init__".to_string(),
+                func: thread_init,
+            }),
+        );
+        m.insert(
+            "start".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "start".to_string(),
+                func: thread_start,
+            }),
+        );
+        m.insert(
+            "run".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "run".to_string(),
+                func: thread_run,
+            }),
+        );
+        m.insert(
+            "join".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "join".to_string(),
+                func: thread_join,
+            }),
+        );
+        for alias in ["is_alive", "isAlive"] {
+            m.insert(
+                alias.to_string(),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: alias.to_string(),
+                    func: thread_is_alive,
+                }),
+            );
+        }
+        m.insert(
+            "getName".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "getName".to_string(),
+                func: thread_get_name,
+            }),
+        );
+        m.insert(
+            "setName".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "setName".to_string(),
+                func: thread_set_name,
+            }),
+        );
+        m
+    };
+    let thread_type = PyObjectRef::new(PyObject::Type {
+        name: "Thread".to_string(),
+        dict: Box::new(str_map_to_typedict(thread_dict)),
+        bases: vec![],
+        mro: vec![],
     });
+    if let PyObject::Type { mro, .. } = &mut *thread_type.borrow_mut() {
+        *mro = vec![thread_type.clone()];
+    }
+    d.insert_str("Thread", thread_type);
 
     // threading.local() — per-thread storage. This interpreter's object
     // model (Rc<RefCell<PyObject>>) only ever runs Python code on one
@@ -231,4 +267,189 @@ pub fn create_threading_dict() -> HashMap<String, PyObjectRef> {
     // `set_builtins_ref`), the same reason `select`'s `error` alias is
     // patched in at the call site rather than here.
     d
+}
+
+fn thread_dict_get(self_obj: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
+    if let PyObject::Instance { dict, .. } = &*self_obj.borrow() {
+        dict.get_str(name).cloned()
+    } else {
+        None
+    }
+}
+
+fn thread_dict_set(self_obj: &PyObjectRef, name: &str, val: PyObjectRef) {
+    if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
+        dict.insert_str(name, val);
+    }
+}
+
+/// `Thread.__init__(self, group=None, target=None, name=None, args=(),
+/// kwargs=None, *, daemon=None)`. See the `thread_type` construction site's
+/// doc comment for why this whole type moved off a bare `PyObject::Thread`
+/// native value.
+fn thread_init(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error(
+            "__init__() missing 1 required positional argument: 'self'",
+        ));
+    }
+    let self_obj = args[0].clone();
+    let (positional, kwargs) = match args.last() {
+        Some(last) if args.len() > 1 && matches!(&*last.borrow(), PyObject::Dict(_)) => {
+            (&args[1..args.len() - 1], Some(last.clone()))
+        }
+        _ => (&args[1..], None),
+    };
+    let kwarg = |name: &str| -> Option<PyObjectRef> {
+        kwargs.as_ref().and_then(|d| {
+            if let PyObject::Dict(d) = &*d.borrow() {
+                d.get(&py_str(name)).ok().flatten()
+            } else {
+                None
+            }
+        })
+    };
+    // positional layout (after self): group, target, name, args, kwargs
+    let target = kwarg("target")
+        .or_else(|| positional.get(1).cloned())
+        .unwrap_or_else(py_none);
+    let name = kwarg("name").or_else(|| positional.get(2).cloned());
+    let args_tuple = kwarg("args").or_else(|| positional.get(3).cloned());
+    let kwargs_dict = kwarg("kwargs").or_else(|| positional.get(4).cloned());
+    let daemon = kwarg("daemon");
+
+    thread_dict_set(&self_obj, "_target", target);
+    thread_dict_set(
+        &self_obj,
+        "_args",
+        args_tuple.unwrap_or_else(|| py_tuple(vec![])),
+    );
+    thread_dict_set(
+        &self_obj,
+        "_kwargs",
+        kwargs_dict.unwrap_or_else(|| PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new())))),
+    );
+    thread_dict_set(&self_obj, "name", name.unwrap_or_else(|| py_str("Thread")));
+    thread_dict_set(&self_obj, "daemon", daemon.unwrap_or_else(|| py_bool(false)));
+    thread_dict_set(&self_obj, "_started", py_bool(false));
+    thread_dict_set(&self_obj, "_finished", py_bool(false));
+    thread_dict_set(&self_obj, "_result", py_none());
+    Ok(py_none())
+}
+
+/// Default `Thread.run()`: calls `self._target(*self._args, **self._kwargs)`
+/// if a target was given (matches real CPython). Subclasses commonly
+/// override `run()` entirely (e.g. `test_ftplib.py`'s `DummyFTPServer.run`)
+/// — ordinary attribute lookup on `self` already honors that override, this
+/// is only reached for the un-overridden base case.
+fn thread_run(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    let self_obj = &args[0];
+    let target = thread_dict_get(self_obj, "_target").unwrap_or_else(py_none);
+    if matches!(&*target.borrow(), PyObject::None) {
+        return Ok(py_none());
+    }
+    let targs = thread_dict_get(self_obj, "_args").unwrap_or_else(|| py_tuple(vec![]));
+    let mut call_args: Vec<PyObjectRef> = match &*targs.borrow() {
+        PyObject::Tuple(items) => items.clone(),
+        _ => vec![],
+    };
+    if let Some(kw) = thread_dict_get(self_obj, "_kwargs") {
+        if let PyObject::Dict(d) = &*kw.borrow() {
+            if !d.is_empty() {
+                call_args.push(kw.clone());
+            }
+        }
+    }
+    crate::object::builtin_call(&target, &call_args)
+}
+
+fn thread_start(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error("start() missing 'self'"));
+    }
+    let self_obj = args[0].clone();
+    let already_started = thread_dict_get(&self_obj, "_started")
+        .map(|v| v.truthy())
+        .unwrap_or(false);
+    if already_started {
+        return Err(PyError::runtime_error("threads can only be started once"));
+    }
+    thread_dict_set(&self_obj, "_started", py_bool(true));
+    let self_clone = self_obj.clone();
+    crate::modules::coop_threads_enqueue(Box::new(move || {
+        let run_method = self_clone.borrow().get_attribute("run");
+        let call_result = match run_method {
+            Ok(m) => crate::object::call_bound_method(m, self_clone.clone(), vec![]),
+            Err(e) => Err(e),
+        };
+        match call_result {
+            Ok(v) => thread_dict_set(&self_clone, "_result", v),
+            Err(e) => {
+                if !crate::object::is_stop_iteration_error(&e) {
+                    eprintln!("Thread raised: {}", e);
+                }
+            }
+        }
+        thread_dict_set(&self_clone, "_finished", py_bool(true));
+    }));
+    Ok(py_none())
+}
+
+fn thread_join(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // Extract timeout from keyword args (trailing PyDict) or positional args.
+    // CPython's Thread.join(timeout=None) — timeout defaults to None.
+    let mut timeout_val: Option<f64> = None;
+    // Check for kwargs dict as last arg
+    if let Some(last) = args.last() {
+        if let PyObject::Dict(d) = &*last.borrow() {
+            if let Ok(Some(val)) = d.get(&py_str("timeout")) {
+                if !matches!(&*val.borrow(), PyObject::None) {
+                    timeout_val = val.as_f64();
+                }
+            }
+        }
+    }
+    // Check positional: args[1] if no kwargs dict
+    if timeout_val.is_none() && args.len() > 1 {
+        let second = &args[1];
+        if !matches!(&*second.borrow(), PyObject::None | PyObject::Dict(_)) {
+            timeout_val = second.as_f64();
+        }
+    }
+    if let Some(t) = timeout_val {
+        if t > 0.0 {
+            return Ok(py_none());
+        }
+    }
+    crate::modules::coop_threads_drain();
+    Ok(py_none())
+}
+
+fn thread_is_alive(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Ok(py_bool(false));
+    }
+    let self_obj = &args[0];
+    let started = thread_dict_get(self_obj, "_started")
+        .map(|v| v.truthy())
+        .unwrap_or(false);
+    let finished = thread_dict_get(self_obj, "_finished")
+        .map(|v| v.truthy())
+        .unwrap_or(false);
+    Ok(py_bool(started && !finished))
+}
+
+fn thread_get_name(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Ok(py_str("Thread"));
+    }
+    Ok(thread_dict_get(&args[0], "name").unwrap_or_else(|| py_str("Thread")))
+}
+
+fn thread_set_name(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.len() < 2 {
+        return Err(PyError::type_error("setName() missing 'name' argument"));
+    }
+    thread_dict_set(&args[0], "name", args[1].clone());
+    Ok(py_none())
 }
