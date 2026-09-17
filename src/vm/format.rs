@@ -3,10 +3,10 @@ use crate::interner::{self, InternedMap, StrId};
 use crate::object::*;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
+use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use smallvec::SmallVec;
 
 /// Implements Python's Format Specification Mini-Language.
 ///
@@ -738,7 +738,12 @@ fn format_float_with_sign(val: f64, sign: char, precision: Option<usize>) -> Str
 /// types ('d', 'n', etc.) N=3; for hex/oct/bin ('x', 'X', 'b', 'o') N=4.
 /// Handles scientific suffixes (`e+05`) and the `%` suffix so the
 /// mantissa/percent fraction can be grouped too.
-fn apply_grouping(s: &str, int_sep: Option<char>, frac_sep: Option<char>, int_group_width: usize) -> String {
+fn apply_grouping(
+    s: &str,
+    int_sep: Option<char>,
+    frac_sep: Option<char>,
+    int_group_width: usize,
+) -> String {
     if int_sep.is_none() && frac_sep.is_none() {
         return s.to_string();
     }
@@ -839,7 +844,8 @@ fn apply_padding(
                 if !bytes.is_empty() && matches!(bytes[0], b'+' | b'-' | b' ') {
                     skip = 1;
                 }
-                if skip < bytes.len() && bytes[skip] == b'0'
+                if skip < bytes.len()
+                    && bytes[skip] == b'0'
                     && skip + 1 < bytes.len()
                     && matches!(bytes[skip + 1], b'x' | b'X' | b'b' | b'o')
                 {

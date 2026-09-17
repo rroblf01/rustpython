@@ -6,7 +6,12 @@ use num_bigint::BigInt;
 use std::rc::Rc;
 
 impl VirtualMachine {
-    pub(crate) fn handle_reg(&mut self, fi: usize, op: Opcode, arg: u32) -> PyResult<Option<PyObjectRef>> {
+    pub(crate) fn handle_reg(
+        &mut self,
+        fi: usize,
+        op: Opcode,
+        arg: u32,
+    ) -> PyResult<Option<PyObjectRef>> {
         match op {
             Opcode::REG_MOV => {
                 // Lazily initialize registers

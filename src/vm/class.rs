@@ -2,12 +2,12 @@ use crate::bytecode::*;
 use crate::interner::{self, InternedMap, StrId};
 use crate::object::*;
 use crate::vm::VirtualMachine;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use smallvec::SmallVec;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 /// C3 linearization for proper method resolution order (MRO).
 ///
@@ -315,10 +315,7 @@ impl VirtualMachine {
                 if items.is_empty() {
                     return Err(PyError::type_error("type MRO must not be empty"));
                 }
-                let first_is_cls = items
-                    .first()
-                    .map(|f| f.is(&class))
-                    .unwrap_or(false);
+                let first_is_cls = items.first().map(|f| f.is(&class)).unwrap_or(false);
                 if !first_is_cls {
                     return Err(PyError::type_error(
                         "mro() must return the class itself first",
@@ -398,10 +395,14 @@ impl VirtualMachine {
                     if let Ok(am) = base.borrow().get_attribute("__abstractmethods__") {
                         match &*am.borrow() {
                             PyObject::FrozenSet(s) => {
-                                for v in s.iter() { abstracts.insert(v.str()); }
+                                for v in s.iter() {
+                                    abstracts.insert(v.str());
+                                }
                             }
                             PyObject::Set(s) => {
-                                for v in s.iter() { abstracts.insert(v.str()); }
+                                for v in s.iter() {
+                                    abstracts.insert(v.str());
+                                }
                             }
                             _ => {}
                         }
@@ -410,22 +411,37 @@ impl VirtualMachine {
                 let mut to_remove = Vec::new();
                 for name in abstracts.iter() {
                     if let Some(v) = namespace_dict.get(name) {
-                        let is_abs = v.borrow().get_attribute("__isabstractmethod__").map(|b| b.truthy()).unwrap_or(false);
+                        let is_abs = v
+                            .borrow()
+                            .get_attribute("__isabstractmethod__")
+                            .map(|b| b.truthy())
+                            .unwrap_or(false);
                         if !is_abs && !matches!(&*v.borrow(), PyObject::None) {
                             to_remove.push(name.clone());
                         }
                     }
                 }
-                for n in to_remove { abstracts.remove(&n); }
+                for n in to_remove {
+                    abstracts.remove(&n);
+                }
                 for (k, v) in &namespace_dict {
-                    if v.borrow().get_attribute("__isabstractmethod__").map(|b| b.truthy()).unwrap_or(false) {
+                    if v.borrow()
+                        .get_attribute("__isabstractmethod__")
+                        .map(|b| b.truthy())
+                        .unwrap_or(false)
+                    {
                         abstracts.insert(k.clone());
                     }
                 }
                 let mut set = crate::object::PySet::new();
-                for n in abstracts.iter() { let _ = set.add(py_str(n)); }
+                for n in abstracts.iter() {
+                    let _ = set.add(py_str(n));
+                }
                 if let PyObject::Type { dict, .. } = &mut *class.borrow_mut() {
-                    dict.insert_str("__abstractmethods__", PyObjectRef::new(PyObject::FrozenSet(set)));
+                    dict.insert_str(
+                        "__abstractmethods__",
+                        PyObjectRef::new(PyObject::FrozenSet(set)),
+                    );
                 }
             }
         }
@@ -473,32 +489,50 @@ impl VirtualMachine {
                                 // Synthesize exception object from PyError
                                 let typ = e.type_name_for_display();
                                 let msg = e.message();
-                                crate::object::PyObjectRef::new(crate::object::PyObject::Exception {
-                                    typ: typ.clone(),
-                                    args: vec![crate::object::py_str(&msg)],
-                                    cause: None,
-                                    suppress_context: false,
-                                    context: None,
-                                    traceback: None,
-                                    extra: None,
-                                })
+                                crate::object::PyObjectRef::new(
+                                    crate::object::PyObject::Exception {
+                                        typ: typ.clone(),
+                                        args: vec![crate::object::py_str(&msg)],
+                                        cause: None,
+                                        suppress_context: false,
+                                        context: None,
+                                        traceback: None,
+                                        extra: None,
+                                    },
+                                )
                             }
                         };
                         {
                             let mut borrowed = exc_obj.borrow_mut();
-                            if let crate::object::PyObject::Exception { extra, .. } = &mut *borrowed {
-                                let map = extra.get_or_insert_with(|| std::collections::HashMap::new());
-                                let old = map.get("__notes__").cloned().unwrap_or_else(|| crate::object::py_list(vec![]));
-                                let mut items = if let crate::object::PyObject::List(v) = &*old.borrow() {
-                                    v.clone()
-                                } else {
-                                    vec![]
-                                };
+                            if let crate::object::PyObject::Exception { extra, .. } = &mut *borrowed
+                            {
+                                let map =
+                                    extra.get_or_insert_with(|| std::collections::HashMap::new());
+                                let old = map
+                                    .get("__notes__")
+                                    .cloned()
+                                    .unwrap_or_else(|| crate::object::py_list(vec![]));
+                                let mut items =
+                                    if let crate::object::PyObject::List(v) = &*old.borrow() {
+                                        v.clone()
+                                    } else {
+                                        vec![]
+                                    };
                                 items.push(crate::object::py_str(&note));
                                 map.insert("__notes__".to_string(), crate::object::py_list(items));
-                            } else if let crate::object::PyObject::Instance { dict, .. } = &mut *borrowed {
-                                let notes = dict.get("__notes__").cloned().unwrap_or_else(|| crate::object::py_list(vec![]));
-                                let mut items = if let crate::object::PyObject::List(v) = &*notes.borrow() { v.clone() } else { vec![] };
+                            } else if let crate::object::PyObject::Instance { dict, .. } =
+                                &mut *borrowed
+                            {
+                                let notes = dict
+                                    .get("__notes__")
+                                    .cloned()
+                                    .unwrap_or_else(|| crate::object::py_list(vec![]));
+                                let mut items =
+                                    if let crate::object::PyObject::List(v) = &*notes.borrow() {
+                                        v.clone()
+                                    } else {
+                                        vec![]
+                                    };
                                 items.push(crate::object::py_str(&note));
                                 dict.insert("__notes__".to_string(), crate::object::py_list(items));
                             }
@@ -506,7 +540,10 @@ impl VirtualMachine {
                         // Re-raise with notes attached
                         match &e {
                             crate::object::PyError::Exception(typ, _) => {
-                                return Err(crate::object::PyError::Exception(typ.clone(), exc_obj));
+                                return Err(crate::object::PyError::Exception(
+                                    typ.clone(),
+                                    exc_obj,
+                                ));
                             }
                             _ => {
                                 let typ = e.type_name_for_display();
@@ -750,18 +787,26 @@ impl VirtualMachine {
                 ),
                 None => (None, None),
             };
-            let has_abc = abc_type.map(|abc_t| {
-                let cls_mro = if let PyObject::Type { mro, .. } = &*cls.borrow() {
-                    mro.clone()
-                } else { vec![] };
-                cls_mro.iter().any(|base| base.is(&abc_t))
-            }).unwrap_or(false);
+            let has_abc = abc_type
+                .map(|abc_t| {
+                    let cls_mro = if let PyObject::Type { mro, .. } = &*cls.borrow() {
+                        mro.clone()
+                    } else {
+                        vec![]
+                    };
+                    cls_mro.iter().any(|base| base.is(&abc_t))
+                })
+                .unwrap_or(false);
             // Also trigger if the metaclass is ABCMeta itself
-            let is_abc_meta = abc_mod.as_ref().map(|_| {
-                let name = metaclass.borrow().type_name();
-                name == "ABCMeta" || name == "builtin_function_or_method"
-                    && metaclass.borrow().repr().contains("ABCMeta")
-            }).unwrap_or(false);
+            let is_abc_meta = abc_mod
+                .as_ref()
+                .map(|_| {
+                    let name = metaclass.borrow().type_name();
+                    name == "ABCMeta"
+                        || name == "builtin_function_or_method"
+                            && metaclass.borrow().repr().contains("ABCMeta")
+                })
+                .unwrap_or(false);
             if has_abc || is_abc_meta {
                 if let Some(update) = update_fn {
                     let _ = self.call_function(update, vec![cls.clone()], vec![]);

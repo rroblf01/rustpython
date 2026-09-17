@@ -25,7 +25,12 @@ impl VirtualMachine {
     /// correctly forever, since the dict its closure captured is never
     /// mutated again — stripping names out from underneath it broke exactly
     /// this pattern.
-    pub(crate) fn install_source_defined_stdlib(&mut self, module_name: &str, source: &str, names: &[&str]) {
+    pub(crate) fn install_source_defined_stdlib(
+        &mut self,
+        module_name: &str,
+        source: &str,
+        names: &[&str],
+    ) {
         // Every `VirtualMachine::new()` — including the many *disposable*
         // ones spun up for nested Python-level calls from Rust builtin code
         // (a separate, documented architectural gap — see
@@ -109,7 +114,7 @@ impl VirtualMachine {
             // same mechanism) would just silently come back missing
             // whatever names the source was SUPPOSED to define, with
             // `import` itself reporting success. Real trigger: a bug
-          // introduced into `enum_extra.py` while adding `Flag`/`IntFlag`
+            // introduced into `enum_extra.py` while adding `Flag`/`IntFlag`
             // support broke the WHOLE `enum` module this way — `Enum`,
             // defined and working near the TOP of that file, silently
             // vanished from `enum.Enum` because of a `TypeError` raised by
@@ -246,7 +251,7 @@ impl VirtualMachine {
             // method's fast-path call site was enabled. Skipping the
             // import on a re-entrant call is safe: that inner disposable
             // VM simply proceeds without `collections.abc` pre-wired
-          // (falling back to whatever a real `import collections.abc`
+            // (falling back to whatever a real `import collections.abc`
             // statement inside its own code would do, same as any other
             // not-yet-cached stdlib extra), and the ONE outer, non-
             // re-entrant call completes normally and populates the cache

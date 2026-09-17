@@ -1,11 +1,11 @@
 use crate::interner::StrId;
+#[cfg(feature = "jit")]
+use crate::jit::JitCompiler;
 use crate::object::PyObjectRef;
 use crate::vm::frame::Frame;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-#[cfg(feature = "jit")]
-use crate::jit::JitCompiler;
 
 pub struct VirtualMachine {
     pub frames: Vec<Frame>,

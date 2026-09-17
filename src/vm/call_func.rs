@@ -106,7 +106,9 @@ impl VirtualMachine {
                                 // Cranelift per call, observed on any
                                 // repeatedly-called loop function).
                                 persist_jit_ptr(callable, compiled_fn as usize);
-                                if std::env::var("RPY_DEBUG_JIT").is_ok() { eprintln!("JIT-OK persisted"); }
+                                if std::env::var("RPY_DEBUG_JIT").is_ok() {
+                                    eprintln!("JIT-OK persisted");
+                                }
                             }
                             None => {
                                 jit_ptr.set(SENTINEL_FAILED);
@@ -115,7 +117,9 @@ impl VirtualMachine {
                                 // function without a loop) re-ran the
                                 // compile scan on every call.
                                 persist_jit_ptr(callable, SENTINEL_FAILED);
-                                if std::env::var("RPY_DEBUG_JIT").is_ok() { eprintln!("JIT-FAIL persisted"); }
+                                if std::env::var("RPY_DEBUG_JIT").is_ok() {
+                                    eprintln!("JIT-FAIL persisted");
+                                }
                             }
                         }
                     }
@@ -230,11 +234,12 @@ impl VirtualMachine {
                     .map(|v| v.str())
                     .unwrap_or_default();
                 let filename = interner::lookup_str(code.filename).to_string();
-                let fname_plain = if module.is_empty() || module == "builtins" || module == "__main__" {
-                    qname.clone()
-                } else {
-                    format!("{}.{}", module, qname)
-                };
+                let fname_plain =
+                    if module.is_empty() || module == "builtins" || module == "__main__" {
+                        qname.clone()
+                    } else {
+                        format!("{}.{}", module, qname)
+                    };
                 let fname_test = if qname == "BozoError" {
                     format!("test.test_unpack.{}", qname)
                 } else if qname == "f" || qname == "g" || qname == "h" || qname == "e" {
@@ -244,8 +249,17 @@ impl VirtualMachine {
                 } else {
                     fname_plain.clone()
                 };
-                if std::env::var("RPY_DEBUG_FNAME").is_ok() && (qname == "f" || qname == "g" || qname == "h" || qname == "e" || qname == "BozoError") {
-                    eprintln!("FNAME debug: qname={} module={} fname_plain={} fname_test={} filename={}", qname, module, fname_plain, fname_test, filename);
+                if std::env::var("RPY_DEBUG_FNAME").is_ok()
+                    && (qname == "f"
+                        || qname == "g"
+                        || qname == "h"
+                        || qname == "e"
+                        || qname == "BozoError")
+                {
+                    eprintln!(
+                        "FNAME debug: qname={} module={} fname_plain={} fname_test={} filename={}",
+                        qname, module, fname_plain, fname_test, filename
+                    );
                 }
                 (fname_plain, fname_test)
             };
@@ -297,12 +311,14 @@ impl VirtualMachine {
                 let kwonly_given = if code.kwonlyarg_count > 0 && !keywords.is_empty() {
                     let kwonly_start_tmp =
                         code.arg_count + if code.vararg_name.is_some() { 1 } else { 0 };
-                    let kwonly_names = &code.varnames
-                        [kwonly_start_tmp..kwonly_start_tmp + code.kwonlyarg_count];
+                    let kwonly_names =
+                        &code.varnames[kwonly_start_tmp..kwonly_start_tmp + code.kwonlyarg_count];
                     keywords
                         .iter()
                         .filter(|(k, _)| {
-                            kwonly_names.iter().any(|&n| crate::interner::intern_eq(n, k))
+                            kwonly_names
+                                .iter()
+                                .any(|&n| crate::interner::intern_eq(n, k))
                         })
                         .count()
                 } else {
@@ -350,11 +366,7 @@ impl VirtualMachine {
                     let verb = if npos > 1 { "were" } else { "was" };
                     format!(
                         "{}() takes from {} to {} positional arguments but {} {} given",
-                        fname,
-                        min_required,
-                        named_params,
-                        npos,
-                        verb
+                        fname, min_required, named_params, npos, verb
                     )
                 };
                 return Err(PyError::type_error(msg));
@@ -463,7 +475,6 @@ impl VirtualMachine {
                             // for keyword argument 'k'` (test_extcall's
                             // doctest: `f(1, 2, **{'a': -1}, a=4, c=6)`).
                             if dict.get(&py_str(key)).ok().flatten().is_some() {
-                                
                                 self.release_frame(new_frame);
                                 let (_, fname_with_test) = fname_for_err();
                                 return Err(PyError::type_error(format!(
@@ -631,13 +642,10 @@ impl VirtualMachine {
                     };
                 for k in 0..code.kwonly_defaults_mask.len() {
                     let idx = kwonly_start + k;
-                    if idx >= new_frame.fast_locals.len()
-                        || new_frame.fast_locals[idx].is_some()
-                    {
+                    if idx >= new_frame.fast_locals.len() || new_frame.fast_locals[idx].is_some() {
                         continue;
                     }
-                    let name_str =
-                        interner::lookup_str(new_frame.code.varnames[idx]).to_string();
+                    let name_str = interner::lookup_str(new_frame.code.varnames[idx]).to_string();
                     if let Some(val) = name_to_default.get(&name_str) {
                         new_frame.insert_local(&name_str, val.clone());
                         new_frame.fast_locals[idx] = Some(val.clone());
@@ -652,7 +660,9 @@ impl VirtualMachine {
                 .any(|i| i >= new_frame.fast_locals.len() || new_frame.fast_locals[i].is_none());
             if has_missing {
                 let missing_positional: Vec<String> = (0..named_params)
-                    .filter(|&i| i >= new_frame.fast_locals.len() || new_frame.fast_locals[i].is_none())
+                    .filter(|&i| {
+                        i >= new_frame.fast_locals.len() || new_frame.fast_locals[i].is_none()
+                    })
                     .map(|i| interner::lookup_str(new_frame.code.varnames[i]).to_string())
                     .collect();
                 self.release_frame(new_frame);
@@ -699,293 +709,305 @@ impl VirtualMachine {
         args: Vec<PyObjectRef>,
         keywords: Vec<(String, PyObjectRef)>,
     ) -> Option<PyResult<PyObjectRef>> {
-        if !matches!(&*callable.borrow(), PyObject::Type { .. }) { return None; }
+        if !matches!(&*callable.borrow(), PyObject::Type { .. }) {
+            return None;
+        }
         let result: PyResult<PyObjectRef> = (|| {
-        let type_construct_info = if let PyObject::Type { dict, mro, .. } = &*callable.borrow() {
-            let native_kind = dict
-                .get_str(crate::object::NATIVE_BASE_MARKER)
-                .map(|v| v.str());
-            let init_func = dict.get_str("__init__").cloned().or_else(|| {
-                for base in mro.iter().skip(1) {
-                    if let PyObject::Type {
-                        name: base_name,
-                        dict: base_dict,
-                        ..
-                    } = &*base.borrow()
-                    {
-                        // Every class implicitly inherits from `object`,
-                        // whose own __init__ is a universal no-op. For a
-                        // class that also has a native base (e.g.
-                        // `class SafeString(str, SafeData): ...`), that
-                        // no-op would otherwise always be found first and
-                        // preempt real native construction — skip it here
-                        // so synthesize_native_init below gets a chance
-                        // unless something more specific actually overrides
-                        // __init__.
-                        if native_kind.is_some() && base_name == "object" {
-                            continue;
-                        }
-                        if let Some(val) = base_dict.get_str("__init__") {
-                            return Some(val.clone());
+            let type_construct_info = if let PyObject::Type { dict, mro, .. } = &*callable.borrow()
+            {
+                let native_kind = dict
+                    .get_str(crate::object::NATIVE_BASE_MARKER)
+                    .map(|v| v.str());
+                let init_func = dict.get_str("__init__").cloned().or_else(|| {
+                    for base in mro.iter().skip(1) {
+                        if let PyObject::Type {
+                            name: base_name,
+                            dict: base_dict,
+                            ..
+                        } = &*base.borrow()
+                        {
+                            // Every class implicitly inherits from `object`,
+                            // whose own __init__ is a universal no-op. For a
+                            // class that also has a native base (e.g.
+                            // `class SafeString(str, SafeData): ...`), that
+                            // no-op would otherwise always be found first and
+                            // preempt real native construction — skip it here
+                            // so synthesize_native_init below gets a chance
+                            // unless something more specific actually overrides
+                            // __init__.
+                            if native_kind.is_some() && base_name == "object" {
+                                continue;
+                            }
+                            if let Some(val) = base_dict.get_str("__init__") {
+                                return Some(val.clone());
+                            }
                         }
                     }
-                }
+                    None
+                });
+                Some((native_kind, init_func))
+            } else {
                 None
-            });
-            Some((native_kind, init_func))
-        } else {
-            None
-        };
-        // The `callable.borrow()` above must be dropped (it already is, by
-        // this point — the `if let` scrutinee's temporary ends with the
-        // `if let` expression) before calling `__init__` below: `__init__`'s
-        // body commonly references its own class by name (e.g. a
-        // class-level counter like `Field.creation_counter += 1`, a
-        // widespread real-world pattern, not specific to any one
-        // library) — a STORE_ATTR on `callable` while this function still
-        // held it borrowed here was a genuine double-borrow panic.
-        if let Some((native_kind, init_func)) = type_construct_info {
-            // A user-defined `__new__` (a Python Function, not the native
-            // float/int/... `__new__`) must be called and its result
-            // returned (class Foo3(float): def __new__(...): return
-            // float.__new__(cls, 2*value) — Foo3(21) == 42). The native
-            // __new__ on the base type builds the default instance.
-            let custom_new = crate::object::lookup_dunder_via_mro(&callable, "__new__")
-                .filter(|f| matches!(&*f.borrow(), PyObject::Function(_)));
-            if let Some(new_fn) = custom_new {
-                let mut new_args = args.clone();
-                new_args.insert(0, callable.clone());
-                let kw_clone = keywords.clone();
-                let result = self.call_function(new_fn, new_args, kw_clone)?;
-                // A user exception class whose `__new__` returns a
-                // non-BaseException must raise TypeError (CPython: "calling
-                // <class '...'> should have returned an instance of
-                // BaseException, not <class 'list'>"). Without the check the
-                // raw non-exception value would be raised/propagated and
-                // escape every `except BaseException`.
-                if crate::object::find_exception_base_name(&callable).is_some() {
-                    let _cname = if let PyObject::Type { name, .. } = &*callable.borrow() { name.clone() } else { String::new() };
-                    if _cname == "ref" || _cname == "ReferenceType" || _cname == "KeyedRef" || _cname == "WeakMethod" || _cname == "weakref" {
-                        // Skip spurious exception check for weakref types (they share machinery with exceptions but are not exceptions)
-                    } else {
-                        let is_exc = match &*result.borrow() {
-                            PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => true,
-                            PyObject::Instance { typ, .. } => {
-                                crate::object::find_exception_base_name(typ).is_some()
-                            }
-                            _ => false,
+            };
+            // The `callable.borrow()` above must be dropped (it already is, by
+            // this point — the `if let` scrutinee's temporary ends with the
+            // `if let` expression) before calling `__init__` below: `__init__`'s
+            // body commonly references its own class by name (e.g. a
+            // class-level counter like `Field.creation_counter += 1`, a
+            // widespread real-world pattern, not specific to any one
+            // library) — a STORE_ATTR on `callable` while this function still
+            // held it borrowed here was a genuine double-borrow panic.
+            if let Some((native_kind, init_func)) = type_construct_info {
+                // A user-defined `__new__` (a Python Function, not the native
+                // float/int/... `__new__`) must be called and its result
+                // returned (class Foo3(float): def __new__(...): return
+                // float.__new__(cls, 2*value) — Foo3(21) == 42). The native
+                // __new__ on the base type builds the default instance.
+                let custom_new = crate::object::lookup_dunder_via_mro(&callable, "__new__")
+                    .filter(|f| matches!(&*f.borrow(), PyObject::Function(_)));
+                if let Some(new_fn) = custom_new {
+                    let mut new_args = args.clone();
+                    new_args.insert(0, callable.clone());
+                    let kw_clone = keywords.clone();
+                    let result = self.call_function(new_fn, new_args, kw_clone)?;
+                    // A user exception class whose `__new__` returns a
+                    // non-BaseException must raise TypeError (CPython: "calling
+                    // <class '...'> should have returned an instance of
+                    // BaseException, not <class 'list'>"). Without the check the
+                    // raw non-exception value would be raised/propagated and
+                    // escape every `except BaseException`.
+                    if crate::object::find_exception_base_name(&callable).is_some() {
+                        let _cname = if let PyObject::Type { name, .. } = &*callable.borrow() {
+                            name.clone()
+                        } else {
+                            String::new()
                         };
-                        if !is_exc {
-                            let result_typ = result.borrow().type_name();
-                            return Err(PyError::type_error(format!(
+                        if _cname == "ref"
+                            || _cname == "ReferenceType"
+                            || _cname == "KeyedRef"
+                            || _cname == "WeakMethod"
+                            || _cname == "weakref"
+                        {
+                            // Skip spurious exception check for weakref types (they share machinery with exceptions but are not exceptions)
+                        } else {
+                            let is_exc = match &*result.borrow() {
+                                PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => {
+                                    true
+                                }
+                                PyObject::Instance { typ, .. } => {
+                                    crate::object::find_exception_base_name(typ).is_some()
+                                }
+                                _ => false,
+                            };
+                            if !is_exc {
+                                let result_typ = result.borrow().type_name();
+                                return Err(PyError::type_error(format!(
                                 "calling {} should have returned an instance of BaseException, not <class '{}'>",
                                 callable.repr(),
                                 result_typ
                             )));
+                            }
                         }
                     }
-                }
-                // CPython: if __new__ returned an instance of this class,
-                // AND __init__ is defined (and different from the base),
-                // call __init__ before returning.
-                // If __new__ returned an instance of this class AND __init__
-                // is defined (and not the base object.__init__ no-op), call
-                // __init__ — CPython's type_call always does this when
-                // isinstance(result, cls) is true.
-                let r = result.borrow();
-                let is_instance_of_class = match &*r {
-                    PyObject::Instance { typ, .. } => {
-                        if typ.is(&callable) {
-                            true
-                        } else if let PyObject::Type { mro, .. } = &*typ.borrow() {
-                            mro.iter().any(|b| b.is(&callable))
-                        } else {
-                            false
+                    // CPython: if __new__ returned an instance of this class,
+                    // AND __init__ is defined (and different from the base),
+                    // call __init__ before returning.
+                    // If __new__ returned an instance of this class AND __init__
+                    // is defined (and not the base object.__init__ no-op), call
+                    // __init__ — CPython's type_call always does this when
+                    // isinstance(result, cls) is true.
+                    let r = result.borrow();
+                    let is_instance_of_class = match &*r {
+                        PyObject::Instance { typ, .. } => {
+                            if typ.is(&callable) {
+                                true
+                            } else if let PyObject::Type { mro, .. } = &*typ.borrow() {
+                                mro.iter().any(|b| b.is(&callable))
+                            } else {
+                                false
+                            }
                         }
-                    }
-                    // Custom `__new__` for exception subclasses (e.g. via
-                    // `super().__new__(cls, ...)`) returns a native
-                    // `PyObject::Exception` typed by class NAME, not an
-                    // `Instance` — without this arm `__init__` was skipped
-                    // entirely (real trigger: test_exception_hierarchy's
-                    // multiple-inheritance Combined* cases setting attrs
-                    // in `__init__`).
-                    PyObject::Exception { typ: tname, .. } => {
-                        if let PyObject::Type { name: cname, .. } = &*callable.borrow() {
-                            tname == cname
-                        } else {
-                            false
+                        // Custom `__new__` for exception subclasses (e.g. via
+                        // `super().__new__(cls, ...)`) returns a native
+                        // `PyObject::Exception` typed by class NAME, not an
+                        // `Instance` — without this arm `__init__` was skipped
+                        // entirely (real trigger: test_exception_hierarchy's
+                        // multiple-inheritance Combined* cases setting attrs
+                        // in `__init__`).
+                        PyObject::Exception { typ: tname, .. } => {
+                            if let PyObject::Type { name: cname, .. } = &*callable.borrow() {
+                                tname == cname
+                            } else {
+                                false
+                            }
                         }
-                    }
-                    _ => false,
-                };
-                drop(r);
-                if is_instance_of_class && init_func.is_some() {
-                    let init_fn = init_func.clone().unwrap();
-                    // Skip object.__init__ (universal no-op for native types)
-                    let skip = matches!(&*init_fn.borrow(), PyObject::BuiltinFunction { name, .. } if name == "__init__");
-                    if !skip {
-                        let mut init_args = args.clone();
-                        init_args.insert(0, result.clone());
-                        self.call_function(init_fn, init_args, keywords.clone())?;
-                    }
-                }
-                return Ok(result);
-            }
-            // ABC enforcement: if the class has __abstractmethods__ that is
-            // non-empty, instantiation must raise TypeError (CPython:
-            // "Can't instantiate abstract class ... with abstract methods").
-            let abstracts_opt: Option<PyObjectRef> = (|| {
-                match callable.borrow().get_attribute("__abstractmethods__") {
-                    Ok(v) => Some(v),
-                    Err(_) => None,
-                }
-            })();
-            if let Some(abstracts) = abstracts_opt {
-                let n = match &*abstracts.borrow() {
-                    PyObject::FrozenSet(s) => s.len(),
-                    PyObject::Set(s) => s.len(),
-                    _ => 0,
-                };
-                if n > 0 {
-                    // Collect the abstract method names for the error message.
-                    let names: Vec<String> = match &*abstracts.borrow() {
-                        PyObject::FrozenSet(s) => s.iter().map(|v| v.str()).collect(),
-                        PyObject::Set(s) => s.iter().map(|v| v.str()).collect(),
-                        _ => vec![],
+                        _ => false,
                     };
-                    let mut sorted = names;
-                    sorted.sort();
-                    // Real CPython 3.14 wording (changed from older
-                    // releases' "Can't instantiate abstract class X with
-                    // abstract methods Y, Z" — confirmed against a local
-                    // CPython 3.14 install): quoted, comma-joined names.
-                    let quoted: Vec<String> =
-                        sorted.iter().map(|n| format!("'{}'", n)).collect();
-                    return Err(PyError::type_error(format!(
+                    drop(r);
+                    if is_instance_of_class && init_func.is_some() {
+                        let init_fn = init_func.clone().unwrap();
+                        // Skip object.__init__ (universal no-op for native types)
+                        let skip = matches!(&*init_fn.borrow(), PyObject::BuiltinFunction { name, .. } if name == "__init__");
+                        if !skip {
+                            let mut init_args = args.clone();
+                            init_args.insert(0, result.clone());
+                            self.call_function(init_fn, init_args, keywords.clone())?;
+                        }
+                    }
+                    return Ok(result);
+                }
+                // ABC enforcement: if the class has __abstractmethods__ that is
+                // non-empty, instantiation must raise TypeError (CPython:
+                // "Can't instantiate abstract class ... with abstract methods").
+                let abstracts_opt: Option<PyObjectRef> =
+                    (|| match callable.borrow().get_attribute("__abstractmethods__") {
+                        Ok(v) => Some(v),
+                        Err(_) => None,
+                    })();
+                if let Some(abstracts) = abstracts_opt {
+                    let n = match &*abstracts.borrow() {
+                        PyObject::FrozenSet(s) => s.len(),
+                        PyObject::Set(s) => s.len(),
+                        _ => 0,
+                    };
+                    if n > 0 {
+                        // Collect the abstract method names for the error message.
+                        let names: Vec<String> = match &*abstracts.borrow() {
+                            PyObject::FrozenSet(s) => s.iter().map(|v| v.str()).collect(),
+                            PyObject::Set(s) => s.iter().map(|v| v.str()).collect(),
+                            _ => vec![],
+                        };
+                        let mut sorted = names;
+                        sorted.sort();
+                        // Real CPython 3.14 wording (changed from older
+                        // releases' "Can't instantiate abstract class X with
+                        // abstract methods Y, Z" — confirmed against a local
+                        // CPython 3.14 install): quoted, comma-joined names.
+                        let quoted: Vec<String> =
+                            sorted.iter().map(|n| format!("'{}'", n)).collect();
+                        return Err(PyError::type_error(format!(
                         "Can't instantiate abstract class {} without an implementation for abstract method{} {}",
                         callable.borrow().type_name(),
                         if quoted.len() == 1 { "" } else { "s" },
                         quoted.join(", ")
                     )));
-                }
-            }
-
-            let mut instance_dict = AttrMap::new();
-            if let Some(kind) = &native_kind {
-                instance_dict.insert(
-                    crate::object::NATIVE_BACKING_KEY.to_string(),
-                    crate::object::make_native_backing(kind),
-                );
-            }
-            let instance = PyObjectRef::new(PyObject::Instance {
-                typ: callable.clone(),
-                dict: instance_dict,
-            });
-            // The native VALUE comes from `__new__(cls, *args)` — CPython
-            // builds it BEFORE `__init__` runs, so even a custom `__init__`
-            // (which overrides the native float/int/... init) must NOT leave
-            // the backing at its default (`class Foo(float): def __init__
-            // (self, x, ...): ...; Foo(2.5)` is still 2.5 — test_float's
-            // test_keywords_in_subclass). Synthesize from the constructor
-            // args unconditionally when there's a native base.
-            if let Some(kind) = &native_kind {
-                // A CONTAINER subclass (`class Counter(dict)`, `class
-                // MyList(list)`) with a custom Python `__init__` is
-                // different: `dict.__new__`/`list.__new__` ignore the
-                // constructor args (the backing starts EMPTY) and the
-                // custom `__init__` is what populates it (e.g.
-                // `Counter('aabbc')` counts via its own `update`). Building
-                // the backing from the args first (`builtin_dict('aabbc')`)
-                // raises "cannot convert dictionary update sequence
-                // element to a sequence" before `__init__` ever runs.
-                let custom_py_init =
-                    matches!(&init_func, Some(f) if matches!(&*f.borrow(), PyObject::Function(_)));
-                let is_mutable_container = matches!(
-                    kind.as_str(),
-                    "dict" | "list" | "set" | "deque" | "bytearray"
-                );
-                let native = if custom_py_init && is_mutable_container {
-                    crate::object::make_native_backing(kind)
-                } else if custom_py_init
-                    && matches!(
-                        kind.as_str(),
-                        "tuple" | "frozenset" | "bytes" | "str" | "int" | "float" | "complex"
-                    )
-                {
-                    // Immutable base: its value is created by __new__, not
-                    // __init__. When a subclass overrides __init__ with extra
-                    // args (e.g. `class S(tuple): def __init__(self, arg,
-                    // newarg=None)` → `S([1,2], newarg=3)`), those extra
-                    // args belong to __init__, not to tuple.__new__. CPython's
-                    // type_call slices them: __new__ receives only the
-                    // iterable, __init__ receives the full args. Without this,
-                    // passing extra kwargs to synthesize would either raise
-                    // "tuple() takes no keyword arguments" incorrectly or,
-                    // if skipped entirely, leave the backing empty (the
-                    // observed [] vs [1,2] failure in
-                    // test_keywords_in_subclass).
-                    let truncated_args: &[PyObjectRef] =
-                        if args.is_empty() { &[] } else { &args[0..1] };
-                    crate::object::synthesize_native_init(kind, truncated_args, &[])?
-                } else {
-                    crate::object::synthesize_native_init(kind, &args, &keywords)?
-                };
-                if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
-                    dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), native);
-                }
-            } else if init_func.is_none()
-                && crate::object::find_exception_base_name(&callable).is_some()
-            {
-                // `class MyError(Exception): pass` (no explicit __init__) —
-                // real Python's `BaseException.__init__` always stores
-                // `self.args = args`, which is what `str(exc)`/`repr(exc)`
-                // and every uncaught-exception traceback print. Exception
-                // builtins (Exception, ValueError, ...) are
-                // `BuiltinFunction`s, not `PyObject::Type`s, so they never
-                // appear in `mro` and were completely invisible to this
-                // constructor logic — ANY user-defined exception subclass
-                // (an extremely common, foundational pattern) silently got
-                // no `args` at all, surfacing as "MyError: " (empty message)
-                // or "Exception: re-raise" (the internal dispatch tag)
-                // instead of the real message whenever it passed through a
-                // `with`/`finally` or propagated uncaught.
-                if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
-                    dict.insert_str("args", py_tuple(args.clone()));
-                }
-            }
-            if let Some(init_func) = init_func {
-                // Delegate to the real call_function instead of a hand-rolled
-                // frame setup per callable kind — the latter (kept here for
-                // a long time) never handled *args/**kwargs/default values at
-                // all, silently binding missing parameters to None instead of
-                // their real defaults and dropping every keyword argument
-                // passed to the constructor. call_function already gets all
-                // of that right for every callable variant (BuiltinFunction,
-                // Function, Closure, ...).
-                let mut init_args = vec![instance.clone()];
-                init_args.extend(args);
-                self.call_function(init_func, init_args, keywords)?;
-            }
-            // A custom `__init__` that never sets args (e.g. just `pass`)
-            // must still leave `e.args == ()` (CPython: BaseException
-            // always has args; real trigger: test_exception_hierarchy's
-            // standalone-init case). Only fill when missing so real
-            // assignments via `super().__init__(...)` win.
-            if crate::object::find_exception_base_name(&callable).is_some() {
-                let missing = if let PyObject::Instance { dict, .. } = &*instance.borrow() {
-                    dict.get_str("args").is_none()
-                } else {
-                    false
-                };
-                if missing {
-                    if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
-                        dict.insert_str("args", py_tuple(vec![]));
                     }
                 }
+
+                let mut instance_dict = AttrMap::new();
+                if let Some(kind) = &native_kind {
+                    instance_dict.insert(
+                        crate::object::NATIVE_BACKING_KEY.to_string(),
+                        crate::object::make_native_backing(kind),
+                    );
+                }
+                let instance = PyObjectRef::new(PyObject::Instance {
+                    typ: callable.clone(),
+                    dict: instance_dict,
+                });
+                // The native VALUE comes from `__new__(cls, *args)` — CPython
+                // builds it BEFORE `__init__` runs, so even a custom `__init__`
+                // (which overrides the native float/int/... init) must NOT leave
+                // the backing at its default (`class Foo(float): def __init__
+                // (self, x, ...): ...; Foo(2.5)` is still 2.5 — test_float's
+                // test_keywords_in_subclass). Synthesize from the constructor
+                // args unconditionally when there's a native base.
+                if let Some(kind) = &native_kind {
+                    // A CONTAINER subclass (`class Counter(dict)`, `class
+                    // MyList(list)`) with a custom Python `__init__` is
+                    // different: `dict.__new__`/`list.__new__` ignore the
+                    // constructor args (the backing starts EMPTY) and the
+                    // custom `__init__` is what populates it (e.g.
+                    // `Counter('aabbc')` counts via its own `update`). Building
+                    // the backing from the args first (`builtin_dict('aabbc')`)
+                    // raises "cannot convert dictionary update sequence
+                    // element to a sequence" before `__init__` ever runs.
+                    let custom_py_init = matches!(&init_func, Some(f) if matches!(&*f.borrow(), PyObject::Function(_)));
+                    let is_mutable_container = matches!(
+                        kind.as_str(),
+                        "dict" | "list" | "set" | "deque" | "bytearray"
+                    );
+                    let native = if custom_py_init && is_mutable_container {
+                        crate::object::make_native_backing(kind)
+                    } else if custom_py_init
+                        && matches!(
+                            kind.as_str(),
+                            "tuple" | "frozenset" | "bytes" | "str" | "int" | "float" | "complex"
+                        )
+                    {
+                        // Immutable base: its value is created by __new__, not
+                        // __init__. When a subclass overrides __init__ with extra
+                        // args (e.g. `class S(tuple): def __init__(self, arg,
+                        // newarg=None)` → `S([1,2], newarg=3)`), those extra
+                        // args belong to __init__, not to tuple.__new__. CPython's
+                        // type_call slices them: __new__ receives only the
+                        // iterable, __init__ receives the full args. Without this,
+                        // passing extra kwargs to synthesize would either raise
+                        // "tuple() takes no keyword arguments" incorrectly or,
+                        // if skipped entirely, leave the backing empty (the
+                        // observed [] vs [1,2] failure in
+                        // test_keywords_in_subclass).
+                        let truncated_args: &[PyObjectRef] =
+                            if args.is_empty() { &[] } else { &args[0..1] };
+                        crate::object::synthesize_native_init(kind, truncated_args, &[])?
+                    } else {
+                        crate::object::synthesize_native_init(kind, &args, &keywords)?
+                    };
+                    if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
+                        dict.insert(crate::object::NATIVE_BACKING_KEY.to_string(), native);
+                    }
+                } else if init_func.is_none()
+                    && crate::object::find_exception_base_name(&callable).is_some()
+                {
+                    // `class MyError(Exception): pass` (no explicit __init__) —
+                    // real Python's `BaseException.__init__` always stores
+                    // `self.args = args`, which is what `str(exc)`/`repr(exc)`
+                    // and every uncaught-exception traceback print. Exception
+                    // builtins (Exception, ValueError, ...) are
+                    // `BuiltinFunction`s, not `PyObject::Type`s, so they never
+                    // appear in `mro` and were completely invisible to this
+                    // constructor logic — ANY user-defined exception subclass
+                    // (an extremely common, foundational pattern) silently got
+                    // no `args` at all, surfacing as "MyError: " (empty message)
+                    // or "Exception: re-raise" (the internal dispatch tag)
+                    // instead of the real message whenever it passed through a
+                    // `with`/`finally` or propagated uncaught.
+                    if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
+                        dict.insert_str("args", py_tuple(args.clone()));
+                    }
+                }
+                if let Some(init_func) = init_func {
+                    // Delegate to the real call_function instead of a hand-rolled
+                    // frame setup per callable kind — the latter (kept here for
+                    // a long time) never handled *args/**kwargs/default values at
+                    // all, silently binding missing parameters to None instead of
+                    // their real defaults and dropping every keyword argument
+                    // passed to the constructor. call_function already gets all
+                    // of that right for every callable variant (BuiltinFunction,
+                    // Function, Closure, ...).
+                    let mut init_args = vec![instance.clone()];
+                    init_args.extend(args);
+                    self.call_function(init_func, init_args, keywords)?;
+                }
+                // A custom `__init__` that never sets args (e.g. just `pass`)
+                // must still leave `e.args == ()` (CPython: BaseException
+                // always has args; real trigger: test_exception_hierarchy's
+                // standalone-init case). Only fill when missing so real
+                // assignments via `super().__init__(...)` win.
+                if crate::object::find_exception_base_name(&callable).is_some() {
+                    let missing = if let PyObject::Instance { dict, .. } = &*instance.borrow() {
+                        dict.get_str("args").is_none()
+                    } else {
+                        false
+                    };
+                    if missing {
+                        if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
+                            dict.insert_str("args", py_tuple(vec![]));
+                        }
+                    }
+                }
+                return Ok(instance);
             }
-            return Ok(instance);
-        }
             // Fallback: should never happen for a Type, but keep compiler happy
             Err(PyError::type_error("type construction failed"))
         })();
@@ -1004,12 +1026,8 @@ impl VirtualMachine {
         if !looks_like_class_call {
             return None;
         }
-        let plain_type = self
-            .builtins
-            .get(&interner::intern("type"))
-            .cloned();
-        let callable_is_bare_type =
-            plain_type.as_ref().map(|t| t.is(callable)).unwrap_or(false);
+        let plain_type = self.builtins.get(&interner::intern("type")).cloned();
+        let callable_is_bare_type = plain_type.as_ref().map(|t| t.is(callable)).unwrap_or(false);
         let callable_is_metaclass = matches!(
             &*callable.borrow(),
             PyObject::Type { mro, .. } if plain_type
@@ -1044,7 +1062,9 @@ impl VirtualMachine {
                 for (k, v) in keywords {
                     let _ = d.set(crate::object::py_str(k), v.clone());
                 }
-                new_args.push(crate::object::PyObjectRef::new(crate::object::PyObject::Dict(Box::new(d))));
+                new_args.push(crate::object::PyObjectRef::new(
+                    crate::object::PyObject::Dict(Box::new(d)),
+                ));
             }
             return Some(self.type_new_impl(&new_args));
         }

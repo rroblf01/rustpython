@@ -19,9 +19,10 @@ impl VirtualMachine {
                     let obj = seq.borrow();
                     match &*obj {
                         PyObject::List(v) | PyObject::Tuple(v) => (Some(v.clone()), true),
-                        PyObject::Dict(d) => {
-                            (Some(d.items().iter().map(|(k, _)| k.clone()).collect()), true)
-                        }
+                        PyObject::Dict(d) => (
+                            Some(d.items().iter().map(|(k, _)| k.clone()).collect()),
+                            true,
+                        ),
                         _ => (None, false),
                     }
                 };

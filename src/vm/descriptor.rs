@@ -2,12 +2,12 @@ use crate::bytecode::*;
 use crate::interner::{self, InternedMap, StrId};
 use crate::object::*;
 use crate::vm::VirtualMachine;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use smallvec::SmallVec;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 impl VirtualMachine {
     /// True if `val` is literally one of the objects stored in a registered
@@ -173,7 +173,6 @@ impl VirtualMachine {
     }
 }
 
-
 thread_local! {
     // See `resolve_descriptor_attr`'s own doc comment: it returns a plain
     // `Option`, so a genuine error raised by an invoked descriptor
@@ -183,11 +182,9 @@ thread_local! {
     static PENDING_DESCRIPTOR_ERROR: RefCell<Option<crate::object::PyError>> = RefCell::new(None);
 }
 
-
 fn set_pending_descriptor_error(e: crate::object::PyError) {
     PENDING_DESCRIPTOR_ERROR.with(|c| *c.borrow_mut() = Some(e));
 }
-
 
 /// Consumes (clears) any error stashed by `resolve_descriptor_attr` when a
 /// descriptor it invoked raised. Callers that treat a `None` result as

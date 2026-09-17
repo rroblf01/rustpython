@@ -2,12 +2,12 @@ use crate::bytecode::*;
 use crate::interner::{self, InternedMap, StrId};
 use crate::object::*;
 use crate::vm::VirtualMachine;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use smallvec::SmallVec;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 impl VirtualMachine {
     /// Execute queued `__del__` finalizers left by the last cycle-collector pass.
@@ -24,10 +24,7 @@ impl VirtualMachine {
         }
         let self_ptr: *mut VirtualMachine = self;
         let pending = crate::cycle_gc::take_pending_finalizers();
-        let saved_active = self
-            .frames
-            .last()
-            .and_then(|f| f.active_exception.clone());
+        let saved_active = self.frames.last().and_then(|f| f.active_exception.clone());
         let saved_ctx_stack = std::mem::take(&mut self.exc_context_stack);
         let saved_propagating = self.propagating_exc.take();
         for (self_obj, del_fn) in pending {
@@ -36,8 +33,7 @@ impl VirtualMachine {
                 func: del_fn,
                 self_obj: self_obj.clone(),
             });
-            let result =
-                with_pinned_vm(self_ptr, || self.call_function(bound, vec![], vec![]));
+            let result = with_pinned_vm(self_ptr, || self.call_function(bound, vec![], vec![]));
             crate::cycle_gc::IN_FINALIZER.with(|f| f.set(false));
             if let Err(err) = result {
                 let carrier_typ = PyObjectRef::new(PyObject::Type {
@@ -49,12 +45,11 @@ impl VirtualMachine {
                 let exc_type_obj = {
                     let name = err.type_name();
                     let cls_name: Option<String> = match &err {
-                        PyError::Exception(_, exc_obj) => ObjectAccess::get_attribute(
-                            &*exc_obj.borrow(),
-                            "__class__",
-                        )
-                        .ok()
-                        .map(|c| c.borrow().type_name()),
+                        PyError::Exception(_, exc_obj) => {
+                            ObjectAccess::get_attribute(&*exc_obj.borrow(), "__class__")
+                                .ok()
+                                .map(|c| c.borrow().type_name())
+                        }
                         _ => None,
                     };
                     let lookup = cls_name.as_deref().unwrap_or(name);
@@ -69,8 +64,10 @@ impl VirtualMachine {
                 dict.insert_str("object", self_obj);
                 dict.insert_str("truncated", py_bool(false));
                 dict.insert_str("traceback", py_none());
-                let carrier =
-                    PyObjectRef::new(PyObject::Instance { typ: carrier_typ, dict });
+                let carrier = PyObjectRef::new(PyObject::Instance {
+                    typ: carrier_typ,
+                    dict,
+                });
                 let hook = self
                     .modules
                     .get("sys")

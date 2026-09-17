@@ -79,7 +79,11 @@ pub(crate) fn formal_param_index(
 /// expensive, for `Int`/`Float`/`Complex`) one-time parse.
 pub(crate) fn unbound_local_msg(f: &Frame, idx: usize) -> PyError {
     let name = crate::interner::lookup_str(
-        f.code.varnames.get(idx).copied().unwrap_or(crate::interner::intern("?")),
+        f.code
+            .varnames
+            .get(idx)
+            .copied()
+            .unwrap_or(crate::interner::intern("?")),
     );
     PyError::unbound_local_error(format!(
         "cannot access local variable '{name}' where it is not associated with a value"
@@ -91,7 +95,9 @@ pub(crate) fn deref_proxy(obj: &PyObjectRef) -> PyResult<PyObjectRef> {
         if let Some(rc) = target.upgrade() {
             Ok(PyObjectRef::Mut(rc))
         } else {
-            Err(PyError::reference_error("weakly-referenced object no longer exists"))
+            Err(PyError::reference_error(
+                "weakly-referenced object no longer exists",
+            ))
         }
     } else {
         Ok(obj.clone())
@@ -108,189 +114,185 @@ pub(crate) fn inplace_binary_op(
 ) -> PyResult<Option<PyObjectRef>> {
     let left = deref_proxy(left)?;
     let right = deref_proxy(right)?;
-                let right = right.clone();
-                let in_place = true;
-                if in_place {
-                    let idunder = match op {
-                        0 => Some("__iadd__"),
-                        1 => Some("__isub__"),
-                        2 => Some("__imul__"),
-                        3 => Some("__itruediv__"),
-                        4 => Some("__ifloordiv__"),
-                        5 => Some("__imod__"),
-                        6 => Some("__ipow__"),
-                        7 => Some("__ilshift__"),
-                        8 => Some("__irshift__"),
-                        9 => Some("__ior__"),
-                        10 => Some("__ixor__"),
-                        11 => Some("__iand__"),
-                        12 => Some("__imatmul__"),
-                        _ => None,
-                    };
-                    if let Some(name) = idunder {
-                        if matches!(&*left.borrow(), PyObject::Instance { .. } | PyObject::Dict(_)) {
-                            if let Some(r) = crate::object::try_dunder_binop(&left, &right, name)? {
-                                return Ok(Some(r));
-                            }
-                        }
-                    }
+    let right = right.clone();
+    let in_place = true;
+    if in_place {
+        let idunder = match op {
+            0 => Some("__iadd__"),
+            1 => Some("__isub__"),
+            2 => Some("__imul__"),
+            3 => Some("__itruediv__"),
+            4 => Some("__ifloordiv__"),
+            5 => Some("__imod__"),
+            6 => Some("__ipow__"),
+            7 => Some("__ilshift__"),
+            8 => Some("__irshift__"),
+            9 => Some("__ior__"),
+            10 => Some("__ixor__"),
+            11 => Some("__iand__"),
+            12 => Some("__imatmul__"),
+            _ => None,
+        };
+        if let Some(name) = idunder {
+            if matches!(
+                &*left.borrow(),
+                PyObject::Instance { .. } | PyObject::Dict(_)
+            ) {
+                if let Some(r) = crate::object::try_dunder_binop(&left, &right, name)? {
+                    return Ok(Some(r));
                 }
-                // Native `deque` has no real Python-callable `__iadd__`/
-                // `__imul__` dunder in its type dict (native methods are
-                // dispatched via `attrs.rs`'s `get_attribute_impl`, which
-                // doesn't fire for operator opcodes) — so `d += 'bcd'` /
-                // `d *= 3` on a raw deque would otherwise fall through to
-                // `py_add`/`py_mul` below, which are correct for `d + e`/
-                // `d * n` (both build a NEW deque) but wrong for the
-                // in-place forms (`d += 'bcd'` must EXTEND the live deque
-                // even though `d + 'bcd'` raises TypeError). Handle the
-                // in-place forms directly here.
-                if in_place {
-                    let is_list = matches!(&*left.borrow(), PyObject::List(_));
-                    if is_list {
-                        match op {
-                            // `l += iterable` — extend in place (CPython's
-                            // list.__iadd__); `u2 = u; u += [2,3]` must keep
-                            // `u is u2` (test_list::test_iadd).
-                            // For `list += UserList` (or any UserList subclass), CPython's
-                            // list.__iadd__ returns NotImplemented so the reflected
-                            // UserList.__radd__ (which returns a UserList) wins and
-                            // the result becomes a UserList, not a list (test_userlist::
-                            // test_mixed_iadd). Detect that case and fall through to
-                            // plain_binary_op (which tries __radd__) instead of
-                            // unconditionally extending the list.
-                            0 => {
-                                let is_instance_rhs = matches!(&*right.borrow(), PyObject::Instance { .. });
-                                if is_instance_rhs {
-                                    // Check if RHS is a UserList (or subclass) via its type name/MRO.
-                                    let is_userlist = if let PyObject::Instance { typ, .. } = &*right.borrow() {
-                                        let tb = typ.borrow();
-                                        if let PyObject::Type { mro, name, .. } = &*tb {
-                                            if name == "UserList" {
-                                                true
-                                            } else {
-                                                mro.iter().any(|base| {
-                                                    if let PyObject::Type { name, .. } = &*base.borrow() {
-                                                        name == "UserList"
-                                                    } else {
-                                                        false
-                                                    }
-                                                })
-                                            }
+            }
+        }
+    }
+    // Native `deque` has no real Python-callable `__iadd__`/
+    // `__imul__` dunder in its type dict (native methods are
+    // dispatched via `attrs.rs`'s `get_attribute_impl`, which
+    // doesn't fire for operator opcodes) — so `d += 'bcd'` /
+    // `d *= 3` on a raw deque would otherwise fall through to
+    // `py_add`/`py_mul` below, which are correct for `d + e`/
+    // `d * n` (both build a NEW deque) but wrong for the
+    // in-place forms (`d += 'bcd'` must EXTEND the live deque
+    // even though `d + 'bcd'` raises TypeError). Handle the
+    // in-place forms directly here.
+    if in_place {
+        let is_list = matches!(&*left.borrow(), PyObject::List(_));
+        if is_list {
+            match op {
+                // `l += iterable` — extend in place (CPython's
+                // list.__iadd__); `u2 = u; u += [2,3]` must keep
+                // `u is u2` (test_list::test_iadd).
+                // For `list += UserList` (or any UserList subclass), CPython's
+                // list.__iadd__ returns NotImplemented so the reflected
+                // UserList.__radd__ (which returns a UserList) wins and
+                // the result becomes a UserList, not a list (test_userlist::
+                // test_mixed_iadd). Detect that case and fall through to
+                // plain_binary_op (which tries __radd__) instead of
+                // unconditionally extending the list.
+                0 => {
+                    let is_instance_rhs = matches!(&*right.borrow(), PyObject::Instance { .. });
+                    if is_instance_rhs {
+                        // Check if RHS is a UserList (or subclass) via its type name/MRO.
+                        let is_userlist = if let PyObject::Instance { typ, .. } = &*right.borrow() {
+                            let tb = typ.borrow();
+                            if let PyObject::Type { mro, name, .. } = &*tb {
+                                if name == "UserList" {
+                                    true
+                                } else {
+                                    mro.iter().any(|base| {
+                                        if let PyObject::Type { name, .. } = &*base.borrow() {
+                                            name == "UserList"
                                         } else {
                                             false
                                         }
-                                    } else {
-                                        false
-                                    };
-                                    if is_userlist {
-                                        return Ok(None);
-                                    }
+                                    })
                                 }
-                                let it = crate::object::builtin_iter(&[right])?;
-                                let mut items = Vec::new();
-                                loop {
-                                    match crate::object::builtin_next(&[it.clone()]) {
-                                        Ok(v) => items.push(v),
-                                        Err(crate::object::PyError::StopIteration) => break,
-                                        Err(e) => return Err(e),
-                                    }
-                                }
-                                if let PyObject::List(list) = &mut *left.borrow_mut() {
-                                    list.extend(items);
-                                }
-                                return Ok(Some(left.clone()));
+                            } else {
+                                false
                             }
-                            // `l *= n` — repeat in place (list.__imul__).
-                            2 => {
-                                let n = crate::object::to_index(&right)
-                                    .map(|n| n.to_i64().unwrap_or(0).max(0))
-                                    .unwrap_or(0) as usize;
-                                if let PyObject::List(list) = &mut *left.borrow_mut() {
-                                    let items: Vec<crate::object::PyObjectRef> = list.clone();
-                                    // Fail fast on overflow like list_resize
-                                    // (`[0] *= sys.maxsize` -> MemoryError).
-                                    let mut reserve: Vec<crate::object::PyObjectRef> = Vec::new();
-                                    match items.len().checked_mul(n) {
-                                        Some(total) if reserve.try_reserve_exact(total).is_ok() => {
-                                            list.clear();
-                                            for _ in 0..n {
-                                                list.extend(items.clone());
-                                            }
-                                        }
-                                        _ => {
-                                            return Err(PyError::memory_error(
-                                                "could not allocate list",
-                                            ))
-                                        }
-                                    }
-                                }
-                                return Ok(Some(left.clone()));
-                            }
-                            _ => {}
+                        } else {
+                            false
+                        };
+                        if is_userlist {
+                            return Ok(None);
                         }
                     }
-                    let is_deque = matches!(&*left.borrow(), PyObject::Deque { .. });
-                    if is_deque {
-                        match op {
-                            // `d += iterable` — extend in place (real
-                            // CPython's `deque.__iadd__`), accepts any
-                            // iterable. Materialize the source FIRST so
-                            // self-extend (`d += d`) doesn't trip the deque
-                            // iterator's own mutation detection mid-iteration.
-                            0 => {
-                                let it = crate::object::builtin_iter(&[right])?;
-                                let mut items = Vec::new();
-                                loop {
-                                    match crate::object::builtin_next(&[it.clone()]) {
-                                        Ok(v) => items.push(v),
-                                        Err(crate::object::PyError::StopIteration) => break,
-                                        Err(e) => return Err(e),
-                                    }
-                                }
-                                {
-                                    if let PyObject::Deque { data, maxlen } =
-                                        &mut *left.borrow_mut()
-                                    {
-                                        for item in items {
-                                            data.push_back(item);
-                                            if let Some(maxlen) = maxlen {
-                                                while data.len() > *maxlen {
-                                                    data.pop_front();
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                return Ok(Some(left.clone()));
-                            }
-                            // `d *= n` — repeat in place, truncated to maxlen.
-                            2 => {
-                                let n = right
-                                    .as_i64()
-                                    .ok_or_else(|| PyError::type_error("an integer is required"))?;
-                                if let PyObject::Deque { data, maxlen } = &mut *left.borrow_mut() {
-                                    let n = n.max(0) as usize;
-                                    let items: Vec<crate::object::PyObjectRef> =
-                                        data.iter().cloned().collect();
-                                    data.clear();
-                                    for _ in 0..n {
-                                        for item in &items {
-                                            data.push_back(item.clone());
-                                            if let Some(maxlen) = maxlen {
-                                                while data.len() > *maxlen {
-                                                    data.pop_front();
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                return Ok(Some(left.clone()));
-                            }
-                            _ => {}
+                    let it = crate::object::builtin_iter(&[right])?;
+                    let mut items = Vec::new();
+                    loop {
+                        match crate::object::builtin_next(&[it.clone()]) {
+                            Ok(v) => items.push(v),
+                            Err(crate::object::PyError::StopIteration) => break,
+                            Err(e) => return Err(e),
                         }
                     }
+                    if let PyObject::List(list) = &mut *left.borrow_mut() {
+                        list.extend(items);
+                    }
+                    return Ok(Some(left.clone()));
                 }
+                // `l *= n` — repeat in place (list.__imul__).
+                2 => {
+                    let n = crate::object::to_index(&right)
+                        .map(|n| n.to_i64().unwrap_or(0).max(0))
+                        .unwrap_or(0) as usize;
+                    if let PyObject::List(list) = &mut *left.borrow_mut() {
+                        let items: Vec<crate::object::PyObjectRef> = list.clone();
+                        // Fail fast on overflow like list_resize
+                        // (`[0] *= sys.maxsize` -> MemoryError).
+                        let mut reserve: Vec<crate::object::PyObjectRef> = Vec::new();
+                        match items.len().checked_mul(n) {
+                            Some(total) if reserve.try_reserve_exact(total).is_ok() => {
+                                list.clear();
+                                for _ in 0..n {
+                                    list.extend(items.clone());
+                                }
+                            }
+                            _ => return Err(PyError::memory_error("could not allocate list")),
+                        }
+                    }
+                    return Ok(Some(left.clone()));
+                }
+                _ => {}
+            }
+        }
+        let is_deque = matches!(&*left.borrow(), PyObject::Deque { .. });
+        if is_deque {
+            match op {
+                // `d += iterable` — extend in place (real
+                // CPython's `deque.__iadd__`), accepts any
+                // iterable. Materialize the source FIRST so
+                // self-extend (`d += d`) doesn't trip the deque
+                // iterator's own mutation detection mid-iteration.
+                0 => {
+                    let it = crate::object::builtin_iter(&[right])?;
+                    let mut items = Vec::new();
+                    loop {
+                        match crate::object::builtin_next(&[it.clone()]) {
+                            Ok(v) => items.push(v),
+                            Err(crate::object::PyError::StopIteration) => break,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    {
+                        if let PyObject::Deque { data, maxlen } = &mut *left.borrow_mut() {
+                            for item in items {
+                                data.push_back(item);
+                                if let Some(maxlen) = maxlen {
+                                    while data.len() > *maxlen {
+                                        data.pop_front();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return Ok(Some(left.clone()));
+                }
+                // `d *= n` — repeat in place, truncated to maxlen.
+                2 => {
+                    let n = right
+                        .as_i64()
+                        .ok_or_else(|| PyError::type_error("an integer is required"))?;
+                    if let PyObject::Deque { data, maxlen } = &mut *left.borrow_mut() {
+                        let n = n.max(0) as usize;
+                        let items: Vec<crate::object::PyObjectRef> = data.iter().cloned().collect();
+                        data.clear();
+                        for _ in 0..n {
+                            for item in &items {
+                                data.push_back(item.clone());
+                                if let Some(maxlen) = maxlen {
+                                    while data.len() > *maxlen {
+                                        data.pop_front();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return Ok(Some(left.clone()));
+                }
+                _ => {}
+            }
+        }
+    }
     Ok(None)
 }
 
@@ -344,7 +346,9 @@ pub(crate) fn plain_binary_op(
         12 => {
             if let Some(r) = crate::object::try_dunder_binop(&left_d, &right_d, "__matmul__")? {
                 r
-            } else if let Some(r) = crate::object::try_dunder_binop(&right_d, &left_d, "__rmatmul__")? {
+            } else if let Some(r) =
+                crate::object::try_dunder_binop(&right_d, &left_d, "__rmatmul__")?
+            {
                 r
             } else {
                 return Err(PyError::type_error(format!(

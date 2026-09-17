@@ -146,7 +146,11 @@ impl VirtualMachine {
                                     if crate::object::array_typecode_is_float(arr.typecode) {
                                         py_float(*v)
                                     } else if arr.typecode == 'w' || arr.typecode == 'u' {
-                                        let ch = (*v as u32).try_into().ok().and_then(char::from_u32).unwrap_or('\0');
+                                        let ch = (*v as u32)
+                                            .try_into()
+                                            .ok()
+                                            .and_then(char::from_u32)
+                                            .unwrap_or('\0');
                                         py_str(&ch.to_string())
                                     } else {
                                         py_int(*v as i64)
@@ -264,7 +268,12 @@ impl VirtualMachine {
                         // by this project's OWN `readline`/`__next__` methods
                         // (added alongside this fix, `attrs.rs`) for direct
                         // `f.readline()`/`next(f)` calls.
-                        PyObject::File { file, binary, encoding, .. } => {
+                        PyObject::File {
+                            file,
+                            binary,
+                            encoding,
+                            ..
+                        } => {
                             use std::io::Read;
                             let binary = *binary;
                             let enc = encoding.clone();
@@ -291,7 +300,9 @@ impl VirtualMachine {
                                                         typ: "UnicodeDecodeError".to_string(),
                                                         args: vec![
                                                             py_str("ascii"),
-                                                            py_str(&String::from_utf8_lossy(&current)),
+                                                            py_str(&String::from_utf8_lossy(
+                                                                &current,
+                                                            )),
                                                             py_int(b as i64),
                                                             py_int(1),
                                                             py_str("ordinal not in range(128)"),

@@ -3,8 +3,8 @@ use crate::compiler::Compiler;
 use crate::interner::{self, StrId};
 use crate::object::*;
 use crate::parser::Parser;
-use crate::vm::VirtualMachine;
 use crate::vm::helpers::{eval_const_value, find_lib_dir};
+use crate::vm::VirtualMachine;
 use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -124,7 +124,11 @@ impl VirtualMachine {
                                                 }
                                             })
                                             .collect();
-                                        if paths.is_empty() { None } else { Some(paths) }
+                                        if paths.is_empty() {
+                                            None
+                                        } else {
+                                            Some(paths)
+                                        }
                                     } else {
                                         None
                                     }
@@ -148,107 +152,105 @@ impl VirtualMachine {
                                 format!("{}/{}/__init__.py", base_trimmed, child),
                             ] {
                                 if let Some(source) = self.read_module_source(candidate)? {
-                                found_child = true;
-                                let is_pkg = candidate.ends_with("__init__.py");
-                                let empty_dict = if is_pkg {
-                                    if let Some(pkg_dir) = std::path::Path::new(candidate).parent()
-                                    {
-                                        HashMap::from([
-                                            (
-                                                "__path__".to_string(),
-                                                py_list(vec![py_str(
-                                                    &pkg_dir.to_string_lossy().to_string(),
-                                                )]),
-                                            ),
-                                            ("__package__".to_string(), py_str(&full_name)),
-                                        ])
+                                    found_child = true;
+                                    let is_pkg = candidate.ends_with("__init__.py");
+                                    let empty_dict = if is_pkg {
+                                        if let Some(pkg_dir) =
+                                            std::path::Path::new(candidate).parent()
+                                        {
+                                            HashMap::from([
+                                                (
+                                                    "__path__".to_string(),
+                                                    py_list(vec![py_str(
+                                                        &pkg_dir.to_string_lossy().to_string(),
+                                                    )]),
+                                                ),
+                                                ("__package__".to_string(), py_str(&full_name)),
+                                            ])
+                                        } else {
+                                            HashMap::new()
+                                        }
                                     } else {
                                         HashMap::new()
-                                    }
-                                } else {
-                                    HashMap::new()
-                                };
-                                let empty_mod = create_module(&full_name, empty_dict);
-                                self.modules.insert(full_name.clone(), empty_mod.clone());
-                                // Register in sys.modules BEFORE executing (needed by code that checks sys.modules[__name__])
-                                // Using cloned PyObjectRef to avoid holding borrow across exec_module_source
-                                let sys_modules = self.modules.get("sys").and_then(|m| {
-                                    let b = m.borrow();
-                                    match &*b {
-                                        PyObject::Module { dict, .. } => {
-                                            dict.get_str("modules").cloned()
-                                        }
-                                        _ => None,
-                                    }
-                                });
-                                if let Some(sm) = sys_modules.clone() {
-                                    // Use try_borrow_mut to avoid RefCell panic if already borrowed
-                                    match &sm {
-                                        PyObjectRef::Mut(rc) => {
-                                            if let Ok(mut guard) = rc.try_borrow_mut() {
-                                                if let PyObject::Dict(ref mut d) = &mut *guard {
-                                                    d.set(py_str(&full_name), empty_mod.clone())
-                                                        .ok();
-                                                }
+                                    };
+                                    let empty_mod = create_module(&full_name, empty_dict);
+                                    self.modules.insert(full_name.clone(), empty_mod.clone());
+                                    // Register in sys.modules BEFORE executing (needed by code that checks sys.modules[__name__])
+                                    // Using cloned PyObjectRef to avoid holding borrow across exec_module_source
+                                    let sys_modules = self.modules.get("sys").and_then(|m| {
+                                        let b = m.borrow();
+                                        match &*b {
+                                            PyObject::Module { dict, .. } => {
+                                                dict.get_str("modules").cloned()
                                             }
+                                            _ => None,
                                         }
-                                        _ => {}
-                                    }
-                                }
-                                // Execute the module source
-                                // On failure remove the pre-registered stub
-                                // (CPython drops failed imports from
-                                // sys.modules; stale stubs break
-                                // import_helper.import_module SkipTest).
-                                let module = match self.exec_module_source(
-                                    &source,
-                                    candidate,
-                                    &full_name,
-                                ) {
-                                    Ok(m) => m,
-                                    Err(e) => {
-                                        self.modules.remove(&full_name);
-                                        if let Some(sm) = sys_modules.clone() {
-                                            match &sm {
-                                                PyObjectRef::Mut(rc) => {
-                                                    if let Ok(mut guard) =
-                                                        rc.try_borrow_mut()
-                                                    {
-                                                        if let PyObject::Dict(
-                                                            ref mut d,
-                                                        ) = &mut *guard
-                                                        {
-                                                            let _ = d.remove(
-                                                                &py_str(&full_name),
-                                                            );
-                                                        }
+                                    });
+                                    if let Some(sm) = sys_modules.clone() {
+                                        // Use try_borrow_mut to avoid RefCell panic if already borrowed
+                                        match &sm {
+                                            PyObjectRef::Mut(rc) => {
+                                                if let Ok(mut guard) = rc.try_borrow_mut() {
+                                                    if let PyObject::Dict(ref mut d) = &mut *guard {
+                                                        d.set(
+                                                            py_str(&full_name),
+                                                            empty_mod.clone(),
+                                                        )
+                                                        .ok();
                                                     }
                                                 }
-                                                _ => {}
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    // Execute the module source
+                                    // On failure remove the pre-registered stub
+                                    // (CPython drops failed imports from
+                                    // sys.modules; stale stubs break
+                                    // import_helper.import_module SkipTest).
+                                    let module = match self
+                                        .exec_module_source(&source, candidate, &full_name)
+                                    {
+                                        Ok(m) => m,
+                                        Err(e) => {
+                                            self.modules.remove(&full_name);
+                                            if let Some(sm) = sys_modules.clone() {
+                                                match &sm {
+                                                    PyObjectRef::Mut(rc) => {
+                                                        if let Ok(mut guard) = rc.try_borrow_mut() {
+                                                            if let PyObject::Dict(ref mut d) =
+                                                                &mut *guard
+                                                            {
+                                                                let _ =
+                                                                    d.remove(&py_str(&full_name));
+                                                            }
+                                                        }
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                            return Err(e);
+                                        }
+                                    };
+                                    self.modules.insert(full_name.clone(), module.clone());
+                                    // Wire into parent module namespace
+                                    if let Some(dot_pos) = full_name.rfind('.') {
+                                        let parent_name = full_name[..dot_pos].to_string();
+                                        let child_name = full_name[dot_pos + 1..].to_string();
+                                        if let Some(parent_mod) =
+                                            self.modules.get(&parent_name).cloned()
+                                        {
+                                            if let PyObject::Module { dict, .. } =
+                                                &mut *parent_mod.borrow_mut()
+                                            {
+                                                dict.insert_str(&child_name, module.clone());
                                             }
                                         }
-                                        return Err(e);
                                     }
-                                };
-                                self.modules.insert(full_name.clone(), module.clone());
-                                // Wire into parent module namespace
-                                if let Some(dot_pos) = full_name.rfind('.') {
-                                    let parent_name = full_name[..dot_pos].to_string();
-                                    let child_name = full_name[dot_pos + 1..].to_string();
-                                    if let Some(parent_mod) =
-                                        self.modules.get(&parent_name).cloned()
-                                    {
-                                        if let PyObject::Module { dict, .. } =
-                                            &mut *parent_mod.borrow_mut()
-                                        {
-                                            dict.insert_str(&child_name, module.clone());
-                                        }
-                                    }
+                                    current_name = full_name;
+                                    parent_path = None;
+                                    break 'outer;
                                 }
-                                current_name = full_name;
-                                parent_path = None;
-                                break 'outer;
-                            }
                             }
                             // Neither `child.py` nor `child/__init__.py` exists
                             // as a real file under this `base` — `base` may
@@ -267,7 +269,7 @@ impl VirtualMachine {
                                 let _ = module;
                                 break 'outer;
                             }
-                            }
+                        }
                         if !found_child {
                             // Neither `child.py` nor `child/__init__.py` exists
                             // under the parent's __path__ — this dotted
@@ -554,7 +556,9 @@ impl VirtualMachine {
             None => match self.import_module_from_file("zipfile") {
                 Ok(m) => m,
                 Err(e) => {
-                    if dbg { eprintln!("ZIP_READ: import zipfile failed: {}", e); }
+                    if dbg {
+                        eprintln!("ZIP_READ: import zipfile failed: {}", e);
+                    }
                     return None;
                 }
             },
@@ -562,14 +566,18 @@ impl VirtualMachine {
         let zipfile_cls = match zipfile_mod.borrow().get_attribute("ZipFile") {
             Ok(c) => c,
             Err(e) => {
-                if dbg { eprintln!("ZIP_READ: get ZipFile attr failed: {}", e); }
+                if dbg {
+                    eprintln!("ZIP_READ: get ZipFile attr failed: {}", e);
+                }
                 return None;
             }
         };
         let zf = match self.call_function(zipfile_cls, vec![py_str(archive)], vec![]) {
             Ok(z) => z,
             Err(e) => {
-                if dbg { eprintln!("ZIP_READ: ZipFile({}) failed: {}", archive, e); }
+                if dbg {
+                    eprintln!("ZIP_READ: ZipFile({}) failed: {}", archive, e);
+                }
                 return None;
             }
         };
@@ -582,7 +590,9 @@ impl VirtualMachine {
         {
             Ok(d) => d,
             Err(e) => {
-                if dbg { eprintln!("ZIP_READ: read({}) failed: {}", member, e); }
+                if dbg {
+                    eprintln!("ZIP_READ: read({}) failed: {}", member, e);
+                }
                 let _ = crate::object::call_method_rebound(self, &zf, "close", vec![]);
                 return None;
             }
@@ -631,7 +641,10 @@ impl VirtualMachine {
                 format!("{}{}/__init__.pyc", prefix_norm, py_name_slash),
                 true,
             ),
-            (format!("{}{}/__init__.py", prefix_norm, py_name_slash), true),
+            (
+                format!("{}{}/__init__.py", prefix_norm, py_name_slash),
+                true,
+            ),
             (format!("{}{}.pyc", prefix_norm, py_name_slash), false),
             (format!("{}{}.py", prefix_norm, py_name_slash), false),
         ];
@@ -666,7 +679,8 @@ impl VirtualMachine {
                 }
             };
 
-            let is_pkg = virtual_path.ends_with("__init__.py") || virtual_path.ends_with("__init__.pyc");
+            let is_pkg =
+                virtual_path.ends_with("__init__.py") || virtual_path.ends_with("__init__.pyc");
             let empty_dict = if is_pkg {
                 if let Some(pkg_dir) = std::path::Path::new(&virtual_path).parent() {
                     HashMap::from([
@@ -683,7 +697,8 @@ impl VirtualMachine {
                 HashMap::new()
             };
             let empty_mod = create_module(full_name, empty_dict);
-            self.modules.insert(full_name.to_string(), empty_mod.clone());
+            self.modules
+                .insert(full_name.to_string(), empty_mod.clone());
             if let Some(sys_mod) = self.modules.get("sys") {
                 if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                     if let Some(mod_dict) = dict.get_str("modules").cloned() {
@@ -819,11 +834,9 @@ impl VirtualMachine {
                 drop(parser); // Free parser memory (AST is now in `program`)
 
                 let mut compiler = crate::compiler::Compiler::new();
-                let compiled = compiler
-                    .compile(&program, path)
-                    .map_err(|e| {
-                        crate::object::PyError::syntax_error_with_filename(e, path, source)
-                    })?;
+                let compiled = compiler.compile(&program, path).map_err(|e| {
+                    crate::object::PyError::syntax_error_with_filename(e, path, source)
+                })?;
                 drop(compiler); // Free compiler internal tables
                 drop(program); // Free AST — CodeObject is now self-contained
 
@@ -935,7 +948,11 @@ impl VirtualMachine {
                 dict.insert(*k, v.clone());
             }
         }
-        self.exec_code_with_module(code, Some(Rc::clone(&module_globals)), Some(module_obj.clone()))?;
+        self.exec_code_with_module(
+            code,
+            Some(Rc::clone(&module_globals)),
+            Some(module_obj.clone()),
+        )?;
         let globals_copy = module_globals.borrow().clone();
         if let PyObject::Module { dict, .. } = &mut *module_obj.borrow_mut() {
             for (k, v) in globals_copy {
@@ -959,19 +976,15 @@ impl VirtualMachine {
         // imported module, since its `LOAD_GLOBAL` would read a different
         // object. The shared module lives in `self.modules["builtins"]`
         // (populated at VM construction).
-        let builtins_module = self
-            .modules
-            .get("builtins")
-            .cloned()
-            .unwrap_or_else(|| {
-                create_module(
-                    "builtins",
-                    self.builtins
-                        .iter()
-                        .map(|(k, v)| (interner::lookup_str(*k).to_string(), v.clone()))
-                        .collect(),
-                )
-            });
+        let builtins_module = self.modules.get("builtins").cloned().unwrap_or_else(|| {
+            create_module(
+                "builtins",
+                self.builtins
+                    .iter()
+                    .map(|(k, v)| (interner::lookup_str(*k).to_string(), v.clone()))
+                    .collect(),
+            )
+        });
         let mut globals_map: HashMap<StrId, PyObjectRef> = HashMap::from([
             (interner::intern("__name__"), py_str(name)),
             (interner::intern("__file__"), py_str(path)),
@@ -1085,7 +1098,10 @@ impl VirtualMachine {
 
     /// Try to execute a simple function without creating a Frame.
     /// Returns Some(result) if the function was simple enough, None otherwise.
-    pub(crate) fn try_exec_simple(code: &CodeObject, args: &[PyObjectRef]) -> Option<PyResult<PyObjectRef>> {
+    pub(crate) fn try_exec_simple(
+        code: &CodeObject,
+        args: &[PyObjectRef],
+    ) -> Option<PyResult<PyObjectRef>> {
         if code.vararg_name.is_some() || code.kwarg_name.is_some() || code.num_defaults > 0 {
             return None;
         }

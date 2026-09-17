@@ -472,8 +472,10 @@ impl VirtualMachine {
                 return crate::modules::iobase_exit_with_vm(self, args).map(Some);
             }
             if let PyObject::BuiltinMethod { func, self_obj, .. } = &*callable.borrow() {
-                if std::ptr::fn_addr_eq(*func, crate::modules::iobase_exit_marker as crate::object::BuiltinFunc)
-                {
+                if std::ptr::fn_addr_eq(
+                    *func,
+                    crate::modules::iobase_exit_marker as crate::object::BuiltinFunc,
+                ) {
                     let mut all_args = vec![self_obj.clone()];
                     all_args.extend_from_slice(args);
                     return crate::modules::iobase_exit_with_vm(self, &all_args).map(Some);
@@ -487,7 +489,12 @@ impl VirtualMachine {
         // per method — real dispatch happens by the `name` field the
         // `BuiltinMethod` already carries (see
         // `zipimporter_method_with_vm`'s doc comment).
-        if let PyObject::BuiltinMethod { func, self_obj, name } = &*callable.borrow() {
+        if let PyObject::BuiltinMethod {
+            func,
+            self_obj,
+            name,
+        } = &*callable.borrow()
+        {
             if std::ptr::fn_addr_eq(
                 *func,
                 crate::modules::zipimporter_method_marker as crate::object::BuiltinFunc,
@@ -509,7 +516,12 @@ impl VirtualMachine {
         // the bare unbound `BuiltinFunction` shape (a property getter, e.g.
         // `f.name`, is invoked as `getter(self)` directly, never auto-bound
         // — mirrors `iobase_exit_marker`'s own dual-shape handling above).
-        if let PyObject::BuiltinMethod { func, self_obj, name } = &*callable.borrow() {
+        if let PyObject::BuiltinMethod {
+            func,
+            self_obj,
+            name,
+        } = &*callable.borrow()
+        {
             if std::ptr::fn_addr_eq(
                 *func,
                 crate::modules::tiw_delegate_marker as crate::object::BuiltinFunc,
@@ -517,8 +529,7 @@ impl VirtualMachine {
                 let method = name.clone();
                 let mut all_args = vec![self_obj.clone()];
                 all_args.extend_from_slice(args);
-                return crate::modules::tiw_delegate_with_vm(self, &method, &all_args)
-                    .map(Some);
+                return crate::modules::tiw_delegate_with_vm(self, &method, &all_args).map(Some);
             }
         }
         if let PyObject::BuiltinFunction { func, name } = &*callable.borrow() {
@@ -527,8 +538,7 @@ impl VirtualMachine {
                 crate::modules::tiw_delegate_marker as crate::object::BuiltinFunc,
             ) {
                 let method = name.clone();
-                return crate::modules::tiw_delegate_with_vm(self, &method, args)
-                    .map(Some);
+                return crate::modules::tiw_delegate_with_vm(self, &method, args).map(Some);
             }
         }
 
@@ -541,8 +551,10 @@ impl VirtualMachine {
         // `PyObject::BuiltinMethod` (found via `ctx.run`'s attribute
         // lookup), unlike `print`'s bare-function case just above.
         if let PyObject::BuiltinMethod { func, self_obj, .. } = &*callable.borrow() {
-            if std::ptr::fn_addr_eq(*func, crate::modules::context_run_fallback as crate::object::BuiltinFunc)
-            {
+            if std::ptr::fn_addr_eq(
+                *func,
+                crate::modules::context_run_fallback as crate::object::BuiltinFunc,
+            ) {
                 let self_obj = self_obj.clone();
                 return crate::modules::context_run_with_vm(self, self_obj, args, keywords)
                     .map(Some);
@@ -570,7 +582,9 @@ impl VirtualMachine {
                     // name resolution — matching real CPython, where
                     // `globals()` IS the module dict, not a copy
                     // (test_dynamic::test_globals_shadow_builtins).
-                    return Ok(Some(PyObjectRef::new(PyObject::Globals(frame.globals.clone()))));
+                    return Ok(Some(PyObjectRef::new(PyObject::Globals(
+                        frame.globals.clone(),
+                    ))));
                 }
                 let mut d = crate::object::PyDict::new();
                 // Merge fast-locals (function-scope named params/vars,
@@ -687,10 +701,16 @@ impl VirtualMachine {
                     }
                     let mt = crate::object::metatype_of(cls)?;
                     if std::env::var("RPY_TRACE_IS").is_ok() {
-                        eprintln!("FIND-HOOK cls={} mt={:?} has_hook={}",
-                                  cls.borrow().type_name(),
-                                  mt.borrow().type_name(),
-                                  if let PyObject::Type { dict, .. } = &*mt.borrow() { dict.contains_key_str(hook_name) } else { false });
+                        eprintln!(
+                            "FIND-HOOK cls={} mt={:?} has_hook={}",
+                            cls.borrow().type_name(),
+                            mt.borrow().type_name(),
+                            if let PyObject::Type { dict, .. } = &*mt.borrow() {
+                                dict.contains_key_str(hook_name)
+                            } else {
+                                false
+                            }
+                        );
                     }
                     let hook = if let PyObject::Type { dict, .. } = &*mt.borrow() {
                         dict.get_str(hook_name).cloned()
@@ -968,7 +988,9 @@ impl VirtualMachine {
                         let mut compiler = crate::compiler::Compiler::new();
                         compiler
                             .compile(&program, &format!("<{}>", mode_name))
-                            .map_err(|e| PyError::syntax_error_with_filename(e, "<string>", &source))?
+                            .map_err(|e| {
+                                PyError::syntax_error_with_filename(e, "<string>", &source)
+                            })?
                     }
                 };
                 // Merge an explicit globals dict (reads) with an explicit
@@ -984,10 +1006,7 @@ impl VirtualMachine {
                 let is_dict_like =
                     |v: &PyObjectRef| -> bool { crate::object::dict_arg_to_hashmap(v, "").is_ok() };
                 let globals_dict = args.get(1).filter(|g| is_dict_like(g));
-                let locals_dict = args
-                    .get(2)
-                    .filter(|l| is_dict_like(l))
-                    .or(globals_dict);
+                let locals_dict = args.get(2).filter(|l| is_dict_like(l)).or(globals_dict);
                 let distinct_locals = args
                     .get(2)
                     .filter(|l| is_dict_like(l))
@@ -1040,9 +1059,10 @@ impl VirtualMachine {
                         {
                             let mut hm = ns.borrow_mut();
                             hm.clear();
-                            for (k, v) in
-                                crate::object::dict_arg_to_hashmap(g, "exec() globals must be a dict")?
-                            {
+                            for (k, v) in crate::object::dict_arg_to_hashmap(
+                                g,
+                                "exec() globals must be a dict",
+                            )? {
                                 hm.insert(interner::intern(&k), v);
                             }
                             if let Some(bm) = caller_builtins.clone() {
@@ -1123,10 +1143,8 @@ impl VirtualMachine {
                         // body explicitly assigning `globals()["1"]` is the
                         // only collision, and vanishingly rare versus the
                         // always-on corruption.)
-                        let shadowed: std::collections::HashSet<String> = saved_non_string
-                            .iter()
-                            .map(|(k, _)| k.str())
-                            .collect();
+                        let shadowed: std::collections::HashSet<String> =
+                            saved_non_string.iter().map(|(k, _)| k.str()).collect();
                         d.clear();
                         for (k, v) in globals_rc.borrow().iter() {
                             let s = interner::lookup_str(*k);
@@ -1170,7 +1188,8 @@ impl VirtualMachine {
                 } else {
                     None
                 };
-                return crate::modules::import_module_with_vm(self, &name, package.as_deref()).map(Some);
+                return crate::modules::import_module_with_vm(self, &name, package.as_deref())
+                    .map(Some);
             }
         }
 
@@ -1198,7 +1217,8 @@ impl VirtualMachine {
                 } else {
                     None
                 };
-                return crate::modules::find_spec_with_vm(self, &name, package.as_deref()).map(Some);
+                return crate::modules::find_spec_with_vm(self, &name, package.as_deref())
+                    .map(Some);
             }
         }
 
@@ -1211,7 +1231,8 @@ impl VirtualMachine {
             let is_getmembers = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::getmembers_builtin as crate::object::BuiltinFunc));
             if is_getmembers && !args.is_empty() {
                 let predicate = args.get(1).cloned();
-                return crate::modules::getmembers_with_vm(self, &args[0], predicate.as_ref()).map(Some);
+                return crate::modules::getmembers_with_vm(self, &args[0], predicate.as_ref())
+                    .map(Some);
             }
         }
 

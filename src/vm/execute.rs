@@ -71,9 +71,7 @@ impl VirtualMachine {
                     if let Some(mod_dict) = dict.get_str("modules") {
                         let md = mod_dict.borrow();
                         if let PyObject::Dict(d) = &*md {
-                            if let Some(real) =
-                                d.get(&crate::object::py_str(name)).ok().flatten()
-                            {
+                            if let Some(real) = d.get(&crate::object::py_str(name)).ok().flatten() {
                                 return Some(real);
                             }
                         }

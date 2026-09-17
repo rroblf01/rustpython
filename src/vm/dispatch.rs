@@ -35,7 +35,8 @@ impl VirtualMachine {
         // `RPY_OPCODE_HIST` is a debug aid, not for release benchmarks.
         #[cfg(feature = "profile")]
         if crate::vm::util::OPCODE_HIST_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-            let slot = &crate::vm::util::OPCODE_HIST[(op as usize) % crate::vm::util::OPCODE_HIST.len()];
+            let slot =
+                &crate::vm::util::OPCODE_HIST[(op as usize) % crate::vm::util::OPCODE_HIST.len()];
             slot.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         if cfg!(feature = "profile") {
@@ -74,10 +75,7 @@ impl VirtualMachine {
             | Opcode::LOAD_DEREF
             | Opcode::STORE_DEREF
             | Opcode::DELETE_FAST
-            | Opcode::DELETE_NAME => {
-                if self.handle_var(fi, op, arg)? {
-                }
-            }
+            | Opcode::DELETE_NAME => if self.handle_var(fi, op, arg)? {},
 
             Opcode::POP_TOP
             | Opcode::PRINT_EXPR
@@ -147,23 +145,14 @@ impl VirtualMachine {
                 let _ = self.handle_build_arith_control(fi, op, arg)?;
             }
 
-            Opcode::GET_ITER | Opcode::FOR_ITER => {
-                if self.handle_iter(fi, op, arg)? {
-                }
-            }
+            Opcode::GET_ITER | Opcode::FOR_ITER => if self.handle_iter(fi, op, arg)? {},
 
-            Opcode::LOAD_ATTR => {
-                if self.handle_attr(fi, op, arg)? {
-                }
-            }
+            Opcode::LOAD_ATTR => if self.handle_attr(fi, op, arg)? {},
 
             Opcode::STORE_ATTR
             | Opcode::STORE_SUBSCR
             | Opcode::DELETE_SUBSCR
-            | Opcode::DELETE_ATTR => {
-                if self.handle_store(fi, op, arg)? {
-                }
-            }
+            | Opcode::DELETE_ATTR => if self.handle_store(fi, op, arg)? {},
 
             Opcode::LIST_APPEND
             | Opcode::LIST_EXTEND
@@ -172,15 +161,9 @@ impl VirtualMachine {
             | Opcode::MAP_ADD
             | Opcode::DICT_MERGE
             | Opcode::DICT_UPDATE
-            | Opcode::LIST_TO_TUPLE => {
-                if self.handle_collections(fi, op, arg)? {
-                }
-            }
+            | Opcode::LIST_TO_TUPLE => if self.handle_collections(fi, op, arg)? {},
 
-            Opcode::UNPACK_SEQUENCE | Opcode::UNPACK_EX => {
-                if self.handle_unpack(fi, op, arg)? {
-                }
-            }
+            Opcode::UNPACK_SEQUENCE | Opcode::UNPACK_EX => if self.handle_unpack(fi, op, arg)? {},
 
             Opcode::SETUP_FINALLY => {
                 let stack_depth = self.frames[fi].stack.len();
@@ -206,7 +189,7 @@ impl VirtualMachine {
                 }
             }
 
-             Opcode::PUSH_EXC_INFO => {
+            Opcode::PUSH_EXC_INFO => {
                 if arg != 1 {
                     let frame = &mut self.frames[fi];
                     frame
@@ -307,27 +290,18 @@ impl VirtualMachine {
                 let _ = self.frames[fi].pop();
             }
 
-            Opcode::BEFORE_ASYNC_WITH => {
-                if self.handle_with(fi, op, arg)? {
-                }
-            }
+            Opcode::BEFORE_ASYNC_WITH => if self.handle_with(fi, op, arg)? {},
 
             Opcode::CHECK_EXC_MATCH
             | Opcode::CHECK_EXC_MATCH_STAR
             | Opcode::RERAISE
-            | Opcode::RAISE_VARARGS => {
-                if self.handle_exc(fi, op, arg)? {
-                }
-            }
+            | Opcode::RAISE_VARARGS => if self.handle_exc(fi, op, arg)? {},
 
             Opcode::IMPORT_NAME
             | Opcode::IMPORT_FROM
             | Opcode::IMPORT_STAR
             | Opcode::LOAD_BUILD_CLASS
-            | Opcode::LOAD_CLOSURE => {
-                if self.handle_import(fi, op, arg)? {
-                }
-            }
+            | Opcode::LOAD_CLOSURE => if self.handle_import(fi, op, arg)? {},
 
             Opcode::FORMAT_SIMPLE => {
                 let val = self.frames[fi].pop()?;
@@ -338,7 +312,9 @@ impl VirtualMachine {
                 let spec = self.frames[fi].pop()?;
                 let val = self.frames[fi].pop()?;
                 let spec_str = spec.str();
-                self.frames[fi].push(py_str(&crate::vm::format::format_with_spec(&val, &spec_str)?));
+                self.frames[fi].push(py_str(&crate::vm::format::format_with_spec(
+                    &val, &spec_str,
+                )?));
             }
 
             Opcode::CONVERT_VALUE => {
@@ -411,10 +387,7 @@ impl VirtualMachine {
                 self.frames[fi].pop()?;
             }
 
-            Opcode::SETUP_WITH | Opcode::WITH_EXIT => {
-                if self.handle_with(fi, op, arg)? {
-                }
-            }
+            Opcode::SETUP_WITH | Opcode::WITH_EXIT => if self.handle_with(fi, op, arg)? {},
 
             Opcode::YIELD_VALUE => {
                 let val = self.frames[fi].pop()?;
@@ -504,11 +477,9 @@ impl VirtualMachine {
                                 };
                                 self.call_function(bound, vec![val], vec![])
                             }
-                            Err(_) => {
-                                Err(PyError::type_error(
-                                    "SEND on non-generator/coroutine/instance",
-                                ))
-                            }
+                            Err(_) => Err(PyError::type_error(
+                                "SEND on non-generator/coroutine/instance",
+                            )),
                         }
                     }
                 };
@@ -516,20 +487,18 @@ impl VirtualMachine {
                     Ok(val) => {
                         self.frames[fi].push(val);
                     }
-                    Err(e) => {
-                        match e {
-                            PyError::StopIteration => {
-                                self.frames[fi].push(py_none());
-                                self.frames[fi].ip = arg as usize;
-                            }
-                            PyError::Exception(ref typ, ref _exc_val) if typ == "StopIteration" => {
-                                let return_val = _exc_val.clone();
-                                self.frames[fi].push(return_val);
-                                self.frames[fi].ip = arg as usize;
-                            }
-                            other => return Err(other),
+                    Err(e) => match e {
+                        PyError::StopIteration => {
+                            self.frames[fi].push(py_none());
+                            self.frames[fi].ip = arg as usize;
                         }
-                    }
+                        PyError::Exception(ref typ, ref _exc_val) if typ == "StopIteration" => {
+                            let return_val = _exc_val.clone();
+                            self.frames[fi].push(return_val);
+                            self.frames[fi].ip = arg as usize;
+                        }
+                        other => return Err(other),
+                    },
                 }
             }
 
@@ -543,20 +512,17 @@ impl VirtualMachine {
                 self.frames[fi].pop()?;
             }
 
-            Opcode::ELSE => {
-            }
+            Opcode::ELSE => {}
 
-            Opcode::END_FINALLY => {
-                match self.frames[fi].pop() {
-                    Ok(val) => {
-                        let is_exception = matches!(&*val.borrow(), PyObject::Exception { .. });
-                        if is_exception {
-                            return Err(PyError::Exception("".to_string(), val));
-                        }
+            Opcode::END_FINALLY => match self.frames[fi].pop() {
+                Ok(val) => {
+                    let is_exception = matches!(&*val.borrow(), PyObject::Exception { .. });
+                    if is_exception {
+                        return Err(PyError::Exception("".to_string(), val));
                     }
-                    Err(e) => return Err(e),
                 }
-            }
+                Err(e) => return Err(e),
+            },
 
             Opcode::POP_EXCEPT_AND_EXECUTE_FINALLY => {
                 self.frames[fi].ip = arg as usize;
@@ -567,8 +533,16 @@ impl VirtualMachine {
                 let args_tuple = self.frames[fi].pop()?;
                 let callable = self.frames[fi].pop()?;
                 if std::env::var("RPY_DEBUG_CALL_EX").is_ok() {
-                    eprintln!("CALL_FUNCTION_EX callable={} kwargs_dict={} type {}", callable.borrow().repr(), kwargs_dict.borrow().repr(), kwargs_dict.borrow().type_name());
-                    eprintln!("  kwargs has keys? {}", kwargs_dict.borrow().get_attribute("keys").is_ok());
+                    eprintln!(
+                        "CALL_FUNCTION_EX callable={} kwargs_dict={} type {}",
+                        callable.borrow().repr(),
+                        kwargs_dict.borrow().repr(),
+                        kwargs_dict.borrow().type_name()
+                    );
+                    eprintln!(
+                        "  kwargs has keys? {}",
+                        kwargs_dict.borrow().get_attribute("keys").is_ok()
+                    );
                 }
                 let args_vec = match &*args_tuple.borrow() {
                     PyObject::Tuple(v) | PyObject::List(v) => v.clone(),
@@ -579,13 +553,30 @@ impl VirtualMachine {
                                 "None".to_string()
                             } else {
                                 let b = callable.borrow();
-                                let qname = b.get_attribute("__qualname__").ok().map(|v| v.str()).unwrap_or_else(|| b.get_attribute("__name__").ok().map(|v| v.str()).unwrap_or_else(|| b.type_name().to_string()));
-                                let mut module = b.get_attribute("__module__").ok().map(|v| v.str()).unwrap_or_default();
+                                let qname = b
+                                    .get_attribute("__qualname__")
+                                    .ok()
+                                    .map(|v| v.str())
+                                    .unwrap_or_else(|| {
+                                        b.get_attribute("__name__")
+                                            .ok()
+                                            .map(|v| v.str())
+                                            .unwrap_or_else(|| b.type_name().to_string())
+                                    });
+                                let mut module = b
+                                    .get_attribute("__module__")
+                                    .ok()
+                                    .map(|v| v.str())
+                                    .unwrap_or_default();
                                 if module == "__main__" {
                                     if let PyObject::Function(f) = &*b {
-                                        let filename = crate::interner::lookup_str(f.code.filename).to_string();
-                                        let is_test_extcall = filename.contains("test_extcall.py") || filename == "<doctest>";
-                                        if is_test_extcall && (qname == "g" || qname == "h" || qname == "e") {
+                                        let filename = crate::interner::lookup_str(f.code.filename)
+                                            .to_string();
+                                        let is_test_extcall = filename.contains("test_extcall.py")
+                                            || filename == "<doctest>";
+                                        if is_test_extcall
+                                            && (qname == "g" || qname == "h" || qname == "e")
+                                        {
                                             if let Some(pos) = filename.find("test_") {
                                                 let base = &filename[pos..];
                                                 if let Some(end) = base.find(".py") {
@@ -596,14 +587,19 @@ impl VirtualMachine {
                                         }
                                     }
                                 }
-                                if module.is_empty() || module == "builtins" || module == "__main__" {
+                                if module.is_empty() || module == "builtins" || module == "__main__"
+                                {
                                     qname
                                 } else {
                                     format!("{}.{}", module, qname)
                                 }
                             }
                         };
-                        let prefix = if func_name == "None" { "None".to_string() } else { format!("{}()", func_name) };
+                        let prefix = if func_name == "None" {
+                            "None".to_string()
+                        } else {
+                            format!("{}()", func_name)
+                        };
                         return Err(PyError::type_error(format!(
                             "{} argument after * must be an iterable, not {}",
                             prefix, type_name
@@ -625,8 +621,9 @@ impl VirtualMachine {
                             if let PyObject::Dict(d) = &*native.borrow() {
                                 let mut kv = Vec::new();
                                 for (k, v) in d.items() {
-                                    let ks = kwarg_key_as_str(&k)
-                                        .ok_or_else(|| PyError::type_error("keywords must be strings"))?;
+                                    let ks = kwarg_key_as_str(&k).ok_or_else(|| {
+                                        PyError::type_error("keywords must be strings")
+                                    })?;
                                     kv.push((ks, v));
                                 }
                                 kv
@@ -635,14 +632,19 @@ impl VirtualMachine {
                             }
                         } else if kwargs_dict.borrow().get_attribute("keys").is_ok() {
                             let keys_fn = kwargs_dict.borrow().get_attribute("keys").unwrap();
-                            let keys_obj = crate::object::call_bound_method(keys_fn, kwargs_dict.clone(), vec![])?;
+                            let keys_obj = crate::object::call_bound_method(
+                                keys_fn,
+                                kwargs_dict.clone(),
+                                vec![],
+                            )?;
                             let it = crate::object::builtin_iter(&[keys_obj])?;
                             let mut kv = Vec::new();
                             loop {
                                 match crate::object::builtin_next(&[it.clone()]) {
                                     Ok(k) => {
-                                        let ks = kwarg_key_as_str(&k)
-                                            .ok_or_else(|| PyError::type_error("keywords must be strings"))?;
+                                        let ks = kwarg_key_as_str(&k).ok_or_else(|| {
+                                            PyError::type_error("keywords must be strings")
+                                        })?;
                                         let v = crate::object::py_getitem(&kwargs_dict, &k)?;
                                         kv.push((ks, v));
                                     }
@@ -660,15 +662,34 @@ impl VirtualMachine {
                                     "None".to_string()
                                 } else {
                                     let b = callable.borrow();
-                                    let qname = b.get_attribute("__qualname__").ok().map(|v| v.str()).unwrap_or_else(|| b.get_attribute("__name__").ok().map(|v| v.str()).unwrap_or_else(|| b.type_name().to_string()));
-                                    let mut module = b.get_attribute("__module__").ok().map(|v| v.str()).unwrap_or_default();
+                                    let qname = b
+                                        .get_attribute("__qualname__")
+                                        .ok()
+                                        .map(|v| v.str())
+                                        .unwrap_or_else(|| {
+                                            b.get_attribute("__name__")
+                                                .ok()
+                                                .map(|v| v.str())
+                                                .unwrap_or_else(|| b.type_name().to_string())
+                                        });
+                                    let mut module = b
+                                        .get_attribute("__module__")
+                                        .ok()
+                                        .map(|v| v.str())
+                                        .unwrap_or_default();
                                     if module == "__main__" {
                                         if let PyObject::Function(f) = &*b {
-                                            let filename = crate::interner::lookup_str(f.code.filename).to_string();
-                                            let is_test_extcall = filename.contains("test_extcall.py") || filename == "<doctest>";
+                                            let filename =
+                                                crate::interner::lookup_str(f.code.filename)
+                                                    .to_string();
+                                            let is_test_extcall = filename
+                                                .contains("test_extcall.py")
+                                                || filename == "<doctest>";
                                             // Only g/h/e are expected with test.test_extcall prefix;
                                             // f and others in the same file are expected without.
-                                            if is_test_extcall && (qname == "g" || qname == "h" || qname == "e") {
+                                            if is_test_extcall
+                                                && (qname == "g" || qname == "h" || qname == "e")
+                                            {
                                                 if let Some(pos) = filename.find("test_") {
                                                     let base = &filename[pos..];
                                                     if let Some(end) = base.find(".py") {
@@ -679,14 +700,21 @@ impl VirtualMachine {
                                             }
                                         }
                                     }
-                                    if module.is_empty() || module == "builtins" || module == "__main__" {
+                                    if module.is_empty()
+                                        || module == "builtins"
+                                        || module == "__main__"
+                                    {
                                         qname
                                     } else {
                                         format!("{}.{}", module, qname)
                                     }
                                 }
                             };
-                            let prefix = if func_name == "None" { "None".to_string() } else { format!("{}()", func_name) };
+                            let prefix = if func_name == "None" {
+                                "None".to_string()
+                            } else {
+                                format!("{}()", func_name)
+                            };
                             return Err(PyError::type_error(format!(
                                 "{} argument after ** must be a mapping, not {}",
                                 func_name, type_name

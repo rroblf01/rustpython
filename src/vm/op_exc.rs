@@ -235,7 +235,9 @@ impl VirtualMachine {
                         if msg.is_empty() {
                             let exc_borrowed = exc.borrow();
                             let is_stop = match &*exc_borrowed {
-                                PyObject::Exception { ref typ, .. } if typ == "StopIteration" => true,
+                                PyObject::Exception { ref typ, .. } if typ == "StopIteration" => {
+                                    true
+                                }
                                 PyObject::Type { name, .. } if name == "StopIteration" => true,
                                 _ => false,
                             };
@@ -301,7 +303,9 @@ impl VirtualMachine {
                         let cause_is_none = matches!(&*cause.borrow(), PyObject::None);
                         if !cause_is_none {
                             let cause_kind = match &*cause.borrow() {
-                                PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => "exc",
+                                PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => {
+                                    "exc"
+                                }
                                 PyObject::Instance { typ, .. } => {
                                     if crate::object::find_exception_base_name(typ).is_some() {
                                         "exc"
@@ -346,7 +350,9 @@ impl VirtualMachine {
                         };
                         if !cause_is_none {
                             let is_exc = match &*cause.borrow() {
-                                PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => true,
+                                PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => {
+                                    true
+                                }
                                 PyObject::Instance { typ, .. } => {
                                     crate::object::find_exception_base_name(typ).is_some()
                                 }

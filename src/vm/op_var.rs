@@ -113,7 +113,9 @@ impl VirtualMachine {
 
     pub(crate) fn handle_var(&mut self, fi: usize, op: Opcode, arg: u32) -> PyResult<bool> {
         match op {
-            Opcode::NOP => { return Ok(true); }
+            Opcode::NOP => {
+                return Ok(true);
+            }
 
             Opcode::LOAD_CONST => {
                 let const_idx = arg as usize;
@@ -213,7 +215,10 @@ impl VirtualMachine {
                     }
                 }
                 let sid = interner::intern(&name);
-                self.frames[fi].globals.borrow_mut().insert(sid, val.clone());
+                self.frames[fi]
+                    .globals
+                    .borrow_mut()
+                    .insert(sid, val.clone());
                 // Dual-write into a custom `__prepare__` namespace (see
                 // `Frame::prepared_namespace`): every body store must be
                 // observable there one call at a time.
@@ -376,7 +381,8 @@ impl VirtualMachine {
                             self.frames[fi].push(v);
                         }
                         None => {
-                            let name = crate::interner::lookup_str(self.frames[fi].code.names[name_idx]);
+                            let name =
+                                crate::interner::lookup_str(self.frames[fi].code.names[name_idx]);
                             return Err(PyError::name_error_for(name));
                         }
                     }
@@ -387,7 +393,10 @@ impl VirtualMachine {
                 let name_idx = arg as usize;
                 let sid = self.frames[fi].code.names[name_idx];
                 let val = self.frames[fi].pop()?;
-                self.frames[fi].globals.borrow_mut().insert(sid, val.clone());
+                self.frames[fi]
+                    .globals
+                    .borrow_mut()
+                    .insert(sid, val.clone());
                 let mod_name_opt = self.frames[fi]
                     .globals
                     .borrow()

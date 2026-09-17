@@ -5,7 +5,12 @@ use crate::vm::VirtualMachine;
 impl VirtualMachine {
     /// Handles BUILD_*, BINARY_OP, COMPARE, UNARY and JUMP opcodes.
     /// Returns Ok(true) if `op` was handled here, Ok(false) if not.
-    pub(crate) fn handle_build_arith_control(&mut self, fi: usize, op: Opcode, arg: u32) -> PyResult<bool> {
+    pub(crate) fn handle_build_arith_control(
+        &mut self,
+        fi: usize,
+        op: Opcode,
+        arg: u32,
+    ) -> PyResult<bool> {
         match op {
             Opcode::BUILD_LIST => {
                 let count = arg as usize;
@@ -48,9 +53,21 @@ impl VirtualMachine {
             }
             Opcode::BUILD_SLICE => {
                 let nargs = arg as usize;
-                let step = if nargs >= 3 { Some(self.frames[fi].pop()?) } else { None };
-                let stop = if nargs >= 2 { Some(self.frames[fi].pop()?) } else { None };
-                let start = if nargs >= 1 { Some(self.frames[fi].pop()?) } else { None };
+                let step = if nargs >= 3 {
+                    Some(self.frames[fi].pop()?)
+                } else {
+                    None
+                };
+                let stop = if nargs >= 2 {
+                    Some(self.frames[fi].pop()?)
+                } else {
+                    None
+                };
+                let start = if nargs >= 1 {
+                    Some(self.frames[fi].pop()?)
+                } else {
+                    None
+                };
                 self.frames[fi].push(PyObjectRef::imm(PyObject::Slice {
                     start: start.unwrap_or(py_none()),
                     stop: stop.unwrap_or(py_none()),
@@ -58,7 +75,11 @@ impl VirtualMachine {
                 }));
             }
             Opcode::BINARY_OP => {
-                let (op_u, in_place) = if arg >= 100 { (arg - 100, true) } else { (arg, false) };
+                let (op_u, in_place) = if arg >= 100 {
+                    (arg - 100, true)
+                } else {
+                    (arg, false)
+                };
                 let right = self.frames[fi].pop()?;
                 let left = self.frames[fi].pop()?;
                 let result = if in_place {
@@ -78,8 +99,18 @@ impl VirtualMachine {
                 let z = (arg >> 24) as usize;
                 let (left, right) = {
                     let f = &self.frames[fi];
-                    let right = f.fast_locals.get(b).cloned().flatten().ok_or_else(|| crate::vm::helpers::unbound_local_msg(f, b))?;
-                    let left = f.fast_locals.get(a).cloned().flatten().ok_or_else(|| crate::vm::helpers::unbound_local_msg(f, a))?;
+                    let right = f
+                        .fast_locals
+                        .get(b)
+                        .cloned()
+                        .flatten()
+                        .ok_or_else(|| crate::vm::helpers::unbound_local_msg(f, b))?;
+                    let left = f
+                        .fast_locals
+                        .get(a)
+                        .cloned()
+                        .flatten()
+                        .ok_or_else(|| crate::vm::helpers::unbound_local_msg(f, a))?;
                     (left, right)
                 };
                 // Same-slot string accumulation (`s = s + t` with z == a, or
@@ -94,7 +125,9 @@ impl VirtualMachine {
                     let grown = {
                         let f = &self.frames[fi];
                         match f.fast_locals.get(a).and_then(|s| s.as_ref()) {
-                            Some(slot_val) => crate::object::try_inplace_str_grow(slot_val, &left, &right)?,
+                            Some(slot_val) => {
+                                crate::object::try_inplace_str_grow(slot_val, &left, &right)?
+                            }
                             None => None,
                         }
                     };
@@ -122,7 +155,12 @@ impl VirtualMachine {
                         crate::interner::lookup_str(f.code.varnames.get(a).copied().unwrap_or(crate::interner::intern("?")))
                     )))?
                 };
-                let cval = self.frames[fi].code.consts.get(c).cloned().ok_or_else(|| PyError::runtime_error("bad const index"))?;
+                let cval = self.frames[fi]
+                    .code
+                    .consts
+                    .get(c)
+                    .cloned()
+                    .ok_or_else(|| PyError::runtime_error("bad const index"))?;
                 let right = crate::vm::helpers::eval_const_value(cval)?;
                 // The fuser only emits this for `a = a op const` (same-slot
                 // store, `superinstr.rs` Pattern B) — the exact pattern where
@@ -133,7 +171,9 @@ impl VirtualMachine {
                     let grown = {
                         let f = &self.frames[fi];
                         match f.fast_locals.get(a).and_then(|s| s.as_ref()) {
-                            Some(slot_val) => crate::object::try_inplace_str_grow(slot_val, &left, &right)?,
+                            Some(slot_val) => {
+                                crate::object::try_inplace_str_grow(slot_val, &left, &right)?
+                            }
                             None => None,
                         }
                     };
@@ -154,7 +194,12 @@ impl VirtualMachine {
                 let a = (arg & 0xFFFF) as usize;
                 let z = (arg >> 16) as usize;
                 let f = &mut self.frames[fi];
-                let val = f.fast_locals.get(a).cloned().flatten().ok_or_else(|| crate::vm::helpers::unbound_local_msg(f, a))?;
+                let val = f
+                    .fast_locals
+                    .get(a)
+                    .cloned()
+                    .flatten()
+                    .ok_or_else(|| crate::vm::helpers::unbound_local_msg(f, a))?;
                 if z < f.fast_locals.len() {
                     f.fast_locals[z] = Some(val);
                 }
@@ -187,7 +232,9 @@ impl VirtualMachine {
                 let val = self.frames[fi].pop()?;
                 let neg_method = if let PyObject::Instance { typ, .. } = &*val.borrow() {
                     crate::object::lookup_dunder_via_mro(typ, "__neg__")
-                } else { None };
+                } else {
+                    None
+                };
                 let result = if let Some(f) = neg_method {
                     call_bound_method(f, val.clone(), vec![])?
                 } else {
@@ -199,7 +246,9 @@ impl VirtualMachine {
                 let val = self.frames[fi].pop()?;
                 let pos_method = if let PyObject::Instance { typ, .. } = &*val.borrow() {
                     crate::object::lookup_dunder_via_mro(typ, "__pos__")
-                } else { None };
+                } else {
+                    None
+                };
                 let result = if let Some(f) = pos_method {
                     call_bound_method(f, val.clone(), vec![])?
                 } else {
@@ -225,7 +274,9 @@ impl VirtualMachine {
                 // `__invert__`.
                 let invert_method = if let PyObject::Instance { typ, .. } = &*val.borrow() {
                     crate::object::lookup_dunder_via_mro(typ, "__invert__")
-                } else { None };
+                } else {
+                    None
+                };
                 let result = if let Some(f) = invert_method {
                     call_bound_method(f, val.clone(), vec![])?
                 } else {
@@ -247,8 +298,12 @@ impl VirtualMachine {
             Opcode::JUMP_FORWARD | Opcode::JUMP | Opcode::JUMP_BACKWARD => {
                 let offset = arg as usize;
                 match op {
-                    Opcode::JUMP_FORWARD => { self.frames[fi].ip += offset; }
-                    Opcode::JUMP => { self.frames[fi].ip = offset; }
+                    Opcode::JUMP_FORWARD => {
+                        self.frames[fi].ip += offset;
+                    }
+                    Opcode::JUMP => {
+                        self.frames[fi].ip = offset;
+                    }
                     Opcode::JUMP_BACKWARD => {
                         let cur_ip = self.frames[fi].ip;
                         self.frames[fi].ip = cur_ip.wrapping_sub(offset).wrapping_sub(1);

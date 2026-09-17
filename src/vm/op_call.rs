@@ -20,8 +20,7 @@ impl VirtualMachine {
                 if nkw == 0 && npos + 1 <= stack_len {
                     let split = stack_len - 1 - npos;
                     let callable = self.frames[fi].stack.remove(split);
-                    let args: Vec<PyObjectRef> =
-                        self.frames[fi].stack.drain(split..).collect();
+                    let args: Vec<PyObjectRef> = self.frames[fi].stack.drain(split..).collect();
 
                     {
                         // `Context.run(callable, *args)` (this specific
@@ -89,9 +88,17 @@ impl VirtualMachine {
                                     crate::modules::tiw_delegate_marker as crate::object::BuiltinFunc,
                                 )
                         );
-                        if !is_special_throw && !is_context_run && !is_iobase_exit && !is_zipimporter_method && !is_tiw_delegate {
-                            if let PyObject::BuiltinMethod { name, func, self_obj } =
-                                &*callable.borrow()
+                        if !is_special_throw
+                            && !is_context_run
+                            && !is_iobase_exit
+                            && !is_zipimporter_method
+                            && !is_tiw_delegate
+                        {
+                            if let PyObject::BuiltinMethod {
+                                name,
+                                func,
+                                self_obj,
+                            } = &*callable.borrow()
                             {
                                 if name == "append" && args.len() == 1 {
                                     let so = self_obj.clone();
@@ -220,17 +227,26 @@ impl VirtualMachine {
                     let dict = &mut inner_f.dict;
                     dict.insert_str("__code__", PyObjectRef::imm(PyObject::Code(code_obj)));
                 }
-                let module_name_opt: Option<String> = if let Some(ref mg) = self.frames[fi].module_globals {
-                    let mg = mg.borrow();
-                    mg.get(&interner::intern("__name__")).and_then(|v| {
-                        if let PyObject::Str(s) = &*v.borrow() { Some(s.to_string()) } else { None }
-                    })
-                } else {
-                    let g = self.frames[fi].globals.borrow();
-                    g.get(&interner::intern("__name__")).and_then(|v| {
-                        if let PyObject::Str(s) = &*v.borrow() { Some(s.to_string()) } else { None }
-                    })
-                };
+                let module_name_opt: Option<String> =
+                    if let Some(ref mg) = self.frames[fi].module_globals {
+                        let mg = mg.borrow();
+                        mg.get(&interner::intern("__name__")).and_then(|v| {
+                            if let PyObject::Str(s) = &*v.borrow() {
+                                Some(s.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        let g = self.frames[fi].globals.borrow();
+                        g.get(&interner::intern("__name__")).and_then(|v| {
+                            if let PyObject::Str(s) = &*v.borrow() {
+                                Some(s.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                    };
                 if let Some(s) = module_name_opt {
                     if let PyObject::Function(ref mut inner_f) = &mut *func.borrow_mut() {
                         let dict = &mut inner_f.dict;

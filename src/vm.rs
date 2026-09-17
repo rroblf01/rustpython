@@ -23,40 +23,43 @@ pub(crate) use helpers::{
 };
 pub mod machine;
 pub use machine::VirtualMachine;
-pub mod pool;
-pub mod import;
-pub mod except;
 pub mod class;
+pub mod except;
 pub mod format;
+pub mod import;
+pub mod pool;
 pub use format::format_with_spec;
 pub mod descriptor;
 pub mod finalizer;
 pub mod stdlib;
 pub mod util;
 pub(crate) use util::{exc_type_matches, is_exception_subclass, OPCODE_HIST, OPCODE_HIST_ENABLED};
-pub(crate) use util::{get_shared_builtins_module, opcode_hist_dump, opcode_hist_init_from_env, set_sys_modules_priority};
-pub mod run;
-pub mod execute;
+pub(crate) use util::{
+    get_shared_builtins_module, opcode_hist_dump, opcode_hist_init_from_env,
+    set_sys_modules_priority,
+};
 pub mod call;
+pub mod call_class;
+pub mod call_func;
+pub mod dispatch;
 pub mod disposable;
-pub mod ops;
+pub mod execute;
+pub mod init;
 pub mod iter;
-pub mod op_import;
-pub mod op_coll;
-pub mod op_unpack;
-pub mod op_reg;
-pub mod op_with;
-pub mod op_stack;
-pub mod op_call;
-pub mod op_var;
-pub mod op_exc;
 pub mod op_attr;
 pub mod op_attr_helpers;
+pub mod op_call;
+pub mod op_coll;
+pub mod op_exc;
+pub mod op_import;
+pub mod op_reg;
+pub mod op_stack;
 pub mod op_store;
-pub mod dispatch;
-pub mod call_class;
-pub mod init;
-pub mod call_func;
+pub mod op_unpack;
+pub mod op_var;
+pub mod op_with;
+pub mod ops;
+pub mod run;
 
 thread_local! {
     pub(crate) static ATTR_CACHE: std::cell::RefCell<HashMap<(String, String), crate::object::BuiltinFunc>> = std::cell::RefCell::new(HashMap::new());
@@ -185,7 +188,15 @@ impl VirtualMachine {
             vm.install_source_defined_stdlib(
                 "functools",
                 crate::modules::FUNCTOOLS_EXTRA_SOURCE,
-                &["lru_cache", "cache", "cached_property", "update_wrapper", "wraps", "WRAPPER_ASSIGNMENTS", "WRAPPER_UPDATES"],
+                &[
+                    "lru_cache",
+                    "cache",
+                    "cached_property",
+                    "update_wrapper",
+                    "wraps",
+                    "WRAPPER_ASSIGNMENTS",
+                    "WRAPPER_UPDATES",
+                ],
             );
             vm.install_source_defined_stdlib(
                 "enum",
@@ -559,7 +570,15 @@ impl VirtualMachine {
         vm.install_source_defined_stdlib(
             "functools",
             crate::modules::FUNCTOOLS_EXTRA_SOURCE,
-            &["lru_cache", "cache", "cached_property", "update_wrapper", "wraps", "WRAPPER_ASSIGNMENTS", "WRAPPER_UPDATES"],
+            &[
+                "lru_cache",
+                "cache",
+                "cached_property",
+                "update_wrapper",
+                "wraps",
+                "WRAPPER_ASSIGNMENTS",
+                "WRAPPER_UPDATES",
+            ],
         );
         vm.install_source_defined_stdlib(
             "enum",
@@ -614,8 +633,6 @@ impl VirtualMachine {
         );
         vm
     }
-
-
 
     pub(crate) fn call_function(
         &mut self,
@@ -686,10 +703,22 @@ impl VirtualMachine {
                 // rejection lives HERE, where `keywords` is known (only fires
                 // when keywords exist).
                 let no_kwargs_name = [
-                    (crate::object::builtin_list as crate::object::BuiltinFunc, "list"),
-                    (crate::object::builtin_tuple as crate::object::BuiltinFunc, "tuple"),
-                    (crate::object::builtin_bool as crate::object::BuiltinFunc, "bool"),
-                    (crate::object::builtin_id as crate::object::BuiltinFunc, "id"),
+                    (
+                        crate::object::builtin_list as crate::object::BuiltinFunc,
+                        "list",
+                    ),
+                    (
+                        crate::object::builtin_tuple as crate::object::BuiltinFunc,
+                        "tuple",
+                    ),
+                    (
+                        crate::object::builtin_bool as crate::object::BuiltinFunc,
+                        "bool",
+                    ),
+                    (
+                        crate::object::builtin_id as crate::object::BuiltinFunc,
+                        "id",
+                    ),
                 ]
                 .iter()
                 .find(|(f, _)| std::ptr::fn_addr_eq(func, *f))
@@ -767,7 +796,9 @@ impl VirtualMachine {
                 let target_ref = PyObjectRef::Mut(rc);
                 return self.call_function(target_ref, args.to_vec(), keywords);
             } else {
-                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                return Err(PyError::reference_error(
+                    "weakly-referenced object no longer exists",
+                ));
             }
         }
 
@@ -1056,8 +1087,4 @@ impl VirtualMachine {
             callable.borrow().type_name()
         )))
     }
-
 }
-
-
-

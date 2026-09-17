@@ -77,7 +77,8 @@ impl VirtualMachine {
                 let mro_entries_fn = base.borrow().get_attribute("__mro_entries__").ok();
                 match mro_entries_fn {
                     Some(f) => {
-                        let orig_bases_tuple = PyObjectRef::new(PyObject::Tuple(original_bases_vec.clone()));
+                        let orig_bases_tuple =
+                            PyObjectRef::new(PyObject::Tuple(original_bases_vec.clone()));
                         let result = {
                             let is_one_arg = match &*f.borrow() {
                                 PyObject::Function(func) => func.code.arg_count == 1,
@@ -92,9 +93,17 @@ impl VirtualMachine {
                                     PyObject::BoundMethod { func, .. } => func.clone(),
                                     _ => f.clone(),
                                 };
-                                crate::object::call_function_disposable(&inner, vec![orig_bases_tuple], vec![])?
+                                crate::object::call_function_disposable(
+                                    &inner,
+                                    vec![orig_bases_tuple],
+                                    vec![],
+                                )?
                             } else {
-                                crate::object::call_bound_method(f, base.clone(), vec![orig_bases_tuple])?
+                                crate::object::call_bound_method(
+                                    f,
+                                    base.clone(),
+                                    vec![orig_bases_tuple],
+                                )?
                             }
                         };
                         let entries = match &*result.borrow() {
@@ -125,9 +134,7 @@ impl VirtualMachine {
                             name: "__setattr__".to_string(),
                             func: |args| {
                                 if args.len() < 3 {
-                                    return Err(PyError::type_error(
-                                        "__setattr__ needs 3 args",
-                                    ));
+                                    return Err(PyError::type_error("__setattr__ needs 3 args"));
                                 }
                                 args[0]
                                     .borrow_mut()
@@ -170,13 +177,14 @@ impl VirtualMachine {
             // A non-type metaclass (plain function) can still carry a
             // `__prepare__` in its own `__dict__` (`meta.__prepare__ =
             // prepare`) — the MRO dunder walk only covers real types.
-            let prep_lookup = crate::object::lookup_dunder_via_mro(mc, "__prepare__").or_else(|| {
-                if matches!(&*mc.borrow(), PyObject::Type { .. }) {
-                    None
-                } else {
-                    mc.borrow().get_attribute("__prepare__").ok()
-                }
-            });
+            let prep_lookup =
+                crate::object::lookup_dunder_via_mro(mc, "__prepare__").or_else(|| {
+                    if matches!(&*mc.borrow(), PyObject::Type { .. }) {
+                        None
+                    } else {
+                        mc.borrow().get_attribute("__prepare__").ok()
+                    }
+                });
             match prep_lookup {
                 Some(prep_fn) => {
                     // A descriptor instance (not directly callable) must be
@@ -207,18 +215,13 @@ impl VirtualMachine {
                         PyObject::StaticMethod { func } => func.clone(),
                         _ => prep_fn.clone(),
                     };
-                    let is_classmethod =
-                        matches!(&*prep_fn.borrow(), PyObject::ClassMethod { .. });
+                    let is_classmethod = matches!(&*prep_fn.borrow(), PyObject::ClassMethod { .. });
                     let call_args = if is_classmethod {
                         vec![mc.clone(), name.clone(), prepare_bases.clone()]
                     } else {
                         vec![name.clone(), prepare_bases.clone()]
                     };
-                    Some(self.call_function(
-                        unwrapped,
-                        call_args,
-                        init_subclass_kwargs.clone(),
-                    )?)
+                    Some(self.call_function(unwrapped, call_args, init_subclass_kwargs.clone())?)
                 }
                 None => None,
             }

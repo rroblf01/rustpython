@@ -480,7 +480,8 @@ impl VirtualMachine {
                             // then `ComplexSubclass(3,4).real` in one frame
                             // returning `1` twice — not merely a display
                             // quirk, real numeric data corruption).
-                            let came_from_native_backing = !found_before_native_backing && attr.is_some();
+                            let came_from_native_backing =
+                                !found_before_native_backing && attr.is_some();
                             let attr = attr.or_else(|| {
                                 crate::vm::op_attr_helpers::try_dict_methods(&obj, &name)
                             });

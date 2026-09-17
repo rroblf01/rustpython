@@ -204,7 +204,9 @@ impl VirtualMachine {
                         rc.borrow_mut().set_attribute(&name, val)?;
                         return Ok(true);
                     } else {
-                        return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                        return Err(PyError::reference_error(
+                            "weakly-referenced object no longer exists",
+                        ));
                     }
                 }
                 if !matches!(&obj, PyObjectRef::Mut(_)) {
@@ -297,11 +299,7 @@ impl VirtualMachine {
                         }
                     };
                     if let Some(del_fn) = property_deleter {
-                        self.call_function(
-                            del_fn,
-                            vec![obj.clone()],
-                            vec![],
-                        )?;
+                        self.call_function(del_fn, vec![obj.clone()], vec![])?;
                         return Ok(true);
                     } else {
                         return Err(PyError::attribute_error(format!(
@@ -354,7 +352,9 @@ impl VirtualMachine {
                         rc.borrow_mut().del_attribute(&name)?;
                         return Ok(true);
                     } else {
-                        return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                        return Err(PyError::reference_error(
+                            "weakly-referenced object no longer exists",
+                        ));
                     }
                 }
                 if !matches!(obj, PyObjectRef::Mut(_)) {

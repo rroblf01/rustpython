@@ -2,12 +2,12 @@ use crate::bytecode::*;
 use crate::interner::{self, InternedMap, StrId};
 use crate::object::*;
 use crate::vm::VirtualMachine;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use smallvec::SmallVec;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 impl VirtualMachine {
     pub(crate) fn synth_exception(typ: &str, error: &PyError) -> PyObjectRef {
@@ -160,8 +160,12 @@ impl VirtualMachine {
     /// frame has never handed out a frame object (the common case: frames
     /// nobody introspects pay nothing).
     pub(crate) fn sync_frame_locals(&mut self, idx: usize) {
-        let Some(f) = self.frames.get(idx) else { return };
-        let Some(obj) = &f.frame_locals_obj else { return };
+        let Some(f) = self.frames.get(idx) else {
+            return;
+        };
+        let Some(obj) = &f.frame_locals_obj else {
+            return;
+        };
         if f.code.varnames.is_empty() {
             return; // module frame: f_locals IS f_globals, already live
         }
@@ -236,8 +240,7 @@ impl VirtualMachine {
                     _ => {
                         let mut fb = PyDict::new();
                         for (k, v) in builtins.iter() {
-                            let _ =
-                                fb.set(py_str(crate::interner::lookup_str(*k)), v.clone());
+                            let _ = fb.set(py_str(crate::interner::lookup_str(*k)), v.clone());
                         }
                         let obj = PyObjectRef::new(PyObject::Dict(Box::new(fb)));
                         *m = Some((ptr, obj.clone()));

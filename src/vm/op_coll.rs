@@ -47,7 +47,9 @@ impl VirtualMachine {
                                     // Only for the generic "'X' object is not iterable"
                                     // case do we rephrase as "Value/h() argument after * ...".
                                     let msg = e.to_string();
-                                    if !msg.contains("is not iterable") && !msg.contains("is not a mapping") {
+                                    if !msg.contains("is not iterable")
+                                        && !msg.contains("is not a mapping")
+                                    {
                                         return Err(e);
                                     }
                                     // For * unpacking in calls, CPython distinguishes:
@@ -62,12 +64,34 @@ impl VirtualMachine {
                                                     "None".to_string()
                                                 } else {
                                                     let b = callable.borrow();
-                                                    let qname = b.get_attribute("__qualname__").ok().map(|v| v.str()).unwrap_or_else(|| b.get_attribute("__name__").ok().map(|v| v.str()).unwrap_or_else(|| b.type_name().to_string()));
-                                                    let mut module = b.get_attribute("__module__").ok().map(|v| v.str()).unwrap_or_default();
-                                                    if module == "__main__" && (qname == "g" || qname == "h" || qname == "e") {
+                                                    let qname = b
+                                                        .get_attribute("__qualname__")
+                                                        .ok()
+                                                        .map(|v| v.str())
+                                                        .unwrap_or_else(|| {
+                                                            b.get_attribute("__name__")
+                                                                .ok()
+                                                                .map(|v| v.str())
+                                                                .unwrap_or_else(|| {
+                                                                    b.type_name().to_string()
+                                                                })
+                                                        });
+                                                    let mut module = b
+                                                        .get_attribute("__module__")
+                                                        .ok()
+                                                        .map(|v| v.str())
+                                                        .unwrap_or_default();
+                                                    if module == "__main__"
+                                                        && (qname == "g"
+                                                            || qname == "h"
+                                                            || qname == "e")
+                                                    {
                                                         module = "test.test_extcall".to_string();
                                                     }
-                                                    if module.is_empty() || module == "builtins" || module == "__main__" {
+                                                    if module.is_empty()
+                                                        || module == "builtins"
+                                                        || module == "__main__"
+                                                    {
                                                         qname
                                                     } else {
                                                         format!("{}.{}", module, qname)
@@ -75,7 +99,11 @@ impl VirtualMachine {
                                                 }
                                             };
                                             if list_len == 0 {
-                                                let prefix = if func_name == "None" { "None".to_string() } else { format!("{}()", func_name) };
+                                                let prefix = if func_name == "None" {
+                                                    "None".to_string()
+                                                } else {
+                                                    format!("{}()", func_name)
+                                                };
                                                 return Err(PyError::type_error(format!(
                                                     "{} argument after * must be an iterable, not {}",
                                                     prefix, type_name
@@ -180,14 +208,21 @@ impl VirtualMachine {
                                 let mut display_fname = fname.clone();
                                 if fname == "g" || fname == "h" || fname == "e" {
                                     if let PyObject::Function(f) = &*callable.borrow() {
-                                        let filename = crate::interner::lookup_str(f.code.filename).to_string();
-                                        if filename.contains("test_extcall.py") || filename == "<doctest>" {
+                                        let filename = crate::interner::lookup_str(f.code.filename)
+                                            .to_string();
+                                        if filename.contains("test_extcall.py")
+                                            || filename == "<doctest>"
+                                        {
                                             display_fname = format!("test.test_extcall.{}", fname);
                                         }
                                     }
                                 }
                                 // For None callable, don't add ()
-                                let prefix = if display_fname == "None" { "None".to_string() } else { format!("{}()", display_fname) };
+                                let prefix = if display_fname == "None" {
+                                    "None".to_string()
+                                } else {
+                                    format!("{}()", display_fname)
+                                };
                                 return Err(PyError::type_error(format!(
                                     "{} argument after ** must be a mapping, not {}",
                                     prefix, type_name

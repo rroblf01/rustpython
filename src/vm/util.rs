@@ -47,7 +47,9 @@ pub(crate) fn set_sys_modules_priority(on: bool) {
 
 pub(crate) fn get_shared_builtins_module() -> PyObjectRef {
     crate::vm::SHARED_BUILTINS_MODULE_REF.with(|c| {
-        c.borrow().clone().expect("shared builtins module not initialized")
+        c.borrow()
+            .clone()
+            .expect("shared builtins module not initialized")
     })
 }
 
@@ -74,7 +76,12 @@ pub(crate) fn opcode_hist_dump() {
         let name = crate::bytecode::Opcode::from_u16(*op as u16)
             .map(|o| format!("{o:?}"))
             .unwrap_or_else(|| format!("OP_{op}"));
-        eprintln!("{:>10}  {:>5.1}%  {}", n, 100.0 * *n as f64 / total as f64, name);
+        eprintln!(
+            "{:>10}  {:>5.1}%  {}",
+            n,
+            100.0 * *n as f64 / total as f64,
+            name
+        );
     }
 }
 

@@ -23,7 +23,8 @@ impl VirtualMachine {
                 }
                 let aenter_raw = mgr.borrow().get_attribute("__aenter__").ok();
                 if let Some(aenter_raw) = aenter_raw {
-                    let is_builtin = matches!(&*aenter_raw.borrow(), PyObject::BuiltinMethod { .. });
+                    let is_builtin =
+                        matches!(&*aenter_raw.borrow(), PyObject::BuiltinMethod { .. });
                     let bound = if is_builtin {
                         let b = aenter_raw.borrow();
                         match &*b {
