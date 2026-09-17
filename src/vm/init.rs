@@ -2,13 +2,33 @@ use crate::interner::{self, StrId};
 use crate::modules::*;
 use crate::object::*;
 use crate::vm::helpers::find_lib_dir;
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+
+thread_local! {
+    static NATIVE_MODULE_NAMES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// Record `name` as a natively-implemented module (no file to re-execute).
+pub(crate) fn note_native_module(name: &str) {
+    NATIVE_MODULE_NAMES.with(|s| {
+        s.borrow_mut().insert(name.to_string());
+    });
+}
+
+/// Whether `name` is a natively-implemented module. Used by
+/// `import_cached_or_fresh`: a `del sys.modules[...]`'d native module
+/// can't be re-imported from disk, so it is rebuilt fresh instead.
+pub(crate) fn is_native_module(name: &str) -> bool {
+    NATIVE_MODULE_NAMES.with(|s| s.borrow().contains(name))
+}
 
 /// Populate the standard library modules into `modules`.
 pub(crate) fn register_native_modules(
     modules: &mut HashMap<String, PyObjectRef>,
     builtins: &HashMap<StrId, PyObjectRef>,
 ) {
+    let before: HashSet<String> = modules.keys().cloned().collect();
     // Native os module
     let os_mod = create_module("os", create_os_dict());
     // Add os.PathLike (PEP 519) — virtual subclass via __fspath__
@@ -974,4 +994,10 @@ pub(crate) fn register_native_modules(
     }
     modules.insert_str("concurrent", concurrent_mod);
     modules.insert_str("concurrent.futures", concurrent_futures_mod);
+
+    for name in modules.keys() {
+        if !before.contains(name) {
+            note_native_module(name);
+        }
+    }
 }

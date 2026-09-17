@@ -103,9 +103,41 @@ impl VirtualMachine {
             return Some(module);
         }
         // Module was `del`'d from sys.modules (e.g. import_fresh_module /
-        // CleanImport in CPython test suite).  Evict from our internal cache
-        // so callers fall through to a full re-import that re-executes the
-        // module code with a fresh namespace.
+        // CleanImport in CPython test suite).
+        if crate::vm::init::is_native_module(name) {
+            // Native modules have no source file to re-execute: rebuild a
+            // FRESH module object sharing the live dict entries. New object
+            // identity (`reimported is not original`) with the same
+            // functions and registries (previously-registered callbacks
+            // keep working). Real trigger: test_atexit.py's
+            // test_atexit_instances dels sys.modules['atexit'] and
+            // re-imports — the old evict-and-None path fell through to
+            // file search and died with ModuleNotFoundError.
+            if let PyObject::Module { name: mname, dict } = &*module.borrow() {
+                let fresh = PyObjectRef::new(PyObject::Module {
+                    name: mname.clone(),
+                    dict: dict.clone(),
+                });
+                self.modules.insert(name.to_string(), fresh.clone());
+                if let Some(sys_mod) = self.modules.get("sys").cloned() {
+                    if let PyObject::Module { dict: sys_dict, .. } = &*sys_mod.borrow() {
+                        if let Some(md) = sys_dict.get_str("modules").cloned() {
+                            if let PyObjectRef::Mut(rc) = &md {
+                                if let Ok(mut guard) = rc.try_borrow_mut() {
+                                    if let PyObject::Dict(ref mut d) = &mut *guard {
+                                        let _ = d.set(py_str(name), fresh.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return Some(fresh);
+            }
+        }
+        // File-backed module: evict from our internal cache so callers
+        // fall through to a full re-import that re-executes the module
+        // code with a fresh namespace.
         self.modules.remove(name);
         None
     }

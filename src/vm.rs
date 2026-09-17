@@ -338,11 +338,20 @@ impl VirtualMachine {
 
         crate::vm::init::register_native_modules(&mut modules, &builtins);
 
+        // Modules built directly above (not via register_native_modules)
+        // are equally native: a later `del sys.modules[...]` + re-import
+        // must rebuild them fresh, never fall through to file search
+        // (which reports a bogus ModuleNotFoundError for them).
+        for name in ["builtins", "math", "_codecs", "sys"] {
+            init::note_native_module(name);
+        }
+
         // Native sqlite3 module (requires --features sqlite3)
         #[cfg(feature = "sqlite3")]
         {
             let sqlite3_mod = create_module("sqlite3", create_sqlite3_dict());
             modules.insert_str("sqlite3", sqlite3_mod.clone());
+            init::note_native_module("sqlite3");
             // sqlite3.dbapi2 — real CPython's sqlite3 package re-exports
             // everything under this name too (the legacy PEP 249 DB-API
             // 2.0 module alias). Real code: Django's own
@@ -351,6 +360,7 @@ impl VirtualMachine {
             // separate copy — matches how CPython's own `dbapi2.py` is
             // just `from sqlite3.dbapi2 import *`-equivalent re-exports.
             modules.insert_str("sqlite3.dbapi2", sqlite3_mod);
+            init::note_native_module("sqlite3.dbapi2");
         }
 
         // Populate sys.path with default search paths — ONLY the first
