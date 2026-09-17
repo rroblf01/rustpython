@@ -19,11 +19,15 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
         }
     }
     let arg0 = arg.clone();
-    let mut get_arg = || -> PyObjectRef {
+    // An exhausted tuple is a real error (CPython: `TypeError: not enough
+    // arguments for format string`, e.g. `b'%s' % ()`), never a silent
+    // None substitution — mirrors string_interpolate's get_arg.
+    let mut get_arg = || -> Result<PyObjectRef, String> {
         if let Some(ref mut it) = arg_iter {
-            it.next().unwrap_or_else(py_none)
+            it.next()
+                .ok_or_else(|| "not enough arguments for format string".to_string())
         } else {
-            arg0.clone()
+            Ok(arg0.clone())
         }
     };
 
@@ -94,7 +98,7 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
             i += 1;
             if i < fmt.len() && fmt[i] == b'*' {
                 i += 1;
-                let p = get_arg();
+                let p = get_arg()?;
                 precision = Some(p.as_i64().unwrap_or(6).max(0) as usize);
             } else {
                 let mut prec_str = String::new();
@@ -137,7 +141,7 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
         let formatted: Vec<u8> = match conv {
             b'%' => vec![b'%'],
             b's' | b'b' => {
-                let raw = get_arg();
+                let raw = get_arg()?;
                 if let Some(b) = as_bytes_like(&raw) {
                     b
                 } else if let Some(f) = raw.borrow().get_attribute("__bytes__").ok() {
@@ -158,7 +162,7 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
                 }
             }
             b'r' => {
-                let raw = get_arg();
+                let raw = get_arg()?;
                 let s = raw.repr();
                 // Escape non-ASCII like %a (CPython: b'%r' % 'Մ' ==
                 // b"'\\u0544'").
@@ -178,7 +182,7 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
                 // ascii() representation: ASCII chars verbatim, non-ASCII
                 // as \uXXXX / \UXXXXXXXX escapes (CPython: b'%a' % 'Մ'
                 // == b"'\\u0544'").
-                let raw = get_arg();
+                let raw = get_arg()?;
                 let s = raw.repr();
                 let mut bytes: Vec<u8> = Vec::new();
                 for ch in s.chars() {
@@ -193,7 +197,7 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
                 bytes
             }
             b'd' | b'i' | b'u' | b'o' | b'x' | b'X' => {
-                let raw = get_arg();
+                let raw = get_arg()?;
                 let is_real = matches!(conv, b'd' | b'i' | b'u');
                 let allowed = if is_real {
                     matches!(
@@ -315,7 +319,7 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
                 s.into_bytes()
             }
             b'e' | b'E' | b'f' | b'F' | b'g' | b'G' => {
-                let raw = get_arg();
+                let raw = get_arg()?;
                 // Must be a real number — a str arg raises TypeError
                 // ("float argument required, not str"), not silently 0.0.
                 let is_num = raw.as_f64().is_some()
@@ -367,7 +371,7 @@ pub(crate) fn bytes_interpolate(fmt: &[u8], arg: &PyObjectRef) -> Result<Vec<u8>
                 s
             }
             b'c' => {
-                let raw = get_arg();
+                let raw = get_arg()?;
                 let out = if let Some(n) = raw.as_i64() {
                     if n < 0 || n > 255 {
                         return Err("%c arg not in range(256) [overflow]".to_string());

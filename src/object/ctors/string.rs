@@ -58,12 +58,17 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
             _ => {}
         }
     }
-    // Helper: get next arg (consume from tuple iterator, or always use the single arg)
-    let mut get_arg = || -> PyObjectRef {
+    // Helper: get next arg (consume from tuple iterator, or always use the single arg).
+    // An exhausted tuple is a real error (CPython: `TypeError: not enough
+    // arguments for format string`, e.g. `'%s' % ()`), never a silent
+    // empty-string substitution — the old fallback masked real bugs
+    // (argparse's metavar-length validation relies on this TypeError).
+    let mut get_arg = || -> Result<PyObjectRef, String> {
         if let Some(ref mut it) = arg_iter {
-            it.next().unwrap_or_else(|| py_str(""))
+            it.next()
+                .ok_or_else(|| "not enough arguments for format string".to_string())
         } else {
-            arg.clone()
+            Ok(arg.clone())
         }
     };
 
@@ -102,7 +107,7 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
             let mut width_str = String::new();
             if chars.clone().next() == Some('*') {
                 chars.next();
-                let w_arg = get_arg();
+                let w_arg = get_arg()?;
                 let w = w_arg.as_i64().unwrap_or(0).max(0) as usize;
                 if w > 1000 {
                     return Err("width too big".to_string());
@@ -141,7 +146,7 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                 // Dynamic precision `.*` — the value comes from the next arg.
                 if chars.clone().next() == Some('*') {
                     chars.next();
-                    let p = get_arg();
+                    let p = get_arg()?;
                     precision = Some(p.as_i64().unwrap_or(6).max(0) as usize);
                 } else {
                     let mut prec_str = String::new();
@@ -206,7 +211,7 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                             _ => return Err("format requires a mapping".to_string()),
                         }
                     } else {
-                        get_arg()
+                        get_arg()?
                     };
 
                     if matches!(conv, 'f' | 'F' | 'e' | 'E' | 'g' | 'G')

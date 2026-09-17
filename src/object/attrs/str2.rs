@@ -619,6 +619,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 || e.contains("an integer is required")
                                 || e.contains("must be real number")
                                 || e.contains("not all arguments converted")
+                                || e.contains("not enough arguments for format string")
                                 || e.contains("requires an int or a unicode character")
                             {
                                 PyError::type_error(e)
