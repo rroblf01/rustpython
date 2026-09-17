@@ -495,6 +495,14 @@ pub fn pickle_deserialize(
             let name_val = pickle_deserialize(data, pos, memo)?;
             let cname = name_val.str();
             if let Some(t) = PICKLE_CLASS_REGISTRY.with(|r| r.borrow().get(&cname).cloned()) {
+                // Mirror the serializer (which memos every Type pre-order):
+                // without this push, a later `@id` for the same class
+                // resolves to whatever unrelated object landed at that
+                // index instead — real trigger: nested GenericAlias
+                // `tuple[*tuple[*tuple[int, ...]]]` whose repeated
+                // `tuple` origins (`@2`) resolved to the inner alias
+                // itself, building an origin cycle that hung repr().
+                memo.push(t.clone());
                 return Ok(t);
             }
             // Fallback: resolve through live builtins/modules tables.
@@ -515,8 +523,12 @@ pub fn pickle_deserialize(
                     cname
                 )))
             }) {
-                Ok(v) => v,
-                Err(e) => return Err(e),
+                Ok(inner) => {
+                    let v = inner?;
+                    memo.push(v.clone());
+                    Ok(v)
+                }
+                Err(e) => Err(e),
             }
         }
         b'K' => {
