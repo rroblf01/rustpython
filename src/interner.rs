@@ -149,16 +149,30 @@ impl<V: Clone> InternedMap<V> {
     }
 
     pub fn insert(&mut self, key: StrId, value: V) -> Option<V> {
-        // Linear scan — fast for small sizes (typical Python dicts)
-        for entry in &mut self.entries {
-            if let Some((k, _)) = entry {
-                if *k == key {
+        // Linear scan — fast for small sizes (typical Python dicts).
+        // Reuse the first vacant (None) slot: `remove` leaves holes
+        // rather than compacting, so without reuse an insert/remove
+        // churn (e.g. frame.locals traffic from STORE_FAST's
+        // frame-object sync plus DELETE_FAST's remove_local on every
+        // fresh-variable comprehension evaluation) grew `entries`
+        // without bound and turned every later scan quadratic
+        // (200k comprehensions went from ~1s to ~40s).
+        let mut first_hole = None;
+        for (i, entry) in self.entries.iter_mut().enumerate() {
+            match entry {
+                Some((k, _)) if *k == key => {
                     let old = std::mem::replace(entry, Some((key, value)));
                     return old.map(|(_, v)| v);
                 }
+                None if first_hole.is_none() => first_hole = Some(i),
+                _ => {}
             }
         }
-        self.entries.push(Some((key, value)));
+        if let Some(i) = first_hole {
+            self.entries[i] = Some((key, value));
+        } else {
+            self.entries.push(Some((key, value)));
+        }
         self.len += 1;
         None
     }
