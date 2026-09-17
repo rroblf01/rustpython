@@ -5,18 +5,19 @@ use crate::object::pystring::PyStr;
 fn repr_pstr(s: &PyStr) -> String {
     let has_single = s.as_str().contains('\'');
     let has_double = s.as_str().contains('"');
-    let quote = if has_single && !has_double {
-        '"'
-    } else {
-        '\''
-    };
+    let quote = if has_single && !has_double { '"' } else { '\'' };
     let mut out = String::with_capacity(s.len() + 2);
     // Use same is_printable logic as escape_string
     fn is_printable_cp(cp: u32) -> bool {
         if cp < 0x80 {
             return cp >= b' ' as u32 && cp != 0x7f;
         }
-        if char::from_u32(cp).map_or(false, |c| c.is_alphanumeric()) || cp == 0x09 || cp == 0x0A || cp == 0x0D || (0x2000..=0x200E).contains(&cp) {
+        if char::from_u32(cp).map_or(false, |c| c.is_alphanumeric())
+            || cp == 0x09
+            || cp == 0x0A
+            || cp == 0x0D
+            || (0x2000..=0x200E).contains(&cp)
+        {
             return true;
         }
         matches!(cp,
@@ -300,8 +301,7 @@ impl PyObject {
                                     format!("{}()", cls_name)
                                 }
                             } else {
-                                let items_str: Vec<String> =
-                                    vec.iter().map(|x| x.repr()).collect();
+                                let items_str: Vec<String> = vec.iter().map(|x| x.repr()).collect();
                                 let inner = items_str.join(", ");
                                 if cls_name == "set" {
                                     format!("{{{}}}", inner)
@@ -319,21 +319,18 @@ impl PyObject {
                                     format!("{}()", cls_name)
                                 }
                             } else {
-                                let items_str: Vec<String> =
-                                    vec.iter().map(|x| x.repr()).collect();
+                                let items_str: Vec<String> = vec.iter().map(|x| x.repr()).collect();
                                 let inner = items_str.join(", ");
                                 format!("{}({{{}}})", cls_name, inner)
                             }
                         }
                         PyObject::List(items) => {
-                            let items_str: Vec<String> =
-                                items.iter().map(|x| x.repr()).collect();
+                            let items_str: Vec<String> = items.iter().map(|x| x.repr()).collect();
                             let inner = items_str.join(", ");
                             format!("[{}]", inner)
                         }
                         PyObject::Tuple(items) => {
-                            let items_str: Vec<String> =
-                                items.iter().map(|x| x.repr()).collect();
+                            let items_str: Vec<String> = items.iter().map(|x| x.repr()).collect();
                             let inner = items_str.join(", ");
                             if items_str.len() == 1 {
                                 format!("({},)", items_str[0])
@@ -486,7 +483,9 @@ impl PyObject {
                                     None
                                 }
                             })
-                            .unwrap_or_else(|| crate::interner::lookup_str(f.code.name).to_string());
+                            .unwrap_or_else(|| {
+                                crate::interner::lookup_str(f.code.name).to_string()
+                            });
                         // Prefer the user-visible CLASS name: instances of
                         // Python-level classes report generic 'instance' as
                         // their runtime type_name, but CPython's bound-method
@@ -511,11 +510,7 @@ impl PyObject {
                     _ => fb.type_name(),
                 };
                 drop(fb);
-                format!(
-                    "<bound method {} of {}>",
-                    mname,
-                    self_obj.repr()
-                )
+                format!("<bound method {} of {}>", mname, self_obj.repr())
             }
             PyObject::Partial { func, .. } => format!("<partial {}>", func.borrow().type_name()),
             PyObject::File { name, .. } => format!("<_io.FileIO '{}'>", name),

@@ -525,4 +525,3 @@ pub(crate) fn zero_pad_precision(mut s: String, precision: usize, has_prefix: bo
 pub(crate) fn byte_index_in(fmt: &str, rest: &str) -> usize {
     fmt.len().saturating_sub(rest.len())
 }
-

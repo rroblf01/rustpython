@@ -68,7 +68,9 @@ pub fn builtin_setattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let target_ref = PyObjectRef::Mut(rc);
             return builtin_setattr(&[target_ref, args[1].clone(), args[2].clone()]);
         } else {
-            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            return Err(PyError::reference_error(
+                "weakly-referenced object no longer exists",
+            ));
         }
     }
     let attr_name = args[1].str();
@@ -110,11 +112,7 @@ pub fn builtin_setattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             };
             if let Some(setter_fn) = property_setter {
                 return with_vm_mut(|vm| {
-                    vm.call_function(
-                        setter_fn,
-                        vec![args[0].clone(), args[2].clone()],
-                        vec![],
-                    )
+                    vm.call_function(setter_fn, vec![args[0].clone(), args[2].clone()], vec![])
                 })?;
             } else {
                 return Err(PyError::attribute_error(format!(
@@ -200,13 +198,7 @@ pub fn builtin_delattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
             };
             if let Some(del_fn) = property_deleter {
-                return with_vm_mut(|vm| {
-                    vm.call_function(
-                        del_fn,
-                        vec![args[0].clone()],
-                        vec![],
-                    )
-                })?;
+                return with_vm_mut(|vm| vm.call_function(del_fn, vec![args[0].clone()], vec![]))?;
             } else {
                 return Err(PyError::attribute_error(format!(
                     "property '{}' of '{}' object has no deleter",
@@ -218,11 +210,7 @@ pub fn builtin_delattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // Generic __delete__ for other descriptors (DynamicClassAttribute, etc.)
         if let Ok(deleter) = desc.borrow().get_attribute("__delete__") {
             return with_vm_mut(|vm| {
-                vm.call_function(
-                    deleter,
-                    vec![desc.clone(), args[0].clone()],
-                    vec![],
-                )
+                vm.call_function(deleter, vec![desc.clone(), args[0].clone()], vec![])
             })?;
         }
     }
@@ -261,14 +249,20 @@ pub fn builtin_ord(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 if v.len() == 1 {
                     return Ok(py_int(v[0] as i64));
                 } else {
-                    return Err(PyError::type_error(format!("ord() expected a character, but string of length {} found", v.len())));
+                    return Err(PyError::type_error(format!(
+                        "ord() expected a character, but string of length {} found",
+                        v.len()
+                    )));
                 }
             }
             PyObject::ByteArray(v) => {
                 if v.len() == 1 {
                     return Ok(py_int(v[0] as i64));
                 } else {
-                    return Err(PyError::type_error(format!("ord() expected a character, but string of length {} found", v.len())));
+                    return Err(PyError::type_error(format!(
+                        "ord() expected a character, but string of length {} found",
+                        v.len()
+                    )));
                 }
             }
             PyObject::Str(s) => {
@@ -282,7 +276,10 @@ pub fn builtin_ord(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     PyError::type_error("ord() expected a character, but string of length 0 found")
                 })?;
                 if cps.len() != 1 {
-                    return Err(PyError::type_error(format!("ord() expected a character, but string of length {} found", cps.len())));
+                    return Err(PyError::type_error(format!(
+                        "ord() expected a character, but string of length {} found",
+                        cps.len()
+                    )));
                 }
                 return Ok(py_int(c as i64));
             }

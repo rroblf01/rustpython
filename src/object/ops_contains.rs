@@ -21,7 +21,9 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
         if let Some(rc) = target.upgrade() {
             return contains_op(&PyObjectRef::Imm(rc), b);
         } else {
-            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            return Err(PyError::reference_error(
+                "weakly-referenced object no longer exists",
+            ));
         }
     }
     // Check for __contains__ on instances
@@ -269,10 +271,12 @@ pub fn contains_op(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<bool> {
             drop(container);
             let it = match builtin_iter(&[a.clone()]) {
                 Ok(it) => it,
-                Err(_) => return Err(PyError::type_error(format!(
-                    "argument of type '{}' is not iterable",
-                    type_name
-                ))),
+                Err(_) => {
+                    return Err(PyError::type_error(format!(
+                        "argument of type '{}' is not iterable",
+                        type_name
+                    )))
+                }
             };
             loop {
                 match builtin_next(&[it.clone()]) {

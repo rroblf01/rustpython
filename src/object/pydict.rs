@@ -7,7 +7,12 @@ thread_local! {
     static MODULE_GLOBALS_REGISTRY: std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<std::cell::RefCell<std::collections::HashMap<crate::interner::StrId, PyObjectRef>>>>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-pub fn register_module_globals(name: &str, globals: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<crate::interner::StrId, PyObjectRef>>>) {
+pub fn register_module_globals(
+    name: &str,
+    globals: std::rc::Rc<
+        std::cell::RefCell<std::collections::HashMap<crate::interner::StrId, PyObjectRef>>,
+    >,
+) {
     MODULE_GLOBALS_REGISTRY.with(|m| m.borrow_mut().insert(name.to_string(), globals));
 }
 
@@ -90,7 +95,8 @@ impl PyDict {
         if cap > 8 && self.size * 4 < cap {
             let new_cap = (cap / 2).max(8);
             // Compact entries: remove tombstones
-            let mut new_entries: Vec<Option<(PyObjectRef, PyObjectRef)>> = Vec::with_capacity(self.size);
+            let mut new_entries: Vec<Option<(PyObjectRef, PyObjectRef)>> =
+                Vec::with_capacity(self.size);
             for e in self.entries_mut().drain(..) {
                 if e.is_some() {
                     new_entries.push(e);
@@ -100,7 +106,8 @@ impl PyDict {
             self.rehash(new_cap);
         } else if self.entries.len() > self.size * 2 + 8 {
             // Compact tombstones without shrinking indices
-            let mut new_entries: Vec<Option<(PyObjectRef, PyObjectRef)>> = Vec::with_capacity(self.size);
+            let mut new_entries: Vec<Option<(PyObjectRef, PyObjectRef)>> =
+                Vec::with_capacity(self.size);
             for e in self.entries_mut().drain(..) {
                 if e.is_some() {
                     new_entries.push(e);
@@ -291,10 +298,19 @@ impl PyDict {
             if format!("{}", e).contains("unhashable") {
                 let tn = {
                     let b = key.borrow();
-                    if let PyObject::Instance { typ, .. } = &*b { crate::object::get_type_name_for_instance(typ) } else { b.type_name() }
+                    if let PyObject::Instance { typ, .. } = &*b {
+                        crate::object::get_type_name_for_instance(typ)
+                    } else {
+                        b.type_name()
+                    }
                 };
-                PyError::type_error(format!("cannot use '{}' as a dict key (unhashable type: '{}')", tn, tn))
-            } else { e }
+                PyError::type_error(format!(
+                    "cannot use '{}' as a dict key (unhashable type: '{}')",
+                    tn, tn
+                ))
+            } else {
+                e
+            }
         })
     }
     /// Same as `get`, but takes an already-computed hash — lets a caller
@@ -695,19 +711,25 @@ pub(crate) fn pydict_safe_get_or_insert(
         }
     }
 }
-pub fn pydict_safe_remove(
-    target: &PyObjectRef,
-    key: &PyObjectRef,
-) -> PyResult<PyObjectRef> {
+pub fn pydict_safe_remove(target: &PyObjectRef, key: &PyObjectRef) -> PyResult<PyObjectRef> {
     let h = key.hash().map_err(|e| {
         // Wrap unhashable error for dict context
         if format!("{}", e).contains("unhashable") {
             let tn = {
                 let b = key.borrow();
-                if let PyObject::Instance { typ, .. } = &*b { crate::object::get_type_name_for_instance(typ) } else { b.type_name() }
+                if let PyObject::Instance { typ, .. } = &*b {
+                    crate::object::get_type_name_for_instance(typ)
+                } else {
+                    b.type_name()
+                }
             };
-            PyError::type_error(format!("cannot use '{}' as a dict key (unhashable type: '{}')", tn, tn))
-        } else { e }
+            PyError::type_error(format!(
+                "cannot use '{}' as a dict key (unhashable type: '{}')",
+                tn, tn
+            ))
+        } else {
+            e
+        }
     })?;
     {
         let mut obj = target.borrow_mut();
@@ -777,9 +799,8 @@ mod views;
 pub use views::make_dict_view;
 
 mod methods;
+pub(crate) use methods::instance_builtin_dict_method;
 pub use methods::{
     builtin_dict_getitem, builtin_dict_setitem, dict_method_get, dict_method_items,
     dict_method_iter, dict_method_keys, dict_method_values,
 };
-pub(crate) use methods::instance_builtin_dict_method;
-

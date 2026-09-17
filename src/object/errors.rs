@@ -121,20 +121,20 @@ impl PyError {
         // `test.support.check_syntax_error`'s assertRaisesRegex(SyntaxError,
         // errtext) matches (test_exceptions' testSyntaxErrorMessage).
         let (clean_msg, line, col) = if let Some(rest) = msg.strip_prefix('L') {
-             if let Some((ln, rest)) = rest.split_once(':') {
-                 if let Some((col_s, rest)) = rest.split_once(':') {
-                     let line = ln.parse::<i64>().ok();
-                     let col = col_s.parse::<i64>().ok();
-                     (rest.trim_start().to_string(), line, col)
-                 } else {
-                     (msg.clone(), None, None)
-                 }
-             } else {
-                 (msg.clone(), None, None)
-             }
-         } else {
-             (msg.clone(), None, None)
-         };
+            if let Some((ln, rest)) = rest.split_once(':') {
+                if let Some((col_s, rest)) = rest.split_once(':') {
+                    let line = ln.parse::<i64>().ok();
+                    let col = col_s.parse::<i64>().ok();
+                    (rest.trim_start().to_string(), line, col)
+                } else {
+                    (msg.clone(), None, None)
+                }
+            } else {
+                (msg.clone(), None, None)
+            }
+        } else {
+            (msg.clone(), None, None)
+        };
         // Indentation-related errors are `IndentationError`, a `SyntaxError`
         // subclass in CPython (test_syntax asserts `subclass=IndentationError`).
         let typ = if clean_msg.contains("unexpected indent")
@@ -159,7 +159,11 @@ impl PyError {
         // needs `.text == 'ä = 5\\\n'`, not `'ä = 5\\'`) — `str::lines()`
         // strips it from every yielded line, so it must be re-added here.
         let text = source.lines().nth((line - 1).max(0) as usize).unwrap_or("");
-        let text = if text.is_empty() { text.to_string() } else { format!("{}\n", text) };
+        let text = if text.is_empty() {
+            text.to_string()
+        } else {
+            format!("{}\n", text)
+        };
         extra.insert("text".to_string(), py_str(&text));
         // CPython: `str(SyntaxError)` is `msg (filename, line N)` where
         // filename is displayed as basename (e.g. `badsyntax_3131.py`, not

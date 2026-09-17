@@ -217,7 +217,6 @@ pub fn builtin_import(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-
 /// PEP 263 source-encoding-cookie detection: real Python scans the first
 /// TWO lines of a `bytes` source for a `# -*- coding: <name> -*-`-shaped
 /// comment before falling back to UTF-8. Only meaningful for `bytes`/
@@ -349,7 +348,8 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 continue;
             }
             if !in_single && !in_double && !in_triple_single && !in_triple_double {
-                if c == '\'' && i + 2 < chars.len() && chars[i + 1] == '\'' && chars[i + 2] == '\'' {
+                if c == '\'' && i + 2 < chars.len() && chars[i + 1] == '\'' && chars[i + 2] == '\''
+                {
                     in_triple_single = true;
                     i += 3;
                     continue;
@@ -377,7 +377,8 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     depth_brace -= 1;
                 }
             } else if in_triple_single {
-                if c == '\'' && i + 2 < chars.len() && chars[i + 1] == '\'' && chars[i + 2] == '\'' {
+                if c == '\'' && i + 2 < chars.len() && chars[i + 1] == '\'' && chars[i + 2] == '\''
+                {
                     in_triple_single = false;
                     i += 3;
                     continue;
@@ -399,7 +400,13 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
             i += 1;
         }
-        depth_paren > 0 || depth_brack > 0 || depth_brace > 0 || in_single || in_double || in_triple_single || in_triple_double
+        depth_paren > 0
+            || depth_brack > 0
+            || depth_brace > 0
+            || in_single
+            || in_double
+            || in_triple_single
+            || in_triple_double
     }
 
     fn has_bare_newline_in_unclosed_single(src: &str) -> bool {
@@ -424,9 +431,13 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 continue;
             }
             if !in_single && !in_double {
-                if c == '\'' && !(i + 2 < chars.len() && chars[i + 1] == '\'' && chars[i + 2] == '\'') {
+                if c == '\''
+                    && !(i + 2 < chars.len() && chars[i + 1] == '\'' && chars[i + 2] == '\'')
+                {
                     in_single = true;
-                } else if c == '"' && !(i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"') {
+                } else if c == '"'
+                    && !(i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"')
+                {
                     in_double = true;
                 }
             } else if in_single {
@@ -492,13 +503,29 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             if trimmed.is_empty() && mode == "eval" {
                 return true;
             }
-            if trimmed.ends_with(':') || trimmed.ends_with('\\') || trimmed.ends_with(',') || trimmed.ends_with('(') || trimmed.ends_with('[') || trimmed.ends_with('{') {
+            if trimmed.ends_with(':')
+                || trimmed.ends_with('\\')
+                || trimmed.ends_with(',')
+                || trimmed.ends_with('(')
+                || trimmed.ends_with('[')
+                || trimmed.ends_with('{')
+            {
                 return true;
             }
             // For eval, empty parentheses etc. already handled via brackets
             // Check for incomplete keywords that expect suite
             let lower_trim = trimmed.to_lowercase();
-            if lower_trim.ends_with("else:") || lower_trim.ends_with("elif") || lower_trim.ends_with("except:") || lower_trim.ends_with("finally:") || lower_trim.ends_with("try:") || lower_trim.ends_with("while") || lower_trim.ends_with("for") || lower_trim.ends_with("with") || lower_trim.ends_with("class") || lower_trim.ends_with("def") {
+            if lower_trim.ends_with("else:")
+                || lower_trim.ends_with("elif")
+                || lower_trim.ends_with("except:")
+                || lower_trim.ends_with("finally:")
+                || lower_trim.ends_with("try:")
+                || lower_trim.ends_with("while")
+                || lower_trim.ends_with("for")
+                || lower_trim.ends_with("with")
+                || lower_trim.ends_with("class")
+                || lower_trim.ends_with("def")
+            {
                 return true;
             }
             return false;
@@ -582,7 +609,9 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 // For single mode with DONT_IMPLY_DEDENT, a final line without trailing
                 // newline that is inside a block is incomplete (needs extra newline to dedent)
                 if (flags & 0x200 != 0) && (flags & 0x4000 != 0) && mode == "single" {
-                    if !source.ends_with('\n') && (source.contains(":\n") || source.contains(":\r\n")) {
+                    if !source.ends_with('\n')
+                        && (source.contains(":\n") || source.contains(":\r\n"))
+                    {
                         return Err(PyError::Exception(
                             "_IncompleteInputError".to_string(),
                             PyObjectRef::new(PyObject::Exception {
@@ -628,7 +657,6 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         .map_err(|e| PyError::syntax_error_with_filename(e, &filename, &source))?;
     Ok(PyObjectRef::new(PyObject::Code(Rc::new(code))))
 }
-
 
 pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let f = func.clone();
@@ -939,7 +967,10 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
         6 => {
             let (func, partial_args) = {
                 let obj = f.borrow();
-                if let PyObject::Partial { func: bf, args: pa, .. } = &*obj {
+                if let PyObject::Partial {
+                    func: bf, args: pa, ..
+                } = &*obj
+                {
                     (bf.clone(), pa.clone())
                 } else {
                     return Err(PyError::type_error("not a partial"));

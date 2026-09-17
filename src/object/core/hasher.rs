@@ -24,12 +24,24 @@ impl std::hash::Hasher for FxHasher {
         }
         self.hash = hash;
     }
-    fn write_u8(&mut self, i: u8) { self.write_u64(i as u64); }
-    fn write_u16(&mut self, i: u16) { self.write_u64(i as u64); }
-    fn write_u32(&mut self, i: u32) { self.write_u64(i as u64); }
-    fn write_u64(&mut self, i: u64) { self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(FX_SEED); }
-    fn write_usize(&mut self, i: usize) { self.write_u64(i as u64); }
-    fn finish(&self) -> u64 { self.hash }
+    fn write_u8(&mut self, i: u8) {
+        self.write_u64(i as u64);
+    }
+    fn write_u16(&mut self, i: u16) {
+        self.write_u64(i as u64);
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(i as u64);
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(FX_SEED);
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64);
+    }
+    fn finish(&self) -> u64 {
+        self.hash
+    }
 }
 
 pub type FxBuildHasher = std::hash::BuildHasherDefault<FxHasher>;

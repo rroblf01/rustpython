@@ -8,8 +8,8 @@ mod func;
 pub use func::PyFunction;
 mod format;
 pub(crate) use format::{escape_string, format_complex_part, format_py_float};
-mod repr;
 mod hash;
+mod repr;
 #[derive(Clone)]
 pub enum PyObject {
     None,
@@ -495,13 +495,24 @@ impl PyObject {
                 if let Some(rc) = target.upgrade() {
                     let b = rc.borrow();
                     let is_callable = match &*b {
-                        PyObject::Instance { typ, .. } => crate::object::lookup_dunder_via_mro(typ, "__call__").is_some(),
-                        PyObject::Function(_) | PyObject::BuiltinFunction { .. } | PyObject::BuiltinMethod { .. } | PyObject::BoundMethod { .. } => true,
+                        PyObject::Instance { typ, .. } => {
+                            crate::object::lookup_dunder_via_mro(typ, "__call__").is_some()
+                        }
+                        PyObject::Function(_)
+                        | PyObject::BuiltinFunction { .. }
+                        | PyObject::BuiltinMethod { .. }
+                        | PyObject::BoundMethod { .. } => true,
                         _ => b.get_attribute("__call__").is_ok(),
                     };
-                    if is_callable { "weakcallableproxy" } else { "weakproxy" }
-                } else { "weakproxy" }
-            },
+                    if is_callable {
+                        "weakcallableproxy"
+                    } else {
+                        "weakproxy"
+                    }
+                } else {
+                    "weakproxy"
+                }
+            }
             PyObject::Capsule { .. } => "capsule",
             PyObject::Exception { typ, .. } => typ,
             PyObject::ExceptionGroup { typ, .. } => typ,
@@ -541,7 +552,6 @@ impl PyObject {
         .to_string()
     }
 
-
     pub fn str(&self) -> String {
         match self {
             PyObject::Str(s) => s.to_string(),
@@ -560,9 +570,10 @@ impl PyObject {
             // `str(FileNotFoundError(2, 'No such file or directory',
             // '/x'))` is `"[Errno 2] No such file or directory: '/x'"`,
             // never `"(2, 'No such file or directory')"`.
-            PyObject::Exception { typ, args, extra, .. }
-                if crate::vm::util::is_exception_subclass(typ, "OSError")
-                    && matches!(args.as_slice(), [_, _] | [_, _, _]) =>
+            PyObject::Exception {
+                typ, args, extra, ..
+            } if crate::vm::util::is_exception_subclass(typ, "OSError")
+                && matches!(args.as_slice(), [_, _] | [_, _, _]) =>
             {
                 let errno = extra.as_ref().and_then(|e| e.get("errno"));
                 let strerror = extra.as_ref().and_then(|e| e.get("strerror"));
@@ -605,7 +616,11 @@ impl PyObject {
             // project's own exception-message formatting) allocated
             // gigabytes and got OOM-killed before ever reaching that
             // formatter.
-            PyObject::ExceptionGroup { typ, args, exceptions } => {
+            PyObject::ExceptionGroup {
+                typ,
+                args,
+                exceptions,
+            } => {
                 // `args` here is `(message, exceptions_tuple)`, matching
                 // real CPython's own `BaseExceptionGroup.args` shape — ONLY
                 // `args[0]` (the message) belongs in `__str__`. Using the
@@ -618,7 +633,12 @@ impl PyObject {
                 let msg = args.first().map(|a| a.str()).unwrap_or_default();
                 let n = exceptions.len();
                 let _ = typ;
-                format!("{} ({} sub-exception{})", msg, n, if n == 1 { "" } else { "s" })
+                format!(
+                    "{} ({} sub-exception{})",
+                    msg,
+                    n,
+                    if n == 1 { "" } else { "s" }
+                )
             }
             _ => self.repr(),
         }
@@ -706,10 +726,13 @@ impl PyObject {
         }
     }
 
-
     pub fn equals(&self, other_ref: &PyObjectRef) -> PyResult<bool> {
         if let PyObject::WeakRef { target, .. } = self {
-            if let PyObject::WeakRef { target: other_target, .. } = &*other_ref.borrow() {
+            if let PyObject::WeakRef {
+                target: other_target,
+                ..
+            } = &*other_ref.borrow()
+            {
                 let self_alive = target.upgrade();
                 let other_alive = other_target.upgrade();
                 match (self_alive, other_alive) {
@@ -717,7 +740,10 @@ impl PyObject {
                         return PyObjectRef::Imm(a_rc).equals(&PyObjectRef::Imm(b_rc));
                     }
                     _ => {
-                        return Ok(std::ptr::eq(self as *const PyObject, &*other_ref.borrow() as *const PyObject));
+                        return Ok(std::ptr::eq(
+                            self as *const PyObject,
+                            &*other_ref.borrow() as *const PyObject,
+                        ));
                     }
                 }
             } else {
@@ -731,14 +757,18 @@ impl PyObject {
             if let Some(rc) = target.upgrade() {
                 return rc.borrow().equals(other_ref);
             } else {
-                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                return Err(PyError::reference_error(
+                    "weakly-referenced object no longer exists",
+                ));
             }
         }
         if let PyObject::WeakProxy { target, .. } = &*other_ref.borrow() {
             if let Some(rc) = target.upgrade() {
                 return self.equals(&PyObjectRef::Imm(rc));
             } else {
-                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                return Err(PyError::reference_error(
+                    "weakly-referenced object no longer exists",
+                ));
             }
         }
         // This structural-equality function is what PyDict/PySet actually
@@ -1012,10 +1042,26 @@ impl PyObject {
             | (PyObject::Module { .. }, PyObject::Module { .. }) => {
                 std::ptr::eq(self as *const PyObject, &*other as *const PyObject)
             }
-            (PyObject::BuiltinFunction { name: a_name, func: a_func }, PyObject::BuiltinFunction { name: b_name, func: b_func }) => {
-                a_name == b_name && std::ptr::fn_addr_eq(*a_func, *b_func)
-            }
-            (PyObject::BoundMethod { func: a_func, self_obj: a_self }, PyObject::BoundMethod { func: b_func, self_obj: b_self }) => {
+            (
+                PyObject::BuiltinFunction {
+                    name: a_name,
+                    func: a_func,
+                },
+                PyObject::BuiltinFunction {
+                    name: b_name,
+                    func: b_func,
+                },
+            ) => a_name == b_name && std::ptr::fn_addr_eq(*a_func, *b_func),
+            (
+                PyObject::BoundMethod {
+                    func: a_func,
+                    self_obj: a_self,
+                },
+                PyObject::BoundMethod {
+                    func: b_func,
+                    self_obj: b_self,
+                },
+            ) => {
                 (a_func.is(b_func) || a_func.equals(b_func).unwrap_or(false))
                     && (a_self.is(b_self) || a_self.equals(b_self).unwrap_or(false))
             }
@@ -1024,4 +1070,3 @@ impl PyObject {
         Ok(result)
     }
 }
-

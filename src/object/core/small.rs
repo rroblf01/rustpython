@@ -34,10 +34,15 @@ pub struct SmallStr {
 impl SmallStr {
     pub fn new(s: &str) -> Option<Self> {
         let bytes = s.as_bytes();
-        if bytes.len() > 15 { return None; }
+        if bytes.len() > 15 {
+            return None;
+        }
         let mut data = [0u8; 15];
         data[..bytes.len()].copy_from_slice(bytes);
-        Some(SmallStr { data, len: bytes.len() as u8 })
+        Some(SmallStr {
+            data,
+            len: bytes.len() as u8,
+        })
     }
     pub fn as_str(&self) -> &str {
         std::str::from_utf8(&self.data[..self.len as usize]).expect("SmallStr: invalid UTF-8 data")

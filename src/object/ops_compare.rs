@@ -7,7 +7,14 @@ use super::*;
 
 pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjectRef> {
     if std::env::var("RPY_DEBUG_NUMERIC").is_ok() && matches!(op, 0 | 1 | 3 | 4) {
-        eprintln!("PY_COMPARE op={} a={} b={} a_type={} b_type={}", op, a.borrow().repr(), b.borrow().repr(), a.get_type_name(), b.get_type_name());
+        eprintln!(
+            "PY_COMPARE op={} a={} b={} a_type={} b_type={}",
+            op,
+            a.borrow().repr(),
+            b.borrow().repr(),
+            a.get_type_name(),
+            b.get_type_name()
+        );
     }
     // Fast path for small int comparisons — no borrow() needed
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
@@ -35,7 +42,14 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
         let is_a_instance = matches!(&*a.borrow(), PyObject::Instance { .. });
         let is_b_instance = matches!(&*b.borrow(), PyObject::Instance { .. });
         if std::env::var("RPY_DEBUG_NUMERIC").is_ok() && matches!(op, 0 | 1 | 3 | 4) {
-            eprintln!("INSTANCE CHECK: op={} a_is_instance={} b_is_instance={} a={} b={}", op, is_a_instance, is_b_instance, a.borrow().repr(), b.borrow().repr());
+            eprintln!(
+                "INSTANCE CHECK: op={} a_is_instance={} b_is_instance={} a={} b={}",
+                op,
+                is_a_instance,
+                is_b_instance,
+                a.borrow().repr(),
+                b.borrow().repr()
+            );
         }
         if is_a_instance || is_b_instance {
             if let Some(result) = try_rich_compare(a, b, op)? {
@@ -83,7 +97,14 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
             let ap_opt = crate::modules::numeric_parts_from_ref(a);
             let bp_opt = crate::modules::numeric_parts_from_ref(b);
             if std::env::var("RPY_DEBUG_NUMERIC").is_ok() && matches!(op, 0 | 1 | 3 | 4) {
-                eprintln!("NUMERIC DEBUG: op={} a={} b={} ap={:?} bp={:?}", op, a.borrow().repr(), b.borrow().repr(), ap_opt, bp_opt);
+                eprintln!(
+                    "NUMERIC DEBUG: op={} a={} b={} ap={:?} bp={:?}",
+                    op,
+                    a.borrow().repr(),
+                    b.borrow().repr(),
+                    ap_opt,
+                    bp_opt
+                );
             }
             if let (Some(ap), Some(bp)) = (ap_opt, bp_opt) {
                 // Equality / inequality always works via numeric parts
@@ -96,14 +117,21 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
                 // even for 1+0j, per test_numeric_tower.test_complex)
                 let a_is_complex = matches!(&*a.borrow(), PyObject::Complex(_, _));
                 let b_is_complex = matches!(&*b.borrow(), PyObject::Complex(_, _));
-                if matches!(op, 0 | 1 | 3 | 4) && ap.1 == 0.0 && bp.1 == 0.0 && !a_is_complex && !b_is_complex {
+                if matches!(op, 0 | 1 | 3 | 4)
+                    && ap.1 == 0.0
+                    && bp.1 == 0.0
+                    && !a_is_complex
+                    && !b_is_complex
+                {
                     let ord = ap.0.partial_cmp(&bp.0);
                     let result = match (op, ord) {
                         (0, Some(std::cmp::Ordering::Less)) => true,
                         (0, _) => false,
-                        (1, Some(std::cmp::Ordering::Less)) | (1, Some(std::cmp::Ordering::Equal)) => true,
+                        (1, Some(std::cmp::Ordering::Less))
+                        | (1, Some(std::cmp::Ordering::Equal)) => true,
                         (1, _) => false,
-                        (3, Some(std::cmp::Ordering::Greater)) | (3, Some(std::cmp::Ordering::Equal)) => true,
+                        (3, Some(std::cmp::Ordering::Greater))
+                        | (3, Some(std::cmp::Ordering::Equal)) => true,
                         (3, _) => false,
                         (4, Some(std::cmp::Ordering::Greater)) => true,
                         (4, _) => false,

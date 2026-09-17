@@ -18,7 +18,9 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         if let Some(rc) = target.upgrade() {
             return py_getitem(&PyObjectRef::Mut(rc), index);
         } else {
-            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            return Err(PyError::reference_error(
+                "weakly-referenced object no longer exists",
+            ));
         }
     }
     // Check for __getitem__ on custom classes and __class_getitem__ on types (PEP 560)
@@ -555,7 +557,9 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
         if let Some(rc) = target.upgrade() {
             return py_setitem(&PyObjectRef::Mut(rc), index, value);
         } else {
-            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            return Err(PyError::reference_error(
+                "weakly-referenced object no longer exists",
+            ));
         }
     }
     // Check for __setitem__ on custom classes
@@ -764,8 +768,7 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
             match &*idx {
                 PyObject::Slice { start, stop, step } => {
                     let len = b.len();
-                    let (start_val, stop_val, step_val) =
-                        extract_slice_fields(start, stop, step)?;
+                    let (start_val, stop_val, step_val) = extract_slice_fields(start, stop, step)?;
                     let (start_n, stop_n) =
                         normalize_slice_bounds(start_val, stop_val, step_val, len);
                     // Collect replacement bytes from value (bytes, bytearray, or iterable of ints)
@@ -777,11 +780,9 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
                             PyObject::List(items) => {
                                 let mut vec = Vec::new();
                                 for item in items {
-                                    let v = item
-                                        .as_i64()
-                                        .ok_or_else(|| {
-                                            PyError::type_error("an integer is required")
-                                        })?;
+                                    let v = item.as_i64().ok_or_else(|| {
+                                        PyError::type_error("an integer is required")
+                                    })?;
                                     if !(0..=255).contains(&v) {
                                         return Err(PyError::value_error(
                                             "byte must be in range(0, 256)",
@@ -866,18 +867,27 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
         PyObject::Array(arr) => {
             let idx = index.borrow();
             if let Some(i) = try_to_index(index) {
-                let i = i.to_isize().ok_or_else(|| PyError::index_error("array index out of range"))?;
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("array index out of range"))?;
                 let len = arr.data.len() as isize;
                 let i = if i < 0 { len + i } else { i };
                 if i < 0 || i >= len {
                     return Err(PyError::index_error("array assignment index out of range"));
                 }
                 let is_float = crate::object::array_typecode_is_float(arr.typecode);
-                let v = if is_float { value.as_f64().unwrap_or(0.0) } else { value.as_i64().unwrap_or(0) as f64 };
+                let v = if is_float {
+                    value.as_f64().unwrap_or(0.0)
+                } else {
+                    value.as_i64().unwrap_or(0) as f64
+                };
                 arr.data[i as usize] = v;
                 return Ok(());
             }
-            Err(PyError::type_error(format!("array indices must be integers or slices, not {}", idx.type_name())))
+            Err(PyError::type_error(format!(
+                "array indices must be integers or slices, not {}",
+                idx.type_name()
+            )))
         }
         // PyObject::Dict is handled above, before this borrow is taken.
         _ => Err(PyError::type_error(format!(
@@ -892,7 +902,9 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
         if let Some(rc) = target.upgrade() {
             return py_delitem(&PyObjectRef::Mut(rc), index);
         } else {
-            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            return Err(PyError::reference_error(
+                "weakly-referenced object no longer exists",
+            ));
         }
     }
     // Check for __delitem__ on custom classes
@@ -1007,7 +1019,9 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
         PyObject::Array(arr) => {
             let idx = index.borrow();
             if let Some(i) = try_to_index(index) {
-                let i = i.to_isize().ok_or_else(|| PyError::index_error("array index out of range"))?;
+                let i = i
+                    .to_isize()
+                    .ok_or_else(|| PyError::index_error("array index out of range"))?;
                 let len = arr.data.len() as isize;
                 let i = if i < 0 { len + i } else { i };
                 if i < 0 || i >= len {
@@ -1016,7 +1030,10 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
                 arr.data.remove(i as usize);
                 Ok(())
             } else {
-                Err(PyError::type_error(format!("array indices must be integers or slices, not {}", idx.type_name())))
+                Err(PyError::type_error(format!(
+                    "array indices must be integers or slices, not {}",
+                    idx.type_name()
+                )))
             }
         }
         // PyObject::Dict is handled above, before this borrow is taken.

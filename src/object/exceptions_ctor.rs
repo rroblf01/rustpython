@@ -143,14 +143,14 @@ pub fn builtin_make_exception_oserror(args: &[PyObjectRef]) -> PyResult<PyObject
         Some(4) => "InterruptedError",           // EINTR
         Some(10) => "ChildProcessError",         // ECHILD
         Some(11) | Some(114) | Some(115) => "BlockingIOError", // EAGAIN/EWOULDBLOCK, EALREADY, EINPROGRESS
-        Some(17) => "FileExistsError",           // EEXIST
-        Some(20) => "NotADirectoryError",        // ENOTDIR
-        Some(21) => "IsADirectoryError",         // EISDIR
-        Some(32) | Some(108) => "BrokenPipeError", // EPIPE, ESHUTDOWN
-        Some(103) => "ConnectionAbortedError",   // ECONNABORTED
-        Some(104) => "ConnectionResetError",     // ECONNRESET
-        Some(110) => "TimeoutError",             // ETIMEDOUT
-        Some(111) => "ConnectionRefusedError",   // ECONNREFUSED
+        Some(17) => "FileExistsError",                         // EEXIST
+        Some(20) => "NotADirectoryError",                      // ENOTDIR
+        Some(21) => "IsADirectoryError",                       // EISDIR
+        Some(32) | Some(108) => "BrokenPipeError",             // EPIPE, ESHUTDOWN
+        Some(103) => "ConnectionAbortedError",                 // ECONNABORTED
+        Some(104) => "ConnectionResetError",                   // ECONNRESET
+        Some(110) => "TimeoutError",                           // ETIMEDOUT
+        Some(111) => "ConnectionRefusedError",                 // ECONNREFUSED
         _ => "OSError",
     };
     Ok(PyObjectRef::new(PyObject::Exception {
@@ -337,7 +337,9 @@ make_exception_func!(
 pub fn builtin_make_exception_blockingioerror(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if let Some(last) = args.last() {
         if matches!(&*last.borrow(), PyObject::Dict(_)) {
-            return Err(PyError::type_error("BlockingIOError() takes no keyword arguments"));
+            return Err(PyError::type_error(
+                "BlockingIOError() takes no keyword arguments",
+            ));
         }
     }
     let mut extra = std::collections::HashMap::new();

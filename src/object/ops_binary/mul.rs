@@ -86,7 +86,8 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             }
             false
         };
-        let is_int_like = |o: &PyObjectRef| o.as_i64().is_some() || crate::object::to_index(o).is_ok();
+        let is_int_like =
+            |o: &PyObjectRef| o.as_i64().is_some() || crate::object::to_index(o).is_ok();
         if (has_custom_new(a) && is_deque_like(a) && is_int_like(b))
             || (has_custom_new(b) && is_deque_like(b) && is_int_like(a))
         {

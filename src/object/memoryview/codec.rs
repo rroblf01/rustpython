@@ -56,10 +56,7 @@ pub(crate) fn is_picklebuffer_obj(obj: &PyObjectRef) -> Option<(PyObjectRef, boo
             false
         };
         if is_pb {
-            let released = dict
-                .get("_released")
-                .map(|v| v.truthy())
-                .unwrap_or(false);
+            let released = dict.get("_released").map(|v| v.truthy()).unwrap_or(false);
             let underlying = dict.get("_obj").cloned().unwrap_or_else(py_none);
             return Some((underlying, released));
         }
@@ -70,11 +67,15 @@ pub(crate) fn is_picklebuffer_obj(obj: &PyObjectRef) -> Option<(PyObjectRef, boo
 pub(crate) fn extract_flags_for_buffer(obj: &PyObjectRef) -> PyResult<i64> {
     let flags_big = crate::object::to_index(obj)?;
     if flags_big.to_i64().is_none() {
-        return Err(PyError::overflow_error("Python int too large to convert to C int"));
+        return Err(PyError::overflow_error(
+            "Python int too large to convert to C int",
+        ));
     }
     let v = flags_big.to_i64().unwrap();
     if v > i32::MAX as i64 || v < i32::MIN as i64 {
-        return Err(PyError::overflow_error("Python int too large to convert to C int"));
+        return Err(PyError::overflow_error(
+            "Python int too large to convert to C int",
+        ));
     }
     Ok(v)
 }

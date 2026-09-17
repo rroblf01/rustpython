@@ -379,7 +379,6 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     }
 }
 
-
 pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         if bi == 0 {
@@ -778,7 +777,6 @@ pub(crate) fn py_float_mod(a: f64, b: f64) -> PyResult<PyObjectRef> {
     }
 }
 
-
 pub fn py_lshift(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
         if bi < 0 {
@@ -1058,7 +1056,10 @@ pub fn py_bit_and(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 /// straightforward merge sort only ever does pairwise comparisons and
 /// never relies on any total-order invariant to stay memory-safe, so it
 /// can't panic regardless of what the predicate returns.
-pub(crate) fn py_stable_sort_by<F>(items: Vec<PyObjectRef>, is_less: &F) -> PyResult<Vec<PyObjectRef>>
+pub(crate) fn py_stable_sort_by<F>(
+    items: Vec<PyObjectRef>,
+    is_less: &F,
+) -> PyResult<Vec<PyObjectRef>>
 where
     F: Fn(&PyObjectRef, &PyObjectRef) -> PyResult<bool>,
 {

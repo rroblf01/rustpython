@@ -288,7 +288,10 @@ pub(crate) fn native_base_of_type(typ: &PyObjectRef) -> Option<String> {
 /// `vm.rs`'s Type-instantiation logic).
 pub(crate) fn find_exception_base_name(typ: &PyObjectRef) -> Option<String> {
     let (name, bases, mro): (String, Vec<PyObjectRef>, Vec<PyObjectRef>) = {
-        if let PyObject::Type { name, bases, mro, .. } = &*typ.borrow() {
+        if let PyObject::Type {
+            name, bases, mro, ..
+        } = &*typ.borrow()
+        {
             (name.clone(), bases.clone(), mro.clone())
         } else {
             return None;
@@ -304,7 +307,9 @@ pub(crate) fn find_exception_base_name(typ: &PyObjectRef) -> Option<String> {
     // own name instead of its actual base (ValueError) and breaking
     // `issubclass(StatisticsError, ValueError)`. Gate on the explicit
     // builtin list instead.
-    if is_builtin_exception_class_name(&name) && crate::vm::is_exception_subclass(&name, "BaseException") {
+    if is_builtin_exception_class_name(&name)
+        && crate::vm::is_exception_subclass(&name, "BaseException")
+    {
         return Some(name.clone());
     }
     // For user-defined exception classes, prefer the actual base's
@@ -337,7 +342,9 @@ pub(crate) fn find_exception_base_name(typ: &PyObjectRef) -> Option<String> {
     // `issubclass(list, BaseException)` being `True` (test_baseexception's
     // `test_inheritance`/`test_catch_non_BaseException`: every native
     // builtin type falsely counted as an exception).
-    if is_builtin_exception_class_name(&name) && crate::vm::is_exception_subclass(&name, "BaseException") {
+    if is_builtin_exception_class_name(&name)
+        && crate::vm::is_exception_subclass(&name, "BaseException")
+    {
         return Some(name.clone());
     }
     None
@@ -647,9 +654,7 @@ pub(crate) fn get_instance_slots(typ: &PyObjectRef) -> Option<Vec<String>> {
             {
                 if let Some(slots_val) = base_dict.get_str("__slots__") {
                     extract_slots(slots_val, &mut all_slots);
-                } else if base_name != "object"
-                    && !is_natively_slotted_type(base_name)
-                {
+                } else if base_name != "object" && !is_natively_slotted_type(base_name) {
                     all_bases_slotted = false;
                 }
             }

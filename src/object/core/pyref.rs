@@ -1,9 +1,9 @@
 // Split from src/object/core.rs — PyObjectRef and core impl.
+use super::object_id;
 use crate::bytecode::CodeObject;
 use crate::interner::{self, StrId};
 use crate::modules::*;
 use crate::object::*;
-use super::object_id;
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use std::cell::RefCell;
@@ -192,8 +192,11 @@ impl PyObjectRef {
                     Err(_) => {
                         use std::io::Write;
                         let t = self.borrow().type_name();
-                        let _ = std::io::stderr()
-                            .write_fmt(format_args!("RefCell CONFLICT - borrow_mut while borrowed on type {} addr {:p}\n", t, Rc::as_ptr(rc)));
+                        let _ = std::io::stderr().write_fmt(format_args!(
+                            "RefCell CONFLICT - borrow_mut while borrowed on type {} addr {:p}\n",
+                            t,
+                            Rc::as_ptr(rc)
+                        ));
                         let _ = std::io::stderr().flush();
                         panic!("RefCell already borrowed on {}", t);
                     }
@@ -711,7 +714,9 @@ impl PyObjectRef {
             if let Some(rc) = target.upgrade() {
                 return PyObjectRef::Imm(rc).try_truthy();
             } else {
-                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                return Err(PyError::reference_error(
+                    "weakly-referenced object no longer exists",
+                ));
             }
         }
         match self {
@@ -771,7 +776,10 @@ impl PyObjectRef {
         if let PyObject::WeakProxy { .. } = &*self.borrow() {
             return Err(PyError::type_error("unhashable type: 'weakproxy'"));
         }
-        if let PyObject::WeakRef { target, hash_cache, .. } = &*self.borrow() {
+        if let PyObject::WeakRef {
+            target, hash_cache, ..
+        } = &*self.borrow()
+        {
             if let Some(rc) = target.upgrade() {
                 let h = PyObjectRef::Imm(rc.clone()).hash()?;
                 if hash_cache.borrow().is_none() {

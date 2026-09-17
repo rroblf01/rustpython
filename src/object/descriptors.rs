@@ -28,7 +28,11 @@ pub fn builtin_property(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // CPython property falls back to getter's __doc__
         getter.as_ref().and_then(|g| {
             let d = g.borrow().get_attribute("__doc__").ok()?;
-            if matches!(&*d.borrow(), PyObject::None) { None } else { Some(d.str()) }
+            if matches!(&*d.borrow(), PyObject::None) {
+                None
+            } else {
+                Some(d.str())
+            }
         })
     };
     Ok(PyObjectRef::new(PyObject::Property(Box::new(
@@ -220,7 +224,13 @@ pub(crate) fn resolve_match_bounds(
     start: Option<i64>,
     end: Option<i64>,
 ) -> Option<(usize, usize)> {
-    let norm = |v: i64| -> i64 { if v < 0 { (v + len as i64).max(0) } else { v } };
+    let norm = |v: i64| -> i64 {
+        if v < 0 {
+            (v + len as i64).max(0)
+        } else {
+            v
+        }
+    };
     let s_raw = start.map(norm).unwrap_or(0);
     if s_raw > len as i64 {
         return None;

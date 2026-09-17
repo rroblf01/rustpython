@@ -39,7 +39,6 @@ pub(crate) fn own_abc_registry(typ: &PyObjectRef) -> Vec<PyObjectRef> {
     }
 }
 
-
 /// Is anything matching `matcher` registered against `base` ITSELF, or
 /// against any REAL (regular inheritance, non-virtual) subclass of `base`?
 /// Needed because registration should propagate to less-specific ABCs in
@@ -61,7 +60,6 @@ pub(crate) fn abc_registry_matches_in_subtree(
         .any(|sub| abc_registry_matches_in_subtree(sub, matcher))
 }
 
-
 pub(crate) fn is_exception_type(typ: &PyObjectRef) -> bool {
     if let PyObject::Type { mro, bases, .. } = &*typ.borrow() {
         let entries = if mro.is_empty() { bases } else { mro };
@@ -77,7 +75,6 @@ pub(crate) fn is_exception_type(typ: &PyObjectRef) -> bool {
     }
 }
 
-
 /// Real `BaseException.__str__`: no args -> `""`, one arg -> that arg's
 /// `str()`, multiple args -> `str()` of the whole args tuple.
 pub(crate) fn exception_instance_str(instance: &PyObjectRef) -> String {
@@ -92,7 +89,6 @@ pub(crate) fn exception_instance_str(instance: &PyObjectRef) -> String {
         _ => String::new(),
     }
 }
-
 
 /// Real `BaseException.__repr__`: `ClassName(repr(arg1), repr(arg2), ...)`.
 pub(crate) fn exception_instance_repr(instance: &PyObjectRef, class_name: &str) -> String {
@@ -112,7 +108,6 @@ pub(crate) fn exception_instance_repr(instance: &PyObjectRef, class_name: &str) 
     format!("{}({})", class_name, args_str)
 }
 
-
 pub fn builtin_object(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Create a new bare object instance
     let object_type = PyObjectRef::new(PyObject::Type {
@@ -126,7 +121,6 @@ pub fn builtin_object(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         dict: AttrMap::new(),
     }))
 }
-
 
 pub fn builtin_hash(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
@@ -148,7 +142,6 @@ pub fn builtin_hash(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // of raising `TypeError: unhashable type: '...'` like real Python.
     Ok(py_int(args[0].hash()? as i64))
 }
-
 
 pub fn builtin_slice(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match args.len() {
@@ -179,7 +172,6 @@ pub fn builtin_slice(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         _ => Err(PyError::type_error("slice() takes at most 3 arguments")),
     }
 }
-
 
 pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
@@ -254,7 +246,9 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if let Some(rc) = target.upgrade() {
             return builtin_dir(&[PyObjectRef::Imm(rc)]);
         } else {
-            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            return Err(PyError::reference_error(
+                "weakly-referenced object no longer exists",
+            ));
         }
     }
     let obj = args[0].borrow();
@@ -271,9 +265,7 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // configparser's ConverterMapping, which discovers getters via
             // dir(parser).
             if let PyObject::Type {
-                dict: tdict,
-                mro,
-                ..
+                dict: tdict, mro, ..
             } = &*typ.borrow()
             {
                 let mut seen = std::collections::HashSet::new();
@@ -413,7 +405,6 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_list(names))
 }
 
-
 pub fn builtin_globals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     with_vm_mut(|vm| {
         let frame = vm
@@ -426,7 +417,6 @@ pub fn builtin_globals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Globals(frame.globals.clone())))
     })?
 }
-
 
 pub fn builtin_locals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     with_vm_mut(|vm| {
@@ -442,9 +432,6 @@ pub fn builtin_locals(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
     })?
 }
-
-
-
 
 /// Invoke `func` in a fresh disposable VM, supporting KEYWORD arguments —
 /// unlike `call_bound_method` (which only forwards positionals). Needed by
@@ -513,7 +500,6 @@ pub fn call_function_disposable(
         ))),
     }
 }
-
 
 pub fn call_bound_method(
     func: PyObjectRef,
@@ -814,16 +800,12 @@ pub fn call_bound_method(
     }
 }
 
-
-
-
 pub fn builtin_id(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("id() takes exactly one argument"));
     }
     Ok(py_int(args[0].get_id() as i64))
 }
-
 
 pub fn builtin_vars(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
@@ -845,7 +827,9 @@ pub fn builtin_vars(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         _ => true,
                     };
                     if is_slots_without_dict {
-                        return Err(PyError::type_error("vars() argument must have __dict__ attribute"));
+                        return Err(PyError::type_error(
+                            "vars() argument must have __dict__ attribute",
+                        ));
                     }
                 }
             }
@@ -868,7 +852,6 @@ pub fn builtin_vars(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-
 thread_local! {
     // `isinstance()`/`issubclass()` recurse in PLAIN RUST (calling
     // themselves directly, not through `call_function`) when the
@@ -885,12 +868,9 @@ thread_local! {
     static ISINSTANCE_RECURSION_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
 }
 
-
 pub(crate) struct IsinstanceRecursionGuard;
 
-
 impl IsinstanceRecursionGuard {
-
     pub(crate) fn enter() -> PyResult<Self> {
         let depth = ISINSTANCE_RECURSION_DEPTH.with(|c| {
             let d = c.get() + 1;
@@ -905,14 +885,11 @@ impl IsinstanceRecursionGuard {
     }
 }
 
-
 impl Drop for IsinstanceRecursionGuard {
-
     fn drop(&mut self) {
         ISINSTANCE_RECURSION_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
     }
 }
-
 
 /// True if `e` is an `AttributeError` — either the native `PyError`
 /// variant (raised internally by `get_attribute_impl`'s own "no such
@@ -939,7 +916,6 @@ pub(crate) fn is_attribute_error(e: &PyError) -> bool {
     }
 }
 
-
 /// `ObjectAccess::get_attribute` (the plain, VM-less attribute lookup every
 /// free-standing native function like this one is stuck with) never applies
 /// the descriptor protocol to a `property` found via an `Instance`'s
@@ -954,17 +930,28 @@ pub(crate) fn is_attribute_error(e: &PyError) -> bool {
 /// `obj.borrow().get_attribute(name)`) so a duck-typed abstract class using
 /// a `property` for `__bases__` (`test_isinstance.py`'s `AbstractClass`)
 /// actually gets its getter invoked.
-pub(crate) fn get_attribute_with_properties(obj: &PyObjectRef, name: &str) -> PyResult<PyObjectRef> {
+pub(crate) fn get_attribute_with_properties(
+    obj: &PyObjectRef,
+    name: &str,
+) -> PyResult<PyObjectRef> {
     let typ = match &*obj.borrow() {
         PyObject::Instance { typ, .. } => typ.clone(),
         _ => return obj.borrow().get_attribute(name),
     };
     let found = {
         let typ_ref = typ.borrow();
-        if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
+        if let PyObject::Type {
+            dict: type_dict,
+            mro,
+            ..
+        } = &*typ_ref
+        {
             type_dict.get_str(name).cloned().or_else(|| {
                 for base in mro.iter().skip(1) {
-                    if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
+                    if let PyObject::Type {
+                        dict: base_dict, ..
+                    } = &*base.borrow()
+                    {
                         if let Some(val) = base_dict.get_str(name) {
                             return Some(val.clone());
                         }
@@ -978,7 +965,8 @@ pub(crate) fn get_attribute_with_properties(obj: &PyObjectRef, name: &str) -> Py
     };
     match found {
         Some(val) => {
-            let is_getter_property = matches!(&*val.borrow(), PyObject::Property(d) if d.getter.is_some());
+            let is_getter_property =
+                matches!(&*val.borrow(), PyObject::Property(d) if d.getter.is_some());
             if is_getter_property {
                 let getter = if let PyObject::Property(d) = &*val.borrow() {
                     d.getter.clone().unwrap()
@@ -1003,7 +991,9 @@ pub(crate) fn get_attribute_with_properties(obj: &PyObjectRef, name: &str) -> Py
             // identical object.
             match obj.borrow().get_attribute(name) {
                 Err(e) if is_attribute_error(&e) => {
-                    if let Some(getattr_fn) = crate::object::lookup_dunder_via_mro(&typ, "__getattr__") {
+                    if let Some(getattr_fn) =
+                        crate::object::lookup_dunder_via_mro(&typ, "__getattr__")
+                    {
                         call_bound_method(getattr_fn, obj.clone(), vec![py_str(name)])
                     } else {
                         Err(e)
@@ -1014,7 +1004,6 @@ pub(crate) fn get_attribute_with_properties(obj: &PyObjectRef, name: &str) -> Py
         }
     }
 }
-
 
 /// CPython's `abstract_get_bases()`: fetch `obj.__bases__`, treating a
 /// missing attribute (`AttributeError`) OR a non-tuple value as "no
@@ -1040,7 +1029,6 @@ pub(crate) fn get_bases_duck(obj: &PyObjectRef) -> PyResult<Option<Vec<PyObjectR
     }
 }
 
-
 /// CPython's `check_class()`: an object with no usable `__bases__` is not
 /// "class-like" at all, raising `TypeError` with the caller-supplied
 /// message — UNLESS fetching `__bases__` itself raised some other
@@ -1053,7 +1041,6 @@ pub(crate) fn check_class_duck(obj: &PyObjectRef, msg: &str) -> PyResult<()> {
         None => Err(PyError::type_error(msg.to_string())),
     }
 }
-
 
 /// CPython's `abstract_issubclass()`: walk `__bases__` (a duck-typed
 /// class need not be a real `type` at all — see `AbstractClass` in

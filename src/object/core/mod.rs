@@ -6,14 +6,14 @@ pub mod hasher;
 pub use hasher::{FxBuildHasher, FxHasher};
 
 pub mod dict;
-pub use dict::{DictMap, TypeDict};
 pub(crate) use dict::{str_map_to_strid_map, str_map_to_typedict};
+pub use dict::{DictMap, TypeDict};
 
 pub mod attr_map;
 pub use attr_map::{AttrEntry, AttrMap};
 
 pub mod small;
-pub use small::{RefOrOwned, SmallStr, ALLOC_COUNT, IMM_COUNT, BuiltinFunc};
+pub use small::{BuiltinFunc, RefOrOwned, SmallStr, ALLOC_COUNT, IMM_COUNT};
 
 pub(crate) mod object_id;
 

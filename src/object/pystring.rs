@@ -11,10 +11,7 @@ use compact_str::CompactString;
 #[derive(Clone, Debug)]
 pub enum PyStr {
     Utf8(CompactString),
-    Wtf8 {
-        raw: Vec<u8>,
-        lossy: CompactString,
-    },
+    Wtf8 { raw: Vec<u8>, lossy: CompactString },
 }
 
 impl PyStr {
@@ -39,7 +36,11 @@ impl PyStr {
 
     /// Create a PyStr from a single surrogate codepoint (0xD800-0xDFFF).
     pub fn from_surrogate(cp: u32) -> Self {
-        assert!(matches!(cp, 0xD800..=0xDFFF), "not a surrogate: U+{:04X}", cp);
+        assert!(
+            matches!(cp, 0xD800..=0xDFFF),
+            "not a surrogate: U+{:04X}",
+            cp
+        );
         let b1 = 0xE0 | ((cp >> 12) as u8);
         let b2 = 0x80 | ((cp >> 6) as u8 & 0x3F);
         let b3 = 0x80 | (cp as u8 & 0x3F);

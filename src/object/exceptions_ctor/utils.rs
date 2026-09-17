@@ -37,9 +37,8 @@ fn ensure_rng_seeded() {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x9e3779b97f4a7c15);
         let pid = std::process::id() as u64;
-        let seed = nanos
-            ^ pid.wrapping_mul(0x9e3779b97f4a7c15).rotate_left(17)
-            ^ 0xbf58476d1ce4e5b9;
+        let seed =
+            nanos ^ pid.wrapping_mul(0x9e3779b97f4a7c15).rotate_left(17) ^ 0xbf58476d1ce4e5b9;
         RNG_STATE.store(seed, std::sync::atomic::Ordering::Relaxed);
     });
 }

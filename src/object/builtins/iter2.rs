@@ -1,5 +1,5 @@
-use super::*;
 use super::iter1::{builtin_iter, builtin_len};
+use super::*;
 
 pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 1 {
@@ -14,13 +14,17 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 Err(e) => {
                     let msg = format!("{}", e);
                     if msg.contains("is not an iterator") {
-                        return Err(PyError::type_error("Weakref proxy referenced a non-iterator"));
+                        return Err(PyError::type_error(
+                            "Weakref proxy referenced a non-iterator",
+                        ));
                     }
                     return Err(e);
                 }
             }
         } else {
-            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            return Err(PyError::reference_error(
+                "weakly-referenced object no longer exists",
+            ));
         }
     }
     // Check for __next__ on instances
@@ -498,14 +502,16 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             index,
             start_len,
         } => {
-            let native = crate::object::native_backing_of(deque).or_else(|| {
-                let dq = deque.borrow();
-                if matches!(&*dq, PyObject::Deque { .. }) {
-                    Some(deque.clone())
-                } else {
-                    None
-                }
-            }).ok_or_else(|| PyError::runtime_error("deque iterator over non-deque"))?;
+            let native = crate::object::native_backing_of(deque)
+                .or_else(|| {
+                    let dq = deque.borrow();
+                    if matches!(&*dq, PyObject::Deque { .. }) {
+                        Some(deque.clone())
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| PyError::runtime_error("deque iterator over non-deque"))?;
             let (is_done, maybe_item) = {
                 let nb = native.borrow();
                 if let PyObject::Deque { data, .. } = &*nb {
@@ -541,14 +547,16 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             index,
             start_len,
         } => {
-            let native = crate::object::native_backing_of(deque).or_else(|| {
-                let dq = deque.borrow();
-                if matches!(&*dq, PyObject::Deque { .. }) {
-                    Some(deque.clone())
-                } else {
-                    None
-                }
-            }).ok_or_else(|| PyError::runtime_error("deque iterator over non-deque"))?;
+            let native = crate::object::native_backing_of(deque)
+                .or_else(|| {
+                    let dq = deque.borrow();
+                    if matches!(&*dq, PyObject::Deque { .. }) {
+                        Some(deque.clone())
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| PyError::runtime_error("deque iterator over non-deque"))?;
             let (is_done, maybe_item) = {
                 let nb = native.borrow();
                 if let PyObject::Deque { data, .. } = &*nb {
@@ -579,52 +587,112 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 Err(PyError::runtime_error("deque iterator over non-deque"))
             }
         }
-        PyObject::DictIter { dict, keys, index, expected_version } => {
-            let cur_version = if let PyObject::Dict(d) = &*dict.borrow() { d.version() } else { *expected_version };
+        PyObject::DictIter {
+            dict,
+            keys,
+            index,
+            expected_version,
+        } => {
+            let cur_version = if let PyObject::Dict(d) = &*dict.borrow() {
+                d.version()
+            } else {
+                *expected_version
+            };
             if cur_version != *expected_version {
-                return Err(PyError::runtime_error("dictionary changed size during iteration"));
+                return Err(PyError::runtime_error(
+                    "dictionary changed size during iteration",
+                ));
             }
             if *index >= keys.len() {
-                if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) }
+                if args.len() >= 2 {
+                    Ok(args[1].clone())
+                } else {
+                    Err(PyError::stop_iteration())
+                }
             } else {
                 let v = keys[*index].clone();
                 *index += 1;
                 Ok(v)
             }
         }
-        PyObject::DictValuesIter { dict, values, index, expected_version } => {
-            let cur_version = if let PyObject::Dict(d) = &*dict.borrow() { d.version() } else { *expected_version };
+        PyObject::DictValuesIter {
+            dict,
+            values,
+            index,
+            expected_version,
+        } => {
+            let cur_version = if let PyObject::Dict(d) = &*dict.borrow() {
+                d.version()
+            } else {
+                *expected_version
+            };
             if cur_version != *expected_version {
-                return Err(PyError::runtime_error("dictionary changed size during iteration"));
+                return Err(PyError::runtime_error(
+                    "dictionary changed size during iteration",
+                ));
             }
             if *index >= values.len() {
-                if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) }
+                if args.len() >= 2 {
+                    Ok(args[1].clone())
+                } else {
+                    Err(PyError::stop_iteration())
+                }
             } else {
                 let v = values[*index].clone();
                 *index += 1;
                 Ok(v)
             }
         }
-        PyObject::DictItemsIter { dict, items, index, expected_version } => {
-            let cur_version = if let PyObject::Dict(d) = &*dict.borrow() { d.version() } else { *expected_version };
+        PyObject::DictItemsIter {
+            dict,
+            items,
+            index,
+            expected_version,
+        } => {
+            let cur_version = if let PyObject::Dict(d) = &*dict.borrow() {
+                d.version()
+            } else {
+                *expected_version
+            };
             if cur_version != *expected_version {
-                return Err(PyError::runtime_error("dictionary changed size during iteration"));
+                return Err(PyError::runtime_error(
+                    "dictionary changed size during iteration",
+                ));
             }
             if *index >= items.len() {
-                if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) }
+                if args.len() >= 2 {
+                    Ok(args[1].clone())
+                } else {
+                    Err(PyError::stop_iteration())
+                }
             } else {
                 let (k, v) = items[*index].clone();
                 *index += 1;
                 Ok(py_tuple(vec![k, v]))
             }
         }
-        PyObject::DictRevIter { dict, keys, index, expected_version } => {
-            let cur_version = if let PyObject::Dict(d) = &*dict.borrow() { d.version() } else { *expected_version };
+        PyObject::DictRevIter {
+            dict,
+            keys,
+            index,
+            expected_version,
+        } => {
+            let cur_version = if let PyObject::Dict(d) = &*dict.borrow() {
+                d.version()
+            } else {
+                *expected_version
+            };
             if cur_version != *expected_version {
-                return Err(PyError::runtime_error("dictionary changed size during iteration"));
+                return Err(PyError::runtime_error(
+                    "dictionary changed size during iteration",
+                ));
             }
             if *index < 0 || (*index as usize) >= keys.len() {
-                if args.len() >= 2 { Ok(args[1].clone()) } else { Err(PyError::stop_iteration()) }
+                if args.len() >= 2 {
+                    Ok(args[1].clone())
+                } else {
+                    Err(PyError::stop_iteration())
+                }
             } else {
                 let v = keys[*index as usize].clone();
                 *index -= 1;
@@ -638,8 +706,6 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-
-
 pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("reversed() takes exactly one argument"));
@@ -648,7 +714,9 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if let Some(rc) = target.upgrade() {
             return builtin_reversed(&[PyObjectRef::Mut(rc)]);
         } else {
-            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            return Err(PyError::reference_error(
+                "weakly-referenced object no longer exists",
+            ));
         }
     }
     // Check type with a short-lived borrow to avoid holding the RefCell
@@ -698,8 +766,17 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if let PyObject::Dict(d) = &*obj {
             let keys = d.keys();
             let version = d.version();
-            let idx = if keys.is_empty() { -1 } else { (keys.len() as isize) - 1 };
-            return Ok(PyObjectRef::new(PyObject::DictRevIter { dict: args[0].clone(), keys, index: idx, expected_version: version }));
+            let idx = if keys.is_empty() {
+                -1
+            } else {
+                (keys.len() as isize) - 1
+            };
+            return Ok(PyObjectRef::new(PyObject::DictRevIter {
+                dict: args[0].clone(),
+                keys,
+                index: idx,
+                expected_version: version,
+            }));
         }
     }
     let kind = {
@@ -778,12 +855,18 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     PyObject::Tuple(v) => {
                         let mut rev = v.clone();
                         rev.reverse();
-                        Ok(PyObjectRef::new(PyObject::ListIter { list: rev, index: 0 }))
+                        Ok(PyObjectRef::new(PyObject::ListIter {
+                            list: rev,
+                            index: 0,
+                        }))
                     }
                     PyObject::Str(s) => {
                         let chars: Vec<PyObjectRef> =
                             s.chars().rev().map(|c| py_str(&c.to_string())).collect();
-                        Ok(PyObjectRef::new(PyObject::ListIter { list: chars, index: 0 }))
+                        Ok(PyObjectRef::new(PyObject::ListIter {
+                            list: chars,
+                            index: 0,
+                        }))
                     }
                     _ => unreachable!(),
                 };
@@ -807,7 +890,11 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     unreachable!()
                 }
             };
-            let idx = if start_len == 0 { -1 } else { (start_len as isize) - 1 };
+            let idx = if start_len == 0 {
+                -1
+            } else {
+                (start_len as isize) - 1
+            };
             return Ok(PyObjectRef::new(PyObject::DequeRevIter {
                 deque,
                 index: idx,
@@ -828,7 +915,11 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                             0
                         }
                     };
-                    let idx = if start_len == 0 { -1 } else { (start_len as isize) - 1 };
+                    let idx = if start_len == 0 {
+                        -1
+                    } else {
+                        (start_len as isize) - 1
+                    };
                     return Ok(PyObjectRef::new(PyObject::DequeRevIter {
                         deque: args[0].clone(),
                         index: idx,

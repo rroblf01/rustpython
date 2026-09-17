@@ -1,8 +1,8 @@
-use super::*;
 use super::introspection1::{
     abc_registry_matches_in_subtree, abstract_issubclass, call_bound_method, check_class_duck,
     get_attribute_with_properties, is_attribute_error, IsinstanceRecursionGuard,
 };
+use super::*;
 
 pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let trace = std::env::var("RPY_TRACE_IS").is_ok();
@@ -80,8 +80,11 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // reachable from for them.
     if let Some(meta) = crate::object::metatype_of(&args[1]) {
         if std::env::var("RPY_TRACE_IS").is_ok() {
-            eprintln!("IS-TRACE fallback: class={} meta={}",
-                      class.type_name(), meta.borrow().type_name());
+            eprintln!(
+                "IS-TRACE fallback: class={} meta={}",
+                class.type_name(),
+                meta.borrow().type_name()
+            );
         }
         if !meta.is(&args[1]) {
             if let Some(f) = crate::object::lookup_dunder_via_mro(&meta, "__instancecheck__") {
@@ -90,8 +93,7 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 // Python code that may write back to either.
                 drop(class);
                 drop(obj);
-                let result =
-                    call_bound_method(f, args[1].clone(), vec![args[0].clone()])?;
+                let result = call_bound_method(f, args[1].clone(), vec![args[0].clone()])?;
                 return Ok(result);
             }
         }
@@ -127,7 +129,8 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             if let Ok(args_val) = args[1].borrow().get_attribute("__args__") {
                 if let PyObject::Tuple(tup) = &*args_val.borrow() {
                     for arg in tup {
-                        let check_arg = if let Ok(origin) = arg.borrow().get_attribute("__origin__") {
+                        let check_arg = if let Ok(origin) = arg.borrow().get_attribute("__origin__")
+                        {
                             if matches!(&*origin.borrow(), PyObject::Type { .. }) {
                                 origin.clone()
                             } else {
@@ -494,7 +497,6 @@ pub fn builtin_isinstance(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-
 /// Real `open()`/`os.*` path arguments accept `str`, `bytes`, or any
 /// `os.PathLike` — but `PyObjectRef::str()` on a `PyObject::Bytes` value
 /// deliberately returns Python's own `repr()`-style `"b'...'"` form (matching
@@ -537,7 +539,6 @@ pub(crate) fn path_arg_to_string(obj: &PyObjectRef) -> String {
         obj.str()
     }
 }
-
 
 pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
@@ -633,10 +634,7 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let binary = mode.contains('b');
         let encoding = kwargs.and_then(|kw| {
             if let PyObject::Dict(d) = &*kw.borrow() {
-                d.get(&py_str("encoding"))
-                    .ok()
-                    .flatten()
-                    .map(|v| v.str())
+                d.get(&py_str("encoding")).ok().flatten().map(|v| v.str())
             } else {
                 None
             }
@@ -698,10 +696,7 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let binary = mode.contains('b');
     let encoding = kwargs.and_then(|kw| {
         if let PyObject::Dict(d) = &*kw.borrow() {
-            d.get(&py_str("encoding"))
-                .ok()
-                .flatten()
-                .map(|v| v.str())
+            d.get(&py_str("encoding")).ok().flatten().map(|v| v.str())
         } else {
             None
         }
@@ -716,13 +711,11 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }))
 }
 
-
 // Python-semantics modulo for `BigInt` (result takes the SIGN OF THE
 // DIVISOR, unlike Rust's `%`, which takes the sign of the dividend) — needed
 // by `builtin_pow`'s 3-arg form below, whose test coverage explicitly checks
 // negative moduli (`test_pow.py::test_negative_exponent` sweeps `m` from
 // -50 to 49).
-
 
 pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 2 {
@@ -773,7 +766,10 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         if let PyObject::Instance { typ, .. } = &*args[0].borrow() {
             let tname = typ.borrow().type_name().to_string();
-            if tname == "_SpecialGenericAlias" || tname == "_GenericAlias" || tname == "_UnionGenericAlias" {
+            if tname == "_SpecialGenericAlias"
+                || tname == "_GenericAlias"
+                || tname == "_UnionGenericAlias"
+            {
                 if let Ok(origin) = args[0].borrow().get_attribute("__origin__") {
                     // `issubclass(List, list)` where `List` is `GenericAlias(list)` -> check origin
                     // For Union first arg (rare), delegate to origin if present, else false.
@@ -797,15 +793,16 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 if let Ok(args_val) = args[1].borrow().get_attribute("__args__") {
                     if let PyObject::Tuple(tup) = &*args_val.borrow() {
                         for arg in tup {
-                            let check_arg = if let Ok(origin) = arg.borrow().get_attribute("__origin__") {
-                                if matches!(&*origin.borrow(), PyObject::Type { .. }) {
-                                    origin.clone()
+                            let check_arg =
+                                if let Ok(origin) = arg.borrow().get_attribute("__origin__") {
+                                    if matches!(&*origin.borrow(), PyObject::Type { .. }) {
+                                        origin.clone()
+                                    } else {
+                                        arg.clone()
+                                    }
                                 } else {
                                     arg.clone()
-                                }
-                            } else {
-                                arg.clone()
-                            };
+                                };
                             if builtin_issubclass(&[args[0].clone(), check_arg])?.truthy() {
                                 return Ok(py_bool(true));
                             }
@@ -828,7 +825,8 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // check, resolved on `type(classinfo)`'s own MRO rather than a
         // metaclass (which doesn't apply here since `classinfo` isn't a
         // `type` at all).
-        let instance_subclasscheck_hook = if let PyObject::Instance { typ, .. } = &*args[1].borrow() {
+        let instance_subclasscheck_hook = if let PyObject::Instance { typ, .. } = &*args[1].borrow()
+        {
             crate::object::lookup_dunder_via_mro(typ, "__subclasscheck__")
         } else {
             None
@@ -1125,7 +1123,6 @@ pub fn builtin_issubclass(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
     }
 }
-
 
 pub fn builtin_help(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {

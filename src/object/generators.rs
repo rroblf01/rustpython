@@ -139,7 +139,6 @@ pub(crate) fn generator_next_fallback(args: &[PyObjectRef]) -> PyResult<PyObject
     }
 }
 
-
 /// PEP 479: a `StopIteration` that escapes from a generator's OWN body code
 /// (as opposed to the generator's normal exhaustion, which this interpreter
 /// signals via a DIFFERENT, internal `PyError::StopIteration`/`Exception
@@ -390,29 +389,29 @@ pub(crate) fn generator_throw_with_vm(
             // through to injecting into the outer frame (CPython closes the
             // sub-generator and re-raises at the yield point).
             let exc_for_throw = exc_obj.clone();
-            let delegated: Option<PyResult<PyObjectRef>> = f
-                .yield_from_iter
-                .as_ref()
-                .map(|it| {
-                    // get_attribute already binds methods to the instance.
-                    let res = it.borrow().get_attribute("throw");
-                    match res {
-                        Ok(bound) => {
-                            // 'method' objects are not directly callable by
-                            // call_function; use call_bound_method which
-                            // handles every method shape.
-                            if let PyObject::BuiltinMethod { func, self_obj, .. } = &*bound.borrow()
-                            {
-                                let mut na = vec![self_obj.clone()];
-                                na.push(exc_for_throw.clone());
-                                (func)(&na)
-                            } else {
-                                crate::object::call_bound_method(bound.clone(), it.clone(), vec![exc_for_throw.clone()])
-                            }
+            let delegated: Option<PyResult<PyObjectRef>> = f.yield_from_iter.as_ref().map(|it| {
+                // get_attribute already binds methods to the instance.
+                let res = it.borrow().get_attribute("throw");
+                match res {
+                    Ok(bound) => {
+                        // 'method' objects are not directly callable by
+                        // call_function; use call_bound_method which
+                        // handles every method shape.
+                        if let PyObject::BuiltinMethod { func, self_obj, .. } = &*bound.borrow() {
+                            let mut na = vec![self_obj.clone()];
+                            na.push(exc_for_throw.clone());
+                            (func)(&na)
+                        } else {
+                            crate::object::call_bound_method(
+                                bound.clone(),
+                                it.clone(),
+                                vec![exc_for_throw.clone()],
+                            )
                         }
-                        Err(e) => Err(e),
                     }
-                });
+                    Err(e) => Err(e),
+                }
+            });
             if let Some(res) = delegated {
                 match res {
                     Ok(_handled_val) => {

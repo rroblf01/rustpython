@@ -134,7 +134,9 @@ pub(crate) fn call_method_rebound(
         // or e.g. `OrderedDict.keys()` ends up called with the wrapper
         // Instance instead of its backing Dict ("keys on non-dict").
         PyObject::BuiltinMethod {
-            func, name: mname, self_obj,
+            func,
+            name: mname,
+            self_obj,
         } => PyObjectRef::imm(PyObject::BuiltinMethod {
             name: mname.clone(),
             func: *func,
@@ -163,7 +165,10 @@ pub(crate) fn call_method_rebound(
         // of which are real bound methods.
         PyObject::BuiltinFunction { name: n, func }
             if !(crate::object::is_builtin_exception_class_name(n)
-                || std::ptr::fn_addr_eq(*func, crate::object::builtin_open as crate::object::BuiltinFunc)) =>
+                || std::ptr::fn_addr_eq(
+                    *func,
+                    crate::object::builtin_open as crate::object::BuiltinFunc,
+                )) =>
         {
             PyObjectRef::new(PyObject::BoundMethod {
                 func: method.clone(),

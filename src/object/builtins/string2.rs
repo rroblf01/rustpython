@@ -55,7 +55,6 @@ fn parse_complex_str(s: &str) -> PyResult<(f64, f64)> {
     }
 }
 
-
 pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Ok(PyObjectRef::imm(PyObject::Complex(0.0, 0.0)));
@@ -194,7 +193,6 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::imm(PyObject::Complex(re, im)))
 }
 
-
 pub fn str_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // `str.maketrans(x[, y[, z]])` — builds a translation table (a dict of
     // {char: replacement-or-None}) consumed by `str.translate`. Real
@@ -257,7 +255,6 @@ pub fn str_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::new(PyObject::Dict(Box::new(table))))
 }
 
-
 pub fn bytes_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // `bytes.maketrans(frm, to)` — returns a 256-byte translation table.
     if args.len() < 2 {
@@ -293,49 +290,75 @@ pub fn bytes_maketrans_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::imm(PyObject::Bytes(result)))
 }
 
-
 pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Handle kwargs packed as trailing dict (object/encoding/errors)
     let (positional, kwargs) = {
         if let Some(last) = args.last() {
             if let PyObject::Dict(d) = &*last.borrow() {
-                let is_kwargs = d.contains(&py_str("object")).unwrap_or(false) || d.contains(&py_str("encoding")).unwrap_or(false) || d.contains(&py_str("errors")).unwrap_or(false);
+                let is_kwargs = d.contains(&py_str("object")).unwrap_or(false)
+                    || d.contains(&py_str("encoding")).unwrap_or(false)
+                    || d.contains(&py_str("errors")).unwrap_or(false);
                 if is_kwargs {
-                    (&args[..args.len()-1], Some(last.clone()))
+                    (&args[..args.len() - 1], Some(last.clone()))
                 } else {
                     (args, None)
                 }
-            } else { (args, None) }
-        } else { (args, None) }
+            } else {
+                (args, None)
+            }
+        } else {
+            (args, None)
+        }
     };
     let get_kw = |k: &str| -> Option<PyObjectRef> {
         kwargs.as_ref().and_then(|d| {
             if let PyObject::Dict(dd) = &*d.borrow() {
                 dd.get(&py_str(k)).ok().flatten()
-            } else { None }
+            } else {
+                None
+            }
         })
     };
-    let obj_arg: Option<PyObjectRef> = if let Some(v) = get_kw("object") { Some(v) } else { positional.get(0).cloned() };
-    let enc_arg: Option<PyObjectRef> = if let Some(v) = get_kw("encoding") { Some(v) } else { positional.get(1).cloned() };
-    let err_arg: Option<PyObjectRef> = if let Some(v) = get_kw("errors") { Some(v) } else { positional.get(2).cloned() };
+    let obj_arg: Option<PyObjectRef> = if let Some(v) = get_kw("object") {
+        Some(v)
+    } else {
+        positional.get(0).cloned()
+    };
+    let enc_arg: Option<PyObjectRef> = if let Some(v) = get_kw("encoding") {
+        Some(v)
+    } else {
+        positional.get(1).cloned()
+    };
+    let err_arg: Option<PyObjectRef> = if let Some(v) = get_kw("errors") {
+        Some(v)
+    } else {
+        positional.get(2).cloned()
+    };
 
     if obj_arg.is_none() && enc_arg.is_none() && err_arg.is_none() {
         return Ok(py_str(""));
     }
     if enc_arg.is_some() || err_arg.is_some() {
         let target = obj_arg.clone().unwrap_or_else(|| py_str(""));
-        if matches!(&*target.borrow(), PyObject::Bytes(_) | PyObject::ByteArray(_)) {
+        if matches!(
+            &*target.borrow(),
+            PyObject::Bytes(_) | PyObject::ByteArray(_)
+        ) {
             let decode = target.borrow().get_attribute("decode")?;
             let enc = enc_arg.clone().unwrap_or_else(|| py_str("utf-8"));
             let err = err_arg.clone();
             if let PyObject::BuiltinMethod { func: f, .. } = &*decode.borrow() {
                 let mut call_args = vec![target.clone()];
                 call_args.push(enc);
-                if let Some(e) = err { call_args.push(e); }
+                if let Some(e) = err {
+                    call_args.push(e);
+                }
                 return f(&call_args);
             }
             let mut call_args = vec![enc];
-            if let Some(e) = err { call_args.push(e); }
+            if let Some(e) = err {
+                call_args.push(e);
+            }
             return call_bound_method(decode, target.clone(), call_args);
         }
         if obj_arg.is_some() {
@@ -388,7 +411,9 @@ pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 let target_ref = PyObjectRef::Mut(rc);
                 return builtin_str(&[target_ref]);
             } else {
-                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                return Err(PyError::reference_error(
+                    "weakly-referenced object no longer exists",
+                ));
             }
         }
         let f = {
@@ -419,7 +444,6 @@ pub fn builtin_str(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-
 /// CPython's int->str digit limit: str()/repr()/format() of an int with more
 /// decimal digits than the configured limit raises ValueError (guard against
 /// a DoS from formatting astronomical integers).
@@ -446,7 +470,6 @@ pub(crate) fn check_int_to_str_limit(bi: &BigInt) -> PyResult<()> {
     Ok(())
 }
 
-
 /// The BigInt value of an `int` (or a transparent int-subclass instance via
 /// its native backing), if any.
 pub(crate) fn int_value_or_backing(obj: &PyObjectRef) -> Option<BigInt> {
@@ -463,7 +486,6 @@ pub(crate) fn int_value_or_backing(obj: &PyObjectRef) -> Option<BigInt> {
         _ => None,
     }
 }
-
 
 pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
@@ -508,7 +530,6 @@ pub fn builtin_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_str(&s))
 }
 
-
 pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Keyword rejection (`bool(x=10)`) lives in the VM's call_function,
     // where `keywords` is known before it gets flattened into an
@@ -523,7 +544,9 @@ pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
         if target.upgrade().is_none() {
-            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            return Err(PyError::reference_error(
+                "weakly-referenced object no longer exists",
+            ));
         }
     }
     let typ_opt = {
@@ -587,7 +610,6 @@ pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     Ok(py_bool(args[0].truthy()))
 }
-
 
 pub fn builtin_format(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match args.len() {

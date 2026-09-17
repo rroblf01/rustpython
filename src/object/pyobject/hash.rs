@@ -181,7 +181,9 @@ impl PyObject {
             // object_with_only___getitem__)` (this interpreter's own
             // `GetItemIter`), and `iter(callable, sentinel)` (`
             // CallSentinelIter`).
-            PyObject::WeakRef { target, hash_cache, .. } => {
+            PyObject::WeakRef {
+                target, hash_cache, ..
+            } => {
                 if let Some(rc) = target.upgrade() {
                     let h = PyObjectRef::Imm(rc.clone()).hash()?;
                     if hash_cache.borrow().is_none() {

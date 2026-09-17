@@ -40,7 +40,9 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if let Some(rc) = target.upgrade() {
             return builtin_len(&[PyObjectRef::Mut(rc)]);
         } else {
-            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            return Err(PyError::reference_error(
+                "weakly-referenced object no longer exists",
+            ));
         }
     }
     let obj = args[0].borrow();
@@ -197,7 +199,6 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-
 /// Cheap, best-effort size hint for materializing an arbitrary iterable
 /// into a `Vec` (used by `list()`/`tuple()`). Real CPython pre-sizes via
 /// `PyObject_LengthHint` before iterating, so a source with an O(1) `len()`
@@ -218,7 +219,6 @@ pub(crate) fn iterable_length_hint(obj: &PyObjectRef) -> Option<usize> {
     }
 }
 
-
 // real `range()` accepts anything implementing `__index__`, not just a
 // literal `int` (`crate::object::subscript::to_index` already implements
 // that same "native int, or call `__index__` via mro" protocol for
@@ -227,7 +227,6 @@ pub(crate) fn iterable_length_hint(obj: &PyObjectRef) -> Option<usize> {
 pub(crate) fn range_index_arg(obj: &PyObjectRef) -> PyResult<num_bigint::BigInt> {
     to_index(obj)
 }
-
 
 pub fn builtin_range(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let one = num_bigint::BigInt::from(1);
@@ -274,14 +273,15 @@ pub fn builtin_range(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-
 pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() == 1 {
         if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
             if let Some(rc) = target.upgrade() {
                 return builtin_iter(&[PyObjectRef::Mut(rc)]);
             } else {
-                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                return Err(PyError::reference_error(
+                    "weakly-referenced object no longer exists",
+                ));
             }
         }
     }
@@ -369,7 +369,11 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     if crate::object::array_typecode_is_float(arr.typecode) {
                         py_float(*v)
                     } else if arr.typecode == 'w' || arr.typecode == 'u' {
-                        let ch = (*v as u32).try_into().ok().and_then(char::from_u32).unwrap_or('\0');
+                        let ch = (*v as u32)
+                            .try_into()
+                            .ok()
+                            .and_then(char::from_u32)
+                            .unwrap_or('\0');
                         py_str(&ch.to_string())
                     } else {
                         py_int(*v as i64)
@@ -449,7 +453,12 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // handling in `vm.rs` for the full story; this is the SEPARATE
         // free-function path (`iter(f)` called explicitly, or anything
         // routing through `collect_iterable`) that needs the identical fix.
-        PyObject::File { file, binary, encoding, .. } => {
+        PyObject::File {
+            file,
+            binary,
+            encoding,
+            ..
+        } => {
             use std::io::Read;
             let binary = *binary;
             let enc = encoding.as_deref().unwrap_or("utf-8");
@@ -520,7 +529,6 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-
 /// `range_iterator.__setstate__(state)` — real CPython's pickle protocol
 /// uses this to restore a saved iteration position (`state` = number of
 /// items already consumed). Since `RangeIter.current` already tracks the
@@ -549,7 +557,6 @@ pub fn range_iter_setstate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_none())
 }
 
-
 /// `list_iterator.__setstate__(state)` — same protocol as `range_iterator`'s
 /// above, but simpler: `ListIter.index` already IS the absolute position, so
 /// this just sets it directly (clamped to the list's length, matching real
@@ -573,5 +580,3 @@ pub fn list_iter_setstate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     Ok(py_none())
 }
-
-

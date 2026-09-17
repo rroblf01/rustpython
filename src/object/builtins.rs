@@ -5,7 +5,6 @@
 // eval/exec, and so on).
 use super::*;
 
-
 mod print;
 pub use print::builtin_print;
 pub(crate) use print::{call_method_rebound, print_with_vm};
@@ -18,43 +17,61 @@ pub(crate) use builtin_type::{
 };
 
 mod attribute;
-pub use attribute::{builtin_ascii, builtin_bin, builtin_chr, builtin_delattr, builtin_exit, builtin_getattr, builtin_hasattr, builtin_hex, builtin_input, builtin_oct, builtin_ord, builtin_setattr};
+pub use attribute::{
+    builtin_ascii, builtin_bin, builtin_chr, builtin_delattr, builtin_exit, builtin_getattr,
+    builtin_hasattr, builtin_hex, builtin_input, builtin_oct, builtin_ord, builtin_setattr,
+};
 
 mod int;
-pub use int::{builtin_int, builtin_int_from_bytes};
 pub(crate) use int::check_int_str_digit_limit;
+pub use int::{builtin_int, builtin_int_from_bytes};
 
 mod numeric;
-pub use numeric::{builtin_abs, builtin_divmod, builtin_pow, builtin_round};
 pub(crate) use numeric::{bigint_gcd, bigint_mod_inverse, round_half_even_rat};
+pub use numeric::{builtin_abs, builtin_divmod, builtin_pow, builtin_round};
 
 mod functional;
-pub use functional::{builtin_all, builtin_any, builtin_breakpoint, builtin_callable, builtin_enumerate, builtin_max, builtin_min, builtin_sorted, builtin_sum};
+pub use functional::{
+    builtin_all, builtin_any, builtin_breakpoint, builtin_callable, builtin_enumerate, builtin_max,
+    builtin_min, builtin_sorted, builtin_sum,
+};
 
 mod iter1;
 mod iter2;
-pub use iter1::{builtin_iter, builtin_len, builtin_range, list_iter_setstate, range_iter_setstate};
-pub use iter2::{builtin_next, builtin_reversed};
+pub use iter1::{
+    builtin_iter, builtin_len, builtin_range, list_iter_setstate, range_iter_setstate,
+};
 pub(crate) use iter1::{iterable_length_hint, range_index_arg};
+pub use iter2::{builtin_next, builtin_reversed};
 
 mod string1;
 mod string2;
 pub use string1::builtin_float;
-pub use string2::{builtin_bool, builtin_complex, builtin_format, builtin_repr, builtin_str, bytes_maketrans_builtin, str_maketrans_builtin};
-pub(crate) use string1::{bigint_to_float, float_class_hex, float_fromhex, float_subclass_result, ldexp_f64, python_bytes_repr, validate_underscores};
+pub(crate) use string1::{
+    bigint_to_float, float_class_hex, float_fromhex, float_subclass_result, ldexp_f64,
+    python_bytes_repr, validate_underscores,
+};
+pub use string2::{
+    builtin_bool, builtin_complex, builtin_format, builtin_repr, builtin_str,
+    bytes_maketrans_builtin, str_maketrans_builtin,
+};
 pub(crate) use string2::{check_int_to_str_limit, int_value_or_backing};
 
 mod introspection1;
 mod introspection2;
-pub use introspection1::{builtin_dir, builtin_globals, builtin_hash, builtin_id, builtin_locals, builtin_object, builtin_slice, builtin_vars, call_bound_method, call_function_disposable};
 pub(crate) use introspection1::is_attribute_error;
-pub use introspection2::{builtin_help, builtin_isinstance, builtin_issubclass, builtin_open};
-pub(crate) use introspection1::{exception_instance_repr, exception_instance_str, is_exception_type};
+pub use introspection1::{
+    builtin_dir, builtin_globals, builtin_hash, builtin_id, builtin_locals, builtin_object,
+    builtin_slice, builtin_vars, call_bound_method, call_function_disposable,
+};
+pub(crate) use introspection1::{
+    exception_instance_repr, exception_instance_str, is_exception_type,
+};
 pub(crate) use introspection2::path_arg_to_string;
+pub use introspection2::{builtin_help, builtin_isinstance, builtin_issubclass, builtin_open};
 
 mod frozenset;
 pub use frozenset::builtin_frozenset;
-
 
 pub fn builtin_list(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // `list(iterable, extra)` is always wrong; keyword rejection happens in
@@ -112,7 +129,6 @@ pub fn builtin_list(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
     }
 }
-
 
 pub fn builtin_deque(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // `deque(iterable=None, maxlen=None)` — `maxlen` may come positionally
@@ -194,7 +210,6 @@ pub fn builtin_deque(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_deque(data, maxlen))
 }
 
-
 pub fn builtin_tuple(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Ok(py_tuple(Vec::new()));
@@ -247,7 +262,6 @@ pub fn builtin_tuple(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_tuple(items))
 }
 
-
 /// `dict.__repr__` — a per-type repr so `type(x).__repr__` differs across
 /// native container types (CPython's pprint dispatches on
 /// `type(object).__repr__`; a shared identity repr made dict and deque
@@ -271,7 +285,6 @@ pub fn builtin_dict_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_str(&args[0].repr()))
 }
 
-
 /// `deque.__repr__` — see `builtin_dict_repr`.
 pub fn builtin_deque_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let _: &'static str = std::hint::black_box("deque");
@@ -280,7 +293,6 @@ pub fn builtin_deque_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     Ok(py_str(&args[0].repr()))
 }
-
 
 // Per-type `__repr__` functions. Each native container/type must have its
 // OWN `__repr__` function object: CPython's pprint dispatches on
@@ -463,7 +475,6 @@ pub fn builtin_frozenset_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 native_repr_fn!(builtin_slice_repr, "slice");
 
-
 pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Ok(py_dict());
@@ -485,8 +496,21 @@ pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // Only objects without `.keys()` fall back to being treated
             // as an iterable of (key, value) pairs.
             let type_name = args[0].borrow().type_name();
-            let is_view = matches!(type_name.as_str(), "dict_items" | "dict_keys" | "dict_values" | "KeysView" | "ItemsView" | "ValuesView" | "MappingView");
-            let keys_method = if is_view { None } else { args[0].borrow().get_attribute("keys").ok() };
+            let is_view = matches!(
+                type_name.as_str(),
+                "dict_items"
+                    | "dict_keys"
+                    | "dict_values"
+                    | "KeysView"
+                    | "ItemsView"
+                    | "ValuesView"
+                    | "MappingView"
+            );
+            let keys_method = if is_view {
+                None
+            } else {
+                args[0].borrow().get_attribute("keys").ok()
+            };
             if let Some(keys_raw) = keys_method {
                 let keys_iterable = call_bound_method(keys_raw, args[0].clone(), vec![])?;
                 let it = builtin_iter(&[keys_iterable])?;
@@ -511,7 +535,10 @@ pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         Err(e) => return Err(e),
                     };
                     let attach_note = |err: PyError, idx: usize| -> PyError {
-                        let note = format!("Cannot convert dictionary update sequence element #{} to a sequence", idx);
+                        let note = format!(
+                            "Cannot convert dictionary update sequence element #{} to a sequence",
+                            idx
+                        );
                         let (typ, msg) = match err {
                             PyError::TypeError(m) => ("TypeError".to_string(), m),
                             PyError::ValueError(m) => ("ValueError".to_string(), m),
@@ -519,9 +546,18 @@ pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                                 {
                                     let mut b = o.borrow_mut();
                                     if let PyObject::Exception { extra, .. } = &mut *b {
-                                        let map = extra.get_or_insert_with(|| std::collections::HashMap::new());
-                                        let old = map.get("__notes__").cloned().unwrap_or_else(|| py_list(vec![]));
-                                        let mut items = if let PyObject::List(v) = &*old.borrow() { v.clone() } else { vec![] };
+                                        let map = extra.get_or_insert_with(|| {
+                                            std::collections::HashMap::new()
+                                        });
+                                        let old = map
+                                            .get("__notes__")
+                                            .cloned()
+                                            .unwrap_or_else(|| py_list(vec![]));
+                                        let mut items = if let PyObject::List(v) = &*old.borrow() {
+                                            v.clone()
+                                        } else {
+                                            vec![]
+                                        };
                                         items.push(py_str(&note));
                                         map.insert("__notes__".to_string(), py_list(items));
                                     }
@@ -532,21 +568,26 @@ pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         };
                         let mut extra = std::collections::HashMap::new();
                         extra.insert("__notes__".to_string(), py_list(vec![py_str(&note)]));
-                        PyError::Exception(typ.clone(), PyObjectRef::new(PyObject::Exception {
-                            typ,
-                            args: vec![py_str(&msg)],
-                            cause: None,
-                            suppress_context: false,
-                            context: None,
-                            traceback: None,
-                            extra: Some(extra),
-                        }))
+                        PyError::Exception(
+                            typ.clone(),
+                            PyObjectRef::new(PyObject::Exception {
+                                typ,
+                                args: vec![py_str(&msg)],
+                                cause: None,
+                                suppress_context: false,
+                                context: None,
+                                traceback: None,
+                                extra: Some(extra),
+                            }),
+                        )
                     };
                     // Fast path for tuple/list
                     let kv = {
                         let b = pair.borrow();
                         match &*b {
-                            PyObject::Tuple(v) | PyObject::List(v) if v.len() == 2 => Some((v[0].clone(), v[1].clone())),
+                            PyObject::Tuple(v) | PyObject::List(v) if v.len() == 2 => {
+                                Some((v[0].clone(), v[1].clone()))
+                            }
                             PyObject::Tuple(v) | PyObject::List(v) => {
                                 return Err(PyError::value_error(format!(
                                     "dictionary update sequence element #{} has length {}; 2 is required", idx, v.len()
@@ -563,9 +604,14 @@ pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                             Err(_) => {
                                 let type_name = {
                                     let b = pair.borrow();
-                                    if let PyObject::Instance { typ, .. } = &*b { crate::object::get_type_name_for_instance(typ) } else { b.type_name() }
+                                    if let PyObject::Instance { typ, .. } = &*b {
+                                        crate::object::get_type_name_for_instance(typ)
+                                    } else {
+                                        b.type_name()
+                                    }
                                 };
-                                let err = PyError::type_error(format!("{} is not iterable", type_name));
+                                let err =
+                                    PyError::type_error(format!("{} is not iterable", type_name));
                                 return Err(attach_note(err, idx));
                             }
                         };
@@ -581,7 +627,9 @@ pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                                         let mut len = collected.len() + 1;
                                         while let Ok(_) = builtin_next(&[pair_iter.clone()]) {
                                             len += 1;
-                                            if len > 100 { break; }
+                                            if len > 100 {
+                                                break;
+                                            }
                                         }
                                         return Err(PyError::value_error(format!(
                                             "dictionary update sequence element #{} has length {}; 2 is required", idx, len
@@ -589,7 +637,10 @@ pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                                     }
                                 }
                                 Err(PyError::StopIteration) => break,
-                                Err(e) => { pair_err = Some(e); break; }
+                                Err(e) => {
+                                    pair_err = Some(e);
+                                    break;
+                                }
                             }
                         }
                         if let Some(e) = pair_err {
@@ -606,13 +657,15 @@ pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                                 let mut len = 3;
                                 while let Ok(_) = builtin_next(&[pair_iter.clone()]) {
                                     len += 1;
-                                    if len > 100 { break; }
+                                    if len > 100 {
+                                        break;
+                                    }
                                 }
                                 return Err(PyError::value_error(format!(
                                     "dictionary update sequence element #{} has length {}; 2 is required", idx, len
                                 )));
                             }
-                            Err(PyError::StopIteration) => {},
+                            Err(PyError::StopIteration) => {}
                             Err(e) => return Err(attach_note(e, idx)),
                         }
                         (collected[0].clone(), collected[1].clone())
@@ -643,7 +696,6 @@ pub fn builtin_dict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
 }
 
-
 pub fn builtin_set(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Ok(py_set());
@@ -669,7 +721,6 @@ pub fn builtin_set(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(PyObjectRef::new(PyObject::Set(PySet::from_vec(elts)?)))
 }
 
-
 pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         Ok(PyObjectRef::imm(PyObject::Bytes(Vec::new())))
@@ -678,7 +729,9 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             if let Some(rc) = target.upgrade() {
                 return builtin_bytes(&[PyObjectRef::Imm(rc)]);
             } else {
-                return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                return Err(PyError::reference_error(
+                    "weakly-referenced object no longer exists",
+                ));
             }
         }
         {
@@ -688,7 +741,9 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     let b = args[0].borrow();
                     if let PyObject::Instance { typ, .. } = &*b {
                         lookup_dunder_via_mro(typ, "__bytes__")
-                    } else { None }
+                    } else {
+                        None
+                    }
                 };
                 if let Some(f) = f {
                     return call_bound_method(f, args[0].clone(), vec![]);
@@ -714,10 +769,7 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     false
                 };
                 if is_pb {
-                    let released = dict
-                        .get("_released")
-                        .map(|v| v.truthy())
-                        .unwrap_or(false);
+                    let released = dict.get("_released").map(|v| v.truthy()).unwrap_or(false);
                     if released {
                         return Err(PyError::value_error(
                             "operation forbidden on released PickleBuffer object",
@@ -864,7 +916,6 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-
 /// bytes.fromhex(string) -> bytes
 ///
 /// Create a bytes object from a string of hexadecimal digits.
@@ -895,7 +946,6 @@ pub fn builtin_bytes_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     Ok(PyObjectRef::imm(PyObject::Bytes(result)))
 }
-
 
 pub fn builtin_bytearray(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
@@ -1001,6 +1051,3 @@ pub fn builtin_bytearray(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
     }
 }
-
-
-

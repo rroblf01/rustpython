@@ -32,7 +32,6 @@ pub(crate) fn validate_underscores(s: &str) -> PyResult<String> {
     Ok(s.to_string())
 }
 
-
 /// Python-style bytes repr (`b'...'`, escaping non-printables) — used in
 /// `float()` conversion error messages, which quote the original bytes.
 pub(crate) fn python_bytes_repr(b: &[u8]) -> String {
@@ -51,7 +50,6 @@ pub(crate) fn python_bytes_repr(b: &[u8]) -> String {
     s
 }
 
-
 /// `float(int)`: an int too large to be represented as a double raises
 /// OverflowError (2**2000 -> "int too large to convert to float"), not inf.
 pub(crate) fn bigint_to_float(i: &BigInt) -> PyResult<f64> {
@@ -60,7 +58,6 @@ pub(crate) fn bigint_to_float(i: &BigInt) -> PyResult<f64> {
         _ => Err(PyError::overflow_error("int too large to convert to float")),
     }
 }
-
 
 pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
@@ -277,7 +274,6 @@ pub fn builtin_float(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
-
 /// `float.fromhex(s)` — a genuine class-level-only method (called unbound,
 /// `float.fromhex("0x1.8p3")`, never as `x.fromhex()` on a float instance),
 /// extracted out of what used to be a `bf_name == "float" && name ==
@@ -321,7 +317,6 @@ pub(crate) fn float_subclass_result(cls: &PyObjectRef, value: f64) -> PyResult<P
     }
     Ok(instance)
 }
-
 
 pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // Bound as a classmethod: args[0] is the calling type, args[1] the string.
@@ -494,7 +489,6 @@ pub(crate) fn float_fromhex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     float_subclass_result(cls, result)
 }
 
-
 /// `x * 2**exp` without intermediate overflow/underflow — a naive
 /// `x * 2.0f64.powi(exp)` overflows to inf for exp >= 1024 even when the
 /// true value (e.g. `0x.fffffffffffff8p+1024` == the max normal) is
@@ -521,7 +515,6 @@ pub(crate) fn ldexp_f64(x: f64, exp: i32) -> f64 {
     }
     x * 2.0f64.powi(e)
 }
-
 
 /// `float.hex(x)` — the unbound, explicit-argument class-level form (`float.
 /// hex(3.5)`, as opposed to `x.hex()` on a float instance, which goes

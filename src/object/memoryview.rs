@@ -5,9 +5,12 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 mod format;
-pub(crate) use format::{mv_itemsize, mv_total_items, mv_source_bytes, mv_write_bytes, nest_list};
+pub(crate) use format::{mv_itemsize, mv_source_bytes, mv_total_items, mv_write_bytes, nest_list};
 mod codec;
-pub(crate) use codec::{mv_decode_elem, mv_encode_elem, is_picklebuffer_obj, extract_flags_for_buffer, check_buffer_flags};
+pub(crate) use codec::{
+    check_buffer_flags, extract_flags_for_buffer, is_picklebuffer_obj, mv_decode_elem,
+    mv_encode_elem,
+};
 
 thread_local! {
     static BYTEARRAY_EXPORTS: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
@@ -55,8 +58,12 @@ pub(crate) fn decrement_bytearray_export(obj: &PyObjectRef) {
         BYTEARRAY_EXPORTS.with(|m| {
             let mut map = m.borrow_mut();
             if let Some(c) = map.get_mut(&k) {
-                if *c > 0 { *c -= 1; }
-                if *c == 0 { map.remove(&k); }
+                if *c > 0 {
+                    *c -= 1;
+                }
+                if *c == 0 {
+                    map.remove(&k);
+                }
             }
         });
     }
@@ -132,8 +139,14 @@ pub(crate) fn mv_fields(
 
 pub(crate) fn do_mv_release(view: &PyObjectRef) -> PyResult<()> {
     // Check if already released
-    let already = if let PyObject::MemoryView { released, .. } = &*view.borrow() { *released } else { false };
-    if already { return Ok(()); }
+    let already = if let PyObject::MemoryView { released, .. } = &*view.borrow() {
+        *released
+    } else {
+        false
+    };
+    if already {
+        return Ok(());
+    }
     // Mark as releasing for the duration of __release_buffer__
     if let Some(k) = view_key(view) {
         RELEASING_VIEW.with(|c| *c.borrow_mut() = Some(k));
@@ -143,14 +156,19 @@ pub(crate) fn do_mv_release(view: &PyObjectRef) -> PyResult<()> {
         let b = view.borrow();
         if let PyObject::MemoryView { source, .. } = &*b {
             Some(source.clone())
-        } else { None }
-    };
-    let source = match source_opt { Some(s)=>s, None=> {
-        if let Some(k) = view_key(view) {
-            RELEASING_VIEW.with(|c| *c.borrow_mut() = None);
+        } else {
+            None
         }
-        return Ok(());
-    } };
+    };
+    let source = match source_opt {
+        Some(s) => s,
+        None => {
+            if let Some(k) = view_key(view) {
+                RELEASING_VIEW.with(|c| *c.borrow_mut() = None);
+            }
+            return Ok(());
+        }
+    };
     // Call exporter's __release_buffer__ if tracked (before marking, so exporter can check released flag)
     if let Some(exporter) = get_view_exporter(view) {
         remove_view_exporter(view);
@@ -165,18 +183,27 @@ pub(crate) fn do_mv_release(view: &PyObjectRef) -> PyResult<()> {
                         if let Some(first) = bases.first() {
                             if let PyObject::Type { name, .. } = &*first.borrow() {
                                 name == "bytearray"
-                            } else if let PyObject::BuiltinFunction { name, .. } = &*first.borrow() {
+                            } else if let PyObject::BuiltinFunction { name, .. } = &*first.borrow()
+                            {
                                 name == "bytearray"
-                            } else { false }
-                        } else { false }
-                    } else { false }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
                 };
                 if is_bytearray_first {
                     // Check if exporter Type directly defines __release_buffer__ (e.g. B in test_inheritance_releasebuffer)
                     let has_own = {
                         if let PyObject::Type { dict, .. } = &*typ.borrow() {
                             dict.contains_key_str("__release_buffer__")
-                        } else { false }
+                        } else {
+                            false
+                        }
                     };
                     if has_own {
                         crate::object::lookup_dunder_via_mro(typ, "__release_buffer__")
@@ -184,9 +211,12 @@ pub(crate) fn do_mv_release(view: &PyObjectRef) -> PyResult<()> {
                         let view_is_over_exporter = {
                             let vs = view.borrow();
                             if let PyObject::MemoryView { source, .. } = &*vs {
-                                let eb = crate::object::native_backing_of(&exporter).unwrap_or_else(|| exporter.clone());
+                                let eb = crate::object::native_backing_of(&exporter)
+                                    .unwrap_or_else(|| exporter.clone());
                                 source.is(&eb) || source.is(&exporter)
-                            } else { false }
+                            } else {
+                                false
+                            }
                         };
                         if view_is_over_exporter {
                             None
@@ -212,12 +242,23 @@ pub(crate) fn do_mv_release(view: &PyObjectRef) -> PyResult<()> {
                 let is_ba_first2 = if let PyObject::Instance { typ, .. } = &*exporter.borrow() {
                     if let PyObject::Type { bases, .. } = &*typ.borrow() {
                         if let Some(first) = bases.first() {
-                            if let PyObject::Type { name, .. } = &*first.borrow() { name == "bytearray" } else { false }
-                        } else { false }
-                    } else { false }
-                } else { false };
+                            if let PyObject::Type { name, .. } = &*first.borrow() {
+                                name == "bytearray"
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
                 if !is_ba_first2 {
-                    let _ = crate::object::call_bound_method(m, exporter.clone(), vec![view.clone()]);
+                    let _ =
+                        crate::object::call_bound_method(m, exporter.clone(), vec![view.clone()]);
                 }
             }
         }
@@ -225,8 +266,12 @@ pub(crate) fn do_mv_release(view: &PyObjectRef) -> PyResult<()> {
         let saved = if let PyObject::Instance { dict, .. } = &*exporter.borrow() {
             if let Some(buf) = dict.get("buffer") {
                 buf.is(view)
-            } else { false }
-        } else { false };
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         if saved {
             let k = view_key(view).unwrap_or(0);
             let already_saved = SAVED_VIEWS.with(|s| s.borrow().contains(&k));
@@ -247,14 +292,17 @@ pub(crate) fn do_mv_release(view: &PyObjectRef) -> PyResult<()> {
             let view_is_over_exporter = {
                 let vs = view.borrow();
                 if let PyObject::MemoryView { source, .. } = &*vs {
-                    let eb = crate::object::native_backing_of(&exporter).unwrap_or_else(|| exporter.clone());
+                    let eb = crate::object::native_backing_of(&exporter)
+                        .unwrap_or_else(|| exporter.clone());
                     // For C plain object with view over ba's bytearray, view_is_over_exporter false, so keep view valid
                     // For C(Releaser, bytearray) with view over C's bytearray, view_is_over_exporter true, so mark view as released
                     let is_over = source.is(&eb) || source.is(&exporter);
                     // Also check if source is bytearray and exporter is plain object with view over global ba's bytearray
                     // In that case, view_is_over_exporter false, but saved true, and we want to keep view valid
                     is_over
-                } else { false }
+                } else {
+                    false
+                }
             };
             if view_is_over_exporter {
                 // For C(Releaser, bytearray) where view is over C's own bytearray and saved as c.buffer,
@@ -389,7 +437,11 @@ pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // Use a helper to invoke: try to call via call_bound_method if it's a plain function, otherwise via VM?
         let method_c = method.clone();
         let bound = match &*method_c.borrow() {
-            PyObject::Function(_) | PyObject::BuiltinFunction { .. } | PyObject::BuiltinMethod { .. } | PyObject::Closure(_) | PyObject::BoundMethod { .. } => method.clone(),
+            PyObject::Function(_)
+            | PyObject::BuiltinFunction { .. }
+            | PyObject::BuiltinMethod { .. }
+            | PyObject::Closure(_)
+            | PyObject::BoundMethod { .. } => method.clone(),
             _ => method.clone(),
         };
         // Actually call_bound_method expects func and self_obj separate. If bound is already BoundMethod, handle.
@@ -397,17 +449,20 @@ pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let is_bound_method = matches!(&*bound.clone().borrow(), PyObject::BoundMethod { .. });
         let result = if is_bound_method {
             // bound already has self
-            crate::object::call_bound_method(bound.clone(), obj.clone(), vec![flags_arg.clone()]).or_else(|_| {
-                // fallback: call as generic function with args [obj, flags]
-                crate::object::call_bound_method(bound.clone(), obj.clone(), vec![flags_arg])
-            })
+            crate::object::call_bound_method(bound.clone(), obj.clone(), vec![flags_arg.clone()])
+                .or_else(|_| {
+                    // fallback: call as generic function with args [obj, flags]
+                    crate::object::call_bound_method(bound.clone(), obj.clone(), vec![flags_arg])
+                })
         } else {
             // Check if Instance with custom __buffer__
             let typ_opt = {
                 let b = obj.borrow();
                 if let PyObject::Instance { typ, .. } = &*b {
                     Some(typ.clone())
-                } else { None }
+                } else {
+                    None
+                }
             };
             if let Some(typ) = typ_opt {
                 if let Some(f) = crate::object::lookup_dunder_via_mro(&typ, "__buffer__") {
@@ -423,7 +478,9 @@ pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                         let b = bound.borrow();
                         if let PyObject::BuiltinMethod { func, .. } = &*b {
                             *func
-                        } else { unreachable!() }
+                        } else {
+                            unreachable!()
+                        }
                     };
                     func(&[obj.clone(), flags_arg])
                 } else {
@@ -434,7 +491,9 @@ pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         match result {
             Ok(v) => {
                 if !matches!(&*v.borrow(), PyObject::MemoryView { .. }) {
-                    return Err(PyError::type_error("memoryview: __buffer__ must return memoryview"));
+                    return Err(PyError::type_error(
+                        "memoryview: __buffer__ must return memoryview",
+                    ));
                 }
                 // Track exporter for release
                 track_view_exporter(&v, obj.clone());
@@ -447,11 +506,26 @@ pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 }
                 return Ok(v);
             }
-            Err(e) if e.type_name_for_display() == "RuntimeError" && e.message().contains("should not be called") => {
+            Err(e)
+                if e.type_name_for_display() == "RuntimeError"
+                    && e.message().contains("should not be called") =>
+            {
                 // Fallback for B(bytearray, A) where A.__buffer__ incorrectly raises (should have found bytearray's)
                 let backing = crate::object::native_backing_of(&obj).unwrap_or_else(|| obj.clone());
-                let len = if let PyObject::ByteArray(b) = &*backing.borrow() { b.len() } else { 0 };
-                let view = PyObjectRef::new(PyObject::MemoryView { source: obj.clone(), format: "B".to_string(), shape: vec![len], itemsize: 1, offset: 0, readonly: false, released: false });
+                let len = if let PyObject::ByteArray(b) = &*backing.borrow() {
+                    b.len()
+                } else {
+                    0
+                };
+                let view = PyObjectRef::new(PyObject::MemoryView {
+                    source: obj.clone(),
+                    format: "B".to_string(),
+                    shape: vec![len],
+                    itemsize: 1,
+                    offset: 0,
+                    readonly: false,
+                    released: false,
+                });
                 track_view_exporter(&view, obj.clone());
                 if !is_bytearray_exported(&obj) {
                     increment_bytearray_export(&obj);
@@ -464,8 +538,7 @@ pub fn builtin_memoryview(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
     }
     // No __buffer__ found, try direct handling for bytes/bytearray/array
-    let (readonly, format, len) = if let Some(backing) =
-        crate::object::native_backing_of(&args[0])
+    let (readonly, format, len) = if let Some(backing) = crate::object::native_backing_of(&args[0])
     {
         match &*backing.borrow() {
             PyObject::Bytes(b) => (true, "B".to_string(), b.len()),
@@ -514,7 +587,11 @@ pub(crate) fn mv_from_flags(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let (obj, flags_obj) = match args.len() {
         2 => (&args[0], &args[1]),
         3 => (&args[1], &args[2]),
-        _ => return Err(PyError::type_error("memoryview._from_flags() takes exactly 2 arguments")),
+        _ => {
+            return Err(PyError::type_error(
+                "memoryview._from_flags() takes exactly 2 arguments",
+            ))
+        }
     };
     let flags = extract_flags_for_buffer(flags_obj)?;
     check_buffer_flags(flags)?;
@@ -529,7 +606,9 @@ pub(crate) fn mv_from_flags(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 let b = method_c.borrow();
                 if let PyObject::BuiltinMethod { func, .. } = &*b {
                     *func
-                } else { unreachable!() }
+                } else {
+                    unreachable!()
+                }
             };
             func(&[obj.clone(), flags_arg])
         } else {
@@ -538,7 +617,9 @@ pub(crate) fn mv_from_flags(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 let b = obj.borrow();
                 if let PyObject::Instance { typ, .. } = &*b {
                     Some(typ.clone())
-                } else { None }
+                } else {
+                    None
+                }
             };
             if let Some(typ) = typ_opt {
                 if let Some(f) = crate::object::lookup_dunder_via_mro(&typ, "__buffer__") {
@@ -553,7 +634,9 @@ pub(crate) fn mv_from_flags(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         match result {
             Ok(v) => {
                 if !matches!(&*v.borrow(), PyObject::MemoryView { .. }) {
-                    return Err(PyError::type_error("memoryview: __buffer__ must return memoryview"));
+                    return Err(PyError::type_error(
+                        "memoryview: __buffer__ must return memoryview",
+                    ));
                 }
                 track_view_exporter(&v, obj.clone());
                 if let PyObject::MemoryView { source, .. } = &*v.borrow() {
@@ -582,12 +665,33 @@ pub(crate) fn mv_from_flags(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
     };
     if is_writable && readonly {
-        return Err(PyError::Exception("RuntimeError".to_string(), PyObjectRef::new(PyObject::Exception{ typ:"RuntimeError".to_string(), args: vec![py_str("not mutable")], cause:None, suppress_context:false, context:None, traceback:None, extra:None })));
+        return Err(PyError::Exception(
+            "RuntimeError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "RuntimeError".to_string(),
+                args: vec![py_str("not mutable")],
+                cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
+                extra: None,
+            }),
+        ));
     }
     let itemsize = mv_itemsize(&format);
-    let view = PyObjectRef::new(PyObject::MemoryView { source: obj.clone(), format, shape: vec![len], itemsize, offset:0, readonly, released:false });
+    let view = PyObjectRef::new(PyObject::MemoryView {
+        source: obj.clone(),
+        format,
+        shape: vec![len],
+        itemsize,
+        offset: 0,
+        readonly,
+        released: false,
+    });
     track_view_exporter(&view, obj.clone());
-    if !readonly { increment_bytearray_export(obj); }
+    if !readonly {
+        increment_bytearray_export(obj);
+    }
     Ok(view)
 }
 
@@ -604,11 +708,31 @@ pub(crate) fn mv_nbytes(v: &PyObjectRef) -> PyResult<usize> {
 pub(crate) fn mv_tobytes(v: &PyObjectRef) -> PyResult<Vec<u8>> {
     // During __release_buffer__, tobytes is allowed even though view is being released
     let (source, _, shape, itemsize, offset, _) = {
-        let is_releasing = if let Some(k) = view_key(v) { RELEASING_VIEW.with(|c| *c.borrow() == Some(k)) } else { false };
+        let is_releasing = if let Some(k) = view_key(v) {
+            RELEASING_VIEW.with(|c| *c.borrow() == Some(k))
+        } else {
+            false
+        };
         if is_releasing {
             // Bypass mv_fields's releasing check for tobytes - directly get fields without checking releasing
-            if let PyObject::MemoryView { source, format, shape, itemsize, offset, readonly, .. } = &*v.borrow() {
-                (source.clone(), format.clone(), shape.clone(), *itemsize, *offset, *readonly)
+            if let PyObject::MemoryView {
+                source,
+                format,
+                shape,
+                itemsize,
+                offset,
+                readonly,
+                ..
+            } = &*v.borrow()
+            {
+                (
+                    source.clone(),
+                    format.clone(),
+                    shape.clone(),
+                    *itemsize,
+                    *offset,
+                    *readonly,
+                )
             } else {
                 return Err(PyError::type_error("not a memoryview"));
             }
@@ -700,7 +824,9 @@ pub(crate) fn mv_getattr(name: &str) -> Option<PyObjectRef> {
         "cast" => method!(|args| {
             if let Some(k) = view_key(&args[0]) {
                 if RELEASING_VIEW.with(|c| *c.borrow() == Some(k)) {
-                    return Err(PyError::value_error("operation forbidden on released memoryview object"));
+                    return Err(PyError::value_error(
+                        "operation forbidden on released memoryview object",
+                    ));
                 }
             }
             mv_cast_impl(args)
@@ -728,26 +854,48 @@ pub(crate) fn mv_getattr(name: &str) -> Option<PyObjectRef> {
         "toreadonly" => method!(|args| {
             if let Some(k) = view_key(&args[0]) {
                 if RELEASING_VIEW.with(|c| *c.borrow() == Some(k)) {
-                    return Err(PyError::value_error("operation forbidden on released memoryview object"));
+                    return Err(PyError::value_error(
+                        "operation forbidden on released memoryview object",
+                    ));
                 }
             }
             let (source, format, shape, itemsize, offset, _) = mv_fields(&args[0])?;
-            Ok(PyObjectRef::new(PyObject::MemoryView { source, format, shape, itemsize, offset, readonly: true, released: false }))
+            Ok(PyObjectRef::new(PyObject::MemoryView {
+                source,
+                format,
+                shape,
+                itemsize,
+                offset,
+                readonly: true,
+                released: false,
+            }))
         }),
         "__buffer__" => method!(|args| {
             if args.len() < 2 {
-                return Err(PyError::type_error("__buffer__() takes exactly one argument"));
+                return Err(PyError::type_error(
+                    "__buffer__() takes exactly one argument",
+                ));
             }
             if let Some(k) = view_key(&args[0]) {
                 if RELEASING_VIEW.with(|c| *c.borrow() == Some(k)) {
-                    return Err(PyError::value_error("operation forbidden on released memoryview object"));
+                    return Err(PyError::value_error(
+                        "operation forbidden on released memoryview object",
+                    ));
                 }
             }
             let flags = extract_flags_for_buffer(&args[1])?;
             check_buffer_flags(flags)?;
             // Return a new view over same source
             let (source, format, shape, itemsize, offset, readonly) = mv_fields(&args[0])?;
-            Ok(PyObjectRef::new(PyObject::MemoryView { source, format, shape, itemsize, offset, readonly, released: false }))
+            Ok(PyObjectRef::new(PyObject::MemoryView {
+                source,
+                format,
+                shape,
+                itemsize,
+                offset,
+                readonly,
+                released: false,
+            }))
         }),
         "__enter__" => method!(|args| Ok(args[0].clone())),
         "__exit__" => method!(|args| {
@@ -798,7 +946,9 @@ pub(crate) fn mv_getprop(v: &PyObjectRef, name: &str) -> Option<PyResult<PyObjec
 pub(crate) fn mv_getitem(v: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let Some(k) = view_key(v) {
         if RELEASING_VIEW.with(|c| *c.borrow() == Some(k)) {
-            return Err(PyError::value_error("operation forbidden on released memoryview object"));
+            return Err(PyError::value_error(
+                "operation forbidden on released memoryview object",
+            ));
         }
     }
     let (source, format, shape, itemsize, offset, _readonly) = mv_fields(v)?;

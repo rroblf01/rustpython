@@ -532,4 +532,3 @@ pub fn builtin_int_from_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     };
     Ok(py_int(big))
 }
-

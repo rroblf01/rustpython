@@ -1,9 +1,9 @@
 // Split from src/object/core.rs — NativeDispatchRecursionGuard + equals_inner + get_id.
+use super::object_id;
 use crate::bytecode::CodeObject;
 use crate::interner::{self, StrId};
 use crate::modules::*;
 use crate::object::*;
-use super::object_id;
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use std::cell::RefCell;

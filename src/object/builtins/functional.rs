@@ -19,9 +19,10 @@ pub fn builtin_sorted(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             // calling it below panics/errors with "object is not
             // callable" (see list.sort()'s identical guard just above
             // in attrs/list.rs for the same fix pattern).
-            kwargs.get(&py_str("key")).unwrap_or(None).filter(|k| {
-                !matches!(&*k.borrow(), PyObject::None)
-            })
+            kwargs
+                .get(&py_str("key"))
+                .unwrap_or(None)
+                .filter(|k| !matches!(&*k.borrow(), PyObject::None))
         } else {
             None
         }
@@ -198,7 +199,14 @@ fn compare_gt(a: &PyObjectRef, b: &PyObjectRef) -> std::cmp::Ordering {
     }
 }
 
-fn parse_max_min_kwargs(args: &[PyObjectRef]) -> PyResult<(Vec<PyObjectRef>, Option<PyObjectRef>, Option<PyObjectRef>, bool)> {
+fn parse_max_min_kwargs(
+    args: &[PyObjectRef],
+) -> PyResult<(
+    Vec<PyObjectRef>,
+    Option<PyObjectRef>,
+    Option<PyObjectRef>,
+    bool,
+)> {
     if args.is_empty() {
         return Ok((Vec::new(), None, None, false));
     }
@@ -251,16 +259,24 @@ fn parse_max_min_kwargs(args: &[PyObjectRef]) -> PyResult<(Vec<PyObjectRef>, Opt
     Ok((pos_args, key_fn, default_val, has_default))
 }
 
-fn max_min_with_key(items: Vec<PyObjectRef>, key_fn: Option<PyObjectRef>, is_max: bool) -> PyResult<PyObjectRef> {
+fn max_min_with_key(
+    items: Vec<PyObjectRef>,
+    key_fn: Option<PyObjectRef>,
+    is_max: bool,
+) -> PyResult<PyObjectRef> {
     if items.is_empty() {
         return Err(PyError::value_error("max() arg is an empty sequence"));
     }
     if key_fn.is_none() {
         if is_max {
-            return items.into_iter().max_by(compare_gt)
+            return items
+                .into_iter()
+                .max_by(compare_gt)
                 .ok_or_else(|| PyError::value_error("max() arg is an empty sequence"));
         } else {
-            return items.into_iter().min_by(compare_gt)
+            return items
+                .into_iter()
+                .min_by(compare_gt)
                 .ok_or_else(|| PyError::value_error("min() arg is an empty sequence"));
         }
     }
@@ -391,7 +407,9 @@ pub fn builtin_callable(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         if let Some(rc) = target.upgrade() {
             return builtin_callable(&[PyObjectRef::Mut(rc)]);
         } else {
-            return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+            return Err(PyError::reference_error(
+                "weakly-referenced object no longer exists",
+            ));
         }
     }
     let obj = args[0].borrow();
