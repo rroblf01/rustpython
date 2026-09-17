@@ -903,6 +903,18 @@ impl VirtualMachine {
         globals_map
             .entry(interner::intern("__builtins__"))
             .or_insert(builtins_module);
+        globals_map
+            .entry(interner::intern("__doc__"))
+            .or_insert(PyObjectRef::None);
+        globals_map
+            .entry(interner::intern("__loader__"))
+            .or_insert(PyObjectRef::None);
+        globals_map
+            .entry(interner::intern("__spec__"))
+            .or_insert(PyObjectRef::None);
+        globals_map
+            .entry(interner::intern("__cached__"))
+            .or_insert(PyObjectRef::None);
         if is_package {
             if let Some(p) = pkg_path {
                 globals_map.insert(interner::intern("__path__"), py_list(vec![py_str(&p)]));
@@ -964,6 +976,10 @@ impl VirtualMachine {
             (interner::intern("__name__"), py_str(name)),
             (interner::intern("__file__"), py_str(path)),
             (interner::intern("__builtins__"), builtins_module),
+            (interner::intern("__doc__"), PyObjectRef::None),
+            (interner::intern("__loader__"), PyObjectRef::None),
+            (interner::intern("__spec__"), PyObjectRef::None),
+            (interner::intern("__cached__"), PyObjectRef::None),
         ]);
         if is_package {
             if let Some(pkg_dir) = std::path::Path::new(path).parent() {

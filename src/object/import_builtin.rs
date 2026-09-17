@@ -713,6 +713,32 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                         code.filename
                     );
                 }
+                // This project's usual "kwargs packed as a trailing dict
+                // ARGUMENT" calling convention (see `src/vm/call.rs`'s own
+                // doc comments) was never honored by THIS disposable-VM
+                // dispatch path: a `**kwargs`-accepting function always got
+                // an empty dict bound to its `**kwargs` parameter,
+                // regardless of what was actually passed, and any trailing
+                // dict silently fell into `*args` instead (or was dropped
+                // if there was no varargs parameter). Real trigger:
+                // `operator.methodcaller('name', **kwds)` forwarding kwds
+                // through `builtin_call` — `test_operator.py`'s
+                // `test_methodcaller` keyword-arg cases raised `KeyError`
+                // inside the callee because its `**kwds` was always `{}`.
+                // Detect a trailing packed-kwargs dict only when the callee
+                // actually declares `**kwargs`, and strip it off before the
+                // normal positional/vararg logic runs.
+                let (kwdict, a): (Option<PyObjectRef>, &[PyObjectRef]) =
+                    if code.kwarg_name.is_some() {
+                        match a.split_last() {
+                            Some((last, rest)) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
+                                (Some(last.clone()), rest)
+                            }
+                            _ => (None, &a[..]),
+                        }
+                    } else {
+                        (None, &a[..])
+                    };
                 let npos = a.len();
                 let named_params = if code.vararg_name.is_some() || code.kwarg_name.is_some() {
                     code.varnames
@@ -816,17 +842,18 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                     }
                 }
                 if let Some(kwarg_name) = &code.kwarg_name {
+                    let kwval = kwdict.clone().unwrap_or_else(py_dict);
                     if let Some(idx) = code
                         .varnames
                         .iter()
                         .position(|n| crate::interner::lookup_str(*n) == kwarg_name.as_str())
                     {
                         if idx < frame.fast_locals.len() && frame.fast_locals[idx].is_none() {
-                            frame.fast_locals[idx] = Some(py_dict());
+                            frame.fast_locals[idx] = Some(kwval.clone());
                         }
                     }
                     if !frame.contains_local(kwarg_name) {
-                        frame.insert_local(kwarg_name.as_str(), py_dict());
+                        frame.insert_local(kwarg_name.as_str(), kwval);
                     }
                 }
                 vm.push_frame(frame);
@@ -929,9 +956,36 @@ pub fn builtin_call(func: &PyObjectRef, args: &[PyObjectRef]) -> PyResult<PyObje
                 unreachable!()
             }
         }
-        _ => Err(PyError::type_error(format!(
-            "'{}' object is not callable",
-            type_name
-        ))),
+        _ => {
+            // Plain `Instance` objects (e.g. `operator.itemgetter(...)`,
+            // or any user-defined class with a `__call__` method) fell
+            // through to a hard "not callable" TypeError here, because
+            // this disposable-VM `builtin_call` path (used by `map()`/
+            // `filter()`/`sorted(key=...)`/etc., unlike the full
+            // `VirtualMachine::call_function` used by the `CALL` opcode)
+            // never looked up `__call__` via the MRO before giving up.
+            // Real trigger: `map(itemgetter(1), rows)` — itemgetter is a
+            // real `Instance` with `__call__` in its type dict (see
+            // `make_getter_type` in `modules/core/operator.rs`), and
+            // `statistics._rank`'s docstring exercises exactly this.
+            let call_dunder = {
+                let borrowed = f.borrow();
+                if let PyObject::Instance { typ, .. } = &*borrowed {
+                    crate::object::lookup_dunder_via_mro(typ, "__call__")
+                } else {
+                    None
+                }
+            };
+            if let Some(call_fn) = call_dunder {
+                let _guard = crate::object::NativeDispatchRecursionGuard::enter()?;
+                let mut call_args = vec![f.clone()];
+                call_args.extend(a);
+                return builtin_call(&call_fn, &call_args);
+            }
+            Err(PyError::type_error(format!(
+                "'{}' object is not callable",
+                type_name
+            )))
+        }
     }
 }

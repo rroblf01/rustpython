@@ -133,10 +133,9 @@ pub(crate) fn import_module_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRe
     // Resolve relative imports
     let resolved = resolve_name(&name, package.as_deref())?;
 
-    // Use with_vm_mut for VM-dependent part
     with_vm_mut(|vm| -> PyResult<PyObjectRef> {
-        if let Some(module) = vm.modules.get(&resolved) {
-            return Ok(module.clone());
+        if let Some(module) = vm.import_cached_or_fresh(&resolved) {
+            return Ok(module);
         }
         import_dotted(vm, &resolved)
     })?
@@ -151,8 +150,8 @@ pub(crate) fn import_module_with_vm(
     package: Option<&str>,
 ) -> PyResult<PyObjectRef> {
     let resolved = resolve_name(name, package)?;
-    if let Some(module) = vm.modules.get(&resolved) {
-        return Ok(module.clone());
+    if let Some(module) = vm.import_cached_or_fresh(&resolved) {
+        return Ok(module);
     }
     import_dotted(vm, &resolved)
 }

@@ -104,28 +104,12 @@ impl VirtualMachine {
         if in_sys_modules {
             return Some(module);
         }
-        let fresh = PyObjectRef::new(PyObject::Module {
-            name: name.to_string(),
-            dict: {
-                let b = module.borrow();
-                if let PyObject::Module { dict, .. } = &*b {
-                    dict.clone()
-                } else {
-                    Box::new(crate::object::TypeDict::default())
-                }
-            },
-        });
-        self.modules.insert(name.to_string(), fresh.clone());
-        if let Some(sys_mod) = self.modules.get("sys") {
-            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                if let Some(mod_dict) = dict.get_str("modules") {
-                    if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
-                        let _ = d.set(crate::object::py_str(name), fresh.clone());
-                    }
-                }
-            }
-        }
-        Some(fresh)
+        // Module was `del`'d from sys.modules (e.g. import_fresh_module /
+        // CleanImport in CPython test suite).  Evict from our internal cache
+        // so callers fall through to a full re-import that re-executes the
+        // module code with a fresh namespace.
+        self.modules.remove(name);
+        None
     }
 
     pub(crate) fn throw_into_frame(&mut self, err: PyError) -> PyResult<PyObjectRef> {
