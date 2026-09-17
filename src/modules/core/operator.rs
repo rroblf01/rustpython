@@ -196,7 +196,7 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
         py_mod(&args[0], &args[1])
     });
     op_func!("pow", |args| {
-        if args.len() < 2 {
+        if args.len() != 2 {
             return Err(PyError::type_error("operator.pow requires 2 arguments"));
         }
         py_pow(&args[0], &args[1])
@@ -338,7 +338,7 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("operator.truth requires 1 argument"));
         }
-        Ok(py_bool(args[0].truthy()))
+        Ok(py_bool(args[0].try_truthy()?))
     });
     op_func!("neg", |args| {
         if args.is_empty() {
@@ -350,7 +350,7 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("operator.pos requires 1 argument"));
         }
-        Ok(args[0].clone())
+        py_pos(&args[0])
     });
     op_func!("abs", |args| {
         if args.is_empty() {
@@ -421,7 +421,13 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
         }
         match bound_attr(&args[0], "__length_hint__") {
             Ok(method) => match builtin_call(&method, &[]) {
-                Ok(v) => Ok(v),
+                Ok(v) => {
+                    if crate::object::is_not_implemented(&v) {
+                        Ok(default)
+                    } else {
+                        Ok(v)
+                    }
+                }
                 Err(_) => Ok(default),
             },
             Err(_) => Ok(default),
@@ -584,6 +590,11 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
     // `__eq__` implemented against that stored state instead of a captured
     // closure.
     const OG_ITEMS_KEY: &str = "__og_items__";
+    // `methodcaller`-only: the packed keyword-arguments dict (empty dict
+    // when none were given), stored separately from `OG_ITEMS_KEY` (which
+    // holds `(name, *args)`) so `methodcaller_call` can forward it and
+    // `methodcaller_repr`/`__reduce__` can render/round-trip it.
+    const OG_KWARGS_KEY: &str = "__og_kwargs__";
 
     fn make_getter_type(
         name: &str,
@@ -619,7 +630,27 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
                     } else {
                         return Err(PyError::type_error("__reduce__ on non-instance"));
                     };
-                    Ok(py_tuple(vec![typ, stored_items]))
+                    // `methodcaller` only: re-append its stored kwargs dict
+                    // as one extra trailing item so reconstruction
+                    // (`typ(*stored_items)`) round-trips through the same
+                    // trailing-packed-kwargs-dict detection the factory
+                    // closure above already does — `itemgetter`/
+                    // `attrgetter` never set this key, so they fall
+                    // through unchanged.
+                    let combined_items = match args[0].borrow().get_attribute(OG_KWARGS_KEY) {
+                        Ok(kwargs)
+                            if !matches!(&*kwargs.borrow(), PyObject::Dict(d) if d.is_empty()) =>
+                        {
+                            let mut items = match &*stored_items.borrow() {
+                                PyObject::Tuple(t) => t.clone(),
+                                _ => Vec::new(),
+                            };
+                            items.push(kwargs);
+                            py_tuple(items)
+                        }
+                        _ => stored_items,
+                    };
+                    Ok(py_tuple(vec![typ, combined_items]))
                 },
             }),
         );
@@ -832,6 +863,18 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
         let method = bound_attr(obj, &method_name)?;
         let mut full_args = extra_args.to_vec();
         full_args.extend_from_slice(&args[2..]);
+        // Stored keyword arguments (`operator.methodcaller(name, **kwds)`)
+        // are forwarded as this project's usual trailing packed-kwargs-dict
+        // ARGUMENT — same convention `builtin_call`'s callees already
+        // expect — rather than being silently dropped (the previous
+        // behavior, per this function's now-stale "positional-only"
+        // comment above), which broke every keyword-arg case in
+        // `test_operator.py::test_methodcaller`.
+        if let Ok(kwargs) = args[0].borrow().get_attribute(OG_KWARGS_KEY) {
+            if !matches!(&*kwargs.borrow(), PyObject::Dict(d) if d.is_empty()) {
+                full_args.push(kwargs);
+            }
+        }
         builtin_call(&method, &full_args)
     }
     fn methodcaller_repr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -864,6 +907,9 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
                         "methodcaller requires at least 1 argument",
                     ));
                 }
+                if !matches!(&*args[0].borrow(), PyObject::Str(_)) {
+                    return Err(PyError::type_error("method name must be a string"));
+                }
                 let typ = METHODCALLER_TYPE.with(|c| {
                     let mut b = c.borrow_mut();
                     if b.is_none() {
@@ -876,8 +922,21 @@ pub fn create_operator_dict() -> HashMap<String, PyObjectRef> {
                     }
                     b.clone().unwrap()
                 });
+                // Detect this project's usual trailing packed-kwargs dict
+                // (present when `methodcaller(name, **kwds)` was used) and
+                // store it separately from the positional `(name, *args)`
+                // tuple, instead of folding it into `OG_ITEMS_KEY` where
+                // `methodcaller_call` used to just silently ignore it.
+                let (positional, kwargs) = if args.len() >= 2
+                    && matches!(&*args[args.len() - 1].borrow(), PyObject::Dict(_))
+                {
+                    (&args[..args.len() - 1], args[args.len() - 1].clone())
+                } else {
+                    (args, PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new()))))
+                };
                 let mut attrs = crate::object::AttrMap::new();
-                attrs.insert(OG_ITEMS_KEY.to_string(), py_tuple(args.to_vec()));
+                attrs.insert(OG_ITEMS_KEY.to_string(), py_tuple(positional.to_vec()));
+                attrs.insert(OG_KWARGS_KEY.to_string(), kwargs);
                 Ok(PyObjectRef::new(PyObject::Instance { typ, dict: attrs }))
             },
         }),

@@ -519,6 +519,16 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
         "version",
         py_str("3.12.0 (main, Sep 12 2026, 00:00:00) [RustPython 0.1.0]"),
     );
+    // `sys._git` — a real CPython attribute (CPython/Python/sysmodule.c),
+    // a 3-tuple (project, tag, version) describing the VCS build info.
+    // `Lib/platform.py`'s module-level code and `test_platform.py`'s
+    // `PlatformTest.setUp` do `sys._git` unconditionally (not behind
+    // hasattr), so its absence raised AttributeError before any test in
+    // that class could even run.
+    d.insert_str(
+        "_git",
+        py_tuple(vec![py_str("CPython"), py_str(""), py_str("")]),
+    );
     // sys.version_info — structseq (tuple + attributes) like
     // time.struct_time: supports both v[0] and v.major. Plain tuple
     // broke attribute access (`'tuple' object has no attribute
@@ -1115,6 +1125,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
             binary: false,
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
+            encoding: None,
         }),
     );
     d.insert_str(
@@ -1127,6 +1138,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
             binary: false,
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
+            encoding: None,
         }),
     );
     d.insert_str(
@@ -1139,6 +1151,7 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
             binary: false,
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
+            encoding: None,
         }),
     );
     d.insert_str("platform", py_str(std::env::consts::OS));
@@ -1205,6 +1218,30 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
                 .unwrap_or_default(),
         ),
     );
+    // `sys._base_executable` — CPython's real, non-venv interpreter path,
+    // used internally by `venv`/`ensurepip`/`site` (e.g. `EnvBuilder.
+    // ensure_directories()` reads it directly) to find the real interpreter
+    // to symlink/copy into a new venv, distinct from `sys.executable` (which
+    // — like `sys.prefix` above — follows whatever venv is CURRENTLY
+    // active). Was missing entirely: any of that tooling raised
+    // `AttributeError: module 'sys' has no attribute '_base_executable'`
+    // instead of building a venv. Same value as `executable` here since
+    // this interpreter isn't itself venv-relocatable the way CPython is.
+    d.insert_str(
+        "_base_executable",
+        py_str(
+            &std::env::current_exe()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        ),
+    );
+    // `sys._framework` — real CPython always defines this (see
+    // `sysmodule.c`'s `SET_SYS_FROM_STRING("_framework", _PYTHONFRAMEWORK)`),
+    // even off macOS, as an empty string. Missing entirely here caused a
+    // bare AttributeError in code that reads it unconditionally (real
+    // trigger: `test_sysconfig.py`'s `setUp`/`tearDown` unconditionally
+    // save/restore `sys._framework`).
+    d.insert_str("_framework", py_str(""));
     // Detect virtual environment (uv, venv, virtualenv, conda, poetry, pixi)
     let venv_path = std::env::var("VIRTUAL_ENV")
         .ok()

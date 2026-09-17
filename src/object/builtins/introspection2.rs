@@ -631,12 +631,23 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         };
         let file = unsafe { std::fs::File::from_raw_fd(owned_fd) };
         let binary = mode.contains('b');
+        let encoding = kwargs.and_then(|kw| {
+            if let PyObject::Dict(d) = &*kw.borrow() {
+                d.get(&py_str("encoding"))
+                    .ok()
+                    .flatten()
+                    .map(|v| v.str())
+            } else {
+                None
+            }
+        });
         return Ok(PyObjectRef::new(PyObject::File {
             file: std::rc::Rc::new(std::cell::RefCell::new(file)),
             name: format!("<fdopen fd={}>", fd),
             binary,
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
+            encoding,
         }));
     }
     let filename = path_arg_to_string(&pos_args[0]);
@@ -685,12 +696,23 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         .open(&filename)
         .map_err(|e| PyError::os_error_from_io_path(&e, Some(&filename)))?;
     let binary = mode.contains('b');
+    let encoding = kwargs.and_then(|kw| {
+        if let PyObject::Dict(d) = &*kw.borrow() {
+            d.get(&py_str("encoding"))
+                .ok()
+                .flatten()
+                .map(|v| v.str())
+        } else {
+            None
+        }
+    });
     Ok(PyObjectRef::new(PyObject::File {
         file: std::rc::Rc::new(std::cell::RefCell::new(file)),
         name: filename,
         binary,
         pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
+        encoding,
     }))
 }
 

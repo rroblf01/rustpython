@@ -264,14 +264,16 @@ impl VirtualMachine {
                         // by this project's OWN `readline`/`__next__` methods
                         // (added alongside this fix, `attrs.rs`) for direct
                         // `f.readline()`/`next(f)` calls.
-                        PyObject::File { file, binary, .. } => {
+                        PyObject::File { file, binary, encoding, .. } => {
                             use std::io::Read;
                             let binary = *binary;
+                            let enc = encoding.clone();
                             let mut rest = Vec::new();
                             file.borrow_mut()
                                 .read_to_end(&mut rest)
                                 .map_err(|e| PyError::os_error_from_io(&e))?;
                             drop(obj);
+                            let enc_str = enc.as_deref().unwrap_or("utf-8");
                             let mut lines: Vec<PyObjectRef> = Vec::new();
                             let mut current: Vec<u8> = Vec::new();
                             for byte in rest {
@@ -279,6 +281,31 @@ impl VirtualMachine {
                                 if byte == b'\n' {
                                     lines.push(if binary {
                                         PyObjectRef::imm(PyObject::Bytes(current.clone()))
+                                    } else if enc_str == "ascii" || enc_str == "us-ascii" {
+                                        // Check each byte for ASCII compliance
+                                        for &b in &current {
+                                            if b >= 0x80 {
+                                                return Err(PyError::Exception(
+                                                    "UnicodeDecodeError".to_string(),
+                                                    PyObjectRef::new(PyObject::Exception {
+                                                        typ: "UnicodeDecodeError".to_string(),
+                                                        args: vec![
+                                                            py_str("ascii"),
+                                                            py_str(&String::from_utf8_lossy(&current)),
+                                                            py_int(b as i64),
+                                                            py_int(1),
+                                                            py_str("ordinal not in range(128)"),
+                                                        ],
+                                                        cause: None,
+                                                        suppress_context: false,
+                                                        context: None,
+                                                        traceback: None,
+                                                        extra: None,
+                                                    }),
+                                                ));
+                                            }
+                                        }
+                                        py_str(&String::from_utf8_lossy(&current))
                                     } else {
                                         py_str(&String::from_utf8_lossy(&current))
                                     });
@@ -288,6 +315,30 @@ impl VirtualMachine {
                             if !current.is_empty() {
                                 lines.push(if binary {
                                     PyObjectRef::imm(PyObject::Bytes(current.clone()))
+                                } else if enc_str == "ascii" || enc_str == "us-ascii" {
+                                    for &b in &current {
+                                        if b >= 0x80 {
+                                            return Err(PyError::Exception(
+                                                "UnicodeDecodeError".to_string(),
+                                                PyObjectRef::new(PyObject::Exception {
+                                                    typ: "UnicodeDecodeError".to_string(),
+                                                    args: vec![
+                                                        py_str("ascii"),
+                                                        py_str(&String::from_utf8_lossy(&current)),
+                                                        py_int(b as i64),
+                                                        py_int(1),
+                                                        py_str("ordinal not in range(128)"),
+                                                    ],
+                                                    cause: None,
+                                                    suppress_context: false,
+                                                    context: None,
+                                                    traceback: None,
+                                                    extra: None,
+                                                }),
+                                            ));
+                                        }
+                                    }
+                                    py_str(&String::from_utf8_lossy(&current))
                                 } else {
                                     py_str(&String::from_utf8_lossy(&current))
                                 });

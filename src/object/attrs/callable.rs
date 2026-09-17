@@ -104,7 +104,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     "__qualname__" => Ok(dict
                         .get("__qualname__")
                         .cloned()
-                        .unwrap_or(py_str(crate::interner::lookup_str(*func_name)))),
+                        .unwrap_or_else(|| py_str(crate::interner::lookup_str(f.code.qualname)))),
                     "name" => Ok(dict
                         .get("name")
                         .cloned()
@@ -737,7 +737,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             self_obj: PyObjectRef::new(PyObject::Code(code_rc)),
                         }))
                     }
-                    "co_qualname" => Ok(py_str(crate::interner::lookup_str(c.name))),
+                    "co_qualname" => Ok(py_str(crate::interner::lookup_str(c.qualname))),
                     // `co_lines()` — a *method* (not a plain attribute)
                     // since CPython 3.10 replacing the old `co_lnotab`
                     // bytes blob: returns an iterator of

@@ -178,7 +178,7 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
         );
         od_dict.insert_str(
             "__module__",
-            PyObjectRef::new(PyObject::Str(compact_str::CompactString::from(
+            PyObjectRef::new(PyObject::Str(crate::object::PyStr::from_str(
                 "collections",
             ))),
         );

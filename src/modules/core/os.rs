@@ -642,6 +642,21 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
                 return Err(PyError::value_error("binary mode doesn't take an errors argument"));
             }
         }
+        // Validate the fd is actually open BEFORE wrapping it in a
+        // `std::fs::File` — `from_raw_fd` on an invalid fd builds a `File`
+        // that owns garbage, and this Rust toolchain's `File::drop` carries
+        // a `debug_assert_fd_is_open` check that calls `rtabort!` (a hard
+        // process abort, uncatchable by any Python try/except) the instant
+        // it's dropped and observes the fd already invalid. `fcntl(fd,
+        // F_GETFD)` is the standard cheap "is this fd open" probe.
+        extern "C" {
+            fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        }
+        const F_GETFD: i32 = 1;
+        let probe = unsafe { fcntl(fd, F_GETFD) };
+        if probe < 0 {
+            return Err(PyError::os_error_from_io(&std::io::Error::last_os_error()));
+        }
         use std::os::unix::io::FromRawFd;
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         Ok(PyObjectRef::new(PyObject::File {
@@ -650,6 +665,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             binary,
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
+            encoding: None,
         }))
     });
 

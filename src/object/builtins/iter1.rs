@@ -3,6 +3,35 @@
 // `reversed`) and their helpers.
 use super::*;
 
+/// Decode bytes to a Python string, raising UnicodeDecodeError for ASCII encoding.
+fn py_str_decoding_with_encoding(bytes: &[u8], encoding: &str) -> PyResult<PyObjectRef> {
+    if encoding == "ascii" || encoding == "us-ascii" {
+        for &b in bytes {
+            if b >= 0x80 {
+                return Err(PyError::Exception(
+                    "UnicodeDecodeError".to_string(),
+                    PyObjectRef::new(PyObject::Exception {
+                        typ: "UnicodeDecodeError".to_string(),
+                        args: vec![
+                            py_str("ascii"),
+                            py_str(&String::from_utf8_lossy(bytes)),
+                            py_int(b as i64),
+                            py_int(1),
+                            py_str("ordinal not in range(128)"),
+                        ],
+                        cause: None,
+                        suppress_context: false,
+                        context: None,
+                        traceback: None,
+                        extra: None,
+                    }),
+                ));
+            }
+        }
+    }
+    Ok(py_str(&String::from_utf8_lossy(bytes)))
+}
+
 pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 1 {
         return Err(PyError::type_error("len() takes exactly one argument"));
@@ -16,7 +45,15 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let obj = args[0].borrow();
     match &*obj {
-        PyObject::Str(s) => Ok(py_int(s.chars().count())),
+        PyObject::Str(s) => {
+            // Count WTF-8 codepoints (surrogates count as 1 each).
+            let count = if s.has_surrogates() {
+                crate::object::pystring::Wtf8Chars::new(s.as_bytes()).count()
+            } else {
+                s.as_str().chars().count()
+            };
+            Ok(py_int(count))
+        }
         PyObject::List(v) => Ok(py_int(v.len())),
         PyObject::Deque { data, .. } => Ok(py_int(data.len())),
         PyObject::Tuple(v) => Ok(py_int(v.len())),
@@ -412,8 +449,10 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // handling in `vm.rs` for the full story; this is the SEPARATE
         // free-function path (`iter(f)` called explicitly, or anything
         // routing through `collect_iterable`) that needs the identical fix.
-        PyObject::File { file, binary, .. } => {
+        PyObject::File { file, binary, encoding, .. } => {
             use std::io::Read;
+            let binary = *binary;
+            let enc = encoding.as_deref().unwrap_or("utf-8");
             let mut rest = Vec::new();
             file.borrow_mut()
                 .read_to_end(&mut rest)
@@ -423,19 +462,19 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             for byte in rest {
                 current.push(byte);
                 if byte == b'\n' {
-                    lines.push(if *binary {
+                    lines.push(if binary {
                         PyObjectRef::imm(PyObject::Bytes(current.clone()))
                     } else {
-                        py_str(&String::from_utf8_lossy(&current))
+                        py_str_decoding_with_encoding(&current, enc)?
                     });
                     current.clear();
                 }
             }
             if !current.is_empty() {
-                lines.push(if *binary {
+                lines.push(if binary {
                     PyObjectRef::imm(PyObject::Bytes(current.clone()))
                 } else {
-                    py_str(&String::from_utf8_lossy(&current))
+                    py_str_decoding_with_encoding(&current, enc)?
                 });
             }
             Ok(PyObjectRef::new(PyObject::ListIter {

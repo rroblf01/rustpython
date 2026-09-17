@@ -216,6 +216,33 @@ pub fn create_gc_dict() -> HashMap<String, PyObjectRef> {
         GC_DEBUG_FLAGS.with(|c| c.set(flags));
         Ok(py_none())
     });
+    // `gc.freeze`/`unfreeze`/`get_freeze_count` — real CPython moves all
+    // currently-tracked objects into a permanent "frozen" generation so a
+    // later `collect()` never re-scans them (a fork-server memory-sharing
+    // optimization). This interpreter's cycle collector (`cycle_gc.rs`) has
+    // no notion of generations to move objects between, so there is nothing
+    // for these calls to correctly *do* — but real code (`test_gc.py`'s
+    // `setUpModule`/`tearDownModule`, and `multiprocessing`'s fork-server
+    // usage) unconditionally calls them and needs them to exist and behave
+    // consistently rather than raise `AttributeError`. `freeze` bumps a
+    // counter `get_freeze_count` reports and `unfreeze` resets it to 0,
+    // matching the only externally observable contract real code depends
+    // on (that the count goes up on freeze and back to 0 on unfreeze).
+    thread_local! {
+        static GC_FREEZE_COUNT: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+    }
+    gc_func!("freeze", |_| {
+        GC_FREEZE_COUNT.with(|c| c.set(c.get() + 1));
+        Ok(py_none())
+    });
+    gc_func!("unfreeze", |_| {
+        GC_FREEZE_COUNT.with(|c| c.set(0));
+        Ok(py_none())
+    });
+    gc_func!("get_freeze_count", |_| {
+        Ok(py_int(GC_FREEZE_COUNT.with(|c| c.get())))
+    });
+
     d.insert_str("DEBUG_STATS", py_int(1));
     d.insert_str("DEBUG_COLLECTABLE", py_int(2));
     d.insert_str("DEBUG_UNCOLLECTABLE", py_int(4));

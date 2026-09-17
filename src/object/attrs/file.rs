@@ -4,6 +4,43 @@ use super::*;
 use crate::interner;
 use std::rc::Rc;
 
+/// Decode bytes to a Python string, respecting the file's encoding.
+/// Returns UnicodeDecodeError for non-UTF-8 encodings when bytes are invalid.
+pub fn decode_with_encoding(
+    buf: &[u8],
+    encoding: &Option<String>,
+) -> PyResult<PyObjectRef> {
+    let enc = encoding.as_deref().unwrap_or("utf-8");
+    if enc == "ascii" || enc == "us-ascii" {
+        for &b in buf {
+            if b >= 0x80 {
+                return Err(PyError::Exception(
+                    "UnicodeDecodeError".to_string(),
+                    PyObjectRef::new(PyObject::Exception {
+                        typ: "UnicodeDecodeError".to_string(),
+                        args: vec![
+                            py_str("ascii"),
+                            py_str(&String::from_utf8_lossy(buf)),
+                            py_int(b as i64),
+                            py_int(1),
+                            py_str("ordinal not in range(128)"),
+                        ],
+                        cause: None,
+                        suppress_context: false,
+                        context: None,
+                        traceback: None,
+                        extra: None,
+                    }),
+                ));
+            }
+        }
+        Ok(py_str(&String::from_utf8_lossy(buf)))
+    } else {
+        // UTF-8 or other: use lossy decode (existing behavior)
+        Ok(py_str(&String::from_utf8_lossy(buf)))
+    }
+}
+
 /// Replace the `std::fs::File` living inside a shared `Rc<RefCell<File>>`
 /// pipe/file handle with a fresh `/dev/null` placeholder, closing the real
 /// OS fd exactly once — WITHOUT ever letting `std::fs::File`'s own `Drop`
@@ -78,6 +115,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 binary: true,
                                 pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                                 closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
+                                encoding: None,
                             }))
                         } else {
                             Err(PyError::runtime_error("buffer access on non-file"))
@@ -173,6 +211,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 file,
                                 binary,
                                 pending,
+                                encoding,
                                 ..
                             } = &*args[0].borrow()
                             {
@@ -223,6 +262,10 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     let mut full: Vec<u8> =
                                         std::mem::take(&mut *pending.borrow_mut());
                                     full.extend_from_slice(&buf);
+                                    let enc = encoding.as_deref().unwrap_or("utf-8");
+                                    if enc == "ascii" || enc == "us-ascii" {
+                                        return decode_with_encoding(&full, encoding);
+                                    }
                                     loop {
                                         match std::str::from_utf8(&full) {
                                             Ok(s) => return Ok(py_str(s)),
@@ -281,7 +324,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         name: "readline".to_string(),
                         func: |args| {
                             use std::io::Read;
-                            if let PyObject::File { file, binary, .. } = &*args[0].borrow() {
+                            if let PyObject::File { file, binary, encoding, .. } = &*args[0].borrow() {
                                 let limit = args.get(1).and_then(|a| a.as_i64()).filter(|&n| n >= 0).map(|n| n as usize);
                                 let mut buf = Vec::new();
                                 let mut byte = [0u8; 1];
@@ -305,7 +348,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 if *binary {
                                     Ok(PyObjectRef::imm(PyObject::Bytes(buf)))
                                 } else {
-                                    Ok(py_str(&String::from_utf8_lossy(&buf)))
+                                    decode_with_encoding(&buf, encoding)
                                 }
                             } else {
                                 Err(PyError::runtime_error("readline on non-file"))
@@ -317,7 +360,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         name: "readlines".to_string(),
                         func: |args| {
                             use std::io::Read;
-                            if let PyObject::File { file, binary, .. } = &*args[0].borrow() {
+                            if let PyObject::File { file, binary, encoding, .. } = &*args[0].borrow() {
                                 let mut rest = Vec::new();
                                 file.borrow_mut()
                                     .read_to_end(&mut rest)
@@ -330,7 +373,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                         lines.push(if *binary {
                                             PyObjectRef::imm(PyObject::Bytes(current.clone()))
                                         } else {
-                                            py_str(&String::from_utf8_lossy(&current))
+                                            decode_with_encoding(&current, encoding)?
                                         });
                                         current.clear();
                                     }
@@ -339,7 +382,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     lines.push(if *binary {
                                         PyObjectRef::imm(PyObject::Bytes(current.clone()))
                                     } else {
-                                        py_str(&String::from_utf8_lossy(&current))
+                                        decode_with_encoding(&current, encoding)?
                                     });
                                 }
                                 Ok(py_list(lines))
@@ -358,7 +401,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         name: "__next__".to_string(),
                         func: |args| {
                             use std::io::Read;
-                            if let PyObject::File { file, binary, .. } = &*args[0].borrow() {
+                            if let PyObject::File { file, binary, encoding, .. } = &*args[0].borrow() {
                                 let mut buf = Vec::new();
                                 let mut byte = [0u8; 1];
                                 loop {
@@ -379,7 +422,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 if *binary {
                                     Ok(PyObjectRef::imm(PyObject::Bytes(buf)))
                                 } else {
-                                    Ok(py_str(&String::from_utf8_lossy(&buf)))
+                                    decode_with_encoding(&buf, encoding)
                                 }
                             } else {
                                 Err(PyError::runtime_error("__next__ on non-file"))
