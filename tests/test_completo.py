@@ -14,6 +14,20 @@ print("1. f-strings: OK")
 # === 2. repr exceptions ===
 assert repr(TypeError("bad msg")) == "TypeError('bad msg')"
 assert repr(ValueError("v")) == "ValueError('v')"
+for text, expected_repr in [
+    ("123\ud800", "'123\\ud800'"),
+    ("123\udfff", "'123\\udfff'"),
+    ("12'bad", '"12\'bad"'),
+]:
+    for args in [(text,), (text, 10)]:
+        try:
+            int(*args)
+        except ValueError as error:
+            assert error.args[0] == (
+                "invalid literal for int() with base 10: " + expected_repr
+            )
+        else:
+            raise AssertionError("int() accepted an invalid literal")
 print("2. repr exceptions: OK")
 
 # === 3. print kwargs ===

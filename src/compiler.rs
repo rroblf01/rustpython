@@ -47,6 +47,13 @@ pub struct Compiler {
     // see the Expr::Call bare-super compilation for why this must be the
     // class the method is textually defined in, not type(self).
     class_name_stack: Vec<String>,
+    // Tracks the __qualname__ of each enclosing named scope (function or
+    // class) currently being compiled, plus whether that scope is a class
+    // body. Used to compute a nested def/class's own __qualname__: CPython's
+    // rule is `<enclosing qualname>.<locals>.<name>` when the immediate
+    // enclosing scope is a function, or `<enclosing qualname>.<name>` when
+    // it's a class body (methods don't get a `<locals>` segment).
+    qual_stack: Vec<(String, bool)>,
     current_line: usize,
     // Whether `__annotations__` has already been created (via BUILD_MAP +
     // STORE_NAME) in the CURRENT module/class scope — reset per scope like
@@ -83,6 +90,7 @@ impl Compiler {
             scope_stack: Vec::new(),
             varnames_stack: Vec::new(),
             class_name_stack: Vec::new(),
+            qual_stack: Vec::new(),
             current_line: 1,
             annotations_initialized: false,
             comprehension_depth: 0,
@@ -365,6 +373,13 @@ impl Compiler {
     }
 
     fn emit_jump(&mut self, op: Opcode, label: usize) {
+        // Must push to `line_numbers` in lockstep with `instructions` (like
+        // `emit()` does) — omitting this permanently desyncs the two
+        // same-length parallel arrays by one slot for the rest of the code
+        // object after any jump (every if/while/for/and/or/... compiles at
+        // least one), making every later instruction report the wrong
+        // source line via co_lines()/__traceback__.tb_lineno.
+        self.code.line_numbers.push(self.current_line as u32);
         self.code.instructions.push(Instr::with_arg(op, 0));
         self.labels[label].push(self.code.instructions.len() - 1);
     }
