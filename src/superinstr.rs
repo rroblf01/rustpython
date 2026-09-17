@@ -135,14 +135,9 @@ fn fuse_one(instrs: &mut Vec<Instr>) {
             && !targets[i + 1]
             && !targets[i + 2]
         {
-            let (a, c, op) = (
-                instrs[i].arg,
-                instrs[i + 1].arg,
-                instrs[i + 2].arg,
-            );
+            let (a, c, op) = (instrs[i].arg, instrs[i + 1].arg, instrs[i + 2].arg);
             if a < 256 && c < 65536 {
-                instrs[i] =
-                    Instr::with_arg(Opcode::SUPER_FASTC_BIN, a | (c << 8) | (op << 24));
+                instrs[i] = Instr::with_arg(Opcode::SUPER_FASTC_BIN, a | (c << 8) | (op << 24));
                 instrs[i + 1] = nop();
                 instrs[i + 2] = nop();
                 instrs[i + 3] = nop();

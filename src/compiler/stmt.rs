@@ -1,15 +1,14 @@
-use crate::ast::*;
-use crate::bytecode::*;
-use super::Compiler;
 use super::scope::{LoopInfo, PendingCleanup, ScopeType};
 use super::utils::delete_error_for;
+use super::Compiler;
+use crate::ast::*;
+use crate::bytecode::*;
 
+mod assign_target;
+mod match_block;
 mod try_block;
 mod with_block;
-mod match_block;
-mod assign_target;
 impl Compiler {
-
     pub(crate) fn compile_stmts(&mut self, stmts: &[Stmt]) -> Result<(), String> {
         let mut first = true;
         for stmt in stmts {
@@ -526,7 +525,8 @@ impl Compiler {
                 });
                 self.emit(Opcode::LOAD_BUILD_CLASS, 0);
                 self.compile_class_body(name.clone(), body)?;
-                let class_name_idx = self.get_const_index(ConstValue::String(name.clone().into())) as u32;
+                let class_name_idx =
+                    self.get_const_index(ConstValue::String(name.clone().into())) as u32;
                 self.emit(Opcode::LOAD_CONST, class_name_idx);
                 // Starred bases (`class C(B, *bases)`) must be unpacked
                 // into a flat tuple (BUILD_LIST/LIST_EXTEND/LIST_TO_TUPLE),
@@ -589,9 +589,9 @@ impl Compiler {
                     let kw_count = kw.len();
                     for k in kw {
                         // Push keyword name as a string constant
-                        let name_idx = self
-                            .get_const_index(ConstValue::String(k.arg.clone().unwrap_or_default().into()))
-                            as u32;
+                        let name_idx = self.get_const_index(ConstValue::String(
+                            k.arg.clone().unwrap_or_default().into(),
+                        )) as u32;
                         self.emit(Opcode::LOAD_CONST, name_idx);
                         self.compile_expr(&k.value)?;
                     }
@@ -994,5 +994,4 @@ impl Compiler {
         }
         Ok(())
     }
-
 }

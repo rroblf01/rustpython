@@ -994,7 +994,10 @@ pub enum ConstValue {
     Bool(bool),
     Int(String),
     Float(String),
-    Complex { real: String, imag: String },
+    Complex {
+        real: String,
+        imag: String,
+    },
     String(crate::object::pystring::PyStr),
     Bytes(Vec<u8>),
     Code(Box<CodeObject>),

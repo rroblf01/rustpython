@@ -1,7 +1,7 @@
+use super::super::scope::ScopeType;
+use super::super::Compiler;
 use crate::ast::*;
 use crate::bytecode::*;
-use super::super::Compiler;
-use super::super::scope::ScopeType;
 
 impl Compiler {
     /// Compile an assignment target.  `in_unpack` is true when we are
@@ -99,9 +99,7 @@ impl Compiler {
                     // and compile the inner expression as a store target.
                     self.compile_assign_target_with(inner, true)?;
                 } else {
-                    return Err(
-                        "starred assignment target must be in a list or tuple".to_string()
-                    );
+                    return Err("starred assignment target must be in a list or tuple".to_string());
                 }
             }
             Expr::List(elts) | Expr::Tuple(elts) => {
@@ -109,18 +107,17 @@ impl Compiler {
                 let star_pos = elts.iter().position(|e| matches!(e, Expr::Starred(_)));
                 if let Some(pos) = star_pos {
                     // Check for multiple starred targets
-                    let second_star = elts.iter().skip(pos + 1).any(|e| matches!(e, Expr::Starred(_)));
+                    let second_star = elts
+                        .iter()
+                        .skip(pos + 1)
+                        .any(|e| matches!(e, Expr::Starred(_)));
                     if second_star {
-                        return Err(
-                            "multiple starred expressions in assignment".to_string()
-                        );
+                        return Err("multiple starred expressions in assignment".to_string());
                     }
                     let before = pos;
                     let after = elts.len() - pos - 1;
                     if before > 255 || after > 255 {
-                        return Err(
-                            "too many expressions in star-unpacking assignment".to_string()
-                        );
+                        return Err("too many expressions in star-unpacking assignment".to_string());
                     }
                     let arg = ((before as u32) << 8) | (after as u32);
                     self.emit(Opcode::UNPACK_EX, arg);
@@ -177,5 +174,4 @@ impl Compiler {
     pub(crate) fn compile_assign_target(&mut self, target: &Expr) -> Result<(), String> {
         self.compile_assign_target_with(target, false)
     }
-
 }

@@ -1,7 +1,7 @@
+use super::Compiler;
 use crate::ast::*;
 use crate::bytecode::*;
 use std::collections::HashSet;
-use super::Compiler;
 
 impl Compiler {
     // ---- Closure analysis ----
@@ -313,10 +313,7 @@ impl Compiler {
                 }
                 Stmt::With { items, body, .. } => {
                     for item in items {
-                        Self::collect_comprehension_targets_in_expr(
-                            &item.context_expr,
-                            assigned,
-                        );
+                        Self::collect_comprehension_targets_in_expr(&item.context_expr, assigned);
                         if let Some(var) = &item.optional_vars {
                             Self::collect_comprehension_targets_in_expr(var, assigned);
                         }
@@ -385,7 +382,10 @@ impl Compiler {
         }
     }
 
-    pub(crate) fn collect_comprehension_targets_in_expr(expr: &Expr, assigned: &mut HashSet<String>) {
+    pub(crate) fn collect_comprehension_targets_in_expr(
+        expr: &Expr,
+        assigned: &mut HashSet<String>,
+    ) {
         match expr {
             Expr::Lambda { .. } => {
                 // Own separate scope.
@@ -1560,7 +1560,13 @@ impl Compiler {
                 );
             }
             Expr::Yield(Some(e)) => {
-                Self::collect_nested_refs_in_expr(e, local_names, global_names, nonlocal_names, refs);
+                Self::collect_nested_refs_in_expr(
+                    e,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
             }
             Expr::IfExp { test, body, orelse } => {
                 for e in [test, body, orelse] {
@@ -1818,5 +1824,4 @@ impl Compiler {
         }
         (globals, nonlocals)
     }
-
 }

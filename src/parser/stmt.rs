@@ -10,7 +10,12 @@ use super::Parser;
 fn has_line_col_prefix(msg: &str) -> bool {
     msg.strip_prefix('L')
         .and_then(|rest| rest.split_once(':'))
-        .map(|(ln, rest)| ln.parse::<i64>().is_ok() && rest.split_once(':').is_some_and(|(col, _)| col.parse::<i64>().is_ok()))
+        .map(|(ln, rest)| {
+            ln.parse::<i64>().is_ok()
+                && rest
+                    .split_once(':')
+                    .is_some_and(|(col, _)| col.parse::<i64>().is_ok())
+        })
         .unwrap_or(false)
 }
 
@@ -277,10 +282,7 @@ impl Parser {
                 // `x = *a` without trailing comma is a bare starred
                 // expression on the RHS — CPython rejects it with
                 // "can't use starred expression here".
-                if elts.len() == 1
-                    && matches!(&elts[0], Expr::Starred(_))
-                    && !rhs_had_comma
-                {
+                if elts.len() == 1 && matches!(&elts[0], Expr::Starred(_)) && !rhs_had_comma {
                     return Err("can't use starred expression here".to_string());
                 }
                 Expr::Tuple(elts)
@@ -333,10 +335,7 @@ impl Parser {
                             break;
                         }
                     }
-                    if elts.len() == 1
-                        && matches!(&elts[0], Expr::Starred(_))
-                        && !rhs_had_comma
-                    {
+                    if elts.len() == 1 && matches!(&elts[0], Expr::Starred(_)) && !rhs_had_comma {
                         return Err("can't use starred expression here".to_string());
                     }
                     Expr::Tuple(elts)
@@ -404,21 +403,21 @@ impl Parser {
             let mut value = self.parse_conditional_expr()?;
             // Augmented assignment with tuple RHS: fds += r, w
             if self.at(&Token::Comma) {
-                    let mut elts = vec![value];
-                    while self.eat(&Token::Comma) {
-                        if self.at(&Token::Newline)
-                            || self.at(&Token::Semicolon)
-                            || self.at(&Token::EndOfFile)
-                        {
-                            break;
-                        }
-                        if self.at(&Token::Star) {
-                            self.next();
-                            elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
-                        } else {
-                            elts.push(self.parse_conditional_expr()?);
-                        }
+                let mut elts = vec![value];
+                while self.eat(&Token::Comma) {
+                    if self.at(&Token::Newline)
+                        || self.at(&Token::Semicolon)
+                        || self.at(&Token::EndOfFile)
+                    {
+                        break;
                     }
+                    if self.at(&Token::Star) {
+                        self.next();
+                        elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                    } else {
+                        elts.push(self.parse_conditional_expr()?);
+                    }
+                }
                 value = Expr::Tuple(elts);
             }
             let _ = self.expect_newline_or_eof();
@@ -943,7 +942,10 @@ impl Parser {
         self.finish_block(stmts)
     }
 
-    pub(crate) fn parse_block_indented(&mut self, mut stmts: Vec<Stmt>) -> Result<Vec<Stmt>, String> {
+    pub(crate) fn parse_block_indented(
+        &mut self,
+        mut stmts: Vec<Stmt>,
+    ) -> Result<Vec<Stmt>, String> {
         loop {
             match &self.current {
                 Token::Dedent => {
@@ -978,6 +980,4 @@ impl Parser {
     }
 
     // ---- Expressions ----
-
-
 }

@@ -179,9 +179,7 @@ impl Parser {
                             // `(*x for ...)` — CPython's `invalid_group` rule
                             // rejects this with "cannot use starred expression here".
                             if self.at(&Token::For) || self.at(&Token::Async) {
-                                return Err(
-                                    "cannot use starred expression here".to_string(),
-                                );
+                                return Err("cannot use starred expression here".to_string());
                             }
                         } else {
                             let e = self.parse_expr()?;
@@ -222,13 +220,8 @@ impl Parser {
                     // `(*x)` without trailing comma is a parenthesized
                     // starred expression — CPython's `invalid_group` rule
                     // rejects it with "cannot use starred expression here".
-                    if elts.len() == 1
-                        && matches!(&elts[0], Expr::Starred(_))
-                        && !had_comma
-                    {
-                        return Err(
-                            "cannot use starred expression here".to_string()
-                        );
+                    if elts.len() == 1 && matches!(&elts[0], Expr::Starred(_)) && !had_comma {
+                        return Err("cannot use starred expression here".to_string());
                     }
                     Expr::Tuple(elts)
                 } else if self.peek() == &Token::Comma
@@ -466,7 +459,7 @@ impl Parser {
                         // dict unpacking in dict comprehensions.
                         if self.at(&Token::For) || self.at(&Token::Async) {
                             return Err(
-                                "dict unpacking cannot be used in dict comprehension".to_string(),
+                                "dict unpacking cannot be used in dict comprehension".to_string()
                             );
                         }
                         keys.push(None);
@@ -548,7 +541,10 @@ impl Parser {
                                 // starred expressions in comprehensions.
                                 if let Some(last) = values.last() {
                                     if matches!(last, Expr::Starred(_)) {
-                                        return Err("iterable unpacking cannot be used in comprehension".to_string());
+                                        return Err(
+                                            "iterable unpacking cannot be used in comprehension"
+                                                .to_string(),
+                                        );
                                     }
                                 }
                                 let target = self.parse_for_target()?;
@@ -693,15 +689,17 @@ impl Parser {
                                 if let Ok(Expr::FString(inner)) = nested_parser.parse_expr() {
                                     format_spec = Some(Box::new(Expr::FString(inner)));
                                 } else {
-                                    format_spec =
-                                        Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
+                                    format_spec = Some(Box::new(Expr::Constant(Constant::String(
+                                        spec.into(),
+                                    ))));
                                 }
                             } else {
                                 format_spec =
                                     Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
                             }
                         } else {
-                            format_spec = Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
+                            format_spec =
+                                Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
                         }
                     }
                     parts.push(FStringPart::Expr {
@@ -760,15 +758,17 @@ impl Parser {
                                 if let Ok(Expr::FString(inner)) = nested_parser.parse_expr() {
                                     format_spec = Some(Box::new(Expr::FString(inner)));
                                 } else {
-                                    format_spec =
-                                        Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
+                                    format_spec = Some(Box::new(Expr::Constant(Constant::String(
+                                        spec.into(),
+                                    ))));
                                 }
                             } else {
                                 format_spec =
                                     Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
                             }
                         } else {
-                            format_spec = Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
+                            format_spec =
+                                Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
                         }
                     }
                     parts.push(FStringPart::Expr {
@@ -969,5 +969,4 @@ impl Parser {
             Ok(Expr::Yield(expr))
         }
     }
-
 }

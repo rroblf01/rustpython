@@ -1,5 +1,5 @@
-use super::{Lexer, Token};
 use super::unicode_name_to_char;
+use super::{Lexer, Token};
 use crate::object::pystring::PyStr;
 
 /// Encode a Unicode codepoint (including surrogates) as WTF-8 bytes.

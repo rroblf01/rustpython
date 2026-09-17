@@ -29,7 +29,7 @@
 //! `PyObjectRef`s are tracked (matching CPython's own `gc`, which likewise
 //! never tracks plain ints/strings/etc.) — see `is_trackable`.
 
-use crate::object::{PyDict, PyError, PyObject, PyObjectRef, PySet, ObjectAccess};
+use crate::object::{ObjectAccess, PyDict, PyError, PyObject, PyObjectRef, PySet};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
@@ -133,7 +133,6 @@ pub fn stats() -> (usize, usize) {
     LAST_STATS.with(Cell::get)
 }
 
-
 /// Called from PyObjectRef::new for every fresh Instance: if the instance's
 /// type defines __del__, retain a strong reference in FINALIZERS so the
 /// finalizer can run later even after user code drops its references.
@@ -162,8 +161,9 @@ pub fn maybe_register_finalizer(rc: &Rc<RefCell<PyObject>>) {
             let b = rc.try_borrow().ok();
             let found = match b {
                 Some(b) => match &*b {
-                    PyObject::Instance { typ, .. } =>
-                        crate::object::lookup_dunder_via_mro(typ, "__del__").is_some(),
+                    PyObject::Instance { typ, .. } => {
+                        crate::object::lookup_dunder_via_mro(typ, "__del__").is_some()
+                    }
                     _ => false,
                 },
                 None => false,
@@ -174,7 +174,9 @@ pub fn maybe_register_finalizer(rc: &Rc<RefCell<PyObject>>) {
         has
     });
     if has_del {
-        if std::env::var("RPY_DBG_UR").is_ok() { eprintln!("finalizer REGISTERED"); }
+        if std::env::var("RPY_DBG_UR").is_ok() {
+            eprintln!("finalizer REGISTERED");
+        }
         FINALIZERS.with(|q| q.borrow_mut().push(rc.clone()));
     }
 }
@@ -194,8 +196,13 @@ pub fn drain_finalizers() {
                 .position(|rc| {
                     let sc = Rc::strong_count(rc);
                     if std::env::var("RPY_DBG_UR").is_ok() {
-                        eprintln!("drain cand strong={} type={}", sc,
-                            rc.try_borrow().map(|b| b.type_name().to_string()).unwrap_or_default());
+                        eprintln!(
+                            "drain cand strong={} type={}",
+                            sc,
+                            rc.try_borrow()
+                                .map(|b| b.type_name().to_string())
+                                .unwrap_or_default()
+                        );
                     }
                     sc == 1 && !FINALIZED.with(|f| f.borrow().contains(&Rc::as_ptr(rc)))
                 })
@@ -225,15 +232,10 @@ fn run_finalizer(rc: &Rc<RefCell<PyObject>>) {
             Err(_) => return,
         };
         match &*borrowed {
-            PyObject::Instance { typ, .. } => {
-                match lookup_dunder_via_mro(typ, "__del__") {
-                    Some(f) => (
-                        f,
-                        crate::object::PyObjectRef::Mut(rc.clone()),
-                    ),
-                    None => return,
-                }
-            }
+            PyObject::Instance { typ, .. } => match lookup_dunder_via_mro(typ, "__del__") {
+                Some(f) => (f, crate::object::PyObjectRef::Mut(rc.clone())),
+                None => return,
+            },
             _ => return,
         }
     };
@@ -258,8 +260,6 @@ thread_local! {
         RefCell::new(Vec::new());
     static FINALIZED_LOCKED: std::cell::Cell<()> = const { std::cell::Cell::new(()) };
 }
-
-
 
 fn extract_rc(r: &PyObjectRef) -> Option<Rc<RefCell<PyObject>>> {
     match r {
@@ -539,32 +539,63 @@ pub fn collect() -> usize {
         let mut pos = 0;
         let mut neg = 0;
         for &r in &gc_refs {
-            if r == 0 { zero += 1; } else if r > 0 { pos += 1; } else { neg += 1; }
+            if r == 0 {
+                zero += 1;
+            } else if r > 0 {
+                pos += 1;
+            } else {
+                neg += 1;
+            }
         }
         eprintln!(
             "cycle_gc: post-trial: tracked={} seeds={} zero={} neg={}",
-            live_rcs.len(), pos, zero, neg
+            live_rcs.len(),
+            pos,
+            zero,
+            neg
         );
         // Print zero-ref objects and their types
         for (i, rc) in live_rcs.iter().enumerate() {
             if gc_refs[i] == 0 {
-                let name = rc.try_borrow().map(|b| b.type_name().to_string()).unwrap_or("?".into());
+                let name = rc
+                    .try_borrow()
+                    .map(|b| b.type_name().to_string())
+                    .unwrap_or("?".into());
                 let sc = Rc::strong_count(rc);
-                eprintln!("  zero[{}] {} strong={} ptr={:?}", i, name, sc, Rc::as_ptr(rc));
+                eprintln!(
+                    "  zero[{}] {} strong={} ptr={:?}",
+                    i,
+                    name,
+                    sc,
+                    Rc::as_ptr(rc)
+                );
             }
         }
         // Also check interesting seed types
         for (i, rc) in live_rcs.iter().enumerate() {
             if gc_refs[i] > 0 {
-                let name = rc.try_borrow().map(|b| b.type_name().to_string()).unwrap_or("?".into());
+                let name = rc
+                    .try_borrow()
+                    .map(|b| b.type_name().to_string())
+                    .unwrap_or("?".into());
                 if matches!(name.as_str(), "instance" | "slice" | "list" | "dict") {
                     let sc = Rc::strong_count(rc);
-                    eprintln!("  SEED[{}] {} strong={} gc_refs={} ptr={:?}", i, name, sc, gc_refs[i], Rc::as_ptr(rc));
+                    eprintln!(
+                        "  SEED[{}] {} strong={} gc_refs={} ptr={:?}",
+                        i,
+                        name,
+                        sc,
+                        gc_refs[i],
+                        Rc::as_ptr(rc)
+                    );
                 }
             }
         }
         // Reverse map: which tracked objects hold refs to each small-gc_refs seed?
-        if std::env::var("RPY_DEBUG_GC").map(|v| v == "2").unwrap_or(false) {
+        if std::env::var("RPY_DEBUG_GC")
+            .map(|v| v == "2")
+            .unwrap_or(false)
+        {
             let mut rev: HashMap<usize, Vec<usize>> = HashMap::new();
             for (i, rc) in live_rcs.iter().enumerate() {
                 scratch.clear();
@@ -581,14 +612,29 @@ pub fn collect() -> usize {
             }
             for (i, rc) in live_rcs.iter().enumerate() {
                 if gc_refs[i] >= 0 && gc_refs[i] <= 2 {
-                    let name = rc.try_borrow().map(|b| b.type_name().to_string()).unwrap_or("?".into());
+                    let name = rc
+                        .try_borrow()
+                        .map(|b| b.type_name().to_string())
+                        .unwrap_or("?".into());
                     let holders = rev.get(&i).cloned().unwrap_or_default();
-                    let hnames: Vec<String> = holders.iter().map(|&h| {
-                        let hn = live_rcs[h].try_borrow().map(|b| b.type_name().to_string()).unwrap_or("?".into());
-                        format!("{}[{}](gc={})", hn, h, gc_refs[h])
-                    }).collect();
-                    eprintln!("  REV[{}] {} strong={} gc={} held-by: {}", i, name,
-                              Rc::strong_count(rc), gc_refs[i], hnames.join(", "));
+                    let hnames: Vec<String> = holders
+                        .iter()
+                        .map(|&h| {
+                            let hn = live_rcs[h]
+                                .try_borrow()
+                                .map(|b| b.type_name().to_string())
+                                .unwrap_or("?".into());
+                            format!("{}[{}](gc={})", hn, h, gc_refs[h])
+                        })
+                        .collect();
+                    eprintln!(
+                        "  REV[{}] {} strong={} gc={} held-by: {}",
+                        i,
+                        name,
+                        Rc::strong_count(rc),
+                        gc_refs[i],
+                        hnames.join(", ")
+                    );
                 }
             }
         }
@@ -647,7 +693,9 @@ pub fn collect() -> usize {
     if std::env::var("RPY_DEBUG_GC").is_ok() {
         eprintln!(
             "cycle_gc: tracked={} collected={} marked_but_zero={}",
-            live_rcs.len(), collected, marked_but_zero
+            live_rcs.len(),
+            collected,
+            marked_but_zero
         );
     }
     collected
@@ -675,7 +723,11 @@ mod tests {
         let lst = list_self_cycle();
         drop(lst);
         let collected = collect();
-        assert!(collected >= 1, "self-cycle list must be collected, got {}", collected);
+        assert!(
+            collected >= 1,
+            "self-cycle list must be collected, got {}",
+            collected
+        );
     }
 
     #[test]
@@ -687,16 +739,24 @@ mod tests {
             let k = crate::object::py_str("other");
             if let PyObjectRef::Mut(rc) = &d1 {
                 let mut b = rc.try_borrow_mut().unwrap();
-                if let PyObject::Dict(dd) = &mut *b { dd.set(k.clone(), d2.clone()).unwrap(); }
+                if let PyObject::Dict(dd) = &mut *b {
+                    dd.set(k.clone(), d2.clone()).unwrap();
+                }
             }
             if let PyObjectRef::Mut(rc) = &d2 {
                 let mut b = rc.try_borrow_mut().unwrap();
-                if let PyObject::Dict(dd) = &mut *b { dd.set(k, d1.clone()).unwrap(); }
+                if let PyObject::Dict(dd) = &mut *b {
+                    dd.set(k, d1.clone()).unwrap();
+                }
             }
         }
         drop(d1);
         drop(d2);
         let collected = collect();
-        assert!(collected >= 2, "mutual dict cycle must be collected, got {}", collected);
+        assert!(
+            collected >= 2,
+            "mutual dict cycle must be collected, got {}",
+            collected
+        );
     }
 }

@@ -1,7 +1,7 @@
+use super::scope::ScopeType;
+use super::Compiler;
 use crate::ast::*;
 use crate::bytecode::*;
-use super::Compiler;
-use super::scope::ScopeType;
 
 impl Compiler {
     pub(crate) fn compile_expr(&mut self, expr: &Expr) -> Result<(), String> {
@@ -212,10 +212,20 @@ impl Compiler {
                         CmpOp::GtE => 3,
                         CmpOp::Is => {
                             // Emit SyntaxWarning for "is" with literal (PEP 8)
-                            let actual_left: &Expr = if i == 0 { left } else { &comparators[i - 1] };
-                            let is_none_or_bool = |e: &Expr| matches!(e, Expr::Constant(Constant::None) | Expr::Constant(Constant::Bool(_)) | Expr::Constant(Constant::Ellipsis));
-                            let left_is_lit = matches!(actual_left, Expr::Constant(_)) && !is_none_or_bool(actual_left);
-                            let right_is_lit = matches!(right, Expr::Constant(_)) && !is_none_or_bool(right);
+                            let actual_left: &Expr =
+                                if i == 0 { left } else { &comparators[i - 1] };
+                            let is_none_or_bool = |e: &Expr| {
+                                matches!(
+                                    e,
+                                    Expr::Constant(Constant::None)
+                                        | Expr::Constant(Constant::Bool(_))
+                                        | Expr::Constant(Constant::Ellipsis)
+                                )
+                            };
+                            let left_is_lit = matches!(actual_left, Expr::Constant(_))
+                                && !is_none_or_bool(actual_left);
+                            let right_is_lit =
+                                matches!(right, Expr::Constant(_)) && !is_none_or_bool(right);
                             if left_is_lit || right_is_lit {
                                 let lit_expr = if left_is_lit { actual_left } else { right };
                                 let typ_str = match lit_expr {
@@ -229,7 +239,10 @@ impl Compiler {
                                     Expr::Constant(Constant::Ellipsis) => "ellipsis",
                                     _ => "literal",
                                 };
-                                let msg = format!("\"is\" with '{}' literal. Did you mean \"==\"?", typ_str);
+                                let msg = format!(
+                                    "\"is\" with '{}' literal. Did you mean \"==\"?",
+                                    typ_str
+                                );
                                 if crate::modules::warning_is_error_mode() {
                                     return Err(msg);
                                 } else {
@@ -248,10 +261,20 @@ impl Compiler {
                             continue;
                         }
                         CmpOp::IsNot => {
-                            let actual_left: &Expr = if i == 0 { left } else { &comparators[i - 1] };
-                            let is_none_or_bool = |e: &Expr| matches!(e, Expr::Constant(Constant::None) | Expr::Constant(Constant::Bool(_)) | Expr::Constant(Constant::Ellipsis));
-                            let left_is_lit = matches!(actual_left, Expr::Constant(_)) && !is_none_or_bool(actual_left);
-                            let right_is_lit = matches!(right, Expr::Constant(_)) && !is_none_or_bool(right);
+                            let actual_left: &Expr =
+                                if i == 0 { left } else { &comparators[i - 1] };
+                            let is_none_or_bool = |e: &Expr| {
+                                matches!(
+                                    e,
+                                    Expr::Constant(Constant::None)
+                                        | Expr::Constant(Constant::Bool(_))
+                                        | Expr::Constant(Constant::Ellipsis)
+                                )
+                            };
+                            let left_is_lit = matches!(actual_left, Expr::Constant(_))
+                                && !is_none_or_bool(actual_left);
+                            let right_is_lit =
+                                matches!(right, Expr::Constant(_)) && !is_none_or_bool(right);
                             if left_is_lit || right_is_lit {
                                 let lit_expr = if left_is_lit { actual_left } else { right };
                                 let typ_str = match lit_expr {
@@ -265,7 +288,10 @@ impl Compiler {
                                     Expr::Constant(Constant::Ellipsis) => "ellipsis",
                                     _ => "literal",
                                 };
-                                let msg = format!("\"is\" with '{}' literal. Did you mean \"==\"?", typ_str);
+                                let msg = format!(
+                                    "\"is\" with '{}' literal. Did you mean \"==\"?",
+                                    typ_str
+                                );
                                 if crate::modules::warning_is_error_mode() {
                                     return Err(msg);
                                 } else {
@@ -431,8 +457,9 @@ impl Compiler {
                     // unchanged (each value compiled in source position).
                     for kw in keywords {
                         if let Some(name) = &kw.arg {
-                            let name_idx =
-                                self.get_const_index(ConstValue::String(name.clone().into())) as u32;
+                            let name_idx = self
+                                .get_const_index(ConstValue::String(name.clone().into()))
+                                as u32;
                             self.emit(Opcode::BUILD_MAP, 0);
                             self.emit(Opcode::LOAD_CONST, name_idx);
                             self.compile_expr(&kw.value)?;
@@ -780,5 +807,4 @@ impl Compiler {
         }
         Ok(())
     }
-
 }

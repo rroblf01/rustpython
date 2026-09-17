@@ -1,5 +1,5 @@
-use super::{Lexer, Token};
 use super::unicode_name_to_char;
+use super::{Lexer, Token};
 use unicode_normalization::UnicodeNormalization;
 
 impl Lexer {
@@ -131,9 +131,7 @@ impl Lexer {
                         // character, a different condition entirely).
                         // test_eof.py's test_line_continuation_EOF /
                         // test_eof_with_line_continuation both hit this.
-                        return Token::LexerError(
-                            "unexpected EOF while parsing".to_string(),
-                        );
+                        return Token::LexerError("unexpected EOF while parsing".to_string());
                     }
                     return Token::Name("\\".to_string());
                 }
@@ -529,9 +527,8 @@ impl Lexer {
             // error (e.g. dedenting to a column that was never an indent).
             let matches = self.indent_stack.iter().any(|&level| level == indent);
             if !matches {
-                self.pending_error = Some(
-                    "unindent does not match any outer indentation level".to_string(),
-                );
+                self.pending_error =
+                    Some("unindent does not match any outer indentation level".to_string());
             } else {
                 let mut dedents = Vec::new();
                 while let Some(&level) = self.indent_stack.last() {
@@ -712,7 +709,9 @@ impl Lexer {
                                         }
                                     }
                                 }
-                                Some(c @ ('\'' | '"')) if str_char == '\0' && (state == 0 || state == 2) => {
+                                Some(c @ ('\'' | '"'))
+                                    if str_char == '\0' && (state == 0 || state == 2) =>
+                                {
                                     // Detect a triple-quoted string (""" / '''):
                                     // the three quotes must all be consumed
                                     // together so the single-quote closer logic
@@ -802,18 +801,14 @@ impl Lexer {
                                     // Helper to skip whitespace/newlines
                                     let skip_ws = |idx: &mut usize| {
                                         while *idx < self.chars.len()
-                                            && matches!(
-                                                self.chars[*idx],
-                                                ' ' | '\t' | '\n' | '\r'
-                                            )
+                                            && matches!(self.chars[*idx], ' ' | '\t' | '\n' | '\r')
                                         {
                                             *idx += 1;
                                         }
                                     };
                                     skip_ws(&mut next_idx);
                                     // If comment, skip it and following whitespace
-                                    if next_idx < self.chars.len() && self.chars[next_idx] == '#'
-                                    {
+                                    if next_idx < self.chars.len() && self.chars[next_idx] == '#' {
                                         while next_idx < self.chars.len()
                                             && self.chars[next_idx] != '\n'
                                         {
@@ -829,7 +824,10 @@ impl Lexer {
                                             expr.push('=');
                                             self.advance();
                                         }
-                                        _ if matches!(next_sig, Some('}') | Some('!') | Some(':') | None) =>
+                                        _ if matches!(
+                                            next_sig,
+                                            Some('}') | Some('!') | Some(':') | None
+                                        ) =>
                                         {
                                             debug = true;
                                             // For debug, the `=` and any

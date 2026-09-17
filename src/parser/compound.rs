@@ -142,8 +142,7 @@ impl Parser {
         let mut keywords = Vec::new();
         // Duplicate literal keywords are a compile-time SyntaxError
         // (mirrors the call-args parser) — `**` splats don't count.
-        let mut seen_kw_names: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen_kw_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         if self.eat(&Token::LeftParen) {
             if !self.at(&Token::RightParen) {
                 loop {
@@ -619,5 +618,4 @@ impl Parser {
             value: Box::new(value),
         })
     }
-
 }

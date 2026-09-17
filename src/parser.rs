@@ -254,9 +254,7 @@ impl Parser {
     }
 
     // ---- Statements ----
-
 }
-
 
 /// Try to parse a source string as a single expression.
 /// Used by the REPL to detect expression statements whose value should

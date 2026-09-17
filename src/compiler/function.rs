@@ -1,8 +1,8 @@
-use crate::ast::*;
-use crate::bytecode::*;
-use super::Compiler;
 use super::scope::{PendingCleanup, ScopeType};
 use super::utils::contains_yield_in_stmts;
+use super::Compiler;
+use crate::ast::*;
+use crate::bytecode::*;
 
 impl Compiler {
     pub(crate) fn compile_function(
@@ -552,7 +552,8 @@ impl Compiler {
             let module_attr_idx = self.get_name_index("__module__") as u32;
             self.emit(Opcode::STORE_NAME, module_attr_idx);
 
-            let qualname_const_idx = self.get_const_index(ConstValue::String(qualname.clone().into())) as u32;
+            let qualname_const_idx =
+                self.get_const_index(ConstValue::String(qualname.clone().into())) as u32;
             self.emit(Opcode::LOAD_CONST, qualname_const_idx);
             let qualname_attr_idx = self.get_name_index("__qualname__") as u32;
             self.emit(Opcode::STORE_NAME, qualname_attr_idx);
@@ -659,5 +660,4 @@ impl Compiler {
         self.qual_stack.pop();
         Ok(())
     }
-
 }

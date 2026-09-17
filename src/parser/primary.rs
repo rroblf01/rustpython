@@ -411,7 +411,11 @@ impl Parser {
                         break;
                     }
                     if std::env::var("RPY_DEBUG_PEP646").is_ok() {
-                        eprintln!("DEBUG pep646 loop token {:?} at {:?}", self.current, self.lexer.get_line_col());
+                        eprintln!(
+                            "DEBUG pep646 loop token {:?} at {:?}",
+                            self.current,
+                            self.lexer.get_line_col()
+                        );
                     }
                     // Each element may itself be a slice (a:b)
                     if self.eat(&Token::Colon) {
@@ -447,7 +451,11 @@ impl Parser {
                         elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
                     } else {
                         if std::env::var("RPY_DEBUG_PEP646").is_ok() {
-                            eprintln!("DEBUG pep646 else branch token {:?} at {:?}", self.current, self.lexer.get_line_col());
+                            eprintln!(
+                                "DEBUG pep646 else branch token {:?} at {:?}",
+                                self.current,
+                                self.lexer.get_line_col()
+                            );
                         }
                         let e = self.parse_expr()?;
                         // Expression followed by : means it's a slice: 3:4
@@ -490,6 +498,4 @@ impl Parser {
             Ok(lower)
         }
     }
-
-
 }

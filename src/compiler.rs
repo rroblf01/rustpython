@@ -10,7 +10,9 @@ mod scope;
 mod stmt;
 mod utils;
 pub use scope::{LoopInfo, PendingCleanup, ScopeInfo, ScopeType};
-pub use utils::{contains_yield_in_expr, contains_yield_in_stmts, delete_error_for, stmt_has_top_level_await};
+pub use utils::{
+    contains_yield_in_expr, contains_yield_in_stmts, delete_error_for, stmt_has_top_level_await,
+};
 
 pub struct Compiler {
     code: CodeObject,
@@ -240,11 +242,15 @@ impl Compiler {
         {
             let name_idx = self.get_name_index(name) as u32;
             self.emit(Opcode::LOAD_NAME, name_idx);
-        } else if self.scope == ScopeType::Function && self.code.freevars.contains(&name.to_string()) {
+        } else if self.scope == ScopeType::Function
+            && self.code.freevars.contains(&name.to_string())
+        {
             let fv_idx = self.code.freevars.iter().position(|n| n == name).unwrap();
             let idx = self.code.cellvars.len() + fv_idx;
             self.emit(Opcode::LOAD_DEREF, idx as u32);
-        } else if self.scope == ScopeType::Function && self.code.cellvars.contains(&name.to_string()) {
+        } else if self.scope == ScopeType::Function
+            && self.code.cellvars.contains(&name.to_string())
+        {
             let idx = self.code.cellvars.iter().position(|n| n == name).unwrap() as u32;
             self.emit(Opcode::LOAD_DEREF, idx);
         } else if self.scope == ScopeType::Function {
@@ -267,10 +273,14 @@ impl Compiler {
         {
             let idx = self.get_name_index(name) as u32;
             self.emit(Opcode::STORE_NAME, idx);
-        } else if self.scope == ScopeType::Function && self.code.cellvars.contains(&name.to_string()) {
+        } else if self.scope == ScopeType::Function
+            && self.code.cellvars.contains(&name.to_string())
+        {
             let idx = self.code.cellvars.iter().position(|n| n == name).unwrap() as u32;
             self.emit(Opcode::STORE_DEREF, idx);
-        } else if self.scope == ScopeType::Function && self.code.freevars.contains(&name.to_string()) {
+        } else if self.scope == ScopeType::Function
+            && self.code.freevars.contains(&name.to_string())
+        {
             let fv_idx = self.code.freevars.iter().position(|n| n == name).unwrap();
             let idx = (self.code.cellvars.len() + fv_idx) as u32;
             self.emit(Opcode::STORE_DEREF, idx);

@@ -1,7 +1,7 @@
+use super::Compiler;
 use crate::ast::*;
 use crate::bytecode::*;
 use std::collections::HashSet;
-use super::Compiler;
 
 impl Compiler {
     pub(crate) fn compile_comprehension(
