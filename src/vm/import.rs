@@ -147,9 +147,12 @@ impl VirtualMachine {
                         let mut found_child = false;
                         'outer: for base in bases {
                             let base_trimmed = base.trim_end_matches('/');
+                            // Package (`__init__.py`) before plain module,
+                            // same rule as the top-level sys.path search
+                            // below (test_pkg.py::test_4/test_7).
                             for candidate in &[
-                                format!("{}/{}.py", base_trimmed, child),
                                 format!("{}/{}/__init__.py", base_trimmed, child),
+                                format!("{}/{}.py", base_trimmed, child),
                             ] {
                                 if let Some(source) = self.read_module_source(candidate)? {
                                     found_child = true;
@@ -307,75 +310,91 @@ impl VirtualMachine {
         let search_paths = self.get_sys_path();
         let py_name = name.replace('.', "/");
         for base in &search_paths {
-            let py_path = if base.ends_with('/') {
-                format!("{}{}.py", base, py_name)
+            // A regular package (`<name>/__init__.py`) takes precedence
+            // over a same-named plain module (`<name>.py`) in the same
+            // directory — real CPython imports `t4/__init__.py`, never
+            // `t4.py`, when both exist (real trigger:
+            // test_pkg.py::test_4, whose `t4.py` deliberately raises).
+            // Probe cheaply (stat only) and skip the plain-module read
+            // below when a package file exists; the package branch
+            // further down then handles it.
+            let init_probe = if base.ends_with('/') {
+                format!("{}{}/__init__.py", base, py_name)
             } else {
-                format!("{}/{}.py", base, py_name)
+                format!("{}/{}/__init__.py", base, py_name)
             };
-            if let Some(source) = self.read_module_source(&py_path)? {
-                let empty_mod = create_module(name, HashMap::new());
-                self.modules.insert(name.to_string(), empty_mod.clone());
-                if let Some(sys_mod) = self.modules.get("sys") {
-                    if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                        if let Some(mod_dict) = dict.get_str("modules").cloned() {
-                            // `sys.modules` is a plain `dict` — setting a KEY
-                            // needs `PyDict::set`, not `set_attribute` (which
-                            // only supports attribute-style access and always
-                            // fails, silently via the `.ok()` this replaced,
-                            // for a bare `PyObject::Dict`).
-                            if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
-                                let _ = d.set(py_str(name), empty_mod.clone());
-                            }
-                        }
-                    }
-                }
-                // CPython removes failed imports from sys.modules; without
-                // cleanup the empty stub above would make a later
-                // `import name` return a partial module instead of
-                // retrying/raising (e.g. `import bz2` without `_bz2`
-                // leaving a BZ2File-less stub that defeats
-                // import_helper.import_module's SkipTest).
-                let module = match self.exec_module_source(&source, &py_path, name) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        self.modules.remove(name);
-                        if let Some(sys_mod) = self.modules.get("sys").cloned() {
-                            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                                if let Some(mod_dict) = dict.get_str("modules").cloned() {
-                                    if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
-                                        let _ = d.remove(&py_str(name));
-                                    }
+            let has_package = std::path::Path::new(&init_probe).is_file();
+            if !has_package {
+                let py_path = if base.ends_with('/') {
+                    format!("{}{}.py", base, py_name)
+                } else {
+                    format!("{}/{}.py", base, py_name)
+                };
+                if let Some(source) = self.read_module_source(&py_path)? {
+                    let empty_mod = create_module(name, HashMap::new());
+                    self.modules.insert(name.to_string(), empty_mod.clone());
+                    if let Some(sys_mod) = self.modules.get("sys") {
+                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                            if let Some(mod_dict) = dict.get_str("modules").cloned() {
+                                // `sys.modules` is a plain `dict` — setting a KEY
+                                // needs `PyDict::set`, not `set_attribute` (which
+                                // only supports attribute-style access and always
+                                // fails, silently via the `.ok()` this replaced,
+                                // for a bare `PyObject::Dict`).
+                                if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                                    let _ = d.set(py_str(name), empty_mod.clone());
                                 }
                             }
                         }
-                        return Err(e);
                     }
-                };
-                self.modules.insert(name.to_string(), module.clone());
-                // Wire submodule into parent module namespace and update
-                // sys.modules (see the matching comment above: `set_attribute`
-                // is a no-op on a plain `dict` — use `PyDict::set`).
-                if let Some(sys_mod) = self.modules.get("sys") {
-                    if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                        if let Some(mod_dict) = dict.get_str("modules").cloned() {
-                            if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
-                                let _ = d.set(py_str(name), module.clone());
+                    // CPython removes failed imports from sys.modules; without
+                    // cleanup the empty stub above would make a later
+                    // `import name` return a partial module instead of
+                    // retrying/raising (e.g. `import bz2` without `_bz2`
+                    // leaving a BZ2File-less stub that defeats
+                    // import_helper.import_module's SkipTest).
+                    let module = match self.exec_module_source(&source, &py_path, name) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            self.modules.remove(name);
+                            if let Some(sys_mod) = self.modules.get("sys").cloned() {
+                                if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                                    if let Some(mod_dict) = dict.get_str("modules").cloned() {
+                                        if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                                            let _ = d.remove(&py_str(name));
+                                        }
+                                    }
+                                }
+                            }
+                            return Err(e);
+                        }
+                    };
+                    self.modules.insert(name.to_string(), module.clone());
+                    // Wire submodule into parent module namespace and update
+                    // sys.modules (see the matching comment above: `set_attribute`
+                    // is a no-op on a plain `dict` — use `PyDict::set`).
+                    if let Some(sys_mod) = self.modules.get("sys") {
+                        if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                            if let Some(mod_dict) = dict.get_str("modules").cloned() {
+                                if let PyObject::Dict(d) = &mut *mod_dict.borrow_mut() {
+                                    let _ = d.set(py_str(name), module.clone());
+                                }
                             }
                         }
                     }
-                }
-                // Wire submodule into parent module namespace
-                if let Some(dot_pos) = name.rfind('.') {
-                    let parent_name = name[..dot_pos].to_string();
-                    let child_name = name[dot_pos + 1..].to_string();
-                    if let Some(parent_mod) = self.modules.get(&parent_name).cloned() {
-                        if let PyObject::Module { dict, .. } = &mut *parent_mod.borrow_mut() {
-                            dict.insert_str(&child_name, module.clone());
+                    // Wire submodule into parent module namespace
+                    if let Some(dot_pos) = name.rfind('.') {
+                        let parent_name = name[..dot_pos].to_string();
+                        let child_name = name[dot_pos + 1..].to_string();
+                        if let Some(parent_mod) = self.modules.get(&parent_name).cloned() {
+                            if let PyObject::Module { dict, .. } = &mut *parent_mod.borrow_mut() {
+                                dict.insert_str(&child_name, module.clone());
+                            }
                         }
                     }
+                    return Ok(module);
                 }
-                return Ok(module);
-            }
+            } // end `if !has_package` — packages take precedence (see above)
             let init_path = if base.ends_with('/') {
                 format!("{}{}/__init__.py", base, py_name)
             } else {

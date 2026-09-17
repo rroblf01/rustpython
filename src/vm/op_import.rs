@@ -223,6 +223,9 @@ impl VirtualMachine {
                             .collect();
                         drop(module_borrowed);
                         let live_module = self.frames[fi].live_module.clone();
+                        // Live exec-locals mapping: star-imports bind into
+                        // it (like STORE_NAME does), not into frame globals.
+                        let has_exec_locals = self.frames[fi].exec_locals.is_some();
                         for (import_name, val) in &imports {
                             if let Some(order) = self.frames[fi].name_order.clone() {
                                 let mut order = order.borrow_mut();
@@ -234,6 +237,15 @@ impl VirtualMachine {
                                 if let PyObject::Module { dict, .. } = &mut *lm.borrow_mut() {
                                     dict.insert_str(import_name, val.clone());
                                 }
+                            }
+                            if has_exec_locals
+                                && crate::vm::helpers::frame_exec_local_set(
+                                    &self.frames[fi],
+                                    import_name,
+                                    val.clone(),
+                                )
+                            {
+                                continue;
                             }
                             self.frames[fi]
                                 .globals
@@ -401,12 +413,64 @@ impl VirtualMachine {
                         _ => return Err(PyError::runtime_error("IMPORT_STAR on non-module")),
                     }
                 };
+                // Submodule fallback, mirroring IMPORT_FROM's explicit-name
+                // path: a listed-but-absent name on a PACKAGE may be an
+                // unimported submodule (`from t6 import *` with
+                // `__all__ = ['spam', ...]` imports t6.spam — real trigger:
+                // test_pkg.py::test_6). Importing it also sets it as an
+                // attribute on the parent, which later `dir(parent)`
+                // introspection observes.
+                let (mod_name, is_pkg, missing): (String, bool, Vec<String>) = {
+                    let obj = module.borrow();
+                    match &*obj {
+                        PyObject::Module { dict, name: mn } => {
+                            let has_path = dict.get_str("__path__").is_some();
+                            let miss: Vec<String> = names
+                                .iter()
+                                .filter(|n| dict.get_str(n).is_none())
+                                .cloned()
+                                .collect();
+                            (mn.clone(), has_path, miss)
+                        }
+                        _ => return Err(PyError::runtime_error("IMPORT_STAR on non-module")),
+                    }
+                };
+                if is_pkg {
+                    for n in &missing {
+                        let sub = format!("{}.{}", mod_name, n);
+                        match self.import_module_from_file(&sub) {
+                            Ok(submod) => {
+                                self.modules.insert(sub.clone(), submod.clone());
+                                if let PyObject::Module { dict, .. } = &mut *module.borrow_mut() {
+                                    dict.insert_str(n, submod);
+                                }
+                            }
+                            Err(e) => {
+                                let is_module_not_found = matches!(&e, PyError::ImportError(_))
+                                    || matches!(&e, PyError::Exception(typ, _) if typ == "ModuleNotFoundError");
+                                if is_module_not_found {
+                                    return Err(PyError::ImportError(format!(
+                                        "cannot import name '{}' from '{}'",
+                                        n, mod_name
+                                    )));
+                                }
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
                 let mut g = self.frames[fi].globals.borrow_mut();
                 for n in &names {
                     let obj = module.borrow();
                     if let PyObject::Module { dict, .. } = &*obj {
                         if let Some(v) = dict.get(&interner::intern(n)).cloned() {
-                            g.insert(interner::intern(n), v);
+                            g.insert(interner::intern(n), v.clone());
+                            // Live exec-locals mapping: star-imports bind
+                            // into it as well (like STORE_NAME does), so
+                            // bare dir() and later reads see them.
+                            if self.frames[fi].exec_locals.is_some() {
+                                crate::vm::helpers::frame_exec_local_set(&self.frames[fi], n, v);
+                            }
                         }
                     }
                 }
