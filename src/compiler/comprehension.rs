@@ -316,7 +316,16 @@ impl Compiler {
                 let false_idx = self.get_const_index(ConstValue::Bool(false)) as u32;
                 self.emit(Opcode::LOAD_CONST, false_idx);
                 self.emit(Opcode::STORE_FAST, had_idx);
-                self.emit(Opcode::POP_EXCEPT, 1);
+                // arg=0 (not 1): balances the PUSH_EXC_INFO,0 above by
+                // popping the context-stack entry it pushed. The arg=1
+                // form used here previously never popped, leaking one
+                // exc_context_stack entry per fresh-variable
+                // comprehension evaluation — every later handled
+                // exception paid an O(n) retain-scan over the leaked
+                // entries (quadratic slowdown: 200k comprehensions took
+                // 40s) and sys.exc_info() leaked the internal
+                // NameError. Matches plain try/except's balanced pair.
+                self.emit(Opcode::POP_EXCEPT, 0);
                 self.fix_label(end);
                 saved_indices.push((name.clone(), idx, CompSaveKind::Plain { had_idx }));
             } else {
@@ -332,7 +341,9 @@ impl Compiler {
                 let none_idx = self.get_const_index(ConstValue::None) as u32;
                 self.emit(Opcode::LOAD_CONST, none_idx);
                 self.emit(Opcode::STORE_FAST, idx);
-                self.emit(Opcode::POP_EXCEPT, 1);
+                // arg=0: see Plain-arm comment above — balances the
+                // PUSH_EXC_INFO,0 instead of leaking a context entry.
+                self.emit(Opcode::POP_EXCEPT, 0);
                 self.fix_label(end);
                 saved_indices.push((name.clone(), idx, CompSaveKind::Legacy));
             }
