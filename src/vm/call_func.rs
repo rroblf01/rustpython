@@ -718,34 +718,39 @@ impl VirtualMachine {
                 let native_kind = dict
                     .get_str(crate::object::NATIVE_BASE_MARKER)
                     .map(|v| v.str());
-                let init_func = dict.get_str("__init__").cloned().or_else(|| {
-                    for base in mro.iter().skip(1) {
-                        if let PyObject::Type {
-                            name: base_name,
-                            dict: base_dict,
-                            ..
-                        } = &*base.borrow()
-                        {
-                            // Every class implicitly inherits from `object`,
-                            // whose own __init__ is a universal no-op. For a
-                            // class that also has a native base (e.g.
-                            // `class SafeString(str, SafeData): ...`), that
-                            // no-op would otherwise always be found first and
-                            // preempt real native construction — skip it here
-                            // so synthesize_native_init below gets a chance
-                            // unless something more specific actually overrides
-                            // __init__.
-                            if native_kind.is_some() && base_name == "object" {
-                                continue;
-                            }
-                            if let Some(val) = base_dict.get_str("__init__") {
-                                return Some(val.clone());
+                let (init_func, init_from_object) = match dict.get_str("__init__").cloned() {
+                    Some(f) => (Some(f), false),
+                    None => {
+                        let mut found = (None, false);
+                        for base in mro.iter().skip(1) {
+                            if let PyObject::Type {
+                                name: base_name,
+                                dict: base_dict,
+                                ..
+                            } = &*base.borrow()
+                            {
+                                // Every class implicitly inherits from `object`,
+                                // whose own __init__ is a universal no-op. For a
+                                // class that also has a native base (e.g.
+                                // `class SafeString(str, SafeData): ...`), that
+                                // no-op would otherwise always be found first and
+                                // preempt real native construction — skip it here
+                                // so synthesize_native_init below gets a chance
+                                // unless something more specific actually overrides
+                                // __init__.
+                                if native_kind.is_some() && base_name == "object" {
+                                    continue;
+                                }
+                                if let Some(val) = base_dict.get_str("__init__") {
+                                    found = (Some(val.clone()), base_name == "object");
+                                    break;
+                                }
                             }
                         }
+                        found
                     }
-                    None
-                });
-                Some((native_kind, init_func))
+                };
+                Some((native_kind, init_func, init_from_object))
             } else {
                 None
             };
@@ -757,7 +762,7 @@ impl VirtualMachine {
             // widespread real-world pattern, not specific to any one
             // library) — a STORE_ATTR on `callable` while this function still
             // held it borrowed here was a genuine double-borrow panic.
-            if let Some((native_kind, init_func)) = type_construct_info {
+            if let Some((native_kind, init_func, init_from_object)) = type_construct_info {
                 // A user-defined `__new__` (a Python Function, not the native
                 // float/int/... `__new__`) must be called and its result
                 // returned (class Foo3(float): def __new__(...): return
@@ -846,9 +851,37 @@ impl VirtualMachine {
                     drop(r);
                     if is_instance_of_class && init_func.is_some() {
                         let init_fn = init_func.clone().unwrap();
-                        // Skip object.__init__ (universal no-op for native types)
-                        let skip = matches!(&*init_fn.borrow(), PyObject::BuiltinFunction { name, .. } if name == "__init__");
-                        if !skip {
+                        // Skip only object.__init__ itself (universal no-op,
+                        // identified by WHERE it was found, not by name): a
+                        // blanket name-based skip also swallowed real native
+                        // initializers that happen to be BuiltinFunctions
+                        // named "__init__" (e.g. io.TextIOWrapper.__init__,
+                        // which installs _raw/_closed/encoding — without it
+                        // every Python subclass instance silently missed its
+                        // native state and fileno()/isatty() raised
+                        // AttributeError instead of OSError).
+                        //
+                        // One more skip: the shared `native_base_init_builtin`
+                        // stand-in (used for immutable natives like complex/
+                        // str/int that define no real __init__ in CPython)
+                        // when the class defines a custom `__new__` — that
+                        // `__new__` already consumed the constructor args, and
+                        // re-running them through the stand-in re-validates
+                        // them as init args (e.g. `Number(3.14, prec=6)` died
+                        // with "complex() second argument must be a number,
+                        // not 'dict'"). Real CPython ignores excess init args
+                        // exactly in this case. Gated on this one function
+                        // (via fn identity), NOT on custom-`__new__` alone,
+                        // so real initializers (list/dict/deque/IO/
+                        // BaseException's args-storing one) still run.
+                        let is_standin_init = matches!(&*init_fn.borrow(),
+                        PyObject::BuiltinFunction { func, .. }
+                        if std::ptr::fn_addr_eq(
+                            *func,
+                            crate::object::native_base_init_builtin
+                                as crate::object::BuiltinFunc,
+                        ));
+                        if !init_from_object && !is_standin_init {
                             let mut init_args = args.clone();
                             init_args.insert(0, result.clone());
                             self.call_function(init_fn, init_args, keywords.clone())?;

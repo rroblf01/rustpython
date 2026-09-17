@@ -8,6 +8,43 @@ use std::rc::Rc;
 mod buffered;
 use self::buffered::register_buffered_classes;
 
+/// Set a freshly built native type's MRO to itself followed by its base's
+/// linearization (builders can't name the class inside its own
+/// initializer). Hand-built MROs here used to contain only the base —
+/// so `TextIOWrapper.__mro__` was `['TextIOBase']` and any Python
+/// subclass got an inverted MRO (`[S, TextIOBase, TextIOWrapper]`),
+/// making `super().__init__` resolve to the wrong initializer and
+/// silently skip real native state setup (real trigger: argparse's
+/// `StdIOBuffer(TextIOWrapper)`, whose fileno()/isatty() then raised
+/// AttributeError instead of OSError). Fix bottom-up so each base's
+/// own MRO is already correct when a derived class chains onto it.
+pub(crate) fn fixup_self_mro(cls: &PyObjectRef) {
+    let chained: Vec<PyObjectRef> = {
+        let borrowed = cls.borrow();
+        if let PyObject::Type { bases, .. } = &*borrowed {
+            let mut m = Vec::with_capacity(bases.len() + 1);
+            m.push(cls.clone());
+            for b in bases {
+                if let PyObject::Type { mro: base_mro, .. } = &*b.borrow() {
+                    for entry in base_mro {
+                        if !m.iter().any(|e| e.is(entry)) {
+                            m.push(entry.clone());
+                        }
+                    }
+                } else if !m.iter().any(|e| e.is(b)) {
+                    m.push(b.clone());
+                }
+            }
+            m
+        } else {
+            return;
+        }
+    };
+    if let PyObject::Type { mro, .. } = &mut *cls.borrow_mut() {
+        *mro = chained;
+    }
+}
+
 /// `IOBase.__exit__` marker — real logic lives in `iobase_exit_with_vm`
 /// below and is dispatched to from `src/vm/call.rs` via `fn_addr_eq`
 /// (needs a live `&mut VirtualMachine` to invoke `self.close()`, which the
@@ -619,14 +656,18 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             }),
         );
 
-        Ok(PyObjectRef::new(PyObject::Instance {
-            typ: PyObjectRef::new(PyObject::Type {
+        Ok(PyObjectRef::new({
+            let typ = PyObjectRef::new(PyObject::Type {
                 name: "BytesIO".to_string(),
                 dict: Box::new(str_map_to_typedict(type_dict)),
                 bases: vec![],
                 mro: vec![],
-            }),
-            dict: AttrMap::new(),
+            });
+            fixup_self_mro(&typ);
+            PyObject::Instance {
+                typ,
+                dict: AttrMap::new(),
+            }
         }))
     });
 
@@ -768,6 +809,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         bases: vec![],
         mro: vec![],
     });
+    fixup_self_mro(&iobase_cls);
     d.insert_str("IOBase", iobase_cls.clone());
     d.insert_str("_IOBase", iobase_cls.clone());
 
@@ -822,6 +864,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         bases: vec![iobase_cls.clone()],
         mro: vec![iobase_cls.clone()],
     });
+    fixup_self_mro(&raw_cls);
     d.insert_str("RawIOBase", raw_cls.clone());
     d.insert_str("_RawIOBase", raw_cls.clone());
 
@@ -876,6 +919,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         bases: vec![iobase_cls.clone()],
         mro: vec![iobase_cls.clone()],
     });
+    fixup_self_mro(&buf_cls);
     d.insert_str("BufferedIOBase", buf_cls.clone());
     d.insert_str("_BufferedIOBase", buf_cls.clone());
 
@@ -923,6 +967,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         bases: vec![iobase_cls.clone()],
         mro: vec![iobase_cls.clone()],
     });
+    fixup_self_mro(&text_cls);
     d.insert_str("TextIOBase", text_cls.clone());
     d.insert_str("_TextIOBase", text_cls.clone());
 
@@ -1286,14 +1331,18 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 }),
             );
 
-            Ok(PyObjectRef::new(PyObject::Instance {
-                typ: PyObjectRef::new(PyObject::Type {
+            Ok(PyObjectRef::new({
+                let typ = PyObjectRef::new(PyObject::Type {
                     name: "StringIO".to_string(),
                     dict: Box::new(str_map_to_typedict(type_dict)),
                     bases: vec![text_cls.clone()],
                     mro: vec![text_cls.clone()],
-                }),
-                dict: AttrMap::new(),
+                });
+                fixup_self_mro(&typ);
+                PyObject::Instance {
+                    typ,
+                    dict: AttrMap::new(),
+                }
             }))
         });
     d.insert_str(
@@ -1549,6 +1598,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         bases: vec![text_cls_tiw.clone()],
         mro: vec![text_cls_tiw.clone()],
     });
+    fixup_self_mro(&tiw_cls);
     d.insert_str("TextIOWrapper", tiw_cls);
 
     d.insert_str("_WindowsConsoleIO", py_str("_WindowsConsoleIO"));
