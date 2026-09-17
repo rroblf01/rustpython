@@ -934,7 +934,6 @@ class RawConfigParser(MutableMapping):
     def clear(self):
         for sec in list(self.sections()):
             self.remove_section(sec)
-        self._defaults.clear()
 
     def keys(self):
         return iter(self.sections())
@@ -1359,20 +1358,6 @@ class SectionProxy(MutableMapping):
             return self._parser.options(self._name)
         else:
             return self._parser.defaults()
-
-    def keys(self):
-        return iter(self._options())
-
-    def values(self):
-        for k in self._options():
-            yield self[k]
-
-    def items(self):
-        for k in self._options():
-            yield (k, self[k])
-
-    def __iter__(self):
-        return self._options().__iter__()
 
     @property
     def parser(self):

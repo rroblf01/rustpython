@@ -19,6 +19,12 @@ class PathFinder:
     @classmethod
     def find_spec(cls, fullname, path=None, target=None):
         return None
+    @classmethod
+    def invalidate_caches(cls):
+        return None
+    @classmethod
+    def find_module(cls, fullname, path=None):
+        return None
 
 class FileFinder:
     def __init__(self, path, *loader_details):

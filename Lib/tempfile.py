@@ -49,17 +49,34 @@ if hasattr(_os, "O_NOFOLLOW"):
 _bin_openflags = _text_openflags
 
 
-def _candidate_filename(suffix="", prefix="tmp", dir=None):
-    import uuid
+def _sanitize_params(suffix, prefix, dir):
+    # Real CPython's `mkstemp`/`mkdtemp`/`mktemp`/`NamedTemporaryFile` all
+    # accept `suffix=None`/`prefix=None` (not just an omitted argument) as
+    # meaning "use the default" -- a very common calling idiom in real code
+    # (e.g. `Lib/test/support/__init__.py`-style helpers that forward a
+    # `prefix=None` parameter straight through). This simplified
+    # reimplementation used mutable string defaults instead, so an
+    # explicit `None` silently overrode them and blew up downstream in
+    # `_candidate_filename`'s string concatenation with a
+    # "'str' + 'NoneType'" TypeError instead of CPython's real behavior.
+    if suffix is None:
+        suffix = ""
+    if prefix is None:
+        prefix = gettempprefix()
     if dir is None:
         dir = gettempdir()
+    return suffix, prefix, dir
+
+
+def _candidate_filename(suffix="", prefix="tmp", dir=None):
+    import uuid
+    suffix, prefix, dir = _sanitize_params(suffix, prefix, dir)
     name = dir + "/" + prefix + str(uuid.uuid4())[:8] + suffix
     return name
 
 
 def mkstemp(suffix="", prefix="tmp", dir=None, text=False):
-    if dir is None:
-        dir = gettempdir()
+    suffix, prefix, dir = _sanitize_params(suffix, prefix, dir)
     _os.makedirs(dir, exist_ok=True)
     name = _candidate_filename(suffix, prefix, dir)
     for _ in range(100):
@@ -73,8 +90,7 @@ def mkstemp(suffix="", prefix="tmp", dir=None, text=False):
 
 
 def mkdtemp(suffix="", prefix="tmp", dir=None):
-    if dir is None:
-        dir = gettempdir()
+    suffix, prefix, dir = _sanitize_params(suffix, prefix, dir)
     _os.makedirs(dir, exist_ok=True)
     name = _candidate_filename(suffix, prefix, dir)
     for _ in range(100):
@@ -88,8 +104,7 @@ def mkdtemp(suffix="", prefix="tmp", dir=None):
 
 
 def mktemp(suffix="", prefix="tmp", dir=None):
-    if dir is None:
-        dir = gettempdir()
+    suffix, prefix, dir = _sanitize_params(suffix, prefix, dir)
     return _candidate_filename(suffix, prefix, dir)
 
 
@@ -175,21 +190,44 @@ class SpooledTemporaryFile(_io.BytesIO):
 
 
 class TemporaryDirectory:
-    def __init__(self, suffix="", prefix="tmp", dir=None):
+    # Real CPython's TemporaryDirectory accepts `ignore_cleanup_errors` (skip
+    # cleanup failures instead of raising) and `delete` (opt out of removal
+    # entirely) — this reimplementation previously only took
+    # suffix/prefix/dir, so any real-world call like
+    # `TemporaryDirectory(ignore_cleanup_errors=True)` raised
+    # `TypeError: unexpected keyword argument`.
+    def __init__(self, suffix="", prefix="tmp", dir=None,
+                 ignore_cleanup_errors=False, delete=True):
         self.name = mkdtemp(suffix, prefix, dir)
+        self._ignore_cleanup_errors = ignore_cleanup_errors
+        self._delete = delete
+        self._finalized = False
 
     def cleanup(self):
+        # Idempotent: a caller doing `with TemporaryDirectory() as d: ...`
+        # and *also* calling `.cleanup()` manually (or a GC-driven __del__
+        # racing the `with`-exit) must not raise merely because the
+        # directory is already gone — only report genuine cleanup failures.
+        if not self._delete or self._finalized:
+            return
+        self._finalized = True
         import shutil
-        try:
-            shutil.rmtree(self.name)
-        except Exception:
-            pass
+        if self._ignore_cleanup_errors:
+            shutil.rmtree(self.name, ignore_errors=True)
+        else:
+            try:
+                shutil.rmtree(self.name)
+            except FileNotFoundError:
+                pass
 
     def __enter__(self):
         return self.name
 
     def __exit__(self, exc, value, tb):
         self.cleanup()
+
+    def __repr__(self):
+        return f"<{self.__class__.__name__} {self.name!r}>"
 
 
 class _TemporaryFileCloser:

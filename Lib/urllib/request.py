@@ -91,12 +91,55 @@ def urlretrieve(url, filename=None, reporthook=None, data=None):
     return filename, {}
 
 
-def pathname2url(path):
-    return path.replace("\\", "/")
+def pathname2url(path, *, add_scheme=False):
+    url = path.replace("\\", "/")
+    if add_scheme:
+        url = "file:" + url
+    return url
 
 
-def url2pathname(path):
-    return path
+def _is_local_authority(authority, resolve):
+    if not authority or authority == "localhost":
+        return True
+    import socket
+    try:
+        hostname = socket.gethostname()
+    except (OSError, AttributeError):
+        pass
+    else:
+        if authority == hostname:
+            return True
+    if not resolve:
+        return False
+    try:
+        address = socket.gethostbyname(authority)
+    except (OSError, AttributeError, UnicodeEncodeError):
+        return False
+    try:
+        localhost = socket.gethostbyname(socket.gethostname())
+    except OSError:
+        return False
+    return address == localhost
+
+
+def url2pathname(url, *, require_scheme=False, resolve_host=False):
+    """Convert the given file URL to a local file system path (real
+    CPython's `urllib.request.url2pathname`; the previous version here
+    was a bare identity stub ignoring the `file:` scheme, authority, and
+    percent-encoding entirely, and didn't accept `require_scheme`/
+    `resolve_host` at all — any real-world call passing those keywords,
+    e.g. `test_urllib.py`, raised TypeError before this)."""
+    if not require_scheme:
+        url = "file:" + url
+    scheme, authority, url = urlsplit(url)[:3]
+    if scheme != "file":
+        raise URLError("URL is missing a 'file:' scheme")
+    if not _is_local_authority(authority, resolve_host):
+        raise URLError("file:// scheme is supported only on localhost")
+    from urllib.parse import unquote
+    encoding = sys.getfilesystemencoding()
+    errors = sys.getfilesystemencodeerrors()
+    return unquote(url, encoding=encoding, errors=errors)
 
 
 def urlcleanup():

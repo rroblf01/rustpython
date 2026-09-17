@@ -373,6 +373,20 @@ class TracebackException:
         self.limit = limit
         self.stack = extract_tb(exc_traceback, limit)
 
+    @classmethod
+    def from_exception(cls, exc, *, limit=None, capture_locals=False,
+                        compact=False, save_exc_type=True,
+                        max_group_width=15, max_group_depth=10):
+        """Real CPython's TracebackException.from_exception() is a thin
+        wrapper building an instance from an exception object directly
+        (`type(exc), exc, exc.__traceback__`) rather than the three separate
+        pieces the constructor takes — was missing entirely, so any code
+        doing `traceback.TracebackException.from_exception(e)` (a common
+        modern idiom, e.g. in `unittest`/`asyncio` internals) raised
+        AttributeError before this."""
+        return cls(type(exc), exc, exc.__traceback__, limit=limit,
+                    capture_locals=capture_locals, compact=compact)
+
     def format(self, *, chain=True, colorize=False):
         return format_exception(self.exc_type, self.exc_value, self.exc_traceback,
                                 limit=self.limit, chain=chain)
