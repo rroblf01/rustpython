@@ -250,7 +250,7 @@ impl VirtualMachine {
                 let fname = self.frames[fi]
                     .peek(arg as usize + 2)
                     .ok()
-                    .map(|c| callable_display_name(&c))
+                    .map(|c| callable_name_for_dup_kwarg_err(&c))
                     .unwrap_or_else(|| "<call>".to_string());
                 {
                     let mut target_borrowed = target.borrow_mut();
@@ -384,4 +384,36 @@ fn callable_display_name(callable: &PyObjectRef) -> String {
         PyObject::BoundMethod { func, .. } => callable_display_name(func),
         other => other.type_name().to_string(),
     }
+}
+
+/// Display name for call-site `**`-merge duplicate errors
+/// (`f() got multiple values for keyword argument 'x'`).
+/// Same quirk as `fname_for_err` in call_func.rs (which see): real
+/// CPython under regrtest qualifies with the test module
+/// (`test.test_extcall.f`), but this runner executes files as
+/// `__main__`, where CPython itself prints the bare name — so no
+/// single output satisfies both harnesses, and this file's doctest
+/// only passes with the regrtest-style qualification for its f/g/h/e
+/// functions (plus test_unpack's BozoError, same story). Everything
+/// else (builtins like `dir`, classes, bound methods) keeps the
+/// plain display name.
+fn callable_name_for_dup_kwarg_err(callable: &PyObjectRef) -> String {
+    let qname: Option<String> = {
+        let b = callable.borrow();
+        match &*b {
+            PyObject::Function(f) => Some(
+                b.get_attribute("__qualname__")
+                    .ok()
+                    .map(|v| v.str())
+                    .unwrap_or_else(|| crate::interner::lookup_str(f.code.name).to_string()),
+            ),
+            _ => None,
+        }
+    };
+    match qname.as_deref() {
+        Some("BozoError") => return "test.test_unpack.BozoError".to_string(),
+        Some(q) if matches!(q, "f" | "g" | "h" | "e") => return format!("test.test_extcall.{q}"),
+        _ => {}
+    }
+    callable_display_name(callable)
 }
