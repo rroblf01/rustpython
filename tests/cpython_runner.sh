@@ -45,17 +45,41 @@ start=$(date +%s%N)
 # UNCATCHABLE SIGKILL 10s after the initial SIGTERM if the process hasn't
 # exited by then, giving every single test file a hard, unconditional
 # memory/runtime backstop regardless of what specific bug causes a runaway.
-(cd "$scratch_dir" && timeout --kill-after=10 "$TIMEOUT" "$BINARY" "$TEST_FILE") > "$logfile" 2>&1
+#
+# Peak-RSS accounting: while `timeout` is alive, poll the kernel's VmHWM
+# high-watermark (exact peak, no sampling loss for the maximum) over the
+# `timeout` process plus two levels of descendants (the interpreter itself
+# plus anything the test spawns, e.g. test_subprocess children). Reported
+# as a tree sum in MB — shared pages are counted once per process, so it
+# overstates true unique memory by a small constant; valid for comparing
+# runs against each other, which is its purpose (RAM baseline for the
+# compat hunt). Fast tests (<0.2s) may record a partial sample.
+(cd "$scratch_dir" && timeout --kill-after=10 "$TIMEOUT" "$BINARY" "$TEST_FILE") > "$logfile" 2>&1 &
+timeout_pid=$!
+peak_kb=0
+while kill -0 $timeout_pid 2>/dev/null; do
+  total_kb=0
+  for p in $timeout_pid $(ps -o pid= --ppid $timeout_pid 2>/dev/null); do
+    for q in $p $(ps -o pid= --ppid $p 2>/dev/null); do
+      hwm=$(awk '/^VmHWM:/{print $2}' /proc/$q/status 2>/dev/null)
+      total_kb=$((total_kb + ${hwm:-0}))
+    done
+  done
+  [ "$total_kb" -gt "$peak_kb" ] && peak_kb=$total_kb
+  sleep 0.2
+done
+wait $timeout_pid
 exit_code=$?
 end=$(date +%s%N)
 elapsed=$(( (end - start) / 1000000 ))
+peak_mb=$(( (peak_kb + 1023) / 1024 ))
 rm -rf "$scratch_dir"
 
 # Classify the result
 if [ $exit_code -eq 0 ]; then
-    echo "PASS|$name|${elapsed}ms"
+    echo "PASS|$name|${elapsed}ms|${peak_mb}MB"
 elif [ $exit_code -eq 124 ]; then
-    echo "TIMEOUT|$name|${elapsed}ms"
+    echo "TIMEOUT|$name|${elapsed}ms|${peak_mb}MB"
 else
     # If test raised unittest.SkipTest (platform-specific module not
     # available, e.g. winreg on Linux, _zstd not built, etc.) it
@@ -64,7 +88,7 @@ else
     # (test requires a resource like a terminal, network, or audio
     # device that is unavailable in this environment, e.g. curses).
     if grep -q "SkipTest\|ResourceDenied" "$logfile"; then
-        echo "SKIP|$name|${elapsed}ms"
+        echo "SKIP|$name|${elapsed}ms|${peak_mb}MB"
         # Normalize exit code so Makefile's `set -e` / failure check
         # doesn't treat a correct skip as a sweep failure.
         exit 0
@@ -74,9 +98,9 @@ else
     # If the first meaningful line is a Parse error from the interpreter,
     # the test never actually ran — classify it as PARSE_ERROR.
     if echo "$first_error" | grep -q "^Parse error\|^SyntaxError:"; then
-        echo "PARSE_ERROR|$name|${elapsed}ms"
+        echo "PARSE_ERROR|$name|${elapsed}ms|${peak_mb}MB"
     else
-        echo "FAIL|$name|${elapsed}ms"
+        echo "FAIL|$name|${elapsed}ms|${peak_mb}MB"
     fi
 fi
 exit $exit_code

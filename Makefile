@@ -177,19 +177,16 @@ test-uv: $(RUSTPYTHON)
 	@echo -e "$(GREEN)✔  uv integration OK$(RESET)"
 
 # ── CPython test suite ─────────────────────────────
-CPYTHON_TIMEOUT := 180
-# Matches nproc (12 on the dev machine this was tuned on) — full-core
-# parallel *debug*-profile (unoptimized, no LTO) rustpython processes will
-# starve the desktop of CPU for the ~7-8 minute duration of a sweep (a real,
-# previously-observed tradeoff, explicitly accepted in exchange for wall-
-# clock speed — see cpython_test_suite_compat.md's resource-monitor
-# diagnosis for why this is NOT a memory-safety concern: even 8-way never
-# used more than ~9GB/32GB RAM, and the earlier OOM incident that originally
-# motivated capping this was a since-fixed interpreter bug — unbounded Vec
-# growth in list()/list*n/reversed(range) — not a parallelism problem at
-# all). Drop this back toward nproc-2 if the desktop-starvation tradeoff
-# stops being worth it.
-CPYTHON_PARALLEL := 12
+CPYTHON_TIMEOUT := 240
+# 8 parallel (down from 12): at full-core parallelism the slowest
+# CPU-bound files (test_math ~126s, test_configparser ~122s solo) had no
+# headroom left and flapped between PASS and TIMEOUT purely on load
+# (confirmed: test_math passes solo, times out under 12-way contention;
+# test_sort/test_userlist flap both directions too). 8 workers trade some
+# wall-clock time for CONSISTENT results — a timeout you can't reproduce
+# solo is noise, not signal. Revisit upward only with per-file timing
+# evidence, not impatience.
+CPYTHON_PARALLEL := 8
 
 test-cpython: build-test
 	@echo -e "$(CYAN)==> Running CPython compatibility tests ($(CPYTHON_TIMEOUT)s timeout, $(CPYTHON_PARALLEL) parallel)...$(RESET)"
