@@ -441,7 +441,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     }
                 }
                 if type_name == "str" {
-                    let dummy = PyObject::Str(compact_str::CompactString::new(""));
+                    let dummy = PyObject::Str(crate::object::PyStr::from_str(""));
                     if let Ok(val) = dummy.get_attribute(name) {
                         return Ok(val);
                     }

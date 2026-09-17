@@ -414,7 +414,18 @@ pub(crate) extern "C" fn jit_make_function(
         let has_closure = (arg & 0x100) != 0;
         let n_defaults = (arg & 0xFF) as usize;
         let n_kwdefaults = ((arg >> 9) & 0xFF) as usize;
-        let mut total = n_defaults + n_kwdefaults;
+        // `items` holds the FULL array the JIT caller built (see
+        // `emit2.rs`'s `MAKE_FUNCTION` handler): closure (if any), then
+        // code object, then defaults, then kwdefaults, in that push
+        // order — `n_items` total slots, not just the default/kwdefault
+        // count. Starting `total` at `n_defaults + n_kwdefaults` (as an
+        // earlier version of this function did) ignored the leading
+        // code-object (and closure) slot(s) sharing the same array,
+        // under-counting and walking backward from the wrong offset —
+        // silently reading garbage/out-of-bounds `PyObjectRef`s and
+        // segfaulting on the first `.clone()`/`.borrow()` of one
+        // (real crash: `test_dis.py` under the JIT).
+        let mut total = n_defaults + n_kwdefaults + 1 + if has_closure { 1 } else { 0 };
         let mut kwdefaults: Vec<crate::object::PyObjectRef> = Vec::new();
         for _ in 0..n_kwdefaults {
             kwdefaults.push((*items.offset(total as isize - 1)).clone());

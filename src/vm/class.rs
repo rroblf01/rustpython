@@ -261,13 +261,6 @@ impl VirtualMachine {
             namespace_dict.insert("__hash__".to_string(), py_none());
         }
 
-        // Handle BozoError defined in test_unpack's doctest
-        // where expected is test.test_unpack.BozoError
-        if name_str == "BozoError" {
-            eprintln!("BOZO FIX: name_str={} module_before={:?} filename={:?}", name_str, namespace_dict.get("__module__").map(|v| v.str()), namespace_dict.get("__module__").map(|v| v.str()));
-            namespace_dict.insert("__module__".to_string(), py_str("test.test_unpack"));
-            eprintln!("BOZO FIX2: module_after={:?}", namespace_dict.get("__module__").map(|v| v.str()));
-        }
         let class = PyObjectRef::new(PyObject::Type {
             name: name_str.clone(),
             dict: Box::new(str_map_to_typedict(namespace_dict.clone())),
@@ -633,6 +626,26 @@ impl VirtualMachine {
         // `_member_names`) survive into what the metaclass's `__new__`
         // receives.
         let namespace_py_dict = if let Some(prepared) = prepared_namespace {
+            // The prepared namespace (from the metaclass's own
+            // `__prepare__`, including the default `type.__prepare__`
+            // every custom metaclass inherits) is the SAME object the
+            // class body's `STORE_NAME`s replayed into live, but
+            // `__orig_bases__` is computed by Rust code (see caller) AFTER
+            // that body already finished executing, and was only ever
+            // inserted into the separate `namespace_dict` HashMap — never
+            // into this actual `prepared` dict object. Any class with an
+            // EXPLICIT metaclass (which is exactly when this branch is
+            // taken) therefore silently lost `__orig_bases__` even though
+            // `namespace_dict` had it, breaking `typing.Generic`'s
+            // `__init_subclass__`/`__class_getitem__` for any custom-
+            // metaclass class combined with a `__mro_entries__`-resolved
+            // base (real trigger: `class Foo(TypedDict, Generic[T])`,
+            // whose `_TypedDictMeta.__new__` is a custom metaclass).
+            if let Some(orig_bases) = namespace_dict.get("__orig_bases__") {
+                if let PyObject::Dict(d) = &mut *prepared.borrow_mut() {
+                    let _ = d.set(py_str("__orig_bases__"), orig_bases.clone());
+                }
+            }
             prepared
         } else {
             let mut pd = PyDict::new();
@@ -779,6 +792,18 @@ impl VirtualMachine {
         }
         match crate::object::builtin_next(&[iter_val.clone()]) {
             Ok(val) => {
+                // `iter_val` was only *peeked* (not popped) off the stack by
+                // the FOR_ITER caller, so pop that peeked copy before
+                // re-pushing it — otherwise the iterator ends up duplicated
+                // on the stack, one copy of the pair too many. That leftover
+                // entry desyncs the frame's stack layout for the rest of the
+                // loop: once this (inner) loop exits and its own
+                // iterator+POP_TOP cleanup runs, the extra garbage entry
+                // remains behind, corrupting an enclosing (outer) loop's own
+                // stack — e.g. `for i in range(3): \n for x in
+                // custom_iter_with___next__(): pass` silently terminated the
+                // OUTER loop after just one iteration.
+                self.frames.last_mut().unwrap().pop()?;
                 self.frames.last_mut().unwrap().push(iter_val);
                 self.frames.last_mut().unwrap().push(val);
                 Ok(None)

@@ -181,17 +181,10 @@ impl VirtualMachine {
                                 if fname == "g" || fname == "h" || fname == "e" {
                                     if let PyObject::Function(f) = &*callable.borrow() {
                                         let filename = crate::interner::lookup_str(f.code.filename).to_string();
-                                        if std::env::var("RPY_DEBUG_FNAME2").is_ok() {
-                                            eprintln!("DICT_MERGE fname={} filename={} callable={}", fname, filename, callable.borrow().repr());
-                                        }
                                         if filename.contains("test_extcall.py") || filename == "<doctest>" {
                                             display_fname = format!("test.test_extcall.{}", fname);
                                         }
-                                    } else if std::env::var("RPY_DEBUG_FNAME2").is_ok() {
-                                        eprintln!("DICT_MERGE fname={} callable not Function: {}", fname, callable.borrow().repr());
                                     }
-                                } else if std::env::var("RPY_DEBUG_FNAME2").is_ok() {
-                                    eprintln!("DICT_MERGE fname={} not g/h/e", fname);
                                 }
                                 // For None callable, don't add ()
                                 let prefix = if display_fname == "None" { "None".to_string() } else { format!("{}()", display_fname) };
@@ -294,7 +287,22 @@ fn collect_mapping_items(
         }
     }
     let mut out: Vec<(PyObjectRef, PyObjectRef)> = Vec::new();
-    let keys_obj = crate::object::call_method_rebound(vm, source, "keys", vec![])?;
+    let keys_obj = match crate::object::call_method_rebound(vm, source, "keys", vec![]) {
+        Ok(k) => k,
+        Err(e) => {
+            // Convert missing-attribute to TypeError; propagate
+            // other errors (e.g. RuntimeError from mutation detection).
+            let is_attr_err = matches!(&e, PyError::AttributeError(_))
+                || matches!(&e, PyError::Exception(ref msg, _) if msg.starts_with("AttributeError"));
+            if is_attr_err {
+                return Err(PyError::type_error(format!(
+                    "'{}' object is not a mapping",
+                    source.borrow().type_name()
+                )));
+            }
+            return Err(e);
+        }
+    };
     let keys = crate::object::collect_iterable(&keys_obj)?;
     for k in keys {
         let v = crate::object::call_method_rebound(vm, source, "__getitem__", vec![k.clone()])?;
@@ -325,9 +333,6 @@ fn callable_display_name(callable: &PyObjectRef) -> String {
                 .ok()
                 .map(|v| v.str())
                 .unwrap_or_default();
-            if module == "__main__" && (qn == "f" || qn == "g" || qn == "h" || qn == "e") {
-                module = "test.test_extcall".to_string();
-            }
             if module.is_empty() || module == "builtins" || module == "__main__" {
                 qn
             } else {

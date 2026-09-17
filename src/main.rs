@@ -456,7 +456,14 @@ fn print_usage() {
 // guard) with real headroom to spare.
 fn main() {
     let child = std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
+        // Debug builds carry far more native stack per Rust call frame than
+        // optimized builds, so 64MB (enough for release/release-lite to
+        // clear sys.getrecursionlimit()'s default of 1000) could still
+        // hard stack-overflow-abort a debug build before vm.rs's own
+        // recursion_limit check gets a chance to raise a catchable
+        // RecursionError. 256MB is reserved address space, not committed
+        // memory, so the cost is negligible until actually touched.
+        .stack_size(256 * 1024 * 1024)
         .spawn(real_main)
         .expect("failed to spawn main thread with enlarged stack");
     match child.join() {

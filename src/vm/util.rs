@@ -87,6 +87,16 @@ pub(crate) fn is_exception_subclass(child_type: &str, parent_type: &str) -> bool
             || is_exception_subclass("OSError", parent_type)
             || is_exception_subclass("ValueError", parent_type);
     }
+    // Real CPython: `class ExceptionGroup(Exception, BaseExceptionGroup)` —
+    // genuine multiple inheritance (PEP 654). This table otherwise encodes
+    // a single-parent chain per type, which can't express that diamond, so
+    // special-case the second base explicitly: without it,
+    // `issubclass(ExceptionGroup, BaseExceptionGroup)` was `False` (only
+    // the `Exception` parent chain was walked), breaking
+    // `test_exception_group.py`'s `test_exception_group_types`.
+    if child_type == "ExceptionGroup" && is_exception_subclass("BaseExceptionGroup", parent_type) {
+        return true;
+    }
     let parent: Option<&str> = match child_type {
         "BaseException" => None,
         "Exception" | "SystemExit" | "KeyboardInterrupt" | "GeneratorExit"

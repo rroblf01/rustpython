@@ -551,6 +551,56 @@ pub(crate) fn collect_iterable(iterable: &PyObjectRef) -> PyResult<Vec<PyObjectR
     Ok(items)
 }
 
+/// Native C types like `dict`, `int`, `str` etc. don't define `__slots__`
+/// but also don't provide `__dict__` to instances (their `tp_dictoffset`
+/// is 0 in CPython). Only user-defined classes without `__slots__`
+/// provide `__dict__`. This check identifies those native types so
+/// `get_instance_slots` doesn't incorrectly treat them as "not slotted".
+fn is_natively_slotted_type(name: &str) -> bool {
+    matches!(
+        name,
+        "object"
+            | "dict"
+            | "list"
+            | "tuple"
+            | "set"
+            | "frozenset"
+            | "int"
+            | "float"
+            | "complex"
+            | "str"
+            | "bytes"
+            | "bytearray"
+            | "memoryview"
+            | "range"
+            | "slice"
+            | "bool"
+            | "property"
+            | "staticmethod"
+            | "classmethod"
+            | "super"
+            | "type"
+            | "enumerate"
+            | "map"
+            | "filter"
+            | "zip"
+            | "reversed"
+            | "warnings"
+            | "module"
+            | "function"
+            | "method"
+            | "code"
+            | "frame"
+            | "traceback"
+            | "generator"
+            | "coroutine"
+            | "async_generator"
+            | "cell"
+            | "ellipsis"
+            | "notimplemented"
+    )
+}
+
 pub(crate) fn get_instance_slots(typ: &PyObjectRef) -> Option<Vec<String>> {
     let typ_ref = typ.borrow();
     if let PyObject::Type {
@@ -597,7 +647,9 @@ pub(crate) fn get_instance_slots(typ: &PyObjectRef) -> Option<Vec<String>> {
             {
                 if let Some(slots_val) = base_dict.get_str("__slots__") {
                     extract_slots(slots_val, &mut all_slots);
-                } else if base_name != "object" {
+                } else if base_name != "object"
+                    && !is_natively_slotted_type(base_name)
+                {
                     all_bases_slotted = false;
                 }
             }

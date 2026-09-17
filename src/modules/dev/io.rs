@@ -279,6 +279,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             binary: mode.contains('b'),
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
+            encoding: None,
         }))
     });
 
@@ -632,6 +633,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             binary: true,
             pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
+            encoding: None,
         }))
     });
 

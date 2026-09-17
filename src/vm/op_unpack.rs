@@ -78,7 +78,6 @@ impl VirtualMachine {
             Opcode::UNPACK_EX => {
                 let before = (arg >> 8) as usize;
                 let after = (arg & 0xFF) as usize;
-                let total = before + after + 1;
                 let seq = self.frames[fi].pop()?;
                 let list_items = {
                     let obj = seq.borrow();
@@ -115,17 +114,26 @@ impl VirtualMachine {
                         items.len()
                     )));
                 }
-                let _ = total;
                 let n = items.len();
-                for i in (n - after)..n {
+                // CPython's _PyEval_UnpackIterableStackRef uses *--sp
+                // (pre-decrement), so items must be pushed onto the stack
+                // in reverse order: after-elements right-to-left, then the
+                // starred list, then before-elements right-to-left.
+
+                // 1) Push after-elements in reverse order so that STORE
+                //    operations (which pop from TOS) assign them left-to-right.
+                for i in ((n - after)..n).rev() {
                     self.frames[fi].push(items[i].clone());
                 }
+                // 2) Push the starred list.
                 let star_count = n - before - after;
                 let mut star_items: Vec<PyObjectRef> = Vec::new();
                 for i in before..(before + star_count) {
                     star_items.push(items[i].clone());
                 }
                 self.frames[fi].push(py_list(star_items));
+                // 3) Push before-elements (reversed) — these end up on
+                //    bottom so the leftmost STORE pops them first.
                 for i in (0..before).rev() {
                     self.frames[fi].push(items[i].clone());
                 }

@@ -461,6 +461,7 @@ impl PyObject {
                                 binary: true,
                                 pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                                 closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
+                                encoding: None,
                             }))
                         } else if let Ok(f) =
                             std::fs::OpenOptions::new().read(true).open("/dev/null")
@@ -471,6 +472,7 @@ impl PyObject {
                                 binary: true,
                                 pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                                 closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
+                                encoding: None,
                             }))
                         } else {
                             Err(PyError::runtime_error(
@@ -962,7 +964,7 @@ impl PyObject {
                     ))
                 })
             }
-            PyObject::Socket { inner: _ } => return socket::get(self, name),
+            PyObject::Socket { inner: _, .. } => return socket::get(self, name),
             PyObject::Thread(inner_arc) => return thread::get(self, name),
             PyObject::Lock(_) | PyObject::RLock(_) | PyObject::Event(_) | PyObject::Queue(_) | PyObject::ThreadCondition { .. } | PyObject::ThreadSemaphore { .. } | PyObject::ThreadBarrier { .. } | PyObject::ThreadTimer { .. } => return sync::get(self, name),            PyObject::Int(_) | PyObject::Bool(_) => return int::get(self, name),
             PyObject::Float(_) => return float::get(self, name),
