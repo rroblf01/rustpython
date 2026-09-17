@@ -1,5 +1,5 @@
 use crate::bytecode::ConstValue;
-use crate::object::{py_str_pstr, PyError, PyObject, PyObjectRef, PyResult};
+use crate::object::{py_str, py_str_pstr, PyError, PyObject, PyObjectRef, PyResult};
 use crate::vm::frame::Frame;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
@@ -445,4 +445,83 @@ pub(crate) fn eval_const_value(const_val: ConstValue) -> PyResult<PyObjectRef> {
         }
         ConstValue::Object(obj) => obj,
     })
+}
+
+/// Live-`locals` accessors for `exec(code, globals, locals)` frames with a
+/// DISTINCT locals mapping (`Frame::exec_locals`, which see). The mapping
+/// object is shared, not copied: reads check it before frame globals,
+/// stores/deletes land in it directly (visible to the caller, and to bare
+/// `dir()` which lists its keys). Accepts plain dicts and dict-backed
+/// instances (the two shapes `dict_arg_to_hashmap` accepts).
+fn exec_locals_dict(frame: &Frame) -> Option<PyObjectRef> {
+    let l = frame.exec_locals.clone()?;
+    let lb = l.borrow();
+    match &*lb {
+        PyObject::Dict(_) => Some(l.clone()),
+        _ => crate::object::native_backing_of(&l),
+    }
+}
+
+/// Read `name` from the frame's live exec-locals mapping, if any.
+pub(crate) fn frame_exec_local_get(frame: &Frame, name: &str) -> Option<PyObjectRef> {
+    let d = exec_locals_dict(frame)?;
+    let db = d.borrow();
+    if let PyObject::Dict(pd) = &*db {
+        pd.get(&py_str(name)).ok().flatten()
+    } else {
+        None
+    }
+}
+
+/// Store `name` into the frame's live exec-locals mapping.
+/// Returns true when stored (a mapping is installed).
+pub(crate) fn frame_exec_local_set(frame: &Frame, name: &str, val: PyObjectRef) -> bool {
+    if let Some(d) = exec_locals_dict(frame) {
+        if let PyObject::Dict(pd) = &mut *d.borrow_mut() {
+            let _ = pd.set(py_str(name), val);
+            return true;
+        }
+    }
+    false
+}
+
+/// Delete `name` from the frame's live exec-locals mapping.
+/// Returns `Some(true)` when deleted, `Some(false)` when the mapping is
+/// installed but lacks the name (real NameError), `None` when no mapping.
+pub(crate) fn frame_exec_local_del(frame: &Frame, name: &str) -> Option<bool> {
+    let d = exec_locals_dict(frame)?;
+    let existed = {
+        let db = d.borrow();
+        if let PyObject::Dict(pd) = &*db {
+            pd.get(&py_str(name)).ok().flatten().is_some()
+        } else {
+            false
+        }
+    };
+    if !existed {
+        return Some(false);
+    }
+    if let PyObject::Dict(pd) = &mut *d.borrow_mut() {
+        let _ = pd.remove(&py_str(name));
+    }
+    Some(true)
+}
+
+/// Keys of the frame's live exec-locals mapping, if any (for bare `dir()`).
+pub(crate) fn frame_exec_local_keys(frame: &Frame) -> Option<Vec<String>> {
+    let d = exec_locals_dict(frame)?;
+    let db = d.borrow();
+    if let PyObject::Dict(pd) = &*db {
+        Some(
+            pd.items()
+                .into_iter()
+                .filter_map(|(k, _)| match &*k.borrow() {
+                    PyObject::Str(s) => Some(s.to_string()),
+                    _ => None,
+                })
+                .collect(),
+        )
+    } else {
+        None
+    }
 }

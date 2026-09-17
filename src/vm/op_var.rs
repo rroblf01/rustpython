@@ -166,6 +166,10 @@ impl VirtualMachine {
                                 _ => Some(cell.clone()),
                             }
                         })
+                        // Live exec-locals mapping (`exec(code, globals,
+                        // locals)` with distinct locals) shadows frame
+                        // globals, like CPython's f_locals.
+                        .or_else(|| crate::vm::helpers::frame_exec_local_get(f, name))
                         .or_else(|| f.globals.borrow().get(&interner::intern(name)).cloned())
                 };
                 // A custom `__prepare__` namespace IS the class body's
@@ -203,6 +207,17 @@ impl VirtualMachine {
                 let name_idx = arg as usize;
                 let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let val = self.frames[fi].pop()?;
+                // Live exec-locals mapping (`exec(code, globals, locals)`
+                // with distinct locals): stores land in it directly and
+                // nowhere else — like CPython writing f_locals. Skips the
+                // module/class mirroring below, which is meaningless (and
+                // leaky) for a throwaway exec namespace.
+                if crate::vm::helpers::frame_exec_local_set(&self.frames[fi], &name, val.clone()) {
+                    if self.frames[fi].frame_locals_obj.is_some() {
+                        self.sync_frame_locals(fi);
+                    }
+                    return Ok(true);
+                }
                 if let Some(order) = self.frames[fi].name_order.clone() {
                     let mut order = order.borrow_mut();
                     if !order.contains(&name) {
@@ -538,6 +553,22 @@ impl VirtualMachine {
             Opcode::DELETE_NAME => {
                 let name_idx = arg as usize;
                 let name = self.frames[fi].code.names[name_idx].to_string();
+                // Live exec-locals mapping: delete from it (NameError when
+                // absent, even if frame globals has the name — CPython
+                // deletes from f_locals).
+                if let Some(deleted) =
+                    crate::vm::helpers::frame_exec_local_del(&self.frames[fi], &name)
+                {
+                    if !deleted {
+                        return Err(PyError::name_error_for(crate::interner::lookup_str(
+                            self.frames[fi].code.names[name_idx],
+                        )));
+                    }
+                    if self.frames[fi].frame_locals_obj.is_some() {
+                        self.sync_frame_locals(fi);
+                    }
+                    return Ok(true);
+                }
                 if let Some(live_module) = self.frames[fi].live_module.clone() {
                     if let PyObject::Module { dict, .. } = &mut *live_module.borrow_mut() {
                         dict.remove(&interner::intern(&name));

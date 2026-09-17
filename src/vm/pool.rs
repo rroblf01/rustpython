@@ -39,6 +39,7 @@ impl VirtualMachine {
             frame.name_order = None;
             frame.prepared_namespace = None;
             frame.live_module = None;
+            frame.exec_locals = None;
             frame.yield_from_iter = None;
             frame.frame_object = None;
             frame.frame_locals_obj = None;
@@ -71,6 +72,7 @@ impl VirtualMachine {
             frame.name_order = None;
             frame.prepared_namespace = None;
             frame.live_module = None;
+            frame.exec_locals = None;
             frame.yield_from_iter = None;
             frame.frame_object = None;
             frame.frame_locals_obj = None;

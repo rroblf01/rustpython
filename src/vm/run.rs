@@ -82,6 +82,28 @@ impl VirtualMachine {
         self.exec_code_with_module(code, globals, None)
     }
 
+    /// Like `exec_code`, but installs a live `locals` mapping on the frame
+    /// (`Frame::exec_locals`, which see): `exec(code, globals, locals)`
+    /// with a DISTINCT locals dict reads/writes/deletes through it, and
+    /// bare `dir()` lists its keys. The mapping object is shared, not
+    /// copied, so writes stay visible to the caller with no mirror-back.
+    pub fn exec_code_with_locals(
+        &mut self,
+        code: CodeObject,
+        globals: Option<Rc<RefCell<HashMap<StrId, PyObjectRef>>>>,
+        locals: PyObjectRef,
+    ) -> PyResult<PyObjectRef> {
+        let g = globals.unwrap_or_else(|| self.globals.clone());
+        let mut frame = self.acquire_frame(Rc::new(code), g, Rc::clone(&self.builtins), None);
+        frame.exec_locals = Some(locals);
+        self.push_frame(frame);
+        let result = self.execute();
+        if let Some(frame) = self.frames.pop() {
+            self.release_frame(frame);
+        }
+        result
+    }
+
     /// Like `exec_code`, but when `live_module` is Some, every STORE_NAME/
     /// DELETE_NAME during this execution also mirrors into that module's
     /// own `dict` immediately — not just once execution finishes (see

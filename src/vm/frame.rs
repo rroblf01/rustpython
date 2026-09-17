@@ -82,6 +82,14 @@ pub struct Frame {
     /// same effect generally, for every module, not just via IMPORT_FROM's
     /// narrower ancestor-frame fallback.
     pub live_module: Option<PyObjectRef>,
+    /// Live `locals` mapping for `exec(code, globals, locals)` frames with
+    /// a DISTINCT locals dict (`Some` only then; `None` for every other
+    /// frame). Real CPython executes such bodies with f_locals BEING that
+    /// mapping: reads check it before globals, stores/deletes go to it
+    /// directly (so they stay visible to the caller), and bare `dir()`
+    /// lists its keys. Set alongside the frame by the exec() call path;
+    /// cleared on pool acquire/release like the other per-execution state.
+    pub exec_locals: Option<PyObjectRef>,
     /// While resuming a generator whose body contains `yield from`, the
     /// currently-active sub-iterator. `generator.throw()` delegates to this
     /// iterator's own `.throw()` instead of injecting the exception into the
@@ -129,6 +137,7 @@ impl Frame {
             name_order: None,
             prepared_namespace: None,
             live_module: None,
+            exec_locals: None,
             yield_from_iter: None,
             back: None,
         }

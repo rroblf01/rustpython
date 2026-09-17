@@ -189,6 +189,16 @@ pub(crate) fn dict_arg_to_hashmap(
     }
     match &*namespace.borrow() {
         PyObject::Dict(d) => Ok(d.items().into_iter().map(|(k, v)| (k.str(), v)).collect()),
+        // A live `globals()` view behaves as a dict everywhere (its
+        // type_name IS "dict") — including as exec()/eval()/type()
+        // namespaces. Without this arm, `exec(src, globals(), {...})`
+        // (the standard test-harness/plugin shape, real trigger:
+        // test_pkg.py's run_code) silently used neither mapping.
+        PyObject::Globals(g) => Ok(g
+            .borrow()
+            .iter()
+            .map(|(k, v)| (crate::interner::lookup_str(*k).to_string(), v.clone()))
+            .collect()),
         _ => Err(PyError::type_error(err_msg)),
     }
 }

@@ -1105,56 +1105,74 @@ impl VirtualMachine {
                         .map(|f| f.globals.clone())
                         .unwrap_or_else(|| self.globals.clone())
                 });
-                let result = self.exec_code(code, Some(globals_rc.clone()));
-                if let Some(target) = locals_dict {
-                    let real_target = if matches!(&*target.borrow(), PyObject::Dict(_)) {
-                        target.clone()
-                    } else {
-                        crate::object::native_backing_of(target).unwrap_or_else(|| target.clone())
-                    };
-                    let mut real_target_borrow = real_target.borrow_mut();
-                    if let PyObject::Dict(d) = &mut *real_target_borrow {
-                        // Full mirror, not a merge: `globals_rc` started as a
-                        // complete copy of `target`'s own contents (see
-                        // `namespace`'s construction above), so any name
-                        // present in `target` but no longer in `globals_rc`
-                        // was `del`eted during execution and must disappear
-                        // from `target` too (test_descrtut.py's `del
-                        // property  # unmask the builtin` doctest).
-                        // Non-string-keyed entries (e.g. int keys on a
-                        // dict-subclass exec namespace) cannot round-trip
-                        // through the StrId-keyed frame namespace — and
-                        // Python code under exec cannot name them either —
-                        // so save them aside and restore verbatim. The old
-                        // code wrote every key back stringified, permanently
-                        // corrupting the caller's dict (int key 1 became
-                        // '1', test_descrtut).
-                        let saved_non_string: Vec<(PyObjectRef, PyObjectRef)> = d
-                            .items()
-                            .into_iter()
-                            .filter(|(k, _)| !matches!(&*k.borrow(), PyObject::Str(_)))
-                            .collect();
-                        // String forms of the saved keys above: these strings
-                        // may ALSO be present in the frame namespace purely
-                        // because the read path stringified the same
-                        // non-string keys (`dict_arg_to_hashmap` maps
-                        // `k.str()`). They must not be mirrored back, or the
-                        // caller ends up with BOTH `1` and `'1'`. (An exec
-                        // body explicitly assigning `globals()["1"]` is the
-                        // only collision, and vanishingly rare versus the
-                        // always-on corruption.)
-                        let shadowed: std::collections::HashSet<String> =
-                            saved_non_string.iter().map(|(k, _)| k.str()).collect();
-                        d.clear();
-                        for (k, v) in globals_rc.borrow().iter() {
-                            let s = interner::lookup_str(*k);
-                            if shadowed.contains(s) {
-                                continue;
+                // A DISTINCT locals mapping runs live on the frame
+                // (Frame::exec_locals): reads check it before globals,
+                // stores/deletes land in it directly, so no mirror-back
+                // is needed — and mirroring would wrongly copy the
+                // globals-seeded entries into it. The shared-namespace
+                // shape below (no distinct locals) still needs the
+                // mirror to write results back into the caller's dict.
+                let live_locals = if distinct_locals.is_some() {
+                    locals_dict.cloned()
+                } else {
+                    None
+                };
+                let result = match live_locals.clone() {
+                    Some(l) => self.exec_code_with_locals(code, Some(globals_rc.clone()), l),
+                    None => self.exec_code(code, Some(globals_rc.clone())),
+                };
+                if live_locals.is_none() {
+                    if let Some(target) = locals_dict {
+                        let real_target = if matches!(&*target.borrow(), PyObject::Dict(_)) {
+                            target.clone()
+                        } else {
+                            crate::object::native_backing_of(target)
+                                .unwrap_or_else(|| target.clone())
+                        };
+                        let mut real_target_borrow = real_target.borrow_mut();
+                        if let PyObject::Dict(d) = &mut *real_target_borrow {
+                            // Full mirror, not a merge: `globals_rc` started as a
+                            // complete copy of `target`'s own contents (see
+                            // `namespace`'s construction above), so any name
+                            // present in `target` but no longer in `globals_rc`
+                            // was `del`eted during execution and must disappear
+                            // from `target` too (test_descrtut.py's `del
+                            // property  # unmask the builtin` doctest).
+                            // Non-string-keyed entries (e.g. int keys on a
+                            // dict-subclass exec namespace) cannot round-trip
+                            // through the StrId-keyed frame namespace — and
+                            // Python code under exec cannot name them either —
+                            // so save them aside and restore verbatim. The old
+                            // code wrote every key back stringified, permanently
+                            // corrupting the caller's dict (int key 1 became
+                            // '1', test_descrtut).
+                            let saved_non_string: Vec<(PyObjectRef, PyObjectRef)> = d
+                                .items()
+                                .into_iter()
+                                .filter(|(k, _)| !matches!(&*k.borrow(), PyObject::Str(_)))
+                                .collect();
+                            // String forms of the saved keys above: these strings
+                            // may ALSO be present in the frame namespace purely
+                            // because the read path stringified the same
+                            // non-string keys (`dict_arg_to_hashmap` maps
+                            // `k.str()`). They must not be mirrored back, or the
+                            // caller ends up with BOTH `1` and `'1'`. (An exec
+                            // body explicitly assigning `globals()["1"]` is the
+                            // only collision, and vanishingly rare versus the
+                            // always-on corruption.)
+                            let shadowed: std::collections::HashSet<String> =
+                                saved_non_string.iter().map(|(k, _)| k.str()).collect();
+                            d.clear();
+                            for (k, v) in globals_rc.borrow().iter() {
+                                let s = interner::lookup_str(*k);
+                                if shadowed.contains(s) {
+                                    continue;
+                                }
+                                let _ = d.set(py_str(s), v.clone());
                             }
-                            let _ = d.set(py_str(s), v.clone());
-                        }
-                        for (k, v) in saved_non_string {
-                            let _ = d.set(k, v);
+                            for (k, v) in saved_non_string {
+                                let _ = d.set(k, v);
+                            }
                         }
                     }
                 }

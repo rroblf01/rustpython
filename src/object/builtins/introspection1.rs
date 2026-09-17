@@ -180,6 +180,15 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 .frames
                 .last()
                 .ok_or_else(|| crate::object::PyError::runtime_error("no frame"))?;
+            // Live exec-locals mapping (`exec(code, globals, locals)` with
+            // distinct locals): bare dir() lists exactly its keys — the
+            // merged frame globals would also show the globals-seeded
+            // entries, which real CPython deliberately excludes.
+            if let Some(keys) = crate::vm::helpers::frame_exec_local_keys(frame) {
+                let mut names: Vec<PyObjectRef> = keys.into_iter().map(|s| py_str(&s)).collect();
+                names.sort_by(|a, b| a.str().cmp(&b.str()));
+                return Ok(py_list(names));
+            }
             let mut names: Vec<PyObjectRef> = Vec::new();
             let mut seen = std::collections::HashSet::new();
             // Comprehensions in this compiler are inlined directly into the

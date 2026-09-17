@@ -63,10 +63,25 @@ pub fn builtin_exec(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         (None, None)
     };
     let code2 = code.clone();
+    // An explicit DISTINCT locals mapping runs live on the frame (same as
+    // the call.rs interception): reads check it before globals, stores
+    // land in it directly. Without this, the plain-exec fallback below
+    // silently ignored locals entirely.
+    let live_locals = if args.len() > 2 {
+        match &*args[2].borrow() {
+            PyObject::Dict(_) => Some(args[2].clone()),
+            _ => crate::object::native_backing_of(&args[2]),
+        }
+    } else {
+        None
+    };
     // Use current VM if available via VM_PTR so exec() shares modules, sys.path, etc.
     let result = match with_vm_mut(|vm| {
         if let Some(ref g) = compiled_globals {
-            vm.exec_code(code, Some(g.clone()))
+            match live_locals.clone() {
+                Some(l) => vm.exec_code_with_locals(code, Some(g.clone()), l),
+                None => vm.exec_code(code, Some(g.clone())),
+            }
         } else {
             vm.run(code)
         }
