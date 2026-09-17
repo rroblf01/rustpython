@@ -6,8 +6,45 @@ use std::rc::Rc;
 
 pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
     match o {
-            PyObject::Socket { inner: _ } => {
+            PyObject::Socket { inner: _, family, type_, proto } => {
                 match name {
+                    "family" => return Ok(PyObjectRef::SmallInt(*family)),
+                    "type" => return Ok(PyObjectRef::SmallInt(*type_)),
+                    "proto" => return Ok(PyObjectRef::SmallInt(*proto)),
+                    // Real `detach()` leaks the underlying fd back to the
+                    // caller without closing it, marking this wrapper
+                    // closed. We don't have a raw-fd-owning socket
+                    // representation to hand back (no `socket.fromfd()`
+                    // either), but returning the fd number instead of
+                    // raising `AttributeError` unblocks callers that only
+                    // check truthiness/int-ness (real trigger:
+                    // `test_socket.py` setUp/tearDown helpers that call
+                    // `sock.detach()` unconditionally during cleanup).
+                    "detach" => {
+                        return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                            name: "detach".to_string(),
+                            func: |args| {
+                                let socket = &*args[0].borrow();
+                                if let PyObject::Socket { inner, .. } = socket {
+                                    use std::os::fd::AsRawFd;
+                                    let mut inner = inner.borrow_mut();
+                                    let old = std::mem::replace(
+                                        &mut *inner,
+                                        SocketInner::Uninitialized,
+                                    );
+                                    let fd = match &old {
+                                        SocketInner::TcpListener(l) => l.as_raw_fd(),
+                                        SocketInner::TcpStream(s) => s.as_raw_fd(),
+                                        _ => -1,
+                                    };
+                                    std::mem::forget(old);
+                                    return Ok(py_int(fd as i64));
+                                }
+                                Err(PyError::runtime_error("detach on non-socket"))
+                            },
+                            self_obj: PyObjectRef::new(PyObject::None),
+                        }));
+                    }
                     "bind" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                         name: "bind".to_string(),
                         func: |args| {
@@ -16,7 +53,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             }
                             let addr = socket_addr_to_string(&args[1])?;
                             let socket = &*args[0].borrow();
-                            if let PyObject::Socket { inner } = socket {
+                            if let PyObject::Socket { inner, .. } = socket {
                                 let mut inner = inner.borrow_mut();
                                 match &*inner {
                                     SocketInner::Uninitialized => {
@@ -46,7 +83,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             };
                             let _ = backlog;
                             let socket = &*args[0].borrow();
-                            if let PyObject::Socket { inner } = socket {
+                            if let PyObject::Socket { inner, .. } = socket {
                                 let inner = inner.borrow();
                                 match &*inner {
                                     SocketInner::TcpListener(_listener) => Ok(py_none()),
@@ -99,7 +136,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         name: "fileno".to_string(),
                         func: |args| {
                             let sock = &*args[0].borrow();
-                            if let PyObject::Socket { inner } = sock {
+                            if let PyObject::Socket { inner, .. } = sock {
                                 let inner = inner.borrow();
                                 use std::os::fd::AsRawFd;
                                 let fd = match &*inner {
@@ -117,7 +154,8 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         name: "accept".to_string(),
                         func: |args| {
                             let socket = &*args[0].borrow();
-                            if let PyObject::Socket { inner } = socket {
+                            if let PyObject::Socket { inner, family, type_, proto } = socket {
+                                let (family, type_, proto) = (*family, *type_, *proto);
                                 let mut inner = inner.borrow_mut();
                                 let old =
                                     std::mem::replace(&mut *inner, SocketInner::Uninitialized);
@@ -165,6 +203,9 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                                             SocketInner::TcpStream(stream),
                                                         ),
                                                     ),
+                                                    family,
+                                                    type_,
+                                                    proto,
                                                 });
                                                 // Real `accept()` returns
                                                 // `(host, port)`, not a
@@ -202,7 +243,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             }
                             let addr = socket_addr_to_string(&args[1])?;
                             let socket = &*args[0].borrow();
-                            if let PyObject::Socket { inner } = socket {
+                            if let PyObject::Socket { inner, .. } = socket {
                                 let mut inner = inner.borrow_mut();
                                 match &*inner {
                                     SocketInner::Uninitialized => {
@@ -233,7 +274,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             }
                             let data = args[1].str();
                             let socket = &*args[0].borrow();
-                            if let PyObject::Socket { inner } = socket {
+                            if let PyObject::Socket { inner, .. } = socket {
                                 let mut inner = inner.borrow_mut();
                                 match &mut *inner {
                                     SocketInner::TcpStream(stream) => {
@@ -259,7 +300,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             }
                             let bufsize = args[1].as_i64().unwrap_or(4096) as usize;
                             let socket = &*args[0].borrow();
-                            if let PyObject::Socket { inner } = socket {
+                            if let PyObject::Socket { inner, .. } = socket {
                                 let mut inner = inner.borrow_mut();
                                 match &mut *inner {
                                     SocketInner::TcpStream(stream) => {
@@ -294,7 +335,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         name: "close".to_string(),
                         func: |args| {
                             let socket = &*args[0].borrow();
-                            if let PyObject::Socket { inner } = socket {
+                            if let PyObject::Socket { inner, .. } = socket {
                                 let mut inner = inner.borrow_mut();
                                 let old =
                                     std::mem::replace(&mut *inner, SocketInner::Uninitialized);
@@ -329,7 +370,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         name: "__exit__".to_string(),
                         func: |args| {
                             let socket = &*args[0].borrow();
-                            if let PyObject::Socket { inner } = socket {
+                            if let PyObject::Socket { inner, .. } = socket {
                                 let mut inner = inner.borrow_mut();
                                 let old =
                                     std::mem::replace(&mut *inner, SocketInner::Uninitialized);
@@ -351,7 +392,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         name: "getsockname".to_string(),
                         func: |args| {
                             let socket = &*args[0].borrow();
-                            if let PyObject::Socket { inner } = socket {
+                            if let PyObject::Socket { inner, .. } = socket {
                                 let inner = inner.borrow();
                                 let addr = match &*inner {
                                     SocketInner::TcpListener(l) => l.local_addr(),
@@ -374,7 +415,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         name: "getpeername".to_string(),
                         func: |args| {
                             let socket = &*args[0].borrow();
-                            if let PyObject::Socket { inner } = socket {
+                            if let PyObject::Socket { inner, .. } = socket {
                                 let inner = inner.borrow();
                                 let addr = match &*inner {
                                     SocketInner::TcpStream(s) => s.peer_addr(),
@@ -409,6 +450,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 binary,
                                 pending: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
                                 closed: std::rc::Rc::new(std::cell::RefCell::new(false)),
+                                encoding: None,
                             }))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),

@@ -233,11 +233,35 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
                             revents: 0,
                         })
                         .collect();
-                    let rc =
-                        unsafe { poll(poll_fds.as_mut_ptr(), poll_fds.len() as u32, timeout_ms) };
+                    // When running inside a cooperative thread drain, a
+                    // blocking C poll(-1) would deadlock the entire
+                    // interpreter (the drain caller can never return to
+                    // write to the pipe or run other coop jobs).  Instead
+                    // use a short polling interval so the cooperative
+                    // scheduler can make progress.
+                    let effective_timeout = if timeout_ms < 0
+                        && crate::modules::coop_blocked_forever()
+                    {
+                        100
+                    } else {
+                        timeout_ms
+                    };
+                    let rc = unsafe {
+                        poll(
+                            poll_fds.as_mut_ptr(),
+                            poll_fds.len() as u32,
+                            effective_timeout,
+                        )
+                    };
                     if rc < 0 {
                         let err = std::io::Error::last_os_error();
                         return Err(PyError::os_error_from_io(&err));
+                    }
+                    // If we got no events and we're in a cooperative
+                    // context with infinite timeout, loop so that other
+                    // queued cooperative threads get a chance to run.
+                    if rc == 0 && timeout_ms < 0 && crate::modules::coop_blocked_forever() {
+                        crate::modules::coop_threads_drain();
                     }
                     let mut result = Vec::new();
                     for pfd in &poll_fds {
@@ -600,12 +624,12 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
         } else {
             2
         };
-        let _sock_type = if args.len() > 1 {
+        let sock_type = if args.len() > 1 {
             args[1].as_i64().unwrap_or(1)
         } else {
             1
         };
-        let _proto = if args.len() > 2 {
+        let proto = if args.len() > 2 {
             args[2].as_i64().unwrap_or(0)
         } else {
             0
@@ -623,6 +647,9 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
         }
         Ok(PyObjectRef::new(PyObject::Socket {
             inner: std::rc::Rc::new(std::cell::RefCell::new(SocketInner::Uninitialized)),
+            family,
+            type_: sock_type,
+            proto,
         }))
     });
 
@@ -630,6 +657,9 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     fn wrap_tcp_stream(stream: std::net::TcpStream) -> PyObjectRef {
         PyObjectRef::new(PyObject::Socket {
             inner: Rc::new(RefCell::new(SocketInner::TcpStream(stream))),
+            family: 2,   // AF_INET
+            type_: 1,    // SOCK_STREAM
+            proto: 0,
         })
     }
 
@@ -647,6 +677,77 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
         let (a_end, _l) = l.accept()
             .map_err(|e| PyError::OsError(format!("socketpair accept: {}", e)))?;
         Ok(py_list(vec![wrap_tcp_stream(a_end), wrap_tcp_stream(c)]))
+    });
+
+    // `socket.create_connection(address, timeout=None, source_address=None)`
+    // — connects a new TCP socket to `address` and returns it. Missing
+    // entirely broke any real client code using the standard high-level
+    // connect helper (e.g. `smtplib`/`poplib`/`ftplib`-style dummy test
+    // servers connecting a plain client socket by hand), which fell back to
+    // raw `socket()`+`connect()` only when this raised `AttributeError`.
+    sock_func!("create_connection", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error(
+                "create_connection() missing required argument: 'address'",
+            ));
+        }
+        let addr = socket_addr_to_string(&args[0])?;
+        let stream = TcpStream::connect(&addr).map_err(|e| PyError::os_error_from_io(&e))?;
+        Ok(wrap_tcp_stream(stream))
+    });
+
+    // `socket.getaddrinfo(host, port, family=0, type=0, proto=0, flags=0)`
+    // — real CPython returns a list of `(family, type, proto, canonname,
+    // sockaddr)` 5-tuples. This interpreter only ever resolves/creates
+    // AF_INET/SOCK_STREAM sockets, so a single synthesized IPv4 entry per
+    // resolved address is enough for the common "connect to what
+    // getaddrinfo tells you" pattern (real trigger: `smtplib.py`'s
+    // `SMTP._get_socket`, `ftplib`/`poplib`-adjacent test helpers) without
+    // pretending to support IPv6/UDP resolution it doesn't otherwise have.
+    sock_func!("getaddrinfo", |args| {
+        if args.len() < 2 {
+            return Err(PyError::type_error(
+                "getaddrinfo() missing required arguments: 'host' and 'port'",
+            ));
+        }
+        let host = if matches!(&*args[0].borrow(), PyObject::None) {
+            "0.0.0.0".to_string()
+        } else {
+            args[0].str()
+        };
+        let port: u16 = match &*args[1].borrow() {
+            PyObject::None => 0,
+            _ => args[1]
+                .as_i64()
+                .or_else(|| args[1].str().parse::<i64>().ok())
+                .unwrap_or(0) as u16,
+        };
+        let addr_str = format!("{}:{}", host, port);
+        let resolved = addr_str
+            .to_socket_addrs()
+            .map_err(|e| PyError::os_error_from_io(&e))?;
+        let mut results = vec![];
+        for sockaddr in resolved {
+            if !sockaddr.is_ipv4() {
+                continue;
+            }
+            let sockaddr_tuple = py_tuple(vec![
+                py_str(&sockaddr.ip().to_string()),
+                py_int(sockaddr.port() as i64),
+            ]);
+            results.push(py_tuple(vec![
+                py_int(2),  // AF_INET
+                py_int(1),  // SOCK_STREAM
+                py_int(6),  // IPPROTO_TCP
+                py_str(""), // canonname
+                sockaddr_tuple,
+            ]));
+        }
+        if results.is_empty() {
+            let io_err = std::io::Error::from_raw_os_error(-2);
+            return Err(PyError::os_error_from_io(&io_err));
+        }
+        Ok(py_list(results))
     });
 
     // Honest: this interpreter's `socket()` only supports AF_INET (see

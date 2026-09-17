@@ -419,6 +419,9 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                 // Store stream in instance dict as a Socket object
                 let sock = PyObjectRef::new(PyObject::Socket {
                     inner: Rc::new(RefCell::new(SocketInner::TcpStream(stream))),
+                    family: 2,   // AF_INET
+                    type_: 1,    // SOCK_STREAM
+                    proto: 0,
                 });
                 if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
                     dict.insert_str("_stream", sock);
@@ -457,7 +460,7 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                 // Extract TcpStream from Socket via try_clone
                 let mut stream = {
                     let sock_borrowed = sock.borrow();
-                    if let PyObject::Socket { inner } = &*sock_borrowed {
+                    if let PyObject::Socket { inner, .. } = &*sock_borrowed {
                         let inner_borrowed = inner.borrow();
                         match &*inner_borrowed {
                             SocketInner::TcpStream(s) => s.try_clone().map_err(|e| {
