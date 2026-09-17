@@ -222,6 +222,8 @@ impl VirtualMachine {
                     dict: HashMap::new(),
                     jit_ptr: std::cell::Cell::new(0),
                     jit_consts: std::cell::RefCell::new(Vec::new()),
+                    name_memo: std::cell::RefCell::new(None),
+                    qualname_memo: std::cell::RefCell::new(None),
                 })));
                 if let PyObject::Function(ref mut inner_f) = &mut *func.borrow_mut() {
                     let dict = &mut inner_f.dict;

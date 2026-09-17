@@ -476,6 +476,8 @@ pub(crate) extern "C" fn jit_make_function(
                     dict: std::collections::HashMap::new(),
                     jit_ptr: std::cell::Cell::new(0),
                     jit_consts: std::cell::RefCell::new(Vec::new()),
+                    name_memo: std::cell::RefCell::new(None),
+                    qualname_memo: std::cell::RefCell::new(None),
                 }));
                 let func_ref = crate::object::PyObjectRef::new(func);
                 // Set __code__ and __module__

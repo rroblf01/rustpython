@@ -97,18 +97,39 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
             let func_name = &f.code.name;
             let dict = &f.dict;
             match name {
-                "__name__" => Ok(dict
-                    .get("__name__")
-                    .cloned()
-                    .unwrap_or(py_str(crate::interner::lookup_str(*func_name)))),
-                "__qualname__" => Ok(dict
-                    .get("__qualname__")
-                    .cloned()
-                    .unwrap_or_else(|| py_str(crate::interner::lookup_str(f.code.qualname)))),
-                "name" => Ok(dict
-                    .get("name")
-                    .cloned()
-                    .unwrap_or(py_str(crate::interner::lookup_str(*func_name)))),
+                "__name__" => {
+                    if let Some(v) = dict.get("__name__").cloned() {
+                        return Ok(v);
+                    }
+                    // Memoize: a fresh heap string per read breaks
+                    // `f.__name__ is f.__name__` for long names (see
+                    // PyFunction::name_memo).
+                    let mut memo = f.name_memo.borrow_mut();
+                    if memo.is_none() {
+                        *memo = Some(py_str(crate::interner::lookup_str(*func_name)));
+                    }
+                    Ok(memo.clone().unwrap())
+                }
+                "__qualname__" => {
+                    if let Some(v) = dict.get("__qualname__").cloned() {
+                        return Ok(v);
+                    }
+                    let mut memo = f.qualname_memo.borrow_mut();
+                    if memo.is_none() {
+                        *memo = Some(py_str(crate::interner::lookup_str(f.code.qualname)));
+                    }
+                    Ok(memo.clone().unwrap())
+                }
+                "name" => {
+                    if let Some(v) = dict.get("name").cloned() {
+                        return Ok(v);
+                    }
+                    let mut memo = f.name_memo.borrow_mut();
+                    if memo.is_none() {
+                        *memo = Some(py_str(crate::interner::lookup_str(*func_name)));
+                    }
+                    Ok(memo.clone().unwrap())
+                }
                 "__doc__" => Ok(dict.get("__doc__").cloned().unwrap_or(py_none())),
                 "__code__" => Ok(dict.get("__code__").cloned().unwrap_or(py_none())),
                 "__globals__" => Ok(dict.get("__globals__").cloned().unwrap_or(py_none())),
