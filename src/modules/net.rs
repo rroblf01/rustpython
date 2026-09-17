@@ -1,6 +1,6 @@
 use crate::object::*;
-use std::collections::HashMap;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::rc::Rc;
@@ -105,9 +105,14 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
         let name_clone = name_owned.clone();
         dict.insert(
             "__new__".to_string(),
-            PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(move |_args: &[PyObjectRef]| {
-                Err(PyError::type_error(format!("cannot create '{}' instances", name_clone)))
-            }))),
+            PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(
+                move |_args: &[PyObjectRef]| {
+                    Err(PyError::type_error(format!(
+                        "cannot create '{}' instances",
+                        name_clone
+                    )))
+                },
+            ))),
         );
         dict.insert(
             "register".to_string(),
@@ -139,9 +144,7 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
                 name: "unregister".to_string(),
                 func: |args| {
                     if args.len() < 2 {
-                        return Err(PyError::type_error(
-                            "unregister expected 1 argument, got 0",
-                        ));
+                        return Err(PyError::type_error("unregister expected 1 argument, got 0"));
                     }
                     let fd = get_fd(&args[1])?;
                     let reg = poll_reg_of(&args[0])?;
@@ -177,10 +180,7 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
                         // "register" which adds one.
                         let mut extra = std::collections::HashMap::new();
                         extra.insert("errno".to_string(), py_int(2));
-                        extra.insert(
-                            "strerror".to_string(),
-                            py_str("No such file or directory"),
-                        );
+                        extra.insert("strerror".to_string(), py_str("No such file or directory"));
                         return Err(PyError::Exception(
                             "OSError".to_string(),
                             PyObjectRef::new(PyObject::Exception {
@@ -239,13 +239,12 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
                     // write to the pipe or run other coop jobs).  Instead
                     // use a short polling interval so the cooperative
                     // scheduler can make progress.
-                    let effective_timeout = if timeout_ms < 0
-                        && crate::modules::coop_blocked_forever()
-                    {
-                        100
-                    } else {
-                        timeout_ms
-                    };
+                    let effective_timeout =
+                        if timeout_ms < 0 && crate::modules::coop_blocked_forever() {
+                            100
+                        } else {
+                            timeout_ms
+                        };
                     let rc = unsafe {
                         poll(
                             poll_fds.as_mut_ptr(),
@@ -334,7 +333,9 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
     fn get_fd(obj: &PyObjectRef) -> Result<i32, PyError> {
         if let Some(i) = obj.as_i64() {
             if i < 0 || i > i32::MAX as i64 {
-                return Err(PyError::value_error("filedescriptor out of range in select()"));
+                return Err(PyError::value_error(
+                    "filedescriptor out of range in select()",
+                ));
             }
             return Ok(i as i32);
         }
@@ -385,7 +386,9 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
         };
         if let Some(i) = result.as_i64() {
             if i < 0 || i > i32::MAX as i64 {
-                return Err(PyError::value_error("filedescriptor out of range in select()"));
+                return Err(PyError::value_error(
+                    "filedescriptor out of range in select()",
+                ));
             }
             Ok(i as i32)
         } else {
@@ -432,11 +435,13 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
                 if let PyObject::Dict(d) = &*last.borrow() {
                     let has_timeout = d.get(&py_str("timeout")).ok().flatten().is_some();
                     if has_timeout || args.len() > 4 {
-                        (&args[..args.len()-1], Some(d.clone()))
+                        (&args[..args.len() - 1], Some(d.clone()))
                     } else {
                         (args, None)
                     }
-                } else { (args, None) }
+                } else {
+                    (args, None)
+                }
             }
             _ => (args, None),
         };
@@ -445,7 +450,10 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("select() takes at least 3 arguments"));
         }
         if pos.len() > 4 && kwargs.is_none() {
-            return Err(PyError::type_error(format!("select() takes at most 4 arguments ({} given)", pos.len())));
+            return Err(PyError::type_error(format!(
+                "select() takes at most 4 arguments ({} given)",
+                pos.len()
+            )));
         }
         let rlist = &pos[0];
         let wlist = &pos[1];
@@ -457,27 +465,61 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
 
         let timeout_opt: Option<f64> = if let Some(kw) = kwargs {
             if let Some(v) = kw.get(&py_str("timeout")).ok().flatten() {
-                if matches!(&*v.borrow(), PyObject::None) { None }
-                else if let Some(f) = v.as_f64() { Some(f) }
-                else { return Err(PyError::type_error("timeout must be a float or None")); }
+                if matches!(&*v.borrow(), PyObject::None) {
+                    None
+                } else if let Some(f) = v.as_f64() {
+                    Some(f)
+                } else {
+                    return Err(PyError::type_error("timeout must be a float or None"));
+                }
             } else if pos.len() >= 4 {
                 let t = &pos[3];
-                if matches!(&*t.borrow(), PyObject::None) { None }
-                else {
-                    let is_numeric = matches!(&*t.borrow(), PyObject::Int(_) | PyObject::Float(_)) || matches!(t, PyObjectRef::SmallInt(_) | PyObjectRef::SmallBool(_) | PyObjectRef::SmallFloat(_));
-                    if !is_numeric { return Err(PyError::type_error("timeout must be a float or None")); }
-                    if let Some(f) = t.as_f64() { Some(f) } else { return Err(PyError::type_error("timeout must be a float or None")); }
+                if matches!(&*t.borrow(), PyObject::None) {
+                    None
+                } else {
+                    let is_numeric = matches!(&*t.borrow(), PyObject::Int(_) | PyObject::Float(_))
+                        || matches!(
+                            t,
+                            PyObjectRef::SmallInt(_)
+                                | PyObjectRef::SmallBool(_)
+                                | PyObjectRef::SmallFloat(_)
+                        );
+                    if !is_numeric {
+                        return Err(PyError::type_error("timeout must be a float or None"));
+                    }
+                    if let Some(f) = t.as_f64() {
+                        Some(f)
+                    } else {
+                        return Err(PyError::type_error("timeout must be a float or None"));
+                    }
                 }
-            } else { None }
+            } else {
+                None
+            }
         } else if pos.len() >= 4 {
             let t = &pos[3];
-            if matches!(&*t.borrow(), PyObject::None) { None }
-            else {
-                let is_numeric = matches!(&*t.borrow(), PyObject::Int(_) | PyObject::Float(_)) || matches!(t, PyObjectRef::SmallInt(_) | PyObjectRef::SmallBool(_) | PyObjectRef::SmallFloat(_));
-                if !is_numeric { return Err(PyError::type_error("timeout must be a float or None")); }
-                if let Some(f) = t.as_f64() { Some(f) } else { return Err(PyError::type_error("timeout must be a float or None")); }
+            if matches!(&*t.borrow(), PyObject::None) {
+                None
+            } else {
+                let is_numeric = matches!(&*t.borrow(), PyObject::Int(_) | PyObject::Float(_))
+                    || matches!(
+                        t,
+                        PyObjectRef::SmallInt(_)
+                            | PyObjectRef::SmallBool(_)
+                            | PyObjectRef::SmallFloat(_)
+                    );
+                if !is_numeric {
+                    return Err(PyError::type_error("timeout must be a float or None"));
+                }
+                if let Some(f) = t.as_f64() {
+                    Some(f)
+                } else {
+                    return Err(PyError::type_error("timeout must be a float or None"));
+                }
             }
-        } else { None };
+        } else {
+            None
+        };
 
         if let Some(f) = timeout_opt {
             if f < 0.0 {
@@ -488,9 +530,17 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
         let timeout_ms: i32 = match timeout_opt {
             None => -1,
             Some(f) => {
-                if f == 0.0 { 0 } else {
+                if f == 0.0 {
+                    0
+                } else {
                     let ms = (f * 1000.0).trunc() as i64;
-                    if ms > i32::MAX as i64 { i32::MAX } else if ms < 0 { 0 } else { ms as i32 }
+                    if ms > i32::MAX as i64 {
+                        i32::MAX
+                    } else if ms < 0 {
+                        0
+                    } else {
+                        ms as i32
+                    }
                 }
             }
         };
@@ -501,15 +551,33 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
                     std::thread::sleep(std::time::Duration::from_secs_f64(f));
                 }
             }
-            return Ok(py_tuple(vec![py_list(vec![]), py_list(vec![]), py_list(vec![])]));
+            return Ok(py_tuple(vec![
+                py_list(vec![]),
+                py_list(vec![]),
+                py_list(vec![]),
+            ]));
         }
 
-        let mut fd_to_events: std::collections::HashMap<i32, i16> = std::collections::HashMap::new();
-        for (_, fd) in &r_vec { *fd_to_events.entry(*fd).or_insert(0) |= POLLIN; }
-        for (_, fd) in &w_vec { *fd_to_events.entry(*fd).or_insert(0) |= POLLOUT; }
-        for (_, fd) in &x_vec { *fd_to_events.entry(*fd).or_insert(0) |= POLLPRI; }
+        let mut fd_to_events: std::collections::HashMap<i32, i16> =
+            std::collections::HashMap::new();
+        for (_, fd) in &r_vec {
+            *fd_to_events.entry(*fd).or_insert(0) |= POLLIN;
+        }
+        for (_, fd) in &w_vec {
+            *fd_to_events.entry(*fd).or_insert(0) |= POLLOUT;
+        }
+        for (_, fd) in &x_vec {
+            *fd_to_events.entry(*fd).or_insert(0) |= POLLPRI;
+        }
 
-        let mut poll_fds: Vec<PollFd> = fd_to_events.iter().map(|(&fd, &ev)| PollFd { fd, events: ev, revents: 0 }).collect();
+        let mut poll_fds: Vec<PollFd> = fd_to_events
+            .iter()
+            .map(|(&fd, &ev)| PollFd {
+                fd,
+                events: ev,
+                revents: 0,
+            })
+            .collect();
         let rc = unsafe { poll(poll_fds.as_mut_ptr(), poll_fds.len() as u32, timeout_ms) };
         if rc < 0 {
             let err = std::io::Error::last_os_error();
@@ -523,7 +591,8 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
                 return Err(ebadf_error());
             }
         }
-        let mut fd_to_revents: std::collections::HashMap<i32, i16> = std::collections::HashMap::new();
+        let mut fd_to_revents: std::collections::HashMap<i32, i16> =
+            std::collections::HashMap::new();
         for pfd in poll_fds {
             fd_to_revents.insert(pfd.fd, pfd.revents);
         }
@@ -553,7 +622,11 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
             }
         }
 
-        Ok(py_tuple(vec![py_list(ready_r), py_list(ready_w), py_list(ready_x)]))
+        Ok(py_tuple(vec![
+            py_list(ready_r),
+            py_list(ready_w),
+            py_list(ready_x),
+        ]))
     });
 
     // ---- poll / devpoll factories and types (Closure so they can capture the Type) ----
@@ -561,23 +634,28 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
         let pt = poll_type_for_factory.clone();
         d.insert(
             "poll".to_string(),
-            PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(move |args: &[PyObjectRef]| {
-                if args.is_empty() {
-                } else if args.len() == 1 {
-                    if let PyObject::Dict(d) = &*args[0].borrow() {
-                        if !d.is_empty() {
+            PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(
+                move |args: &[PyObjectRef]| {
+                    if args.is_empty() {
+                    } else if args.len() == 1 {
+                        if let PyObject::Dict(d) = &*args[0].borrow() {
+                            if !d.is_empty() {
+                                return Err(PyError::type_error("poll() takes no arguments"));
+                            }
+                        } else {
                             return Err(PyError::type_error("poll() takes no arguments"));
                         }
                     } else {
                         return Err(PyError::type_error("poll() takes no arguments"));
                     }
-                } else {
-                    return Err(PyError::type_error("poll() takes no arguments"));
-                }
-                let mut inst_dict = AttrMap::new();
-                inst_dict.insert_str("_reg", py_dict());
-                Ok(PyObjectRef::new(PyObject::Instance { typ: pt.clone(), dict: inst_dict }))
-            }))),
+                    let mut inst_dict = AttrMap::new();
+                    inst_dict.insert_str("_reg", py_dict());
+                    Ok(PyObjectRef::new(PyObject::Instance {
+                        typ: pt.clone(),
+                        dict: inst_dict,
+                    }))
+                },
+            ))),
         );
     }
 
@@ -590,7 +668,9 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
         bases: vec![],
         mro: vec![],
     });
-    if let PyObject::Type { mro, .. } = &mut *error_type.borrow_mut() { *mro = vec![error_type.clone()]; }
+    if let PyObject::Type { mro, .. } = &mut *error_type.borrow_mut() {
+        *mro = vec![error_type.clone()];
+    }
     d.insert_str("error", error_type);
 
     // Also expose poll constants expected by some code (optional, not needed for tests)
@@ -657,8 +737,8 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     fn wrap_tcp_stream(stream: std::net::TcpStream) -> PyObjectRef {
         PyObjectRef::new(PyObject::Socket {
             inner: Rc::new(RefCell::new(SocketInner::TcpStream(stream))),
-            family: 2,   // AF_INET
-            type_: 1,    // SOCK_STREAM
+            family: 2, // AF_INET
+            type_: 1,  // SOCK_STREAM
             proto: 0,
         })
     }
@@ -671,10 +751,13 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
         let _stype = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
         let l = std::net::TcpListener::bind("127.0.0.1:0")
             .map_err(|e| PyError::OsError(format!("socketpair bind: {}", e)))?;
-        let addr = l.local_addr().map_err(|e| PyError::OsError(format!("{}", e)))?;
+        let addr = l
+            .local_addr()
+            .map_err(|e| PyError::OsError(format!("{}", e)))?;
         let c = std::net::TcpStream::connect(addr)
             .map_err(|e| PyError::OsError(format!("socketpair connect: {}", e)))?;
-        let (a_end, _l) = l.accept()
+        let (a_end, _l) = l
+            .accept()
             .map_err(|e| PyError::OsError(format!("socketpair accept: {}", e)))?;
         Ok(py_list(vec![wrap_tcp_stream(a_end), wrap_tcp_stream(c)]))
     });
@@ -876,7 +959,10 @@ pub(crate) fn patch_socket_exception_aliases(
     if let Some(oserror) = real_oserror.clone() {
         socket_dict.insert("error".to_string(), oserror);
     }
-    if let Some(real_timeout) = builtins.get(&crate::interner::intern("TimeoutError")).cloned() {
+    if let Some(real_timeout) = builtins
+        .get(&crate::interner::intern("TimeoutError"))
+        .cloned()
+    {
         socket_dict.insert("timeout".to_string(), real_timeout);
     }
     for name in ["gaierror", "herror"] {

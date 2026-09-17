@@ -1,7 +1,7 @@
+use super::helpers::{ymd_to_ordinal, EPOCH_ORDINAL};
 use crate::object::*;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use super::helpers::{ymd_to_ordinal, EPOCH_ORDINAL};
 
 /// Convert seconds since epoch to (year, month, day, hour, minute, second, weekday, yearday)
 pub(crate) fn epoch_to_ymd(secs: i64) -> (i64, i64, i64, i64, i64, i64, i64, i64) {
@@ -89,16 +89,10 @@ fn build_struct_time_type() -> PyObjectRef {
                 // Slice support (st[:3], st[2:6]) returns a plain tuple,
                 // matching structseq semantics; the test suite slices
                 // heavily (`strp_output[:3]`, `tm[7]`).
-                if let PyObject::Slice {
-                    start,
-                    stop,
-                    step,
-                } = &*args[1].borrow()
-                {
+                if let PyObject::Slice { start, stop, step } = &*args[1].borrow() {
                     use crate::object::extract_slice_fields;
                     let n = STRUCT_TIME_FIELDS.len() as isize;
-                    let (s0, s1, step_v) =
-                        extract_slice_fields(start, stop, step)?;
+                    let (s0, s1, step_v) = extract_slice_fields(start, stop, step)?;
                     let norm = |v: Option<isize>, dflt: isize| -> isize {
                         match v {
                             Some(v) => {
@@ -117,13 +111,23 @@ fn build_struct_time_type() -> PyObjectRef {
                         let stop = norm(s1, n);
                         let mut i = start;
                         while i < stop {
-                            let name = STRUCT_TIME_FIELDS.get(i as usize)
-                                .ok_or_else(|| PyError::index_error("struct_time index out of range"))?;
+                            let name = STRUCT_TIME_FIELDS.get(i as usize).ok_or_else(|| {
+                                PyError::index_error("struct_time index out of range")
+                            })?;
                             out.push(dict.get(name).cloned().unwrap_or_else(py_none));
                             i += step_v;
                         }
                     } else {
-                        let start = match s0 { Some(v) => if v < 0 { (n+v).max(-1) } else { v.min(n-1) }, None => n - 1 };
+                        let start = match s0 {
+                            Some(v) => {
+                                if v < 0 {
+                                    (n + v).max(-1)
+                                } else {
+                                    v.min(n - 1)
+                                }
+                            }
+                            None => n - 1,
+                        };
                         let stop = norm(s1, -1);
                         let mut i = start;
                         while i > stop {
@@ -951,7 +955,9 @@ pub fn create_time_dict() -> HashMap<String, PyObjectRef> {
         if rc != 0 {
             return Err(PyError::os_error_from_io(&std::io::Error::last_os_error()));
         }
-        Ok(py_float(ts.tv_sec as f64 + ts.tv_nsec as f64 / 1_000_000_000.0))
+        Ok(py_float(
+            ts.tv_sec as f64 + ts.tv_nsec as f64 / 1_000_000_000.0,
+        ))
     });
 
     // Constants

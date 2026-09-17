@@ -41,11 +41,14 @@ impl Mt {
         let mut j = 0usize;
         let mut k = N.max(key.len());
         while k > 0 {
-            let prev = if i >= 1 { self.mt[i - 1] } else { self.mt[N - 1] };
-            self.mt[i] = (self.mt[i]
-                ^ (prev ^ (prev >> 30)).wrapping_mul(1_664_525))
-            .wrapping_add(key.get(j).copied().unwrap_or(0))
-            .wrapping_add(j as u32);
+            let prev = if i >= 1 {
+                self.mt[i - 1]
+            } else {
+                self.mt[N - 1]
+            };
+            self.mt[i] = (self.mt[i] ^ (prev ^ (prev >> 30)).wrapping_mul(1_664_525))
+                .wrapping_add(key.get(j).copied().unwrap_or(0))
+                .wrapping_add(j as u32);
             i += 1;
             j += 1;
             if i >= N {
@@ -59,10 +62,13 @@ impl Mt {
         }
         k = N - 1;
         while k > 0 {
-            let prev = if i >= 1 { self.mt[i - 1] } else { self.mt[N - 1] };
-            self.mt[i] = (self.mt[i]
-                ^ (prev ^ (prev >> 30)).wrapping_mul(1_566_083_941))
-            .wrapping_sub(i as u32);
+            let prev = if i >= 1 {
+                self.mt[i - 1]
+            } else {
+                self.mt[N - 1]
+            };
+            self.mt[i] = (self.mt[i] ^ (prev ^ (prev >> 30)).wrapping_mul(1_566_083_941))
+                .wrapping_sub(i as u32);
             i += 1;
             if i >= N {
                 self.mt[0] = self.mt[N - 1];
@@ -116,8 +122,14 @@ impl Mt {
             *w = u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]);
         }
         let idx = u64::from_le_bytes([
-            b[N*4], b[N*4+1], b[N*4+2], b[N*4+3],
-            b[N*4+4], b[N*4+5], b[N*4+6], b[N*4+7],
+            b[N * 4],
+            b[N * 4 + 1],
+            b[N * 4 + 2],
+            b[N * 4 + 3],
+            b[N * 4 + 4],
+            b[N * 4 + 5],
+            b[N * 4 + 6],
+            b[N * 4 + 7],
         ]) as usize;
         Some(Mt { mt, idx })
     }
@@ -290,11 +302,16 @@ fn make_random_type() -> PyObjectRef {
     });
 
     rm!("random", |args| {
-        let self_obj = args.first().cloned().ok_or_else(|| PyError::type_error("random(self) missing"))?;
+        let self_obj = args
+            .first()
+            .cloned()
+            .ok_or_else(|| PyError::type_error("random(self) missing"))?;
         let (a, b) = with_mt(&self_obj, |mt| {
             ((mt.next_u32() >> 5) as f64, (mt.next_u32() >> 6) as f64)
         })?;
-        Ok(py_float((a * 67_108_864.0 + b) * (1.0 / 9_007_199_254_740_992.0)))
+        Ok(py_float(
+            (a * 67_108_864.0 + b) * (1.0 / 9_007_199_254_740_992.0),
+        ))
     });
 
     rm!("getstate", |args| {
@@ -375,4 +392,3 @@ pub fn create_random_dict() -> HashMap<String, PyObjectRef> {
     );
     d
 }
-

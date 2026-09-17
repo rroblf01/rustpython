@@ -15,9 +15,7 @@ pub fn create_http_dict() -> HashMap<String, PyObjectRef> {
     status_dict.insert_str("SERVER_ERROR", py_str("500 Internal Server Error"));
 
     // __members__ property needed by http.client, xmlrpc, robotparser, etc.
-    let members_dict = PyObjectRef::new(PyObject::Dict(Box::new(
-        PyDict::new()
-    )));
+    let members_dict = PyObjectRef::new(PyObject::Dict(Box::new(PyDict::new())));
     status_dict.insert("__members__".to_string(), members_dict);
 
     let http_status_type = PyObjectRef::new(PyObject::Type {
@@ -419,8 +417,8 @@ pub fn create_http_client_dict() -> HashMap<String, PyObjectRef> {
                 // Store stream in instance dict as a Socket object
                 let sock = PyObjectRef::new(PyObject::Socket {
                     inner: Rc::new(RefCell::new(SocketInner::TcpStream(stream))),
-                    family: 2,   // AF_INET
-                    type_: 1,    // SOCK_STREAM
+                    family: 2, // AF_INET
+                    type_: 1,  // SOCK_STREAM
                     proto: 0,
                 });
                 if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {

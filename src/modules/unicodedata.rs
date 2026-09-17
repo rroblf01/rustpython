@@ -148,8 +148,13 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
             // branch (falls through to "So"); needed by stringprep
             // C.1.2 (test_stringprep: U+00A0). Set stable since 3.2.0.
             match ch {
-                '\u{0020}' | '\u{00A0}' | '\u{1680}' | '\u{2000}'..='\u{200A}'
-                | '\u{202F}' | '\u{205F}' | '\u{3000}' => {
+                '\u{0020}'
+                | '\u{00A0}'
+                | '\u{1680}'
+                | '\u{2000}'..='\u{200A}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}' => {
                     return Ok(py_str("Zs"));
                 }
                 _ => {}
@@ -173,7 +178,9 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
         });
         ucd_func!("normalize", |args| {
             if args.len() < 2 {
-                return Err(PyError::type_error("normalize() requires form and unicode string"));
+                return Err(PyError::type_error(
+                    "normalize() requires form and unicode string",
+                ));
             }
             Ok(py_str(&args[1].str()))
         });
@@ -477,29 +484,49 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
     // east_asian_width(chr, /) - Returns the East Asian Width property
     ud_func!("east_asian_width", |args| {
         if args.is_empty() {
-            return Err(PyError::type_error("east_asian_width() requires a character"));
+            return Err(PyError::type_error(
+                "east_asian_width() requires a character",
+            ));
         }
         let s = args[0].str();
         let ch = s.chars().next().unwrap_or('\0');
         let eaw = match ch {
-            '\u{1100}'..='\u{115F}' | '\u{2329}'..='\u{232A}'
-            | '\u{2E80}'..='\u{303E}' | '\u{3040}'..='\u{33BF}'
-            | '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}'
-            | '\u{A000}'..='\u{A4CF}' | '\u{AC00}'..='\u{D7AF}'
-            | '\u{F900}'..='\u{FAFF}' | '\u{FE10}'..='\u{FE19}'
-            | '\u{FE30}'..='\u{FE6F}' | '\u{FF01}'..='\u{FF60}'
-            | '\u{FFE0}'..='\u{FFE6}' | '\u{20000}'..='\u{2FFFD}'
+            '\u{1100}'..='\u{115F}'
+            | '\u{2329}'..='\u{232A}'
+            | '\u{2E80}'..='\u{303E}'
+            | '\u{3040}'..='\u{33BF}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{A000}'..='\u{A4CF}'
+            | '\u{AC00}'..='\u{D7AF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{FE10}'..='\u{FE19}'
+            | '\u{FE30}'..='\u{FE6F}'
+            | '\u{FF01}'..='\u{FF60}'
+            | '\u{FFE0}'..='\u{FFE6}'
+            | '\u{20000}'..='\u{2FFFD}'
             | '\u{30000}'..='\u{3FFFD}' => "W",
-            '\u{3000}'..='\u{3002}' | '\u{3004}'..='\u{303C}'
-            | '\u{FF01}'..='\u{FF0F}' | '\u{FF1A}'..='\u{FF20}'
-            | '\u{FF3B}'..='\u{FF40}' | '\u{FF5B}'..='\u{FF65}'
+            '\u{3000}'..='\u{3002}'
+            | '\u{3004}'..='\u{303C}'
+            | '\u{FF01}'..='\u{FF0F}'
+            | '\u{FF1A}'..='\u{FF20}'
+            | '\u{FF3B}'..='\u{FF40}'
+            | '\u{FF5B}'..='\u{FF65}'
             | '\u{FFE0}'..='\u{FFE6}' => "F",
-            '\u{0020}'..='\u{007E}' | '\u{00A0}'..='\u{00AC}'
-            | '\u{00AE}'..='\u{05FF}' | '\u{2010}'..='\u{2027}'
-            | '\u{2028}'..='\u{218F}' | '\u{2460}'..='\u{257F}'
-            | '\u{25A0}'..='\u{27BF}' | '\u{27C0}'..='\u{2BFF}'
-            | '\u{2C60}'..='\u{2C7F}' | '\u{2E00}'..='\u{2E7F}'
-            | '\u{3001}' | '\u{3002}' | '\u{3003}' | '\u{3004}' => "Na",
+            '\u{0020}'..='\u{007E}'
+            | '\u{00A0}'..='\u{00AC}'
+            | '\u{00AE}'..='\u{05FF}'
+            | '\u{2010}'..='\u{2027}'
+            | '\u{2028}'..='\u{218F}'
+            | '\u{2460}'..='\u{257F}'
+            | '\u{25A0}'..='\u{27BF}'
+            | '\u{27C0}'..='\u{2BFF}'
+            | '\u{2C60}'..='\u{2C7F}'
+            | '\u{2E00}'..='\u{2E7F}'
+            | '\u{3001}'
+            | '\u{3002}'
+            | '\u{3003}'
+            | '\u{3004}' => "Na",
             _ => "N",
         };
         Ok(py_str(eaw))
@@ -538,8 +565,18 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
             '\u{002F}' => "SOLIDUS",
             '\u{0030}'..='\u{0039}' => {
                 let n = ch as u32 - '0' as u32;
-                let names = ["DIGIT ZERO", "DIGIT ONE", "DIGIT TWO", "DIGIT THREE", "DIGIT FOUR",
-                    "DIGIT FIVE", "DIGIT SIX", "DIGIT SEVEN", "DIGIT EIGHT", "DIGIT NINE"];
+                let names = [
+                    "DIGIT ZERO",
+                    "DIGIT ONE",
+                    "DIGIT TWO",
+                    "DIGIT THREE",
+                    "DIGIT FOUR",
+                    "DIGIT FIVE",
+                    "DIGIT SIX",
+                    "DIGIT SEVEN",
+                    "DIGIT EIGHT",
+                    "DIGIT NINE",
+                ];
                 names[n as usize]
             }
             '\u{003A}' => "COLON",
@@ -551,15 +588,34 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
             '\u{0040}' => "COMMERCIAL AT",
             '\u{0041}'..='\u{005A}' => {
                 let n = ch as u32 - 'A' as u32;
-                let names = ["LATIN CAPITAL LETTER A", "LATIN CAPITAL LETTER B", "LATIN CAPITAL LETTER C",
-                    "LATIN CAPITAL LETTER D", "LATIN CAPITAL LETTER E", "LATIN CAPITAL LETTER F",
-                    "LATIN CAPITAL LETTER G", "LATIN CAPITAL LETTER H", "LATIN CAPITAL LETTER I",
-                    "LATIN CAPITAL LETTER J", "LATIN CAPITAL LETTER K", "LATIN CAPITAL LETTER L",
-                    "LATIN CAPITAL LETTER M", "LATIN CAPITAL LETTER N", "LATIN CAPITAL LETTER O",
-                    "LATIN CAPITAL LETTER P", "LATIN CAPITAL LETTER Q", "LATIN CAPITAL LETTER R",
-                    "LATIN CAPITAL LETTER S", "LATIN CAPITAL LETTER T", "LATIN CAPITAL LETTER U",
-                    "LATIN CAPITAL LETTER V", "LATIN CAPITAL LETTER W", "LATIN CAPITAL LETTER X",
-                    "LATIN CAPITAL LETTER Y", "LATIN CAPITAL LETTER Z"];
+                let names = [
+                    "LATIN CAPITAL LETTER A",
+                    "LATIN CAPITAL LETTER B",
+                    "LATIN CAPITAL LETTER C",
+                    "LATIN CAPITAL LETTER D",
+                    "LATIN CAPITAL LETTER E",
+                    "LATIN CAPITAL LETTER F",
+                    "LATIN CAPITAL LETTER G",
+                    "LATIN CAPITAL LETTER H",
+                    "LATIN CAPITAL LETTER I",
+                    "LATIN CAPITAL LETTER J",
+                    "LATIN CAPITAL LETTER K",
+                    "LATIN CAPITAL LETTER L",
+                    "LATIN CAPITAL LETTER M",
+                    "LATIN CAPITAL LETTER N",
+                    "LATIN CAPITAL LETTER O",
+                    "LATIN CAPITAL LETTER P",
+                    "LATIN CAPITAL LETTER Q",
+                    "LATIN CAPITAL LETTER R",
+                    "LATIN CAPITAL LETTER S",
+                    "LATIN CAPITAL LETTER T",
+                    "LATIN CAPITAL LETTER U",
+                    "LATIN CAPITAL LETTER V",
+                    "LATIN CAPITAL LETTER W",
+                    "LATIN CAPITAL LETTER X",
+                    "LATIN CAPITAL LETTER Y",
+                    "LATIN CAPITAL LETTER Z",
+                ];
                 names[n as usize]
             }
             '\u{005B}' => "LEFT SQUARE BRACKET",
@@ -570,15 +626,34 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
             '\u{0060}' => "GRAVE ACCENT",
             '\u{0061}'..='\u{007A}' => {
                 let n = ch as u32 - 'a' as u32;
-                let names = ["LATIN SMALL LETTER A", "LATIN SMALL LETTER B", "LATIN SMALL LETTER C",
-                    "LATIN SMALL LETTER D", "LATIN SMALL LETTER E", "LATIN SMALL LETTER F",
-                    "LATIN SMALL LETTER G", "LATIN SMALL LETTER H", "LATIN SMALL LETTER I",
-                    "LATIN SMALL LETTER J", "LATIN SMALL LETTER K", "LATIN SMALL LETTER L",
-                    "LATIN SMALL LETTER M", "LATIN SMALL LETTER N", "LATIN SMALL LETTER O",
-                    "LATIN SMALL LETTER P", "LATIN SMALL LETTER Q", "LATIN SMALL LETTER R",
-                    "LATIN SMALL LETTER S", "LATIN SMALL LETTER T", "LATIN SMALL LETTER U",
-                    "LATIN SMALL LETTER V", "LATIN SMALL LETTER W", "LATIN SMALL LETTER X",
-                    "LATIN SMALL LETTER Y", "LATIN SMALL LETTER Z"];
+                let names = [
+                    "LATIN SMALL LETTER A",
+                    "LATIN SMALL LETTER B",
+                    "LATIN SMALL LETTER C",
+                    "LATIN SMALL LETTER D",
+                    "LATIN SMALL LETTER E",
+                    "LATIN SMALL LETTER F",
+                    "LATIN SMALL LETTER G",
+                    "LATIN SMALL LETTER H",
+                    "LATIN SMALL LETTER I",
+                    "LATIN SMALL LETTER J",
+                    "LATIN SMALL LETTER K",
+                    "LATIN SMALL LETTER L",
+                    "LATIN SMALL LETTER M",
+                    "LATIN SMALL LETTER N",
+                    "LATIN SMALL LETTER O",
+                    "LATIN SMALL LETTER P",
+                    "LATIN SMALL LETTER Q",
+                    "LATIN SMALL LETTER R",
+                    "LATIN SMALL LETTER S",
+                    "LATIN SMALL LETTER T",
+                    "LATIN SMALL LETTER U",
+                    "LATIN SMALL LETTER V",
+                    "LATIN SMALL LETTER W",
+                    "LATIN SMALL LETTER X",
+                    "LATIN SMALL LETTER Y",
+                    "LATIN SMALL LETTER Z",
+                ];
                 names[n as usize]
             }
             '\u{007B}' => "LEFT CURLY BRACKET",
@@ -639,7 +714,8 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
                     return Ok(args[1].clone());
                 }
                 return Err(PyError::value_error(format!(
-                    "no Unicode name for U+{:04X}", ch as u32
+                    "no Unicode name for U+{:04X}",
+                    ch as u32
                 )));
             }
         };
@@ -736,7 +812,8 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
             "EN DASH" => '\u{2013}',
             _ => {
                 return Err(PyError::value_error(format!(
-                    "unknown Unicode name: '{}'", name
+                    "unknown Unicode name: '{}'",
+                    name
                 )));
             }
         };
@@ -756,7 +833,8 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
             Ok(args[1].clone())
         } else {
             Err(PyError::value_error(format!(
-                "not a decimal character: '{}'", s
+                "not a decimal character: '{}'",
+                s
             )))
         }
     });
@@ -774,7 +852,8 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
             Ok(args[1].clone())
         } else {
             Err(PyError::value_error(format!(
-                "not a digit character: '{}'", s
+                "not a digit character: '{}'",
+                s
             )))
         }
     });
@@ -826,7 +905,7 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
             '\u{3021}'..='\u{3029}' => Some(ch as i64 - 0x3021 + 1), // Ideographic
             '\u{3038}'..='\u{303A}' => Some(ch as i64 - 0x3038 + 10), // Ideographic
             '\u{3195}'..='\u{319F}' => Some(ch as i64 - 0x3195 + 1), // Hangul
-            '\u{FF10}'..='\u{FF19}' => Some(ch as i64 - 0xFF10), // Fullwidth digits
+            '\u{FF10}'..='\u{FF19}' => Some(ch as i64 - 0xFF10),     // Fullwidth digits
             _ => None,
         };
         if let Some(v) = val {
@@ -835,7 +914,8 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
             Ok(args[1].clone())
         } else {
             Err(PyError::value_error(format!(
-                "not a numeric character: '{}'", s
+                "not a numeric character: '{}'",
+                s
             )))
         }
     });
@@ -1080,7 +1160,7 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
             '\u{FF60}' => '\u{FF5F}', // ｠ -> ｟
             '\u{FF62}' => '\u{FF63}', // ｢ -> ｣
             '\u{FF63}' => '\u{FF62}', // ｣ -> ｢
-            _ => ch, // Not mirrored, return same character
+            _ => ch,                  // Not mirrored, return same character
         };
         Ok(py_str(&mir.to_string()))
     });
@@ -1231,7 +1311,9 @@ pub fn create_unicodedata_dict() -> HashMap<String, PyObjectRef> {
     // is_normalized(form, str, /) - Returns whether the string is normalized
     ud_func!("is_normalized", |args| {
         if args.len() < 2 {
-            return Err(PyError::type_error("is_normalized() requires form and string"));
+            return Err(PyError::type_error(
+                "is_normalized() requires form and string",
+            ));
         }
         let _form = args[0].str();
         let _text = args[1].str();

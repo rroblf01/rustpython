@@ -1,7 +1,7 @@
+use super::timedelta::make_timedelta;
+use super::utils::{format_utc_offset_name, inst_get, inst_get_i64, instance_type_name, CtorArgs};
 use crate::object::*;
 use std::collections::HashMap;
-use super::utils::{inst_get, inst_get_i64, instance_type_name, CtorArgs, format_utc_offset_name};
-use super::timedelta::make_timedelta;
 
 thread_local! {
     static TIMEZONE_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);

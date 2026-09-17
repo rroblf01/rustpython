@@ -1,7 +1,7 @@
 // Split from src/modules/time/datetime.rs — isoformat helpers.
-use crate::object::*;
-use crate::modules::time::{format_offset_iso, get_utcoffset_seconds, inst_get_i64};
 use super::{datetime_ordinal, datetime_tzinfo};
+use crate::modules::time::{format_offset_iso, get_utcoffset_seconds, inst_get_i64};
+use crate::object::*;
 
 pub(crate) fn datetime_isoformat(obj: &PyObjectRef, sep: char) -> String {
     datetime_isoformat_ts(obj, sep, None)
@@ -9,7 +9,11 @@ pub(crate) fn datetime_isoformat(obj: &PyObjectRef, sep: char) -> String {
 
 /// timespec: None => auto (omit fraction when us==0); Some(n) => emit exactly
 /// n fractional digits (0,3,6 are the meaningful ones; others truncated).
-pub(crate) fn datetime_isoformat_ts(obj: &PyObjectRef, sep: char, timespec: Option<usize>) -> String {
+pub(crate) fn datetime_isoformat_ts(
+    obj: &PyObjectRef,
+    sep: char,
+    timespec: Option<usize>,
+) -> String {
     let y = inst_get_i64(obj, "year");
     let mo = inst_get_i64(obj, "month");
     let d = inst_get_i64(obj, "day");
@@ -20,8 +24,7 @@ pub(crate) fn datetime_isoformat_ts(obj: &PyObjectRef, sep: char, timespec: Opti
     // Shared timezone suffix builder for every early-return path below.
     fn tz_suffix(obj: &PyObjectRef, h: i64, mi: i64, s: i64) -> String {
         let tz = datetime_tzinfo(obj);
-        if let Some(off) =
-            get_utcoffset_seconds(&tz, datetime_ordinal(obj), h * 3600 + mi * 60 + s)
+        if let Some(off) = get_utcoffset_seconds(&tz, datetime_ordinal(obj), h * 3600 + mi * 60 + s)
         {
             format_offset_iso(off)
         } else {
@@ -36,7 +39,10 @@ pub(crate) fn datetime_isoformat_ts(obj: &PyObjectRef, sep: char, timespec: Opti
             return format!("{:04}-{:02}-{:02}{}{:02}{}", y, mo, d, sep, h, tzs);
         }
         Some(2) => {
-            return format!("{:04}-{:02}-{:02}{}{:02}:{:02}{}", y, mo, d, sep, h, mi, tzs);
+            return format!(
+                "{:04}-{:02}-{:02}{}{:02}:{:02}{}",
+                y, mo, d, sep, h, mi, tzs
+            );
         }
         Some(3) => {
             return format!(
@@ -60,7 +66,10 @@ pub(crate) fn datetime_isoformat_ts(obj: &PyObjectRef, sep: char, timespec: Opti
         }
         _ => {}
     }
-    let mut out = format!("{:04}-{:02}-{:02}{}{:02}:{:02}:{:02}", y, mo, d, sep, h, mi, s);
+    let mut out = format!(
+        "{:04}-{:02}-{:02}{}{:02}:{:02}:{:02}",
+        y, mo, d, sep, h, mi, s
+    );
     if timespec == Some(5) || us != 0 {
         out.push_str(&format!(".{:06}", us));
     }

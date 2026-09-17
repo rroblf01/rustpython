@@ -1,8 +1,8 @@
 // Split from src/modules/time/datetime.rs — isoformat parsing helpers.
-use crate::object::*;
+use super::make_datetime;
 use crate::modules::time::helpers::{ordinal_to_ymd, ymd_to_ordinal};
 use crate::modules::time::{get_utc_singleton, make_timezone};
-use super::make_datetime;
+use crate::object::*;
 
 pub(crate) fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
     // Full CPython-3.11-style parser: same grammar as the date-type
@@ -10,17 +10,20 @@ pub(crate) fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
     // ANY single-char separator incl. multi-byte ones, fractional seconds
     // with ',' or '.', truncated to microseconds, 'Z'/+-HH[:MM[:SS]] zones).
     let bad = || {
-        if std::env::var("RPY_ISO_LOG").is_ok() { eprintln!("DTI-REJ {:?}", s); }
+        if std::env::var("RPY_ISO_LOG").is_ok() {
+            eprintln!("DTI-REJ {:?}", s);
+        }
         PyError::value_error("Invalid isoformat string")
     };
     // Accept ASCII/UTF-8 bytes like the date-type parser does.
     let owned;
-    let s_str: &str = if let Some(stripped) = s.strip_prefix("b'").and_then(|x| x.strip_suffix('\'')) {
-        owned = stripped.to_string();
-        &owned
-    } else {
-        s
-    };
+    let s_str: &str =
+        if let Some(stripped) = s.strip_prefix("b'").and_then(|x| x.strip_suffix('\'')) {
+            owned = stripped.to_string();
+            &owned
+        } else {
+            s
+        };
     let mut t = s_str.trim();
     if t.is_empty() {
         return Err(bad());
@@ -79,7 +82,8 @@ pub(crate) fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
                 compact.get(6..8)?.parse().ok()?,
             ));
         }
-        if compact.len() == 7 && compact.chars().all(|c| c.is_ascii_digit())
+        if compact.len() == 7
+            && compact.chars().all(|c| c.is_ascii_digit())
             && !compact.contains(['W', 'w'])
         {
             let y: i64 = compact.get(0..4)?.parse().ok()?;
@@ -145,7 +149,9 @@ pub(crate) fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
                 }
                 let jan4_ord = ymd_to_ordinal(y_, 1, 4);
                 let jan4_wd = ((jan4_ord % 7) + 6) % 7;
-                Some(ordinal_to_ymd(jan4_ord - jan4_wd + (wk - 1) * 7 + (day - 1)))
+                Some(ordinal_to_ymd(
+                    jan4_ord - jan4_wd + (wk - 1) * 7 + (day - 1),
+                ))
             })() {
                 let (mut hh, mut mi, mut ss, mut us) = (0i64, 0i64, 0i64, 0i64);
                 if !time_part.is_empty() {
@@ -155,13 +161,28 @@ pub(crate) fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
                     match time_part.len() {
                         2 => hh = time_part.parse().unwrap_or(99),
                         4 => {
-                            hh = time_part.get(0..2).and_then(|x| x.parse().ok()).unwrap_or(99);
-                            mi = time_part.get(2..4).and_then(|x| x.parse().ok()).unwrap_or(99);
+                            hh = time_part
+                                .get(0..2)
+                                .and_then(|x| x.parse().ok())
+                                .unwrap_or(99);
+                            mi = time_part
+                                .get(2..4)
+                                .and_then(|x| x.parse().ok())
+                                .unwrap_or(99);
                         }
                         6 => {
-                            hh = time_part.get(0..2).and_then(|x| x.parse().ok()).unwrap_or(99);
-                            mi = time_part.get(2..4).and_then(|x| x.parse().ok()).unwrap_or(99);
-                            ss = time_part.get(4..6).and_then(|x| x.parse().ok()).unwrap_or(99);
+                            hh = time_part
+                                .get(0..2)
+                                .and_then(|x| x.parse().ok())
+                                .unwrap_or(99);
+                            mi = time_part
+                                .get(2..4)
+                                .and_then(|x| x.parse().ok())
+                                .unwrap_or(99);
+                            ss = time_part
+                                .get(4..6)
+                                .and_then(|x| x.parse().ok())
+                                .unwrap_or(99);
                         }
                         _ => return Err(bad()),
                     }
@@ -215,9 +236,9 @@ pub(crate) fn parse_datetime_isoformat(s: &str) -> PyResult<PyObjectRef> {
         };
         hh <= 23 && mi < 60 && ss < 60
     }
-    let (date_s, time_s) = if let Some(sep_pos) =
-        t.rfind(['+', '-'])
-            .filter(|&p| (p == 8 || p == 10) && time_like(&t[p + 1..]))
+    let (date_s, time_s) = if let Some(sep_pos) = t
+        .rfind(['+', '-'])
+        .filter(|&p| (p == 8 || p == 10) && time_like(&t[p + 1..]))
     {
         (&t[..sep_pos], &t[sep_pos + 1..])
     } else {

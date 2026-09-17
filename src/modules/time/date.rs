@@ -1,7 +1,11 @@
+use super::timedelta::make_timedelta;
+use super::{
+    day_of_year, days_in_month, epoch_to_ymd, format_strftime, get_utc_singleton, inst_get_i64,
+    instance_type_name, make_datetime, make_timezone, ordinal_to_ymd, weekday_from_ordinal,
+    ymd_to_ordinal, CtorArgs,
+};
 use crate::object::*;
 use std::collections::HashMap;
-use super::{ymd_to_ordinal, ordinal_to_ymd, weekday_from_ordinal, day_of_year, days_in_month, inst_get_i64, instance_type_name, CtorArgs, format_strftime, epoch_to_ymd, make_datetime, make_timezone, get_utc_singleton};
-use super::timedelta::make_timedelta;
 
 thread_local! {
     static DATE_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
@@ -22,7 +26,6 @@ pub(crate) fn make_date_from_ordinal(ord: i64) -> PyObjectRef {
     make_date(y, m, d)
 }
 
-
 /// Build an `IsoCalendarDate`-like instance (CPython returns a
 /// tuple subclass with named fields year/week/weekday). Our version is an
 /// Instance exposing attribute access, iteration, indexing and equality
@@ -37,7 +40,11 @@ fn iso_week_corrected(year: i64, approx_week: i64) -> (i64, i64) {
         (y + y / 4 - y / 100 + y / 400) % 7
     }
     fn weeks_in_year(y: i64) -> i64 {
-        if p(y) == 4 || p(y - 1) == 3 { 53 } else { 52 }
+        if p(y) == 4 || p(y - 1) == 3 {
+            53
+        } else {
+            52
+        }
     }
     if approx_week <= 0 {
         return (year - 1, weeks_in_year(year - 1));
@@ -53,48 +60,91 @@ fn make_isocalendar(year: i64, week: i64, weekday: i64) -> PyObjectRef {
         static ISO_TYPE: std::cell::RefCell<Option<PyObjectRef>> = const { std::cell::RefCell::new(None) };
     }
     let typ = ISO_TYPE.with(|c| {
-        if let Some(t) = &*c.borrow() { return t.clone(); }
+        if let Some(t) = &*c.borrow() {
+            return t.clone();
+        }
         let mut td: HashMap<String, PyObjectRef> = HashMap::new();
         let bf = |name: &str, f: crate::object::BuiltinFunc| {
-            PyObjectRef::new(PyObject::BuiltinFunction { name: name.to_string(), func: f })
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: name.to_string(),
+                func: f,
+            })
         };
-        td.insert("__iter__".into(), bf("__iter__", |args| {
-            let o = &args[0];
-            let g = |n: &str| inst_get_i64(o, n);
-            let tup = py_tuple(vec![
-                py_int(g("year")),
-                py_int(g("week")),
-                py_int(g("weekday")),
-            ]);
-            crate::object::builtin_iter(&[tup])
-        }));
+        td.insert(
+            "__iter__".into(),
+            bf("__iter__", |args| {
+                let o = &args[0];
+                let g = |n: &str| inst_get_i64(o, n);
+                let tup = py_tuple(vec![
+                    py_int(g("year")),
+                    py_int(g("week")),
+                    py_int(g("weekday")),
+                ]);
+                crate::object::builtin_iter(&[tup])
+            }),
+        );
         td.insert("__len__".into(), bf("__len__", |_a| Ok(py_int(3))));
-        td.insert("__getitem__".into(), bf("__getitem__", |args| {
-            let i = args[1].as_i64().unwrap_or(-999);
-            let o = &args[0];
-            let vals = [inst_get_i64(o, "year"), inst_get_i64(o, "week"), inst_get_i64(o, "weekday")];
-            let idx = if i < 0 { 3 + i } else { i };
-            if !(0..3).contains(&idx) { return Err(PyError::index_error("IsoCalendarDate index out of range")); }
-            Ok(py_int(vals[idx as usize]))
-        }));
-        td.insert("__eq__".into(), bf("__eq__", |args| {
-            let o = &args[0]; let other = &args[1];
-            let vals = [inst_get_i64(o, "year"), inst_get_i64(o, "week"), inst_get_i64(o, "weekday")];
-            let eq = match &*other.borrow() {
-                PyObject::Tuple(t) => t.len() == 3 && t.iter().zip(vals.iter()).all(|(v, iv)| v.as_i64() == Some(*iv)),
-                _ => {
-                    if other.borrow().type_name() == "IsoCalendarDate" {
-                        [inst_get_i64(other, "year"), inst_get_i64(other, "week"), inst_get_i64(other, "weekday")] == vals
-                    } else { false }
+        td.insert(
+            "__getitem__".into(),
+            bf("__getitem__", |args| {
+                let i = args[1].as_i64().unwrap_or(-999);
+                let o = &args[0];
+                let vals = [
+                    inst_get_i64(o, "year"),
+                    inst_get_i64(o, "week"),
+                    inst_get_i64(o, "weekday"),
+                ];
+                let idx = if i < 0 { 3 + i } else { i };
+                if !(0..3).contains(&idx) {
+                    return Err(PyError::index_error("IsoCalendarDate index out of range"));
                 }
-            };
-            Ok(py_bool(eq))
-        }));
-        td.insert("__repr__".into(), bf("__repr__", |args| {
-            let o = args[0].clone();
-            Ok(py_str(&format!("IsoCalendarDate(year={}, week={}, weekday={})",
-                inst_get_i64(&o,"year"), inst_get_i64(&o,"week"), inst_get_i64(&o,"weekday"))))
-        }));
+                Ok(py_int(vals[idx as usize]))
+            }),
+        );
+        td.insert(
+            "__eq__".into(),
+            bf("__eq__", |args| {
+                let o = &args[0];
+                let other = &args[1];
+                let vals = [
+                    inst_get_i64(o, "year"),
+                    inst_get_i64(o, "week"),
+                    inst_get_i64(o, "weekday"),
+                ];
+                let eq = match &*other.borrow() {
+                    PyObject::Tuple(t) => {
+                        t.len() == 3
+                            && t.iter()
+                                .zip(vals.iter())
+                                .all(|(v, iv)| v.as_i64() == Some(*iv))
+                    }
+                    _ => {
+                        if other.borrow().type_name() == "IsoCalendarDate" {
+                            [
+                                inst_get_i64(other, "year"),
+                                inst_get_i64(other, "week"),
+                                inst_get_i64(other, "weekday"),
+                            ] == vals
+                        } else {
+                            false
+                        }
+                    }
+                };
+                Ok(py_bool(eq))
+            }),
+        );
+        td.insert(
+            "__repr__".into(),
+            bf("__repr__", |args| {
+                let o = args[0].clone();
+                Ok(py_str(&format!(
+                    "IsoCalendarDate(year={}, week={}, weekday={})",
+                    inst_get_i64(&o, "year"),
+                    inst_get_i64(&o, "week"),
+                    inst_get_i64(&o, "weekday")
+                )))
+            }),
+        );
         let t = PyObjectRef::new(PyObject::Type {
             name: "IsoCalendarDate".into(),
             dict: Box::new(crate::object::str_map_to_typedict(td)),
@@ -168,7 +218,11 @@ fn build_date_type() -> PyObjectRef {
             let wday = weekday_from_ordinal(date_ordinal(&args[0])) + 1;
             // ISO week number — use the date's ordinal directly
             // (same system as weekday_from_ordinal)
-            let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 1 } else { 0 };
+            let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                1
+            } else {
+                0
+            };
             let days_in_month = [0i64, 31, 28 + leap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
             let mut yday = day;
             for m in 1..month {
@@ -180,7 +234,7 @@ fn build_date_type() -> PyObjectRef {
             let jan4_ord = ymd_to_ordinal(year, 1, 4);
             // Day of week for Jan 4 (0=Monday..6=Sunday) using same weekday function
             let jan4_wday = weekday_from_ordinal(jan4_ord); // 0-indexed
-            // Monday of ISO week 1 is Jan 4 minus its weekday offset
+                                                            // Monday of ISO week 1 is Jan 4 minus its weekday offset
             let week1_monday = jan4_ord - jan4_wday;
             // Current date ordinal
             let cur_ord = date_ordinal(&args[0]);
@@ -520,8 +574,7 @@ fn build_date_type() -> PyObjectRef {
                 if let Some(pos) = idx {
                     if pos >= 9 {
                         let zone = &t[pos..];
-                        let zc: String =
-                            zone.chars().filter(|c| *c != ':').collect();
+                        let zc: String = zone.chars().filter(|c| *c != ':').collect();
                         let zbody = &zc[1..];
                         let neg = zc.starts_with('-');
                         let digits: Vec<&str> = if zc.contains('.') {
@@ -540,9 +593,10 @@ fn build_date_type() -> PyObjectRef {
                         };
                         if !digits[0].is_empty()
                             && digits[0].chars().all(|c| c.is_ascii_digit())
-                            && digits.get(1).map(|d| {
-                                d.chars().all(|c| c.is_ascii_digit()) || d.is_empty()
-                            }) == Some(true)
+                            && digits
+                                .get(1)
+                                .map(|d| d.chars().all(|c| c.is_ascii_digit()) || d.is_empty())
+                                == Some(true)
                         {
                             let hh: i64 = digits[0].parse().unwrap_or(99);
                             let mm: i64 = if digits[1].len() >= 2 {
@@ -577,7 +631,9 @@ fn build_date_type() -> PyObjectRef {
 
             fn parse_date(ds: &str) -> Option<(i64, i64, i64)> {
                 let ds = ds.trim();
-                if std::env::var("RPY_DBG_ISO").is_ok() { eprintln!("parse_date({})", ds); }
+                if std::env::var("RPY_DBG_ISO").is_ok() {
+                    eprintln!("parse_date({})", ds);
+                }
                 // Extended YYYY-MM-DD
                 if ds.len() == 10 && ds.as_bytes()[4] == b'-' && ds.as_bytes()[7] == b'-' {
                     let (y, m, d) = (
@@ -597,7 +653,8 @@ fn build_date_type() -> PyObjectRef {
                 }
                 // Ordinal YYYY-DDD / YYYYDDD
                 let compact: String = ds.chars().filter(|c| *c != '-').collect();
-                if compact.len() == 7 && compact.chars().all(|c| c.is_ascii_digit())
+                if compact.len() == 7
+                    && compact.chars().all(|c| c.is_ascii_digit())
                     && !compact.contains(['W', 'w'])
                 {
                     let y: i64 = compact.get(0..4)?.parse().ok()?;
@@ -643,11 +700,11 @@ fn build_date_type() -> PyObjectRef {
                         eprintln!("ISO-REJ date of {:?}", s);
                     }
                     {
-                    if std::env::var("RPY_ISO_LOG").is_ok() {
-                        eprintln!("ISO-REJ generic {:?}", s);
+                        if std::env::var("RPY_ISO_LOG").is_ok() {
+                            eprintln!("ISO-REJ generic {:?}", s);
+                        }
+                        return Err(bad());
                     }
-                    return Err(bad());
-                }
                 }
             };
             if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
@@ -670,11 +727,11 @@ fn build_date_type() -> PyObjectRef {
                 let digits: String = tp.chars().filter(|&c| c != ':').collect();
                 if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
                     {
-                    if std::env::var("RPY_ISO_LOG").is_ok() {
-                        eprintln!("ISO-REJ generic {:?}", s);
+                        if std::env::var("RPY_ISO_LOG").is_ok() {
+                            eprintln!("ISO-REJ generic {:?}", s);
+                        }
+                        return Err(bad());
                     }
-                    return Err(bad());
-                }
                 }
                 if std::env::var("RPY_ISO_LOG").is_ok() && digits.is_empty() {
                     eprintln!("ISO-REJ empty time of {:?}", s);
@@ -694,20 +751,20 @@ fn build_date_type() -> PyObjectRef {
                 }
                 if hh > 23 || mi > 59 || ss > 59 {
                     {
-                    if std::env::var("RPY_ISO_LOG").is_ok() {
-                        eprintln!("ISO-REJ generic {:?}", s);
+                        if std::env::var("RPY_ISO_LOG").is_ok() {
+                            eprintln!("ISO-REJ generic {:?}", s);
+                        }
+                        return Err(bad());
                     }
-                    return Err(bad());
-                }
                 }
                 if !frac.is_empty() {
                     if !frac.chars().all(|c| c.is_ascii_digit()) {
                         {
-                    if std::env::var("RPY_ISO_LOG").is_ok() {
-                        eprintln!("ISO-REJ generic {:?}", s);
-                    }
-                    return Err(bad());
-                }
+                            if std::env::var("RPY_ISO_LOG").is_ok() {
+                                eprintln!("ISO-REJ generic {:?}", s);
+                            }
+                            return Err(bad());
+                        }
                     }
                     let f6: String = frac.chars().take(6).collect();
                     let padded = format!("{:<06}", f6);
@@ -845,4 +902,3 @@ pub(crate) fn get_date_type() -> PyObjectRef {
     });
     typ
 }
-

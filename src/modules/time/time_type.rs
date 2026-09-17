@@ -1,7 +1,10 @@
+use super::timedelta::make_timedelta;
+use super::{
+    format_offset_iso, get_utcoffset_seconds, inst_get, inst_get_i64, instance_type_name,
+    tzname_for, CtorArgs, EPOCH_ORDINAL,
+};
 use crate::object::*;
 use std::collections::HashMap;
-use super::{inst_get, inst_get_i64, get_utcoffset_seconds, tzname_for, format_offset_iso, EPOCH_ORDINAL, CtorArgs, instance_type_name};
-use super::timedelta::make_timedelta;
 
 thread_local! {
     static TIME_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
@@ -221,9 +224,7 @@ fn build_time_type() -> PyObjectRef {
         "fromisoformat",
         bf!("fromisoformat", |args| {
             if args.is_empty() {
-                return Err(PyError::type_error(
-                    "fromisoformat() requires an argument",
-                ));
+                return Err(PyError::type_error("fromisoformat() requires an argument"));
             }
             let s = args[0].str();
             let parts: Vec<&str> = s.splitn(2, 'T').collect();
@@ -239,17 +240,29 @@ fn build_time_type() -> PyObjectRef {
             if time_parts.len() < 2 {
                 return Err(PyError::value_error("Invalid isoformat string"));
             }
-            let hour: i64 = time_parts[0].parse().map_err(|_| PyError::value_error("Invalid isoformat string"))?;
-            let minute: i64 = time_parts[1].parse().map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+            let hour: i64 = time_parts[0]
+                .parse()
+                .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
+            let minute: i64 = time_parts[1]
+                .parse()
+                .map_err(|_| PyError::value_error("Invalid isoformat string"))?;
             let second: i64 = if time_parts.len() > 2 {
                 let sec_str = time_parts[2].split('.').next().unwrap_or("0");
-                sec_str.parse().map_err(|_| PyError::value_error("Invalid isoformat string"))?
-            } else { 0 };
+                sec_str
+                    .parse()
+                    .map_err(|_| PyError::value_error("Invalid isoformat string"))?
+            } else {
+                0
+            };
             let microsecond: i64 = if time_parts.len() > 2 && time_parts[2].contains('.') {
                 let us_str = time_parts[2].split('.').nth(1).unwrap_or("0");
                 let padded = format!("{:0<6}", us_str);
-                padded[..6].parse().map_err(|_| PyError::value_error("Invalid isoformat string"))?
-            } else { 0 };
+                padded[..6]
+                    .parse()
+                    .map_err(|_| PyError::value_error("Invalid isoformat string"))?
+            } else {
+                0
+            };
             Ok(make_time(hour, minute, second, microsecond, py_none(), 0))
         }),
     );
@@ -292,4 +305,3 @@ pub(crate) fn get_time_type() -> PyObjectRef {
     });
     typ
 }
-

@@ -1,7 +1,7 @@
-use crate::object::*;
-use std::collections::HashMap;
 use super::helpers::EPOCH_ORDINAL;
 use super::tzif::{load_tz, tz_offset_for_instant};
+use crate::object::*;
+use std::collections::HashMap;
 
 pub(crate) fn inst_get(obj: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
     if let PyObject::Instance { dict, .. } = &*obj.borrow() {
@@ -28,7 +28,11 @@ pub(crate) fn instance_type_name(obj: &PyObjectRef) -> String {
 /// instant given by `ordinal`/`day_seconds` (days since 0001-01-01 and
 /// seconds since local midnight). Only understands this module's own
 /// `timezone` and `zoneinfo.ZoneInfo` — see module-level doc comment.
-pub(crate) fn get_utcoffset_seconds(tzinfo: &PyObjectRef, ordinal: i64, day_seconds: i64) -> Option<i64> {
+pub(crate) fn get_utcoffset_seconds(
+    tzinfo: &PyObjectRef,
+    ordinal: i64,
+    day_seconds: i64,
+) -> Option<i64> {
     if matches!(tzinfo, PyObjectRef::None) {
         return None;
     }

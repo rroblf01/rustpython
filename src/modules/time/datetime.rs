@@ -1,18 +1,23 @@
+use super::helpers::{
+    day_of_year, days_in_month, ordinal_to_ymd, weekday_from_ordinal, ymd_to_ordinal, EPOCH_ORDINAL,
+};
+use super::timedelta::{make_timedelta, make_timedelta_from_us, timedelta_total_us};
+use super::timezone::{get_utc_singleton, make_timezone};
+use super::tzif::{load_tz, tz_offset_for_instant};
+use super::utils::{
+    format_offset_iso, format_utc_offset_name, get_utcoffset_seconds, inst_get, inst_get_i64,
+    instance_type_name, tzname_for, CtorArgs,
+};
 use crate::object::*;
 use std::collections::HashMap;
-use super::helpers::{ymd_to_ordinal, ordinal_to_ymd, weekday_from_ordinal, day_of_year, days_in_month, EPOCH_ORDINAL};
-use super::tzif::{load_tz, tz_offset_for_instant};
-use super::utils::{inst_get, inst_get_i64, instance_type_name, get_utcoffset_seconds, tzname_for, format_utc_offset_name, format_offset_iso, CtorArgs};
-use super::timedelta::{make_timedelta, make_timedelta_from_us, timedelta_total_us};
-use super::timezone::{make_timezone, get_utc_singleton};
 
 thread_local! {
     static DATETIME_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
 }
 
-use super::date::{make_date, get_date_type, date_ordinal};
 use super::clock::{epoch_to_ymd, format_strftime};
-use super::time_type::{make_time, get_time_type};
+use super::date::{date_ordinal, get_date_type, make_date};
+use super::time_type::{get_time_type, make_time};
 
 mod isoformat;
 use isoformat::{datetime_isoformat, datetime_isoformat_ts};
@@ -704,8 +709,12 @@ fn build_datetime_type() -> PyObjectRef {
             let month = inst_get_i64(&args[0], "month");
             let day = inst_get_i64(&args[0], "day");
             // ISO weekday: 1=Monday ... 7=Sunday
-            let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 1 } else { 0 };
-            let days_in_month = [0i64,31,28+leap,31,30,31,30,31,31,30,31,30,31];
+            let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                1
+            } else {
+                0
+            };
+            let days_in_month = [0i64, 31, 28 + leap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
             let mut yday = day;
             for m in 1..month {
                 yday += days_in_month[m as usize];
@@ -715,17 +724,18 @@ fn build_datetime_type() -> PyObjectRef {
             let a_j = (14 - 1) / 12;
             let y_j = year + 4800 - a_j;
             let m_j = 1 + 12 * a_j - 3;
-            let jd_jan1 = 1 + (153 * m_j + 2) / 5 + 365 * y_j + y_j / 4 - y_j / 100 + y_j / 400 - 32045;
+            let jd_jan1 =
+                1 + (153 * m_j + 2) / 5 + 365 * y_j + y_j / 4 - y_j / 100 + y_j / 400 - 32045;
             let a_d = (14 - month) / 12;
             let y_d = year + 4800 - a_d;
             let m_d = month + 12 * a_d - 3;
-            let jd = day + (153 * m_d + 2) / 5 + 365 * y_d + y_d / 4 - y_d / 100 + y_d / 400 - 32045;
+            let jd =
+                day + (153 * m_d + 2) / 5 + 365 * y_d + y_d / 4 - y_d / 100 + y_d / 400 - 32045;
             // Delegate to the date-type implementation: identical math,
             // and it carries the year-boundary correction.
             let d_obj = make_date(year, month, day);
-            let iso_fn =
-                crate::object::lookup_dunder_via_mro(&get_date_type(), "isocalendar")
-                    .expect("date.isocalendar missing");
+            let iso_fn = crate::object::lookup_dunder_via_mro(&get_date_type(), "isocalendar")
+                .expect("date.isocalendar missing");
             call_bound_method(iso_fn, d_obj, vec![])
         }),
     );
@@ -738,16 +748,36 @@ fn build_datetime_type() -> PyObjectRef {
                     "fromisocalendar() missing required arguments: 'year', 'week', 'weekday'",
                 ));
             }
-            let year = args[0].as_i64().ok_or_else(|| PyError::type_error("year must be an integer"))? as i64;
-            let week = args[1].as_i64().ok_or_else(|| PyError::type_error("week must be an integer"))? as i64;
-            let weekday = args[2].as_i64().ok_or_else(|| PyError::type_error("weekday must be an integer"))? as i64;
+            let year = args[0]
+                .as_i64()
+                .ok_or_else(|| PyError::type_error("year must be an integer"))?
+                as i64;
+            let week = args[1]
+                .as_i64()
+                .ok_or_else(|| PyError::type_error("week must be an integer"))?
+                as i64;
+            let weekday = args[2]
+                .as_i64()
+                .ok_or_else(|| PyError::type_error("weekday must be an integer"))?
+                as i64;
             // Calculate the date from ISO week
-            let jan4_wday = ((year * 365 + (year - 1) / 4 - (year - 1) / 100 + (year - 1) / 400 + 4) % 7 + 1) % 7 + 1;
+            let jan4_wday =
+                ((year * 365 + (year - 1) / 4 - (year - 1) / 100 + (year - 1) / 400 + 4) % 7 + 1)
+                    % 7
+                    + 1;
             let mon_of_week1 = 4 - jan4_wday;
-            let mon_of_week1_adj = if mon_of_week1 <= 0 { mon_of_week1 + 7 } else { mon_of_week1 };
+            let mon_of_week1_adj = if mon_of_week1 <= 0 {
+                mon_of_week1 + 7
+            } else {
+                mon_of_week1
+            };
             let day_of_year = mon_of_week1_adj + (week - 1) * 7 + (weekday - 1);
-            let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 1 } else { 0 };
-            let days_in_month = [0i64,31,28+leap,31,30,31,30,31,31,30,31,30,31];
+            let leap = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                1
+            } else {
+                0
+            };
+            let days_in_month = [0i64, 31, 28 + leap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
             let mut remaining = day_of_year;
             let mut month_out: i64 = 1;
             for m in 1i64..13 {
@@ -757,7 +787,17 @@ fn build_datetime_type() -> PyObjectRef {
                 }
                 remaining -= days_in_month[m as usize];
             }
-            Ok(make_datetime(year, month_out, remaining, 0, 0, 0, 0, py_none(), 0))
+            Ok(make_datetime(
+                year,
+                month_out,
+                remaining,
+                0,
+                0,
+                0,
+                0,
+                py_none(),
+                0,
+            ))
         }),
     );
 
@@ -773,7 +813,19 @@ fn build_datetime_type() -> PyObjectRef {
         "max",
         PyObjectRef::new(PyObject::BuiltinFunction {
             name: "max".to_string(),
-            func: |_args| Ok(make_datetime(9999, 12, 31, 23, 59, 59, 999999, py_none(), 0)),
+            func: |_args| {
+                Ok(make_datetime(
+                    9999,
+                    12,
+                    31,
+                    23,
+                    59,
+                    59,
+                    999999,
+                    py_none(),
+                    0,
+                ))
+            },
         }),
     );
 

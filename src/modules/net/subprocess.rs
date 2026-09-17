@@ -186,8 +186,8 @@ fn spawn_with_timeout(
             command.stdout(std::process::Stdio::piped());
             command.stderr(std::process::Stdio::piped());
             let mut child = command.spawn().map_err(|e| PyError::os_error_from_io(&e))?;
-            let deadline = std::time::Instant::now()
-                + std::time::Duration::from_secs_f64(t.max(0.0));
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs_f64(t.max(0.0));
             loop {
                 match child.try_wait() {
                     Ok(Some(_status)) => {
@@ -738,10 +738,9 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
                 Some(-3) => std::process::Stdio::null(),
                 Some(fd) if fd >= 0 => {
                     use std::os::unix::io::FromRawFd;
-                    let borrowed =
-                        std::mem::ManuallyDrop::new(unsafe {
-                            std::fs::File::from_raw_fd(fd as i32)
-                        });
+                    let borrowed = std::mem::ManuallyDrop::new(unsafe {
+                        std::fs::File::from_raw_fd(fd as i32)
+                    });
                     match borrowed.try_clone() {
                         Ok(dup) => std::process::Stdio::from(dup),
                         Err(_) => std::process::Stdio::inherit(),
@@ -836,4 +835,3 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
 
     d
 }
-

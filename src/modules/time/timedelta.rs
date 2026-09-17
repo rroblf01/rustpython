@@ -1,6 +1,6 @@
+use super::{inst_get_i64, instance_type_name, normalize_timedelta, CtorArgs};
 use crate::object::*;
 use std::collections::HashMap;
-use super::{normalize_timedelta, inst_get_i64, instance_type_name, CtorArgs};
 
 thread_local! {
     static TIMEDELTA_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
@@ -367,4 +367,3 @@ pub(crate) fn get_timedelta_type() -> PyObjectRef {
     });
     typ
 }
-

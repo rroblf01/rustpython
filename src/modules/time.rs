@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 mod helpers;
 pub(crate) use helpers::{
-    days_before_month, days_before_month_table, days_before_year, days_in_month, day_of_year,
+    day_of_year, days_before_month, days_before_month_table, days_before_year, days_in_month,
     is_leap_year, normalize_timedelta, ordinal_to_ymd, weekday_from_ordinal, ymd_to_ordinal,
     EPOCH_ORDINAL,
 };
