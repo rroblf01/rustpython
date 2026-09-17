@@ -220,29 +220,14 @@ impl VirtualMachine {
                 crate::modules::HTTP_SOURCE,
                 &["HTTPStatus", "HTTPMethod"],
             );
-            vm.install_source_defined_stdlib(
-                "gettext",
-                crate::modules::GETTEXT_SOURCE,
-                &[
-                    "NullTranslations",
-                    "GNUTranslations",
-                    "find",
-                    "translation",
-                    "install",
-                    "textdomain",
-                    "bindtextdomain",
-                    "gettext",
-                    "ngettext",
-                    "pgettext",
-                    "npgettext",
-                    "dgettext",
-                    "dngettext",
-                    "_localedirs",
-                    "_current_domain",
-                    "_default_localedir",
-                    "__all__",
-                ],
-            );
+            // `gettext` itself is pure Python upstream (Lib/gettext.py,
+            // vendored, 657 lines) — the native `gettext_extra.py` snippet
+            // this used to install was a hand-written ~239-line stub missing
+            // real functions like `_expand_lang` (test_gettext.py's
+            // ExpandLangTestCase patches `gettext._expand_lang` directly,
+            // which raised AttributeError). Removed so plain module-search
+            // import resolves to the real vendored Lib/gettext.py instead —
+            // same fix as `locale` above.
             vm.install_source_defined_stdlib(
                 "json",
                 crate::modules::JSON_EXTRA_SOURCE,
@@ -604,29 +589,8 @@ impl VirtualMachine {
                 "EnumDict",
             ],
         );
-        vm.install_source_defined_stdlib(
-            "gettext",
-            crate::modules::GETTEXT_SOURCE,
-            &[
-                "NullTranslations",
-                "GNUTranslations",
-                "find",
-                "translation",
-                "install",
-                "textdomain",
-                "bindtextdomain",
-                "gettext",
-                "ngettext",
-                "pgettext",
-                "npgettext",
-                "dgettext",
-                "dngettext",
-                "_localedirs",
-                "_current_domain",
-                "_default_localedir",
-                "__all__",
-            ],
-        );
+        // `gettext` — see the matching comment in the other init path above:
+        // removed in favor of the real vendored Lib/gettext.py.
         vm.install_source_defined_stdlib(
             "json",
             crate::modules::JSON_EXTRA_SOURCE,

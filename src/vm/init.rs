@@ -287,16 +287,22 @@ pub(crate) fn register_native_modules(
 
         // calendar: using Lib/calendar.py (pure Python, full CPython compat)
 
-        // Native locale module
-        modules.insert_str("locale", create_module("locale", create_locale_dict()));
+        // `locale` itself is pure Python upstream (Lib/locale.py, vendored) —
+        // it does `from _locale import *` for the C-level primitives and
+        // defines `normalize`, `atof`, `atoi`, `format_string`, `currency`,
+        // etc. on top. Registering a native `locale` module here used to
+        // shadow that (native modules win over `Lib/` on import), leaving
+        // those pure-Python-only functions permanently missing. Only `_locale`
+        // needs to be native now.
         // Native _locale module — in real CPython this IS the C extension
         // that the pure-Python `locale` module delegates to. Registering it
         // natively (instead of the Lib/_locale.py stub) makes `setlocale`,
         // `localeconv`, etc. real shared state (see create_locale_dict).
         modules.insert_str("_locale", create_module("_locale", create_locale_dict()));
 
-        // gettext module (mostly Python source — see install_source_defined_stdlib below)
-        modules.insert_str("gettext", create_module("gettext", create_gettext_dict()));
+        // gettext: using Lib/gettext.py (native placeholder + source-snippet
+        // shadow removed — see the comment at the install_source_defined_stdlib
+        // call sites this used to have, in src/vm.rs)
 
         // Native ssl module (CPython C extension replacement for urllib3 compatibility)
         modules.insert_str("ssl", create_module("ssl", create_ssl_dict()));

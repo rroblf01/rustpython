@@ -178,7 +178,12 @@ def find(domain, localedir=None, languages=None, all=False):
     return None
 
 
+_translations = {}
+
+
 def translation(domain, localedir=None, languages=None, class_=None, fallback=False):
+    import os
+
     if class_ is None:
         class_ = GNUTranslations
     mofiles = find(domain, localedir, languages, all=True)
@@ -188,9 +193,16 @@ def translation(domain, localedir=None, languages=None, class_=None, fallback=Fa
         raise OSError("no translation file found for domain %r" % domain)
     result = None
     for mofile in mofiles:
-        fp = open(mofile, "rb")
-        t = class_(fp)
-        fp.close()
+        key = (class_, os.path.abspath(mofile))
+        t = _translations.get(key)
+        if t is None:
+            with open(mofile, "rb") as fp:
+                t = _translations.setdefault(key, class_(fp))
+        # Copy the translation object to allow setting fallbacks and
+        # output charset. All other instance data is shared with the
+        # cached object, exactly like real CPython.
+        import copy
+        t = copy.copy(t)
         if result is None:
             result = t
         else:
