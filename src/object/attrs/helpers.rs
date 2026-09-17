@@ -8,7 +8,9 @@ use num_traits::Zero;
 /// (`is_lowercase`) is NOT the same: e.g. U+0345 (Mn, Lowercase=True) is
 /// NOT cased, but `is_lowercase()` returns true.
 pub(crate) fn is_cased(c: char) -> bool {
-    if c == '\u{0345}' { return false; }
+    if c == '\u{0345}' {
+        return false;
+    }
     use unicode_general_category::{get_general_category, GeneralCategory};
     matches!(
         get_general_category(c),
@@ -18,7 +20,9 @@ pub(crate) fn is_cased(c: char) -> bool {
     )
 }
 pub(crate) fn is_case_ignorable(c: char) -> bool {
-    if c == '\u{0345}' { return true; }
+    if c == '\u{0345}' {
+        return true;
+    }
     use unicode_general_category::{get_general_category, GeneralCategory};
     matches!(
         get_general_category(c),
@@ -281,7 +285,11 @@ pub(crate) fn snapshot_deque(obj: &PyObjectRef) -> PyResult<(Vec<PyObjectRef>, u
 /// for `contains`/`count`/`index`, but `IndexError: deque mutated during
 /// iteration` for `remove` (see `deque_remove` in CPython's
 /// `collectionsmodule.c`).
-pub(crate) fn check_deque_not_mutated(obj: &PyObjectRef, start_len: usize, err: &'static str) -> PyResult<()> {
+pub(crate) fn check_deque_not_mutated(
+    obj: &PyObjectRef,
+    start_len: usize,
+    err: &'static str,
+) -> PyResult<()> {
     let borrowed = obj.borrow();
     if let PyObject::Deque { data, .. } = &*borrowed {
         if data.len() != start_len {
@@ -390,14 +398,18 @@ pub(crate) fn encode_utf16_utf32(s: &str, norm: &str) -> Option<Vec<u8>> {
 /// exercising utf-16/utf-32 in the corpus needs strict-mode fidelity yet).
 pub(crate) fn decode_utf16_utf32(bytes: &[u8], norm: &str) -> Option<String> {
     fn units_le(bytes: &[u8]) -> impl Iterator<Item = u16> + '_ {
-        bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]))
+        bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
     }
     fn units_be(bytes: &[u8]) -> impl Iterator<Item = u16> + '_ {
-        bytes.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]]))
+        bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
     }
     match norm {
-        "utf-16" | "utf16" | "utf-16-le" | "utf16-le" | "utf_16_le" | "utf-16-be"
-        | "utf16-be" | "utf_16_be" => {
+        "utf-16" | "utf16" | "utf-16-le" | "utf16-le" | "utf_16_le" | "utf-16-be" | "utf16-be"
+        | "utf_16_be" => {
             let (body, big_endian) = match norm {
                 "utf-16-be" | "utf16-be" | "utf_16_be" => (bytes, true),
                 "utf-16-le" | "utf16-le" | "utf_16_le" => (bytes, false),
@@ -412,12 +424,14 @@ pub(crate) fn decode_utf16_utf32(bytes: &[u8], norm: &str) -> Option<String> {
             } else {
                 units_le(body).collect()
             };
-            Some(char::decode_utf16(units)
-                .map(|r| r.unwrap_or('\u{FFFD}'))
-                .collect())
+            Some(
+                char::decode_utf16(units)
+                    .map(|r| r.unwrap_or('\u{FFFD}'))
+                    .collect(),
+            )
         }
-        "utf-32" | "utf32" | "utf-32-le" | "utf32-le" | "utf_32_le" | "utf-32-be"
-        | "utf32-be" | "utf_32_be" => {
+        "utf-32" | "utf32" | "utf-32-le" | "utf32-le" | "utf_32_le" | "utf-32-be" | "utf32-be"
+        | "utf_32_be" => {
             let (body, big_endian) = match norm {
                 "utf-32-be" | "utf32-be" | "utf_32_be" => (bytes, true),
                 "utf-32-le" | "utf32-le" | "utf_32_le" => (bytes, false),
@@ -686,7 +700,11 @@ pub(crate) fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 };
                 if let Some(ef) = encode_fn {
                     let str_obj = a[0].clone();
-                    match crate::object::call_function_disposable(&ef, vec![str_obj, py_str(&errors)], vec![]) {
+                    match crate::object::call_function_disposable(
+                        &ef,
+                        vec![str_obj, py_str(&errors)],
+                        vec![],
+                    ) {
                         Ok(res) => {
                             let bytes_obj = {
                                 let br = res.borrow();
@@ -718,7 +736,7 @@ pub(crate) fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
             // fallback to utf-8
             s.as_bytes().to_vec()
-        },
+        }
     };
     Ok(PyObjectRef::imm(PyObject::Bytes(bytes)))
 }

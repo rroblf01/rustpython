@@ -5,37 +5,38 @@
 // user-defined class) and its supporting helpers. NOT further broken up
 // internally in this pass — see the plan's own note on scope.
 use super::*;
-mod deque;
-mod list;
+mod array;
+mod bytearray;
 mod bytes1;
 mod bytes2;
+mod compiled_regex;
+mod complex;
+mod deque;
+mod dict;
+mod exception;
+mod exception_group;
+mod file;
+mod float;
+mod frozenset;
+mod generator;
+mod helpers;
+mod int;
+mod list;
+mod module_obj;
+mod range;
+mod set;
+mod slice;
+mod socket;
 mod str1;
 mod str2;
-mod int;
-mod float;
-mod compiled_regex;
-mod range;
-mod tuple;
-mod array;
-mod frozenset;
-mod slice;
-mod complex;
-mod module_obj;
-mod exception_group;
-mod generator;
-mod set;
-mod file;
-mod socket;
-mod thread;
-mod bytearray;
-mod dict;
 mod super_obj;
-mod exception;
-mod helpers;
+mod thread;
+mod tuple;
 pub use helpers::*;
-mod instance;
 mod callable;
-mod sync; mod iter;
+mod instance;
+mod iter;
+mod sync;
 
 thread_local! {
     // PEP 649 computed-annotation cache, keyed by each function's
@@ -44,7 +45,6 @@ thread_local! {
 }
 
 // ---- Attribute access ----
-
 
 pub trait ObjectAccess {
     fn get_attribute(&self, name: &str) -> PyResult<PyObjectRef>;
@@ -200,55 +200,70 @@ impl PyObject {
                 if let Some(rc) = target.upgrade() {
                     return rc.borrow().get_attribute(name);
                 } else {
-                    return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                    return Err(PyError::reference_error(
+                        "weakly-referenced object no longer exists",
+                    ));
                 }
             }
-            PyObject::WeakRef { callback, target, .. } => {
-                match name {
-                    "__callback__" => {
-                        if target.upgrade().is_none() {
-                            return Ok(py_none());
-                        }
-                        return Ok(callback.clone().unwrap_or_else(py_none));
+            PyObject::WeakRef {
+                callback, target, ..
+            } => match name {
+                "__callback__" => {
+                    if target.upgrade().is_none() {
+                        return Ok(py_none());
                     }
-                    "__init__" => {
-                        return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
-                            name: "__init__".to_string(),
-                            func: |args| {
-                                if args.len() > 1 {
-                                    return Err(PyError::type_error(format!("__init__() takes at most 1 argument ({} given)", args.len() - 1)));
-                                }
-                                Ok(py_none())
-                            },
-                            self_obj: PyObjectRef::new(self.clone()),
-                        }));
-                    }
-                    "__call__" => {
-                        return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
-                            name: "__call__".to_string(),
-                            func: |args| {
-                                if let PyObject::WeakRef { target, .. } = &*args[0].borrow() {
-                                    return Ok(match target.upgrade() {
-                                        Some(rc) => PyObjectRef::Mut(rc),
-                                        None => {
-                                            if let Some(default) = args.get(1) {
-                                                default.clone()
-                                            } else {
-                                                py_none()
-                                            }
+                    return Ok(callback.clone().unwrap_or_else(py_none));
+                }
+                "__init__" => {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__init__".to_string(),
+                        func: |args| {
+                            if args.len() > 1 {
+                                return Err(PyError::type_error(format!(
+                                    "__init__() takes at most 1 argument ({} given)",
+                                    args.len() - 1
+                                )));
+                            }
+                            Ok(py_none())
+                        },
+                        self_obj: PyObjectRef::new(self.clone()),
+                    }));
+                }
+                "__call__" => {
+                    return Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name: "__call__".to_string(),
+                        func: |args| {
+                            if let PyObject::WeakRef { target, .. } = &*args[0].borrow() {
+                                return Ok(match target.upgrade() {
+                                    Some(rc) => PyObjectRef::Mut(rc),
+                                    None => {
+                                        if let Some(default) = args.get(1) {
+                                            default.clone()
+                                        } else {
+                                            py_none()
                                         }
-                                    });
-                                }
-                                Err(PyError::runtime_error("__call__ on non-weakref"))
-                            },
-                            self_obj: PyObjectRef::new(self.clone()),
-                        }));
-                    }
-                    _ => return Err(PyError::attribute_error(format!("'weakref' object has no attribute '{}'", name))),
+                                    }
+                                });
+                            }
+                            Err(PyError::runtime_error("__call__ on non-weakref"))
+                        },
+                        self_obj: PyObjectRef::new(self.clone()),
+                    }));
                 }
-            }
+                _ => {
+                    return Err(PyError::attribute_error(format!(
+                        "'weakref' object has no attribute '{}'",
+                        name
+                    )))
+                }
+            },
             PyObject::Module { .. } => return module_obj::get(self, name),
-            PyObject::Type { .. } | PyObject::Instance { .. } | PyObject::Property(_) | PyObject::StaticMethod { .. } | PyObject::ClassMethod { .. } => return instance::get(self, name),            PyObject::Exception { .. } => return exception::get(self, name),
+            PyObject::Type { .. }
+            | PyObject::Instance { .. }
+            | PyObject::Property(_)
+            | PyObject::StaticMethod { .. }
+            | PyObject::ClassMethod { .. } => return instance::get(self, name),
+            PyObject::Exception { .. } => return exception::get(self, name),
             // `ExceptionGroup`/`BaseExceptionGroup` (PEP 654) had NO
             // attribute access implemented at all — not even the two core
             // PEP 654 fields (`.message`, `.exceptions`), let alone the
@@ -260,27 +275,26 @@ impl PyObject {
             PyObject::List(_v) => return list::get(self, name),
             PyObject::Deque { data, maxlen } => return deque::get(self, name),
             PyObject::Tuple(_v) => return tuple::get(self, name),
-            PyObject::Bytes(_v) => {
-                match bytes1::get(self, name) {
-                    Ok(v) => return Ok(v),
-                    Err(_) => return bytes2::get(self, name),
-                }
-            }
+            PyObject::Bytes(_v) => match bytes1::get(self, name) {
+                Ok(v) => return Ok(v),
+                Err(_) => return bytes2::get(self, name),
+            },
             PyObject::ByteArray(_b) => return bytearray::get(self, name),
-            PyObject::Str(_s) => {
-                match str1::get(self, name) {
-                    Ok(v) => return Ok(v),
-                    Err(_) => return str2::get(self, name),
-                }
-            }
+            PyObject::Str(_s) => match str1::get(self, name) {
+                Ok(v) => return Ok(v),
+                Err(_) => return str2::get(self, name),
+            },
             // dict-protocol methods on the live `globals()` view — same
             // surface as `dict` below, but operating on the backing
             // `Rc<RefCell<HashMap<StrId, PyObjectRef>>>` so mutators
             // (`update`/`setdefault`/`pop`/`clear`) stay visible to
             // LOAD_GLOBAL.
-            PyObject::Globals(_) => return sync::get(self, name),            PyObject::Dict(_d) => return dict::get(self, name),
+            PyObject::Globals(_) => return sync::get(self, name),
+            PyObject::Dict(_d) => return dict::get(self, name),
             PyObject::Set(_s) => return set::get(self, name),
-            PyObject::Function(_) => return callable::get(self, name),            PyObject::BoundMethod { .. } => return callable::get(self, name),            PyObject::Generator { .. } => return generator::get(self, name),
+            PyObject::Function(_) => return callable::get(self, name),
+            PyObject::BoundMethod { .. } => return callable::get(self, name),
+            PyObject::Generator { .. } => return generator::get(self, name),
             PyObject::Coroutine { frame: _coro_frame } => match name {
                 "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                     name: "send".to_string(),
@@ -749,8 +763,7 @@ impl PyObject {
                                 if fds.is_empty() {
                                     break;
                                 }
-                                let rc =
-                                    unsafe { poll(fds.as_mut_ptr(), fds.len() as u32, -1) };
+                                let rc = unsafe { poll(fds.as_mut_ptr(), fds.len() as u32, -1) };
                                 if rc < 0 {
                                     break;
                                 }
@@ -765,9 +778,11 @@ impl PyObject {
                                             // chunks) so one `write()` call
                                             // can't itself block for the
                                             // whole remaining input.
-                                            let end =
-                                                (stdin_offset + 65536).min(input_bytes.len());
-                                            match p.borrow_mut().write(&input_bytes[stdin_offset..end]) {
+                                            let end = (stdin_offset + 65536).min(input_bytes.len());
+                                            match p
+                                                .borrow_mut()
+                                                .write(&input_bytes[stdin_offset..end])
+                                            {
                                                 Ok(0) | Err(_) => stdin_open = false,
                                                 Ok(n) => {
                                                     stdin_offset += n;
@@ -966,7 +981,15 @@ impl PyObject {
             }
             PyObject::Socket { inner: _, .. } => return socket::get(self, name),
             PyObject::Thread(inner_arc) => return thread::get(self, name),
-            PyObject::Lock(_) | PyObject::RLock(_) | PyObject::Event(_) | PyObject::Queue(_) | PyObject::ThreadCondition { .. } | PyObject::ThreadSemaphore { .. } | PyObject::ThreadBarrier { .. } | PyObject::ThreadTimer { .. } => return sync::get(self, name),            PyObject::Int(_) | PyObject::Bool(_) => return int::get(self, name),
+            PyObject::Lock(_)
+            | PyObject::RLock(_)
+            | PyObject::Event(_)
+            | PyObject::Queue(_)
+            | PyObject::ThreadCondition { .. }
+            | PyObject::ThreadSemaphore { .. }
+            | PyObject::ThreadBarrier { .. }
+            | PyObject::ThreadTimer { .. } => return sync::get(self, name),
+            PyObject::Int(_) | PyObject::Bool(_) => return int::get(self, name),
             PyObject::Float(_) => return float::get(self, name),
             PyObject::Range { .. } | PyObject::RangeIter { .. } => return range::get(self, name),
             PyObject::CompiledRegex { .. } => return compiled_regex::get(self, name),
@@ -1077,9 +1100,11 @@ impl PyObject {
                     ))),
                 }
             }
-            PyObject::BuiltinFunction { .. } => return callable::get(self, name),            PyObject::FrozenSet(_items) => return frozenset::get(self, name),
+            PyObject::BuiltinFunction { .. } => return callable::get(self, name),
+            PyObject::FrozenSet(_items) => return frozenset::get(self, name),
             PyObject::Slice { .. } => return slice::get(self, name),
-            PyObject::Code(_) => return callable::get(self, name),            PyObject::BuiltinMethod { .. } => return callable::get(self, name),
+            PyObject::Code(_) => return callable::get(self, name),
+            PyObject::BuiltinMethod { .. } => return callable::get(self, name),
             _ => iter::get(self, name),
         }
     }
@@ -1218,7 +1243,9 @@ impl ObjectAccess for PyObject {
         match self {
             PyObject::Instance { dict, typ } => {
                 if crate::object::get_type_name_for_instance(typ) == "Dialect" {
-                    return Err(PyError::AttributeError("attribute is read-only".to_string()));
+                    return Err(PyError::AttributeError(
+                        "attribute is read-only".to_string(),
+                    ));
                 }
                 // Check __slots__ restriction if defined on the type or its MRO
                 if let Some(slots) = get_instance_slots(typ) {
@@ -1237,7 +1264,10 @@ impl ObjectAccess for PyObject {
                 dict.insert_str(&name, value);
                 Ok(())
             }
-            PyObject::Module { dict, name: mod_name } => {
+            PyObject::Module {
+                dict,
+                name: mod_name,
+            } => {
                 dict.insert_str(&name, value.clone());
                 // Keep `frame.globals` (the Rc captured by functions
                 // defined in this module) in sync with `module.__dict__`
@@ -1329,7 +1359,9 @@ impl ObjectAccess for PyObject {
                 if let Some(rc) = target.upgrade() {
                     return rc.borrow_mut().set_attribute(name, value);
                 } else {
-                    return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                    return Err(PyError::reference_error(
+                        "weakly-referenced object no longer exists",
+                    ));
                 }
             }
             _ => Err(PyError::attribute_error(format!(
@@ -1344,7 +1376,9 @@ impl ObjectAccess for PyObject {
         match self {
             PyObject::Instance { dict, typ } => {
                 if crate::object::get_type_name_for_instance(typ) == "Dialect" {
-                    return Err(PyError::AttributeError("attribute is read-only".to_string()));
+                    return Err(PyError::AttributeError(
+                        "attribute is read-only".to_string(),
+                    ));
                 }
                 // Check __slots__ restriction if defined on the type or its MRO
                 if let Some(slots) = get_instance_slots(typ) {
@@ -1381,7 +1415,9 @@ impl ObjectAccess for PyObject {
                 if let Some(rc) = target.upgrade() {
                     return rc.borrow_mut().del_attribute(name);
                 } else {
-                    return Err(PyError::reference_error("weakly-referenced object no longer exists"));
+                    return Err(PyError::reference_error(
+                        "weakly-referenced object no longer exists",
+                    ));
                 }
             }
             // `del e.some_dynamic_attr` for a per-instance attribute set

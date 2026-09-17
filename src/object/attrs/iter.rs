@@ -2,8 +2,8 @@
 // Covers `list_iterator` and the generic `__next__`/`__iter__` backed iterators
 // (`map`/`filter`/`zip`/`cycle`/`groupby`/`enumerate`/`GetItemIter`/`CallSentinelIter`).
 // Keeps mod.rs under 1k lines; this is exactly ~70 lines extracted (1069-70=999).
-use crate::object::*;
 use super::*;
+use crate::object::*;
 
 fn dict_version_changed(dict: &PyObjectRef, expected_version: u64) -> bool {
     match &*dict.borrow() {
@@ -47,7 +47,9 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     if let PyObject::ListIter { list, index } = &*args[0].borrow() {
                         Ok(py_int(list.len().saturating_sub(*index) as i64))
                     } else {
-                        Err(PyError::runtime_error("__length_hint__ on non-list_iterator"))
+                        Err(PyError::runtime_error(
+                            "__length_hint__ on non-list_iterator",
+                        ))
                     }
                 },
                 self_obj: PyObjectRef::new(o.clone()),
@@ -63,7 +65,10 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     if let PyObject::ListIter { list, index } = &*args[0].borrow() {
                         let iter_obj = args[0].clone();
                         let state = py_int(*index as i64);
-                        Ok(py_tuple(vec![py_str("list_iterator"), py_tuple(vec![iter_obj, state])]))
+                        Ok(py_tuple(vec![
+                            py_str("list_iterator"),
+                            py_tuple(vec![iter_obj, state]),
+                        ]))
                     } else {
                         Err(PyError::runtime_error("__reduce__ on non-list_iterator"))
                     }
@@ -127,28 +132,48 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     // expects `length_hint()==0` even though the raw
                     // remaining-slots count would otherwise be nonzero.
                     let hint = match &*args[0].borrow() {
-                        PyObject::DictIter { dict, keys, index, expected_version } => {
+                        PyObject::DictIter {
+                            dict,
+                            keys,
+                            index,
+                            expected_version,
+                        } => {
                             if dict_version_changed(dict, *expected_version) {
                                 0
                             } else {
                                 keys.len().saturating_sub(*index)
                             }
                         }
-                        PyObject::DictValuesIter { dict, values, index, expected_version } => {
+                        PyObject::DictValuesIter {
+                            dict,
+                            values,
+                            index,
+                            expected_version,
+                        } => {
                             if dict_version_changed(dict, *expected_version) {
                                 0
                             } else {
                                 values.len().saturating_sub(*index)
                             }
                         }
-                        PyObject::DictItemsIter { dict, items, index, expected_version } => {
+                        PyObject::DictItemsIter {
+                            dict,
+                            items,
+                            index,
+                            expected_version,
+                        } => {
                             if dict_version_changed(dict, *expected_version) {
                                 0
                             } else {
                                 items.len().saturating_sub(*index)
                             }
                         }
-                        PyObject::DictRevIter { dict, index, expected_version, .. } => {
+                        PyObject::DictRevIter {
+                            dict,
+                            index,
+                            expected_version,
+                            ..
+                        } => {
                             if dict_version_changed(dict, *expected_version) {
                                 0
                             } else {
