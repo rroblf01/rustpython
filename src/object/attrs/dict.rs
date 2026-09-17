@@ -434,16 +434,28 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     args.len() - 1
                                 )));
                             }
-                            let d = args[0].borrow();
-                            if let PyObject::Dict(dict) = &*d {
-                                let mut new_dict = PyDict::new();
-                                for (k, v) in dict.items() {
-                                    new_dict.set(k, v)?;
+                            // Snapshot the items while borrowed, then drop the
+                            // borrow before inserting into `new_dict` — a
+                            // colliding key's `__eq__` can run arbitrary
+                            // Python (e.g. mutate/clear `self`), which must
+                            // not find `args[0]` still borrowed here (same
+                            // reentrant-borrow hazard fixed elsewhere in
+                            // pydict.rs — gh-148660's regression test does
+                            // exactly this: an `__eq__` that calls
+                            // `od.clear()` mid-`copy()`).
+                            let items: Vec<_> = {
+                                let d = args[0].borrow();
+                                if let PyObject::Dict(dict) = &*d {
+                                    dict.items()
+                                } else {
+                                    return Err(PyError::runtime_error("copy on non-dict"));
                                 }
-                                Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))))
-                            } else {
-                                Err(PyError::runtime_error("copy on non-dict"))
+                            };
+                            let mut new_dict = PyDict::new();
+                            for (k, v) in items {
+                                new_dict.set(k, v)?;
                             }
+                            Ok(PyObjectRef::new(PyObject::Dict(Box::new(new_dict))))
                         },
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),

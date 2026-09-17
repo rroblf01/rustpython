@@ -217,33 +217,37 @@ impl PyObjectRef {
                 return Ok(true);
             }
         }
-        // Handle Dict comparison: clone items and keys to avoid RefCell conflicts
+        // Handle Dict comparison: clone the whole dict (cheap — `entries`/
+        // `indices` are `Rc`-shared, so this is O(1), not O(n)) rather than
+        // just `.items()`, so we can still do an O(1) hashed lookup on the
+        // OTHER side per key instead of a linear scan.
         let self_dict = match &*self.borrow() {
-            PyObject::Dict(d) => Some(d.items()),
+            PyObject::Dict(d) => Some(d.clone()),
             _ => None,
         };
-        if let Some(my_items) = self_dict {
+        if let Some(my_dict) = self_dict {
             let other_dict = match &*other.borrow() {
-                PyObject::Dict(d) => Some(d.items()),
+                PyObject::Dict(d) => Some(d.clone()),
                 _ => None,
             };
-            if let Some(other_items) = other_dict {
-                if my_items.len() != other_items.len() {
+            if let Some(other_dict) = other_dict {
+                if my_dict.len() != other_dict.len() {
                     return Ok(false);
                 }
-                // Same identity-shortcut fix as the List/Tuple case just
-                // above, for both keys and values.
-                for (k, va) in my_items {
-                    let mut found = None;
-                    for (ok, ov) in &other_items {
-                        if ok.is(&k) || ok.equals(&k)? {
-                            found = Some(ov);
-                            break;
-                        }
-                    }
-                    match found {
+                // Was a linear scan over the other dict's `.items()` per
+                // key — O(n) per lookup, O(n^2) overall for the whole
+                // comparison. A 100k-entry dict (real trigger:
+                // `test_dict.py`'s `test_copy_fuzz`, which builds dicts up
+                // to ~150k entries and compares them) took 5+ seconds at
+                // 32k entries and scaled quadratically from there, timing
+                // out the whole test file. `PyDict::get_with_hash` is the
+                // same O(1)-average hashed lookup `d[k]`/`k in d` already
+                // use — compute the hash once per key and reuse it.
+                for (k, va) in my_dict.items() {
+                    let h = crate::object::PyDict::dict_hash(&k)?;
+                    match other_dict.get_with_hash(&k, h)? {
                         Some(vb) => {
-                            if !(va.is(vb) || va.equals(vb)?) {
+                            if !(va.is(&vb) || va.equals(&vb)?) {
                                 return Ok(false);
                             }
                         }

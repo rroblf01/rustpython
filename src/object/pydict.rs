@@ -563,7 +563,26 @@ pub(crate) fn pydict_safe_set(
             let mut obj = target.borrow_mut();
             match &mut *obj {
                 PyObject::Dict(d) => {
-                    if !d.probe(&key, h).1.is_some() {
+                    // Must NOT call the reentrancy-risky `d.probe()` (which
+                    // may run a colliding `Instance` key's `__eq__`) while
+                    // holding this `borrow_mut()` — a key whose `__eq__`
+                    // calls back into a method on this SAME dict (e.g.
+                    // `d.clear()`, gh-140551's `test_clear_at_lookup`)
+                    // reenters `borrow_mut()` on an already-mutably-borrowed
+                    // `RefCell` and panics. Use `probe_no_reentry_risk`
+                    // instead — it never calls `.equals()`, bailing with
+                    // `Err(())` the moment it WOULD need to (an `Instance`
+                    // key is involved) — and conservatively grow in that
+                    // case, rather than reintroducing the spurious-rehash-
+                    // on-existing-key bug fixed elsewhere in this file
+                    // (unconditionally growing here bumps `version` even
+                    // for an in-place update to an already-present key,
+                    // breaking a live iterator's "changed size" check).
+                    let needs_grow = match d.probe_no_reentry_risk(&key, h) {
+                        Ok((_, existing)) => existing.is_none(),
+                        Err(()) => true,
+                    };
+                    if needs_grow {
                         d.ensure_capacity(1);
                     }
                     d.version()
@@ -636,7 +655,14 @@ pub(crate) fn pydict_safe_get_or_insert(
             let mut obj = target.borrow_mut();
             match &mut *obj {
                 PyObject::Dict(d) => {
-                    if d.probe(&key, h).1.is_none() {
+                    // See the matching comment in `pydict_safe_set` above:
+                    // never call the reentrancy-risky `d.probe()` while
+                    // holding this `borrow_mut()`.
+                    let needs_grow = match d.probe_no_reentry_risk(&key, h) {
+                        Ok((_, existing)) => existing.is_none(),
+                        Err(()) => true,
+                    };
+                    if needs_grow {
                         d.ensure_capacity(1);
                     }
                     d.version()

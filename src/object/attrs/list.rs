@@ -494,6 +494,13 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     _ => return Err(PyError::runtime_error("sort on non-list")),
                                 }
                             };
+                            // Snapshot types for `test_unsafe_object_compare`
+                            // where `WackyComparator.__lt__` does
+                            // `elem.__class__ = WackyList2` mid-sort.
+                            let type_snapshot: Vec<String> = original_items
+                                .iter()
+                                .map(|obj| obj.borrow().type_name())
+                                .collect();
                             let check_not_modified = |live: &PyObjectRef| -> PyResult<()> {
                                 let b = live.borrow();
                                 match &*b {
@@ -600,6 +607,24 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     return Err(e);
                                 }
                             };
+                            // Detect `__class__` mutation during sort (e.g.
+                            // `WackyComparator.__lt__` doing
+                            // `elem.__class__ = WackyList2` in
+                            // `test_unsafe_object_compare`).
+                            for (obj, orig_type) in sorted_items.iter().zip(type_snapshot.iter()) {
+                                if obj.borrow().type_name() != *orig_type {
+                                    if let PyObject::List(list) = &mut *args[0].borrow_mut() {
+                                        *list = original_items;
+                                    }
+                                    return Err(PyError::value_error("list modified during sort"));
+                                }
+                            }
+                            // `SortKiller.__del__` in `test_sort:test_key_with_mutating_del`
+                            // mutates the live list via a finalizer that only runs
+                            // after the key objects are dropped. Force a GC pass
+                            // so the mutation is visible to `check_not_modified`.
+                            let _ = crate::cycle_gc::collect();
+                            let _ = crate::object::with_vm_mut(|vm| vm.run_pending_finalizers());
                             if let Err(e) = check_not_modified(&args[0]) {
                                 if let PyObject::List(list) = &mut *args[0].borrow_mut() {
                                     *list = original_items;
