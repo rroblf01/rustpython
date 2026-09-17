@@ -131,7 +131,7 @@ impl PyObjectRef {
             PyObjectRef::SmallBool(b) => RefOrOwned::Owned(PyObject::Bool(*b)),
             PyObjectRef::SmallFloat(f) => RefOrOwned::Owned(PyObject::Float(*f)),
             PyObjectRef::SmallStr(s) => {
-                RefOrOwned::Owned(PyObject::Str(compact_str::CompactString::from(s.as_str())))
+                RefOrOwned::Owned(PyObject::Str(crate::object::PyStr::from_str(s.as_str())))
             }
             PyObjectRef::None => RefOrOwned::Owned(PyObject::None),
             PyObjectRef::Mut(rc) => RefOrOwned::Ref(rc.borrow()),

@@ -63,7 +63,7 @@ impl Parser {
                 // Implicit string concatenation: adjacent strings and f-strings
                 // with optional newlines. Chain via BinOp::Add since we can't
                 // pre-compute f-strings at parse time.
-                let mut expr = Expr::Constant(Constant::String(parts.concat()));
+                let mut expr = Expr::Constant(Constant::String(parts[0].clone()));
                 loop {
                     // Only eat newlines if followed by a string or f-string (implicit concatenation)
                     while self.at(&Token::Newline)
@@ -171,10 +171,18 @@ impl Parser {
                 } else if self.at(&Token::Star) {
                     // Unpacking inside tuple: (*a, *b)
                     let mut elts = Vec::new();
+                    let mut had_comma = false;
                     while !self.at(&Token::RightParen) && !self.at(&Token::EndOfFile) {
                         if self.at(&Token::Star) {
                             self.next();
                             elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                            // `(*x for ...)` — CPython's `invalid_group` rule
+                            // rejects this with "cannot use starred expression here".
+                            if self.at(&Token::For) || self.at(&Token::Async) {
+                                return Err(
+                                    "cannot use starred expression here".to_string(),
+                                );
+                            }
                         } else {
                             let e = self.parse_expr()?;
                             if self.eat(&Token::Colon) {
@@ -204,11 +212,24 @@ impl Parser {
                                 elts.push(e);
                             }
                         }
-                        if !self.eat(&Token::Comma) {
+                        if self.eat(&Token::Comma) {
+                            had_comma = true;
+                        } else {
                             break;
                         }
                     }
                     self.expect(&Token::RightParen)?;
+                    // `(*x)` without trailing comma is a parenthesized
+                    // starred expression — CPython's `invalid_group` rule
+                    // rejects it with "cannot use starred expression here".
+                    if elts.len() == 1
+                        && matches!(&elts[0], Expr::Starred(_))
+                        && !had_comma
+                    {
+                        return Err(
+                            "cannot use starred expression here".to_string()
+                        );
+                    }
                     Expr::Tuple(elts)
                 } else if self.peek() == &Token::Comma
                     || (self.peek() == &Token::Equal
@@ -367,6 +388,13 @@ impl Parser {
                 }
                 // Check for list comprehension: [expr for ...]
                 if elts.len() == 1 && (self.at(&Token::For) || self.at(&Token::Async)) {
+                    // CPython's `invalid_comprehension` rule rejects
+                    // starred expressions in comprehensions.
+                    if matches!(&elts[0], Expr::Starred(_)) {
+                        return Err(
+                            "iterable unpacking cannot be used in comprehension".to_string()
+                        );
+                    }
                     let is_async = self.eat_comp_for()?.unwrap();
                     let target = self.parse_for_target()?;
                     self.expect(&Token::In)?;
@@ -434,6 +462,13 @@ impl Parser {
                     // Parse first element to check for comprehension
                     if self.eat(&Token::DoubleStar) {
                         let expr = self.parse_expr()?;
+                        // CPython's `invalid_dict_comprehension` rule rejects
+                        // dict unpacking in dict comprehensions.
+                        if self.at(&Token::For) || self.at(&Token::Async) {
+                            return Err(
+                                "dict unpacking cannot be used in dict comprehension".to_string(),
+                            );
+                        }
                         keys.push(None);
                         values.push(expr);
                         is_dict = true;
@@ -509,6 +544,13 @@ impl Parser {
                         } else {
                             // Check for set comprehension: {expr for ...}
                             if let Some(is_async) = self.eat_comp_for()? {
+                                // CPython's `invalid_comprehension` rule rejects
+                                // starred expressions in comprehensions.
+                                if let Some(last) = values.last() {
+                                    if matches!(last, Expr::Starred(_)) {
+                                        return Err("iterable unpacking cannot be used in comprehension".to_string());
+                                    }
+                                }
                                 let target = self.parse_for_target()?;
                                 self.expect(&Token::In)?;
                                 let iter = self.parse_or_expr()?;
@@ -652,14 +694,14 @@ impl Parser {
                                     format_spec = Some(Box::new(Expr::FString(inner)));
                                 } else {
                                     format_spec =
-                                        Some(Box::new(Expr::Constant(Constant::String(spec))));
+                                        Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
                                 }
                             } else {
                                 format_spec =
-                                    Some(Box::new(Expr::Constant(Constant::String(spec))));
+                                    Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
                             }
                         } else {
-                            format_spec = Some(Box::new(Expr::Constant(Constant::String(spec))));
+                            format_spec = Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
                         }
                     }
                     parts.push(FStringPart::Expr {
@@ -719,14 +761,14 @@ impl Parser {
                                     format_spec = Some(Box::new(Expr::FString(inner)));
                                 } else {
                                     format_spec =
-                                        Some(Box::new(Expr::Constant(Constant::String(spec))));
+                                        Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
                                 }
                             } else {
                                 format_spec =
-                                    Some(Box::new(Expr::Constant(Constant::String(spec))));
+                                    Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
                             }
                         } else {
-                            format_spec = Some(Box::new(Expr::Constant(Constant::String(spec))));
+                            format_spec = Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
                         }
                     }
                     parts.push(FStringPart::Expr {

@@ -308,7 +308,7 @@ pub enum Constant {
     Int(String),
     Float(String),
     Complex { real: String, imag: String },
-    String(String),
+    String(crate::object::pystring::PyStr),
     Bytes(Vec<u8>),
     Ellipsis,
 }

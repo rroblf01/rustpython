@@ -432,7 +432,7 @@ impl Compiler {
                     for kw in keywords {
                         if let Some(name) = &kw.arg {
                             let name_idx =
-                                self.get_const_index(ConstValue::String(name.clone())) as u32;
+                                self.get_const_index(ConstValue::String(name.clone().into())) as u32;
                             self.emit(Opcode::BUILD_MAP, 0);
                             self.emit(Opcode::LOAD_CONST, name_idx);
                             self.compile_expr(&kw.value)?;
@@ -459,7 +459,7 @@ impl Compiler {
                 for kw in keywords {
                     if let Some(name) = &kw.arg {
                         let name_idx =
-                            self.get_const_index(ConstValue::String(name.clone())) as u32;
+                            self.get_const_index(ConstValue::String(name.clone().into())) as u32;
                         self.emit(Opcode::LOAD_CONST, name_idx);
                         self.compile_expr(&kw.value)?;
                     } else {
@@ -688,7 +688,7 @@ impl Compiler {
                 for part in parts {
                     match part {
                         FStringPart::String(s) => {
-                            self.compile_expr(&Expr::Constant(Constant::String(s.clone())))?;
+                            self.compile_expr(&Expr::Constant(Constant::String(s.clone().into())))?;
                             count += 1;
                         }
                         FStringPart::Expr {

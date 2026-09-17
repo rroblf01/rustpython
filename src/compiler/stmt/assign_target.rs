@@ -4,7 +4,15 @@ use super::super::Compiler;
 use super::super::scope::ScopeType;
 
 impl Compiler {
-    pub(crate) fn compile_assign_target(&mut self, target: &Expr) -> Result<(), String> {
+    /// Compile an assignment target.  `in_unpack` is true when we are
+    /// inside a List/Tuple unpacking target — a bare `Expr::Starred`
+    /// node is only valid there (and handled by the caller via
+    /// UNPACK_EX).  At the top level, a `*` target is rejected.
+    pub(crate) fn compile_assign_target_with(
+        &mut self,
+        target: &Expr,
+        in_unpack: bool,
+    ) -> Result<(), String> {
         match target {
             Expr::Name(name) => {
                 // Mirrors the read-side (`compile_expr`'s own `Expr::Name`
@@ -86,25 +94,50 @@ impl Compiler {
                 self.emit(Opcode::STORE_SUBSCR, 0);
             }
             Expr::Starred(inner) => {
-                // Starred target: unwrap and compile inner target
-                self.compile_assign_target(inner)?;
+                if in_unpack {
+                    // Inside a List/Tuple unpacking target: unwrap
+                    // and compile the inner expression as a store target.
+                    self.compile_assign_target_with(inner, true)?;
+                } else {
+                    return Err(
+                        "starred assignment target must be in a list or tuple".to_string()
+                    );
+                }
             }
             Expr::List(elts) | Expr::Tuple(elts) => {
                 // Check if any element is a Starred target — use UNPACK_EX if so
                 let star_pos = elts.iter().position(|e| matches!(e, Expr::Starred(_)));
                 if let Some(pos) = star_pos {
+                    // Check for multiple starred targets
+                    let second_star = elts.iter().skip(pos + 1).any(|e| matches!(e, Expr::Starred(_)));
+                    if second_star {
+                        return Err(
+                            "multiple starred expressions in assignment".to_string()
+                        );
+                    }
                     let before = pos;
                     let after = elts.len() - pos - 1;
+                    if before > 255 || after > 255 {
+                        return Err(
+                            "too many expressions in star-unpacking assignment".to_string()
+                        );
+                    }
                     let arg = ((before as u32) << 8) | (after as u32);
                     self.emit(Opcode::UNPACK_EX, arg);
                     for elt in elts {
-                        self.compile_assign_target(elt)?;
+                        // Unwrap starred: *x → x (the starred is already
+                        // accounted for in UNPACK_EX)
+                        let inner = match elt {
+                            Expr::Starred(s) => s.as_ref(),
+                            other => other,
+                        };
+                        self.compile_assign_target_with(inner, true)?;
                     }
                 } else {
                     let count = elts.len();
                     self.emit(Opcode::UNPACK_SEQUENCE, count as u32);
                     for elt in elts {
-                        self.compile_assign_target(elt)?;
+                        self.compile_assign_target_with(elt, true)?;
                     }
                 }
             }
@@ -138,6 +171,11 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    /// Top-level entry point: not inside any unpacking.
+    pub(crate) fn compile_assign_target(&mut self, target: &Expr) -> Result<(), String> {
+        self.compile_assign_target_with(target, false)
     }
 
 }

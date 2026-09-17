@@ -200,7 +200,18 @@ pub fn py_str(s: &str) -> PyObjectRef {
     if let Some(small) = SmallStr::new(s) {
         return PyObjectRef::SmallStr(small);
     }
-    PyObjectRef::imm(PyObject::Str(compact_str::CompactString::from(s)))
+    PyObjectRef::imm(PyObject::Str(crate::object::PyStr::from_str(s)))
+}
+
+pub fn py_str_pstr(s: &crate::object::PyStr) -> PyObjectRef {
+    if s.has_surrogates() {
+        // WTF-8 strings can't use SmallStr (invalid UTF-8).
+        PyObjectRef::imm(PyObject::Str(s.clone()))
+    } else if let Some(small) = SmallStr::new(s.as_str()) {
+        PyObjectRef::SmallStr(small)
+    } else {
+        PyObjectRef::imm(PyObject::Str(s.clone()))
+    }
 }
 
 pub fn py_list(items: Vec<PyObjectRef>) -> PyObjectRef {

@@ -51,7 +51,7 @@ fn unicode_name_to_char(name: &str) -> Option<char> {
 pub enum Token {
     Name(String),
     Number(String),
-    String(String),
+    String(crate::object::pystring::PyStr),
     Bytes(Vec<u8>),
     FStringStart,
     FStringMiddle(String),

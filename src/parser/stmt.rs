@@ -228,21 +228,60 @@ impl Parser {
     }
 
     pub(crate) fn parse_stmt_tail(&mut self, expr: Expr) -> Result<Stmt, String> {
+        // A standalone starred expression (`*a`) is not valid as a
+        // statement — CPython rejects it with "can't use starred
+        // expression here".
+        if matches!(&expr, Expr::Starred(_))
+            && !(self.at(&Token::Equal)
+                || self.at(&Token::PlusEqual)
+                || self.at(&Token::MinusEqual)
+                || self.at(&Token::StarEqual)
+                || self.at(&Token::SlashEqual)
+                || self.at(&Token::DoubleStarEqual)
+                || self.at(&Token::DoubleSlashEqual)
+                || self.at(&Token::PercentEqual)
+                || self.at(&Token::PipeEqual)
+                || self.at(&Token::AmpersandEqual)
+                || self.at(&Token::CaretEqual)
+                || self.at(&Token::LeftShiftEqual)
+                || self.at(&Token::RightShiftEqual)
+                || self.at(&Token::AtEqual))
+        {
+            return Err("can't use starred expression here".to_string());
+        }
         if self.eat(&Token::Equal) {
             let mut targets = vec![expr];
             // RHS may start with * for tuple unpacking: `a = *b, *c`
             let mut value = if self.at(&Token::Star) {
                 let mut elts = Vec::new();
+                let mut rhs_had_comma = false;
                 loop {
+                    if self.at(&Token::Newline)
+                        || self.at(&Token::Semicolon)
+                        || self.at(&Token::EndOfFile)
+                    {
+                        break;
+                    }
                     if self.at(&Token::Star) {
                         self.next();
                         elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
                     } else {
-                        elts.push(self.parse_expr()?);
+                        elts.push(self.parse_conditional_expr()?);
                     }
-                    if !self.eat(&Token::Comma) {
+                    if self.eat(&Token::Comma) {
+                        rhs_had_comma = true;
+                    } else {
                         break;
                     }
+                }
+                // `x = *a` without trailing comma is a bare starred
+                // expression on the RHS — CPython rejects it with
+                // "can't use starred expression here".
+                if elts.len() == 1
+                    && matches!(&elts[0], Expr::Starred(_))
+                    && !rhs_had_comma
+                {
+                    return Err("can't use starred expression here".to_string());
                 }
                 Expr::Tuple(elts)
             } else {
@@ -259,7 +298,12 @@ impl Parser {
                         {
                             break;
                         }
-                        elts.push(self.parse_conditional_expr()?);
+                        if self.at(&Token::Star) {
+                            self.next();
+                            elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                        } else {
+                            elts.push(self.parse_conditional_expr()?);
+                        }
                     }
                     value = Expr::Tuple(elts);
                 }
@@ -267,23 +311,60 @@ impl Parser {
             };
             while self.eat(&Token::Equal) {
                 targets.push(value);
-                value = self.parse_conditional_expr()?;
-                if self.at(&Token::Comma)
-                    && !self.at(&Token::Semicolon)
-                    && !self.at(&Token::Newline)
-                {
-                    let mut elts = vec![value];
-                    while self.eat(&Token::Comma) {
+                value = if self.at(&Token::Star) {
+                    let mut elts = Vec::new();
+                    let mut rhs_had_comma = false;
+                    loop {
                         if self.at(&Token::Newline)
                             || self.at(&Token::Semicolon)
                             || self.at(&Token::EndOfFile)
                         {
                             break;
                         }
-                        elts.push(self.parse_conditional_expr()?);
+                        if self.at(&Token::Star) {
+                            self.next();
+                            elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                        } else {
+                            elts.push(self.parse_conditional_expr()?);
+                        }
+                        if self.eat(&Token::Comma) {
+                            rhs_had_comma = true;
+                        } else {
+                            break;
+                        }
                     }
-                    value = Expr::Tuple(elts);
-                }
+                    if elts.len() == 1
+                        && matches!(&elts[0], Expr::Starred(_))
+                        && !rhs_had_comma
+                    {
+                        return Err("can't use starred expression here".to_string());
+                    }
+                    Expr::Tuple(elts)
+                } else {
+                    let mut value = self.parse_conditional_expr()?;
+                    if self.at(&Token::Comma)
+                        && !self.at(&Token::Semicolon)
+                        && !self.at(&Token::Newline)
+                    {
+                        let mut elts = vec![value];
+                        while self.eat(&Token::Comma) {
+                            if self.at(&Token::Newline)
+                                || self.at(&Token::Semicolon)
+                                || self.at(&Token::EndOfFile)
+                            {
+                                break;
+                            }
+                            if self.at(&Token::Star) {
+                                self.next();
+                                elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                            } else {
+                                elts.push(self.parse_conditional_expr()?);
+                            }
+                        }
+                        value = Expr::Tuple(elts);
+                    }
+                    value
+                };
             }
             let _ = self.expect_newline_or_eof();
             Ok(Stmt::Assign {
@@ -323,16 +404,21 @@ impl Parser {
             let mut value = self.parse_conditional_expr()?;
             // Augmented assignment with tuple RHS: fds += r, w
             if self.at(&Token::Comma) {
-                let mut elts = vec![value];
-                while self.eat(&Token::Comma) {
-                    if self.at(&Token::Newline)
-                        || self.at(&Token::Semicolon)
-                        || self.at(&Token::EndOfFile)
-                    {
-                        break;
+                    let mut elts = vec![value];
+                    while self.eat(&Token::Comma) {
+                        if self.at(&Token::Newline)
+                            || self.at(&Token::Semicolon)
+                            || self.at(&Token::EndOfFile)
+                        {
+                            break;
+                        }
+                        if self.at(&Token::Star) {
+                            self.next();
+                            elts.push(Expr::Starred(Box::new(self.parse_expr()?)));
+                        } else {
+                            elts.push(self.parse_conditional_expr()?);
+                        }
                     }
-                    elts.push(self.parse_conditional_expr()?);
-                }
                 value = Expr::Tuple(elts);
             }
             let _ = self.expect_newline_or_eof();

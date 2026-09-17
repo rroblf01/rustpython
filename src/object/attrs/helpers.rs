@@ -812,7 +812,7 @@ pub(crate) fn dunder_repeat(obj: &PyObjectRef, count: &PyObjectRef) -> PyResult<
                 if probe.try_reserve_exact(total).is_err() {
                     return Err(PyError::memory_error("could not allocate string"));
                 }
-                Ok(py_str(&s.repeat(n)))
+                Ok(py_str_pstr(&s.repeat(n)))
             }
             None => Err(PyError::overflow_error("repeated string is too long")),
         },

@@ -831,7 +831,11 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         self_obj: PyObjectRef::new(PyObject::None),
                     })),
                     "__len__" => {
-                        let len = _s.chars().count() as i64;
+                        let len = if _s.has_surrogates() {
+                            crate::object::pystring::Wtf8Chars::new(_s.as_bytes()).count() as i64
+                        } else {
+                            _s.as_str().chars().count() as i64
+                        };
                         Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
                             move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
                                 Ok(py_int(len))

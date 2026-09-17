@@ -1,5 +1,5 @@
 use crate::bytecode::ConstValue;
-use crate::object::{PyError, PyObject, PyObjectRef, PyResult};
+use crate::object::{py_str_pstr, PyError, PyObject, PyObjectRef, PyResult};
 use crate::vm::frame::Frame;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
@@ -423,7 +423,7 @@ pub(crate) fn eval_const_value(const_val: ConstValue) -> PyResult<PyObjectRef> {
                 .map_err(|_| PyError::value_error(format!("invalid float: {}", s)))?;
             py_float(f)
         }
-        ConstValue::String(s) => py_str(&s),
+        ConstValue::String(s) => py_str_pstr(&s),
         ConstValue::Bytes(b) => PyObjectRef::imm(PyObject::Bytes(b)),
         ConstValue::Complex { real, imag } => {
             let re: f64 = real

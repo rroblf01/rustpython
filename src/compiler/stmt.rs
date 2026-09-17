@@ -526,7 +526,7 @@ impl Compiler {
                 });
                 self.emit(Opcode::LOAD_BUILD_CLASS, 0);
                 self.compile_class_body(name.clone(), body)?;
-                let class_name_idx = self.get_const_index(ConstValue::String(name.clone())) as u32;
+                let class_name_idx = self.get_const_index(ConstValue::String(name.clone().into())) as u32;
                 self.emit(Opcode::LOAD_CONST, class_name_idx);
                 // Starred bases (`class C(B, *bases)`) must be unpacked
                 // into a flat tuple (BUILD_LIST/LIST_EXTEND/LIST_TO_TUPLE),
@@ -563,7 +563,7 @@ impl Compiler {
                         if let Some(nm) = &k.arg {
                             self.emit(Opcode::BUILD_MAP, 0);
                             let name_idx =
-                                self.get_const_index(ConstValue::String(nm.clone())) as u32;
+                                self.get_const_index(ConstValue::String(nm.clone().into())) as u32;
                             self.emit(Opcode::LOAD_CONST, name_idx);
                             self.compile_expr(&k.value)?;
                             self.emit(Opcode::MAP_ADD, 0);
@@ -590,7 +590,7 @@ impl Compiler {
                     for k in kw {
                         // Push keyword name as a string constant
                         let name_idx = self
-                            .get_const_index(ConstValue::String(k.arg.clone().unwrap_or_default()))
+                            .get_const_index(ConstValue::String(k.arg.clone().unwrap_or_default().into()))
                             as u32;
                         self.emit(Opcode::LOAD_CONST, name_idx);
                         self.compile_expr(&k.value)?;
@@ -601,7 +601,7 @@ impl Compiler {
                 // Set __doc__ on class if present
                 if let Some(doc) = docstring {
                     self.emit(Opcode::DUP_TOP, 0);
-                    let doc_idx = self.get_const_index(ConstValue::String(doc)) as u32;
+                    let doc_idx = self.get_const_index(ConstValue::String(doc.into())) as u32;
                     self.emit(Opcode::LOAD_CONST, doc_idx);
                     let doc_attr_idx = self.get_name_index("__doc__") as u32;
                     self.emit(Opcode::STORE_ATTR, doc_attr_idx);
@@ -903,7 +903,7 @@ impl Compiler {
                         let ann_idx = self.get_name_index("__annotations__") as u32;
                         self.emit(Opcode::LOAD_NAME, ann_idx);
                         let name_const =
-                            self.get_const_index(ConstValue::String(name.clone())) as u32;
+                            self.get_const_index(ConstValue::String(name.clone().into())) as u32;
                         self.emit(Opcode::LOAD_CONST, name_const);
                         // Evaluating the annotation eagerly (this
                         // interpreter doesn't implement PEP 649/749's real

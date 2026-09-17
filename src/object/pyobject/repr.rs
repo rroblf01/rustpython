@@ -1,9 +1,10 @@
 // Extracted from pyobject.rs — PyObject::repr.
 use super::*;
+use crate::object::pystring::PyStr;
 
-fn repr_string(s: &str) -> String {
-    let has_single = s.contains('\'');
-    let has_double = s.contains('"');
+fn repr_pstr(s: &PyStr) -> String {
+    let has_single = s.as_str().contains('\'');
+    let has_double = s.as_str().contains('"');
     let quote = if has_single && !has_double {
         '"'
     } else {
@@ -11,14 +12,13 @@ fn repr_string(s: &str) -> String {
     };
     let mut out = String::with_capacity(s.len() + 2);
     // Use same is_printable logic as escape_string
-    fn is_printable(c: char) -> bool {
-        if c.is_ascii() {
-            return c >= ' ' && c != '\x7f';
+    fn is_printable_cp(cp: u32) -> bool {
+        if cp < 0x80 {
+            return cp >= b' ' as u32 && cp != 0x7f;
         }
-        if c.is_alphanumeric() || c.is_whitespace() {
+        if char::from_u32(cp).map_or(false, |c| c.is_alphanumeric()) || cp == 0x09 || cp == 0x0A || cp == 0x0D || (0x2000..=0x200E).contains(&cp) {
             return true;
         }
-        let cp = c as u32;
         matches!(cp,
             0x00A0..=0x00FF
             | 0x2000..=0x206F
@@ -30,28 +30,51 @@ fn repr_string(s: &str) -> String {
             | 0xFF00..=0xFFEF
         )
     }
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            c if c == quote => {
+    fn is_control_cp(cp: u32) -> bool {
+        matches!(cp, 0x00..=0x1F | 0x7F | 0x80..=0x9F)
+    }
+    // Iterate over WTF-8 codepoints (including surrogates).
+    // For Utf8 variant, chars() returns u32 codepoints.
+    // For Wtf8 variant, we decode the raw bytes.
+    let codepoints: Vec<u32> = if s.has_surrogates() {
+        crate::object::pystring::Wtf8Chars::new(s.as_bytes()).collect()
+    } else {
+        s.as_str().chars().map(|c| c as u32).collect()
+    };
+    for &cp in &codepoints {
+        // Escape the quote char itself (check against both single/double).
+        let cp_char = char::from_u32(cp);
+        let is_quote = cp_char == Some(quote as char);
+        match cp {
+            0x5C => out.push_str("\\\\"),
+            c if is_quote => {
                 out.push('\\');
                 out.push(quote);
             }
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '\x00'..='\x1f' => out.push_str(&format!("\\x{:02x}", c as u8)),
-            '\x7f' => out.push_str("\\x7f"),
-            c if c.is_control() => match c as u32 {
-                code @ 0..=0xff => out.push_str(&format!("\\x{:02x}", code as u8)),
-                code @ 0x100..=0xffff => out.push_str(&format!("\\u{:04x}", code)),
-                code => out.push_str(&format!("\\U{:08x}", code)),
+            0x0A => out.push_str("\\n"),
+            0x09 => out.push_str("\\t"),
+            0x0D => out.push_str("\\r"),
+            0x00..=0x1F => out.push_str(&format!("\\x{:02x}", cp as u8)),
+            0x7F => out.push_str("\\x7f"),
+            c if is_control_cp(c) => match c {
+                0x00..=0xFF => out.push_str(&format!("\\x{:02x}", c as u8)),
+                0x100..=0xFFFF => out.push_str(&format!("\\u{:04x}", c)),
+                _ => out.push_str(&format!("\\U{:08x}", c)),
             },
-            c if !is_printable(c) => match c as u32 {
-                code @ 0x100..=0xffff => out.push_str(&format!("\\u{:04x}", code)),
-                code => out.push_str(&format!("\\U{:08x}", code)),
+            // Lone surrogates (0xD800-0xDFFF) are always escaped.
+            0xD800..=0xDFFF => out.push_str(&format!("\\u{:04x}", cp)),
+            c if !is_printable_cp(c) => match c {
+                0x100..=0xFFFF => out.push_str(&format!("\\u{:04x}", c)),
+                _ => out.push_str(&format!("\\U{:08x}", c)),
             },
-            c => out.push(c),
+            c => {
+                if let Some(ch) = char::from_u32(c) {
+                    out.push(ch);
+                } else {
+                    // Shouldn't happen for valid WTF-8 codepoints.
+                    out.push_str(&format!("\\u{:04x}", c));
+                }
+            }
         }
     }
     format!("{}{}{}", quote, out, quote)
@@ -80,7 +103,7 @@ impl PyObject {
                     )
                 }
             }
-            PyObject::Str(s) => repr_string(s),
+            PyObject::Str(s) => repr_pstr(s),
             PyObject::Bytes(b) => {
                 let s: String = b
                     .iter()
@@ -328,7 +351,7 @@ impl PyObject {
                             format!("{{{}}}", inner)
                         }
                         PyObject::Str(s) => {
-                            let inner = repr_string(s);
+                            let inner = repr_pstr(s);
                             inner
                         }
                         _ => {

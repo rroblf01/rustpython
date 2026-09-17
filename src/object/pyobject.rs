@@ -17,7 +17,7 @@ pub enum PyObject {
     Int(BigInt),
     Float(f64),
     Complex(f64, f64),
-    Str(compact_str::CompactString),
+    Str(crate::object::pystring::PyStr),
     Bytes(Vec<u8>),
     ByteArray(Vec<u8>),
     List(Vec<PyObjectRef>),
@@ -279,24 +279,10 @@ pub enum PyObject {
     File {
         file: std::rc::Rc<std::cell::RefCell<std::fs::File>>,
         name: String,
-        // Real Python's `open(path, mode)` returns `bytes` from `read()`/
-        // `readline()`/iteration when `'b'` is in `mode`, `str` otherwise —
-        // was previously never tracked at all (every read unconditionally
-        // decoded as UTF-8 text), so `open(path, 'rb').read()` returned a
-        // `str`, not `bytes` (real trigger: `dbm/dumb.py`'s own
-        // `__getitem__`, `with _io.open(self._datfile, 'rb') as f: f.seek
-        // (pos); dat = f.read(siz)` — expects `dat` to be raw `bytes`).
         binary: bool,
-        // Text-mode incremental-decoder state: an incomplete UTF-8 sequence
-        // at the end of a `read(n)` chunk that landed mid-multibyte-character
-        // is buffered here and carried into the NEXT read, so streaming
-        // `read(1)`-at-a-time (or any chunk boundary) doesn't corrupt a
-        // character into U+FFFD replacement chars. Real Python's
-        // `TextIOWrapper` keeps exactly this state. (Confirmed via
-        // `test_netrc.py::test_token_value_non_ascii`, which reads a
-        // UTF-8 file one byte at a time.)
         pending: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
         closed: std::rc::Rc<std::cell::RefCell<bool>>,
+        encoding: Option<String>,
     },
     /// Backing for `subprocess.Popen` — holds the spawned child process.
     /// `child` is `None` after `.communicate()`/`.wait()` has reaped it
@@ -317,6 +303,17 @@ pub enum PyObject {
     },
     Socket {
         inner: std::rc::Rc<std::cell::RefCell<SocketInner>>,
+        /// `family`/`type`/`proto` as passed to `socket.socket(...)` (or
+        /// inherited from the listening socket for one returned by
+        /// `.accept()`). Real CPython exposes these as read-only attributes
+        /// (`sock.family`, `sock.type`, `sock.proto`); this codebase's
+        /// socket model only ever actually implements AF_INET/SOCK_STREAM,
+        /// but tests (test_socket, test_ftplib, test_poplib, test_smtplib,
+        /// test_ssl) read these attributes directly, so they must exist
+        /// with sane defaults rather than raising AttributeError.
+        family: i64,
+        type_: i64,
+        proto: i64,
     },
     Thread(std::sync::Arc<std::sync::Mutex<ThreadInner>>),
     Lock(std::sync::Arc<std::sync::Mutex<LockInner>>),

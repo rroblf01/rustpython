@@ -6,6 +6,8 @@ mod pyset;
 pub use pyset::*;
 mod pydict;
 pub use pydict::*;
+pub mod pystring;
+pub use pystring::PyStr;
 pub(crate) use subscript::extract_slice_fields;
 mod pyobject;
 pub use pyobject::*;

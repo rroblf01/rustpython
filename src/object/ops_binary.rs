@@ -117,10 +117,8 @@ pub fn fast_str_add(left: &PyObjectRef, right: &PyObjectRef) -> PyResult<Option<
     };
     let lb = left.borrow();
     if let PyObject::Str(l) = &*lb {
-        let mut out = String::with_capacity(l.len() + r.len());
-        out.push_str(l.as_str());
-        out.push_str(r.as_str());
-        return Ok(Some(py_str(&out)));
+        let combined = crate::object::PyStr::concat_wtf8(l, r);
+        return Ok(Some(py_str_pstr(&combined)));
     }
     Ok(None)
 }
@@ -150,9 +148,10 @@ pub fn try_inplace_str_grow(
         if std::rc::Rc::ptr_eq(slot_rc, left_rc) && left.strong_count() == 2 {
             if let Ok(mut guard) = left_rc.try_borrow_mut() {
                 if let PyObject::Str(l) = &mut *guard {
-                    l.reserve(r.len());
-                    l.push_str(r.as_str());
-                    return Ok(Some(left.clone()));
+                    if l.reserve(r.len()) {
+                        l.push_str_inplace(r.as_str());
+                        return Ok(Some(left.clone()));
+                    }
                 }
             }
         }
@@ -343,7 +342,27 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
             match (as_complex_parts(a), as_complex_parts(b)) {
                 (Some((ar, ai)), Some((br, bi))) => {
-                    Ok(PyObjectRef::imm(PyObject::Complex(ar - br, ai - bi)))
+                    // Sign-of-zero corner case (real CPython test:
+                    // `test_complex.py`'s `test_sub`, matching CPython's own
+                    // `_Py_rc_diff`/`_Py_c_diff` split in
+                    // Objects/complexobject.c): when `a` is a plain
+                    // real number (not itself a `Complex`), its imaginary
+                    // part is not a genuine `0.0 - bi` subtraction — it's
+                    // implicitly absent, so the result imaginary part is
+                    // exactly `-bi` (negation), not `ai - bi` with a
+                    // synthesized `ai = 0.0`. Those two formulas agree for
+                    // every `bi` except `bi == 0.0`, where IEEE754 gives
+                    // `0.0 - 0.0 == 0.0` but `-0.0 == -0.0`/`-(-0.0) ==
+                    // 0.0` — CPython's real-object fast path always uses
+                    // the negation form, so e.g. `-0.0 - complex(0.0, 0.0)`
+                    // must yield `complex(-0.0, -0.0)`, not
+                    // `complex(-0.0, 0.0)`.
+                    let imag = if matches!(a, PyObject::Complex(..)) {
+                        ai - bi
+                    } else {
+                        -bi
+                    };
+                    Ok(PyObjectRef::imm(PyObject::Complex(ar - br, imag)))
                 }
                 _ => Err(PyError::type_error(format!(
                     "unsupported operand type(s) for -: '{}' and '{}'",

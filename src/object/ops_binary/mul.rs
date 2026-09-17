@@ -111,7 +111,7 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         // sign must be checked explicitly to tell them apart.
         (PyObject::Str(s), PyObject::Int(n)) => {
             if let Some(n) = n.to_usize() {
-                Ok(py_str(&s.repeat(n)))
+                Ok(py_str_pstr(&s.repeat(n)))
             } else if n.sign() == Sign::Minus {
                 // `'a' * -1` -> "" but `'a' * -2**100` -> OverflowError
                 // (the magnitude overflows C ssize_t).
@@ -126,7 +126,7 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         }
         (PyObject::Int(n), PyObject::Str(s)) => {
             if let Some(n) = n.to_usize() {
-                Ok(py_str(&s.repeat(n)))
+                Ok(py_str_pstr(&s.repeat(n)))
             } else if n.sign() == Sign::Minus {
                 if n.magnitude().bits() > 63 {
                     Err(PyError::overflow_error("repeated string is too long"))

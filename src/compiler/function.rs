@@ -36,8 +36,20 @@ impl Compiler {
         };
 
         // Save outer code BEFORE enter_scope (which takes cellvars/freevars from self.code)
+        // A `def` whose name is declared `global` in the enclosing scope is
+        // conceptually a module-level function despite being textually
+        // nested (real CPython: `def outer(): global g\n def g(): ...`
+        // gives `g.__qualname__ == "g"`, NOT "outer.<locals>.g") — check
+        // BEFORE computing the nested-prefix qualname.
+        let qualname = if self.global_names.contains(&name) {
+            name.clone()
+        } else {
+            self.compute_qualname(&name)
+        };
         let mut new_code = CodeObject::new(&name);
+        new_code.qualname = crate::interner::intern(&qualname);
         new_code.filename = self.code.filename.clone();
+        self.qual_stack.push((qualname, false));
         let old_code = std::mem::replace(&mut self.code, new_code);
         let old_labels = std::mem::replace(&mut self.labels, Vec::new());
         // `new_label()` allocates ids by pushing to BOTH `self.labels` and
@@ -263,6 +275,7 @@ impl Compiler {
         // that window relative to varnames_stack (already popped above),
         // corrupting compute_enclosing_names for the nested lambda.
         self.leave_scope();
+        self.qual_stack.pop();
 
         // Emit LOAD_CLOSURE for each free var of the inner function
         let mut nfree = 0usize;
@@ -355,13 +368,13 @@ impl Compiler {
             for arg in args.iter() {
                 if let Some(annotation) = &arg.annotation {
                     keys.push(Some(Expr::Constant(Constant::String(
-                        self.mangle_name(&arg.arg),
+                        self.mangle_name(&arg.arg).into(),
                     ))));
                     values.push((**annotation).clone());
                 }
             }
             if let Some(returns) = returns {
-                keys.push(Some(Expr::Constant(Constant::String("return".to_string()))));
+                keys.push(Some(Expr::Constant(Constant::String("return".into()))));
                 values.push((**returns).clone());
             }
             let annotate_body = vec![Stmt::Return(Some(Box::new(Expr::Dict { keys, values })))];
@@ -415,6 +428,22 @@ impl Compiler {
     /// access only (`self.__x`/`obj.__x`) — the by-far dominant real-world
     /// use of this feature — not bare local-variable-name mangling, which
     /// is a much rarer edge case.
+    /// Compute the `__qualname__` a nested def/class named `name` should
+    /// get, given the current `qual_stack` of enclosing named scopes. See
+    /// the `qual_stack` field doc for the CPython rule being followed.
+    pub(crate) fn compute_qualname(&self, name: &str) -> String {
+        match self.qual_stack.last() {
+            None => name.to_string(),
+            Some((parent_qualname, parent_is_class)) => {
+                if *parent_is_class {
+                    format!("{}.{}", parent_qualname, name)
+                } else {
+                    format!("{}.<locals>.{}", parent_qualname, name)
+                }
+            }
+        }
+    }
+
     pub(crate) fn mangle_name(&self, name: &str) -> String {
         if let Some(class_name) = self.class_name_stack.last() {
             let looks_private = name.starts_with("__") && !name.ends_with("__");
@@ -440,10 +469,13 @@ impl Compiler {
             body
         };
 
+        let qualname = self.compute_qualname(&name);
         self.enter_scope(ScopeType::ClassBody);
         self.class_name_stack.push(name.clone());
+        self.qual_stack.push((qualname.clone(), true));
 
         let mut new_class_code = CodeObject::new(&name);
+        new_class_code.qualname = crate::interner::intern(&qualname);
         new_class_code.filename = self.code.filename.clone();
         let old_code = std::mem::replace(&mut self.code, new_class_code);
         self.varnames_stack
@@ -520,7 +552,7 @@ impl Compiler {
             let module_attr_idx = self.get_name_index("__module__") as u32;
             self.emit(Opcode::STORE_NAME, module_attr_idx);
 
-            let qualname_const_idx = self.get_const_index(ConstValue::String(name.clone())) as u32;
+            let qualname_const_idx = self.get_const_index(ConstValue::String(qualname.clone().into())) as u32;
             self.emit(Opcode::LOAD_CONST, qualname_const_idx);
             let qualname_attr_idx = self.get_name_index("__qualname__") as u32;
             self.emit(Opcode::STORE_NAME, qualname_attr_idx);
@@ -624,6 +656,7 @@ impl Compiler {
 
         self.leave_scope();
         self.class_name_stack.pop();
+        self.qual_stack.pop();
         Ok(())
     }
 

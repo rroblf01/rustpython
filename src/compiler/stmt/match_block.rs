@@ -68,7 +68,7 @@ impl Compiler {
                                 "None" => ConstValue::None,
                                 "True" => ConstValue::Bool(true),
                                 "False" => ConstValue::Bool(false),
-                                _ => ConstValue::String(s.clone()),
+                                _ => ConstValue::String(s.clone().into()),
                             }) as u32;
                             self.emit(Opcode::LOAD_CONST, const_idx);
                             self.emit(Opcode::COMPARE_OP, 8); // IS
@@ -127,7 +127,7 @@ impl Compiler {
                                                 "None" => ConstValue::None,
                                                 "True" => ConstValue::Bool(true),
                                                 "False" => ConstValue::Bool(false),
-                                                _ => ConstValue::String(s.clone()),
+                                                _ => ConstValue::String(s.clone().into()),
                                             })
                                                 as u32;
                                             self.emit(Opcode::LOAD_CONST, const_idx);
@@ -178,7 +178,7 @@ impl Compiler {
                                                 "None" => ConstValue::None,
                                                 "True" => ConstValue::Bool(true),
                                                 "False" => ConstValue::Bool(false),
-                                                _ => ConstValue::String(s.clone()),
+                                                _ => ConstValue::String(s.clone().into()),
                                             })
                                                 as u32;
                                             self.emit(Opcode::LOAD_CONST, const_idx);
@@ -238,7 +238,7 @@ impl Compiler {
                                                 "None" => ConstValue::None,
                                                 "True" => ConstValue::Bool(true),
                                                 "False" => ConstValue::Bool(false),
-                                                _ => ConstValue::String(s.clone()),
+                                                _ => ConstValue::String(s.clone().into()),
                                             })
                                                 as u32;
                                             self.emit(Opcode::LOAD_CONST, const_idx);
@@ -248,7 +248,7 @@ impl Compiler {
                                         Pattern::MatchSequence(..) => {
                                             self.emit(Opcode::DUP_TOP, 0);
                                             let list_idx = self.get_const_index(ConstValue::String(
-                                                "list".to_string(),
+                                                "list".into(),
                                             ))
                                                 as u32;
                                             self.emit(Opcode::LOAD_CONST, list_idx);
@@ -256,7 +256,7 @@ impl Compiler {
                                             let seq_ok = self.new_label();
                                             self.emit_jump(Opcode::POP_JUMP_IF_TRUE, seq_ok);
                                             let tuple_idx = self.get_const_index(
-                                                ConstValue::String("tuple".to_string()),
+                                                ConstValue::String("tuple".into()),
                                             )
                                                 as u32;
                                             self.emit(Opcode::LOAD_CONST, tuple_idx);
@@ -268,7 +268,7 @@ impl Compiler {
                                         Pattern::MatchMapping { .. } => {
                                             self.emit(Opcode::DUP_TOP, 0);
                                             let dict_idx = self.get_const_index(ConstValue::String(
-                                                "dict".to_string(),
+                                                "dict".into(),
                                             ))
                                                 as u32;
                                             self.emit(Opcode::LOAD_CONST, dict_idx);
@@ -370,7 +370,7 @@ impl Compiler {
                                             "None" => ConstValue::None,
                                             "True" => ConstValue::Bool(true),
                                             "False" => ConstValue::Bool(false),
-                                            _ => ConstValue::String(s.clone()),
+                                            _ => ConstValue::String(s.clone().into()),
                                         })
                                             as u32;
                                         self.emit(Opcode::LOAD_CONST, const_idx);
@@ -509,7 +509,7 @@ impl Compiler {
                                             "None" => ConstValue::None,
                                             "True" => ConstValue::Bool(true),
                                             "False" => ConstValue::Bool(false),
-                                            _ => ConstValue::String(s.clone()),
+                                            _ => ConstValue::String(s.clone().into()),
                                         })
                                             as u32;
                                         self.emit(Opcode::LOAD_CONST, const_idx);
@@ -542,7 +542,7 @@ impl Compiler {
                                             "None" => ConstValue::None,
                                             "True" => ConstValue::Bool(true),
                                             "False" => ConstValue::Bool(false),
-                                            _ => ConstValue::String(s.clone()),
+                                            _ => ConstValue::String(s.clone().into()),
                                         })
                                             as u32;
                                         self.emit(Opcode::LOAD_CONST, const_idx);

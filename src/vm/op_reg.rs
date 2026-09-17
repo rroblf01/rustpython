@@ -48,7 +48,7 @@ impl VirtualMachine {
                         s.parse()
                             .map_err(|_| PyError::value_error("invalid float"))?,
                     ),
-                    ConstValue::String(s) => py_str(&s),
+                    ConstValue::String(s) => py_str_pstr(&s),
                     ConstValue::Bytes(b) => PyObjectRef::imm(PyObject::Bytes(b)),
                     ConstValue::Complex { real, imag } => {
                         let re: f64 = real

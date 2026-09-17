@@ -46,6 +46,11 @@ impl Parser {
                             // error, handled in the branches below.
                             self.next();
                             let value = self.parse_expr()?;
+                            // `dict(**x for x in ...)` is invalid — CPython
+                            // raises "invalid syntax" here.
+                            if self.at(&Token::For) || self.at(&Token::Async) {
+                                return Err("invalid syntax".to_string());
+                            }
                             keywords.push(Keyword {
                                 arg: None,
                                 value: Box::new(value),

@@ -1,5 +1,25 @@
 use super::{Lexer, Token};
 use super::unicode_name_to_char;
+use crate::object::pystring::PyStr;
+
+/// Encode a Unicode codepoint (including surrogates) as WTF-8 bytes.
+fn push_wtf8_codepoint(out: &mut Vec<u8>, cp: u32) {
+    if cp < 0x80 {
+        out.push(cp as u8);
+    } else if cp < 0x800 {
+        out.push(0xC0 | ((cp >> 6) as u8));
+        out.push(0x80 | ((cp & 0x3F) as u8));
+    } else if cp < 0x10000 {
+        out.push(0xE0 | ((cp >> 12) as u8));
+        out.push(0x80 | ((cp >> 6) as u8 & 0x3F));
+        out.push(0x80 | ((cp & 0x3F) as u8));
+    } else {
+        out.push(0xF0 | ((cp >> 18) as u8));
+        out.push(0x80 | ((cp >> 12) as u8 & 0x3F));
+        out.push(0x80 | ((cp >> 6) as u8 & 0x3F));
+        out.push(0x80 | ((cp & 0x3F) as u8));
+    }
+}
 
 impl Lexer {
     pub(crate) fn read_bytes(&mut self, quote: char, raw: bool) -> Token {
@@ -22,9 +42,6 @@ impl Lexer {
                             Some('\\') => bytes.push(b'\\'),
                             Some('\'') => bytes.push(b'\''),
                             Some('"') => bytes.push(b'"'),
-                            // See the matching fix in read_string above for
-                            // why this needs to consume up to 2 more octal
-                            // digits, not just recognize a bare `\0`.
                             Some(d) if ('0'..='7').contains(&d) => {
                                 let mut value = d.to_digit(8).unwrap();
                                 let mut digits = 1;
@@ -60,11 +77,6 @@ impl Lexer {
                         }
                     }
                     Some(c) if c == '\\' && raw => {
-                        // See the matching fix/comment in read_string: a
-                        // backslash in a raw bytes literal still escapes
-                        // exactly the next char for tokenizing purposes, and
-                        // that char must be consumed here so a following
-                        // quote isn't misread as the terminator.
                         bytes.push(c as u8);
                         if let Some(next) = self.advance() {
                             bytes.push(next as u8);
@@ -86,20 +98,14 @@ impl Lexer {
             }
             if !terminated {
                 return Token::LexerError(format!(
-                    "unterminated triple-quoted string literal (detected at line {})",
-                    self.line
+                    "unterminated bytes literal (detected at line {})",
+                    self.line - 1
                 ));
             }
         } else {
             loop {
                 match self.advance() {
                     None => break,
-                    Some(c) if c == '\n' => {
-                        return Token::LexerError(format!(
-                            "unterminated string literal (detected at line {})",
-                            self.line - 1
-                        ));
-                    }
                     Some(c) if c == '\\' && !raw => {
                         let next = self.advance();
                         match next {
@@ -109,9 +115,6 @@ impl Lexer {
                             Some('\\') => bytes.push(b'\\'),
                             Some('\'') => bytes.push(b'\''),
                             Some('"') => bytes.push(b'"'),
-                            // See the matching fix in read_string above for
-                            // why this needs to consume up to 2 more octal
-                            // digits, not just recognize a bare `\0`.
                             Some(d) if ('0'..='7').contains(&d) => {
                                 let mut value = d.to_digit(8).unwrap();
                                 let mut digits = 1;
@@ -173,7 +176,7 @@ impl Lexer {
     }
 
     pub(crate) fn read_string(&mut self, quote: char, raw: bool, fstring: bool) -> Token {
-        let mut s = String::new();
+        let mut w: Vec<u8> = Vec::new(); // WTF-8 byte buffer
         let triple = self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote);
         let mut terminated = false;
         let mut invalid_escapes: Vec<char> = Vec::new();
@@ -187,22 +190,12 @@ impl Lexer {
                     Some(c) if c == '\\' && !raw => {
                         let next = self.advance();
                         match next {
-                            Some('n') => s.push('\n'),
-                            Some('t') => s.push('\t'),
-                            Some('r') => s.push('\r'),
-                            Some('\\') => s.push('\\'),
-                            Some('\'') => s.push('\''),
-                            Some('"') => s.push('"'),
-                            // Python string literals accept `\ooo` — 1 to 3
-                            // octal digits, the first being the one already
-                            // consumed here — as a byte/char escape (e.g.
-                            // real code, CPython's own `email._policybase`:
-                            // `"[\041-\071\073-\176]+$"`). Previously only a
-                            // bare `\0` (no further digits) was handled,
-                            // pushing NUL and leaving any following digits
-                            // as literal characters — so `\041` produced
-                            // `'\x00' + '4' + '1'` (3 chars) instead of the
-                            // correct single `'!'` (0o41 = 33).
+                            Some('n') => w.push(b'\n'),
+                            Some('t') => w.push(b'\t'),
+                            Some('r') => w.push(b'\r'),
+                            Some('\\') => w.push(b'\\'),
+                            Some('\'') => w.push(b'\''),
+                            Some('"') => w.push(b'"'),
                             Some(d) if ('0'..='7').contains(&d) => {
                                 let mut value = d.to_digit(8).unwrap();
                                 let mut digits = 1;
@@ -216,30 +209,30 @@ impl Lexer {
                                         _ => break,
                                     }
                                 }
-                                s.push((value as u8) as char);
+                                push_wtf8_codepoint(&mut w, value);
                             }
-                            Some('a') => s.push('\x07'),
-                            Some('b') => s.push('\x08'),
-                            Some('f') => s.push('\x0c'),
-                            Some('v') => s.push('\x0b'),
+                            Some('a') => w.push(0x07),
+                            Some('b') => w.push(0x08),
+                            Some('f') => w.push(0x0c),
+                            Some('v') => w.push(0x0b),
                             Some('x') => {
                                 let h1 = self.advance().unwrap_or('0');
                                 let h2 = self.advance().unwrap_or('0');
                                 let val =
                                     u8::from_str_radix(&format!("{}{}", h1, h2), 16).unwrap_or(0);
-                                s.push(val as char);
+                                push_wtf8_codepoint(&mut w, val as u32);
                             }
                             Some('u') => {
                                 let digits: String =
                                     (0..4).map(|_| self.advance().unwrap_or('0')).collect();
                                 let val = u32::from_str_radix(&digits, 16).unwrap_or(0xFFFD);
-                                s.push(std::char::from_u32(val).unwrap_or('\u{FFFD}'));
+                                push_wtf8_codepoint(&mut w, val);
                             }
                             Some('U') => {
                                 let digits: String =
                                     (0..8).map(|_| self.advance().unwrap_or('0')).collect();
                                 let val = u32::from_str_radix(&digits, 16).unwrap_or(0xFFFD);
-                                s.push(std::char::from_u32(val).unwrap_or('\u{FFFD}'));
+                                push_wtf8_codepoint(&mut w, val);
                             }
                             Some('N') => {
                                 if self.advance() == Some('{') {
@@ -252,29 +245,25 @@ impl Lexer {
                                         }
                                     }
                                     let ch = unicode_name_to_char(&name).unwrap_or('\u{FFFD}');
-                                    s.push(ch);
+                                    push_wtf8_codepoint(&mut w, ch as u32);
                                 } else {
-                                    s.push('\\');
-                                    s.push('N');
+                                    w.push(b'\\');
+                                    w.push(b'N');
                                 }
                             }
                             Some(c) if c == '\n' => {}
                             Some(c) => {
                                 invalid_escapes.push(c);
-                                s.push('\\');
-                                s.push(c);
+                                w.push(b'\\');
+                                w.push(c as u8);
                             }
-                            None => s.push('\\'),
+                            None => w.push(b'\\'),
                         }
                     }
                     Some(c) if c == '\\' && raw => {
-                        // See the matching fix/comment below in the
-                        // non-triple branch: a backslash in a raw string
-                        // always escapes exactly the next char for
-                        // tokenizing purposes, which must be consumed here.
-                        s.push(c);
+                        w.push(c as u8);
                         if let Some(next) = self.advance() {
-                            s.push(next);
+                            w.push(next as u8);
                         }
                     }
                     Some(c) if c == quote => {
@@ -284,10 +273,10 @@ impl Lexer {
                             terminated = true;
                             break;
                         }
-                        s.push(c);
+                        push_wtf8_codepoint(&mut w, c as u32);
                     }
                     Some(c) => {
-                        s.push(c);
+                        push_wtf8_codepoint(&mut w, c as u32);
                     }
                 }
             }
@@ -304,22 +293,12 @@ impl Lexer {
                     Some(c) if c == '\\' && !raw => {
                         let next = self.advance();
                         match next {
-                            Some('n') => s.push('\n'),
-                            Some('t') => s.push('\t'),
-                            Some('r') => s.push('\r'),
-                            Some('\\') => s.push('\\'),
-                            Some('\'') => s.push('\''),
-                            Some('"') => s.push('"'),
-                            // Python string literals accept `\ooo` — 1 to 3
-                            // octal digits, the first being the one already
-                            // consumed here — as a byte/char escape (e.g.
-                            // real code, CPython's own `email._policybase`:
-                            // `"[\041-\071\073-\176]+$"`). Previously only a
-                            // bare `\0` (no further digits) was handled,
-                            // pushing NUL and leaving any following digits
-                            // as literal characters — so `\041` produced
-                            // `'\x00' + '4' + '1'` (3 chars) instead of the
-                            // correct single `'!'` (0o41 = 33).
+                            Some('n') => w.push(b'\n'),
+                            Some('t') => w.push(b'\t'),
+                            Some('r') => w.push(b'\r'),
+                            Some('\\') => w.push(b'\\'),
+                            Some('\'') => w.push(b'\''),
+                            Some('"') => w.push(b'"'),
                             Some(d) if ('0'..='7').contains(&d) => {
                                 let mut value = d.to_digit(8).unwrap();
                                 let mut digits = 1;
@@ -333,30 +312,30 @@ impl Lexer {
                                         _ => break,
                                     }
                                 }
-                                s.push((value as u8) as char);
+                                push_wtf8_codepoint(&mut w, value);
                             }
-                            Some('a') => s.push('\x07'),
-                            Some('b') => s.push('\x08'),
-                            Some('f') => s.push('\x0c'),
-                            Some('v') => s.push('\x0b'),
+                            Some('a') => w.push(0x07),
+                            Some('b') => w.push(0x08),
+                            Some('f') => w.push(0x0c),
+                            Some('v') => w.push(0x0b),
                             Some('x') => {
                                 let h1 = self.advance().unwrap_or('0');
                                 let h2 = self.advance().unwrap_or('0');
                                 let val =
                                     u8::from_str_radix(&format!("{}{}", h1, h2), 16).unwrap_or(0);
-                                s.push(val as char);
+                                push_wtf8_codepoint(&mut w, val as u32);
                             }
                             Some('u') => {
                                 let digits: String =
                                     (0..4).map(|_| self.advance().unwrap_or('0')).collect();
                                 let val = u32::from_str_radix(&digits, 16).unwrap_or(0xFFFD);
-                                s.push(std::char::from_u32(val).unwrap_or('\u{FFFD}'));
+                                push_wtf8_codepoint(&mut w, val);
                             }
                             Some('U') => {
                                 let digits: String =
                                     (0..8).map(|_| self.advance().unwrap_or('0')).collect();
                                 let val = u32::from_str_radix(&digits, 16).unwrap_or(0xFFFD);
-                                s.push(std::char::from_u32(val).unwrap_or('\u{FFFD}'));
+                                push_wtf8_codepoint(&mut w, val);
                             }
                             Some('N') => {
                                 if self.advance() == Some('{') {
@@ -369,45 +348,33 @@ impl Lexer {
                                         }
                                     }
                                     let ch = unicode_name_to_char(&name).unwrap_or('\u{FFFD}');
-                                    s.push(ch);
+                                    push_wtf8_codepoint(&mut w, ch as u32);
                                 } else {
-                                    s.push('\\');
-                                    s.push('N');
+                                    w.push(b'\\');
+                                    w.push(b'N');
                                 }
                             }
                             Some(c) if c == '\n' => {}
                             Some(c) => {
                                 invalid_escapes.push(c);
-                                s.push('\\');
-                                s.push(c);
+                                w.push(b'\\');
+                                w.push(c as u8);
                             }
-                            None => s.push('\\'),
+                            None => w.push(b'\\'),
                         }
                     }
                     Some(c) if c == '\\' && raw => {
-                        // A backslash in a raw string always escapes exactly
-                        // the next character for tokenizing purposes (so
-                        // e.g. \" doesn't end the string), while keeping
-                        // both characters literally in the content. The
-                        // escaped character MUST be consumed here — a
-                        // peek-only check (only swallowing the following
-                        // char when it happens to be the quote) misparses
-                        // `\\"` : the first backslash would leave the
-                        // second backslash to be examined fresh next
-                        // iteration, which would then wrongly swallow the
-                        // real closing quote as content instead of
-                        // terminating the string.
-                        s.push(c);
+                        w.push(c as u8);
                         if let Some(next) = self.advance() {
-                            s.push(next);
+                            w.push(next as u8);
                         }
                     }
                     Some(c) if c == '{' && fstring => {
                         if self.peek() == Some('{') {
-                            s.push('{');
+                            w.push(b'{');
                             self.advance();
                         } else {
-                            s.push_str("{...}");
+                            w.extend_from_slice(b"{...}");
                             let mut depth = 1;
                             while depth > 0 {
                                 match self.advance() {
@@ -421,7 +388,7 @@ impl Lexer {
                     }
                     Some(c) if c == '}' && fstring => {
                         if self.peek() == Some('}') {
-                            s.push('}');
+                            w.push(b'}');
                             self.advance();
                         }
                     }
@@ -429,7 +396,9 @@ impl Lexer {
                         terminated = true;
                         break;
                     }
-                    Some(c) => s.push(c),
+                    Some(c) => {
+                        push_wtf8_codepoint(&mut w, c as u32);
+                    }
                 }
             }
             if !terminated {
@@ -457,6 +426,6 @@ impl Lexer {
             }
         }
 
-        Token::String(s)
+        Token::String(PyStr::from_wtf8(w))
     }
 }

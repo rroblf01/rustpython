@@ -528,6 +528,12 @@ pub struct CodeObject {
     /// Line number for each instruction (0 = unknown).
     /// Same length as `instructions`; stored separately so Instr stays 8 bytes.
     pub line_numbers: Vec<u32>,
+    /// Compile-time-computed `__qualname__` (e.g. `Outer.<locals>.inner` or
+    /// `MyClass.method`), distinct from `name` (the bare `__name__`). Falls
+    /// back to `name`'s text for code objects the compiler didn't bother
+    /// setting this on (e.g. built via CodeObject::new directly, not through
+    /// compile_function/compile_class_body).
+    pub qualname: StrId,
 }
 
 /// Structural equality for `CodeObject` — real CPython code objects compare
@@ -564,6 +570,7 @@ impl CodeObject {
     pub fn new(name: &str) -> Self {
         CodeObject {
             name: crate::interner::intern(name),
+            qualname: crate::interner::intern(name),
             arg_count: 0,
             posonlyarg_count: 0,
             kwonlyarg_count: 0,
@@ -756,6 +763,7 @@ impl CodeObject {
 
         Ok(CodeObject {
             name,
+            qualname: name,
             arg_count,
             posonlyarg_count,
             kwonlyarg_count,
@@ -955,7 +963,7 @@ fn read_const_value(data: &[u8], pos: &mut usize) -> Result<ConstValue, String> 
         }
         5 => {
             let s = read_str(data, pos)?;
-            Ok(ConstValue::String(s))
+            Ok(ConstValue::String(s.into()))
         }
         6 => {
             let len = read_u32(data, pos)? as usize;
@@ -987,7 +995,7 @@ pub enum ConstValue {
     Int(String),
     Float(String),
     Complex { real: String, imag: String },
-    String(String),
+    String(crate::object::pystring::PyStr),
     Bytes(Vec<u8>),
     Code(Box<CodeObject>),
     Tuple(Vec<String>),
