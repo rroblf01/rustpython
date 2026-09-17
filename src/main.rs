@@ -145,17 +145,27 @@ fn print_py_error(err: &PyError, fallback_file: &str) {
     match err {
         PyError::Exception(type_name, exc_obj) => {
             // Extract attributes from the exception object
-            let lineno = exc_obj.borrow().get_attribute("lineno")
-                .ok().and_then(|v| v.as_i64()).unwrap_or(0);
-            let offset = exc_obj.borrow().get_attribute("offset")
-                .ok().and_then(|v| v.as_i64()).unwrap_or(0);
-            let text = exc_obj.borrow().get_attribute("text")
-                .ok().map(|v| v.str());
+            let lineno = exc_obj
+                .borrow()
+                .get_attribute("lineno")
+                .ok()
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let offset = exc_obj
+                .borrow()
+                .get_attribute("offset")
+                .ok()
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let text = exc_obj.borrow().get_attribute("text").ok().map(|v| v.str());
             let msg = exc_obj.str();
 
             eprintln!("Traceback (most recent call last):");
-            let file = exc_obj.borrow().get_attribute("filename")
-                .ok().map(|v| v.str())
+            let file = exc_obj
+                .borrow()
+                .get_attribute("filename")
+                .ok()
+                .map(|v| v.str())
                 .unwrap_or_else(|| fallback_file.to_string());
             if lineno > 0 {
                 eprintln!("  File \"{}\", line {}, in <module>", file, lineno);
@@ -183,7 +193,12 @@ fn print_py_error(err: &PyError, fallback_file: &str) {
                         let caret_len = if trimmed.is_empty() {
                             1
                         } else {
-                            std::cmp::max(1, trimmed_chars.saturating_sub(offset as usize).saturating_add(1))
+                            std::cmp::max(
+                                1,
+                                trimmed_chars
+                                    .saturating_sub(offset as usize)
+                                    .saturating_add(1),
+                            )
                         };
                         eprintln!("{}{}{}", indent, " ".repeat(spaces), "^".repeat(caret_len));
                     }

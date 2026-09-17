@@ -7,7 +7,11 @@ use crate::object::PyObjectRef;
 // stack slot holding a valid `PyObjectRef` for every `*const`/`*mut
 // PyObjectRef` parameter — that invariant is enforced by construction in
 // this file's codegen, not by the callee, so it isn't re-derived per function.
-pub(crate) extern "C" fn jit_py_add(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+pub(crate) extern "C" fn jit_py_add(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
             if let Some(sum) = av.checked_add(*bv) {
@@ -23,7 +27,11 @@ pub(crate) extern "C" fn jit_py_add(a: *const PyObjectRef, b: *const PyObjectRef
         );
     }
 }
-pub(crate) extern "C" fn jit_py_sub(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+pub(crate) extern "C" fn jit_py_sub(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
             if let Some(diff) = av.checked_sub(*bv) {
@@ -39,7 +47,11 @@ pub(crate) extern "C" fn jit_py_sub(a: *const PyObjectRef, b: *const PyObjectRef
         );
     }
 }
-pub(crate) extern "C" fn jit_py_mul(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+pub(crate) extern "C" fn jit_py_mul(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
             if let Some(prod) = av.checked_mul(*bv) {
@@ -55,7 +67,11 @@ pub(crate) extern "C" fn jit_py_mul(a: *const PyObjectRef, b: *const PyObjectRef
         );
     }
 }
-pub(crate) extern "C" fn jit_py_div(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+pub(crate) extern "C" fn jit_py_div(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
             // Integer division returns float, so only fast-path if exact
@@ -99,7 +115,11 @@ pub(crate) extern "C" fn jit_py_floor_div(
         );
     }
 }
-pub(crate) extern "C" fn jit_py_mod(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+pub(crate) extern "C" fn jit_py_mod(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
             if *bv != 0 {
@@ -118,7 +138,11 @@ pub(crate) extern "C" fn jit_py_mod(a: *const PyObjectRef, b: *const PyObjectRef
         );
     }
 }
-pub(crate) extern "C" fn jit_py_pow(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+pub(crate) extern "C" fn jit_py_pow(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
             if *bv >= 0 && *bv <= 20 {
@@ -136,7 +160,11 @@ pub(crate) extern "C" fn jit_py_pow(a: *const PyObjectRef, b: *const PyObjectRef
         );
     }
 }
-pub(crate) extern "C" fn jit_py_lshift(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+pub(crate) extern "C" fn jit_py_lshift(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
             if *bv >= 0 && *bv < 64 {
@@ -154,7 +182,11 @@ pub(crate) extern "C" fn jit_py_lshift(a: *const PyObjectRef, b: *const PyObject
         );
     }
 }
-pub(crate) extern "C" fn jit_py_rshift(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+pub(crate) extern "C" fn jit_py_rshift(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
             if *bv >= 0 && *bv < 64 {
@@ -171,7 +203,11 @@ pub(crate) extern "C" fn jit_py_rshift(a: *const PyObjectRef, b: *const PyObject
         );
     }
 }
-pub(crate) extern "C" fn jit_py_bit_and(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+pub(crate) extern "C" fn jit_py_bit_and(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
             std::ptr::write(out, PyObjectRef::SmallInt(av & bv));
@@ -185,7 +221,11 @@ pub(crate) extern "C" fn jit_py_bit_and(a: *const PyObjectRef, b: *const PyObjec
         );
     }
 }
-pub(crate) extern "C" fn jit_py_bit_or(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+pub(crate) extern "C" fn jit_py_bit_or(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
             std::ptr::write(out, PyObjectRef::SmallInt(av | bv));
@@ -199,7 +239,11 @@ pub(crate) extern "C" fn jit_py_bit_or(a: *const PyObjectRef, b: *const PyObject
         );
     }
 }
-pub(crate) extern "C" fn jit_py_bit_xor(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+pub(crate) extern "C" fn jit_py_bit_xor(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         if let (PyObjectRef::SmallInt(av), PyObjectRef::SmallInt(bv)) = (&*a, &*b) {
             std::ptr::write(out, PyObjectRef::SmallInt(av ^ bv));
@@ -349,14 +393,22 @@ pub(crate) extern "C" fn jit_list_append(
         std::ptr::write(out, crate::object::py_none());
     }
 }
-pub(crate) extern "C" fn jit_contains(a: *const PyObjectRef, b: *const PyObjectRef, out: *mut PyObjectRef) {
+pub(crate) extern "C" fn jit_contains(
+    a: *const PyObjectRef,
+    b: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         let result =
             crate::object::py_contains(&*a, &*b).unwrap_or_else(|_| crate::object::py_bool(false));
         std::ptr::write(out, result);
     }
 }
-pub(crate) extern "C" fn jit_getitem(obj: *const PyObjectRef, idx: *const PyObjectRef, out: *mut PyObjectRef) {
+pub(crate) extern "C" fn jit_getitem(
+    obj: *const PyObjectRef,
+    idx: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         let result =
             crate::object::py_getitem(&*obj, &*idx).unwrap_or_else(|_| crate::object::py_none());
@@ -607,7 +659,10 @@ pub(crate) extern "C" fn jit_load_attr(
                 }
                 crate::object::PyObject::BuiltinFunction { name: n, func }
                     if !(crate::object::is_builtin_exception_class_name(n)
-                        || std::ptr::fn_addr_eq(*func, crate::object::builtin_open as crate::object::BuiltinFunc)) =>
+                        || std::ptr::fn_addr_eq(
+                            *func,
+                            crate::object::builtin_open as crate::object::BuiltinFunc,
+                        )) =>
                 {
                     drop(rb);
                     crate::object::PyObjectRef::new(crate::object::PyObject::BoundMethod {

@@ -1,3 +1,5 @@
+use super::runtime::*;
+use super::runtime_extra::*;
 use crate::bytecode::CodeObject;
 use crate::object::PyObjectRef;
 use cranelift::prelude::*;
@@ -6,8 +8,6 @@ use cranelift_module::{Linkage, Module};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use super::runtime::*;
-use super::runtime_extra::*;
 
 pub struct JitCompiler {
     pub(crate) builder_context: FunctionBuilderContext,
@@ -529,5 +529,4 @@ impl JitCompiler {
         }
         result
     }
-
 }

@@ -1,5 +1,5 @@
-use crate::object::PyObjectRef;
 use super::globals::CURRENT_JIT_GLOBALS;
+use crate::object::PyObjectRef;
 // FOR_ITER: calls __next__, returns 0 on success (value in out), 1 on StopIteration
 pub(crate) extern "C" fn jit_for_iter(iter: *const PyObjectRef, out: *mut PyObjectRef) -> i64 {
     unsafe {
@@ -342,7 +342,11 @@ pub(crate) extern "C" fn jit_build_set(n: i64, items: *const PyObjectRef, out: *
     }
 }
 
-pub(crate) extern "C" fn jit_build_string(n: i64, items: *const PyObjectRef, out: *mut PyObjectRef) {
+pub(crate) extern "C" fn jit_build_string(
+    n: i64,
+    items: *const PyObjectRef,
+    out: *mut PyObjectRef,
+) {
     unsafe {
         let mut parts = Vec::with_capacity(n as usize);
         for i in 0..n as isize {

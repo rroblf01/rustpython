@@ -1,13 +1,12 @@
+use super::compiler::JitCompiler;
 use crate::bytecode::{CodeObject, Opcode};
 use crate::object::PyObjectRef;
+use cranelift::codegen::ir::{FuncRef, StackSlot, StackSlotData, StackSlotKind};
 use cranelift::prelude::*;
-use cranelift::codegen::ir::{StackSlot, StackSlotData, StackSlotKind, FuncRef};
 use cranelift_module::{Linkage, Module};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::cell::RefCell;
-use super::compiler::JitCompiler;
-
 
 pub(crate) struct FuncRefs {
     pub add: FuncRef,
@@ -84,7 +83,9 @@ impl JitCompiler {
         if code.instructions.is_empty() || code.instructions.len() > 200 {
             return None;
         }
-        if std::env::var("RPY_DEBUG_JIT").is_ok() { eprintln!("JIT-TRY {}", crate::interner::lookup_str(code.name)); }
+        if std::env::var("RPY_DEBUG_JIT").is_ok() {
+            eprintln!("JIT-TRY {}", crate::interner::lookup_str(code.name));
+        }
         // Only compile functions with loops (back edges) — JIT shines for loops
         let has_loop = code
             .instructions
@@ -150,7 +151,9 @@ impl JitCompiler {
                 // Gated behind RPY_DEBUG_JIT: this fires for most real
                 // functions (generators, closures, try/except...) and used
                 // to print unconditionally, polluting every test's stderr.
-                if std::env::var("RPY_DEBUG_JIT").is_ok() || std::env::var("RPY_DEBUG_JIT_ALL").is_ok() {
+                if std::env::var("RPY_DEBUG_JIT").is_ok()
+                    || std::env::var("RPY_DEBUG_JIT_ALL").is_ok()
+                {
                     eprintln!("JIT: unsupported opcode {:?} in '{}'", instr.op, code.name);
                 }
                 return None;
@@ -186,7 +189,10 @@ impl JitCompiler {
             // name is even bound to (a user function coincidentally named
             // one of these only costs it JIT eligibility, never
             // correctness).
-            if matches!(instr.op, Opcode::LOAD_ATTR | Opcode::LOAD_GLOBAL | Opcode::LOAD_NAME) {
+            if matches!(
+                instr.op,
+                Opcode::LOAD_ATTR | Opcode::LOAD_GLOBAL | Opcode::LOAD_NAME
+            ) {
                 let name_idx = instr.arg as usize;
                 if let Some(&name_id) = code.names.get(name_idx) {
                     let name = crate::interner::lookup_str(name_id);
@@ -654,7 +660,12 @@ impl JitCompiler {
                     i,
                 };
                 if crate::jit::emit::emit_part1(&mut builder, &mut eval_stack, &mut ctx, instr) {
-                } else if crate::jit::emit2::emit_part2(&mut builder, &mut eval_stack, &mut ctx, instr) {
+                } else if crate::jit::emit2::emit_part2(
+                    &mut builder,
+                    &mut eval_stack,
+                    &mut ctx,
+                    instr,
+                ) {
                 } else {
                     eprintln!("JIT: codegen unsupported {:?} at instr {}", instr.op, i);
                     return None;
