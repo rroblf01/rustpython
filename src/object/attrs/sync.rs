@@ -971,6 +971,28 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     },
                     self_obj: PyObjectRef::new(PyObject::None),
                 })),
+                // `Queue.empty()` / `Queue.full()` — same shape as `qsize`
+                // (real trigger: test_sched.py's concurrent scheduler
+                // tests assert `q.empty()` after each drain step). `full`
+                // is always False here: this unbounded implementation has
+                // no maxsize (matching SimpleQueue reuse below).
+                "empty" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: "empty".to_string(),
+                    func: |args| {
+                        let obj = args[0].borrow();
+                        if let PyObject::Queue(inner_arc) = &*obj {
+                            let q = inner_arc.lock().unwrap();
+                            return Ok(py_bool(q.queue.is_empty()));
+                        }
+                        Ok(py_bool(true))
+                    },
+                    self_obj: PyObjectRef::new(PyObject::None),
+                })),
+                "full" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: "full".to_string(),
+                    func: |_args| Ok(py_bool(false)),
+                    self_obj: PyObjectRef::new(PyObject::None),
+                })),
                 _ => Err(PyError::attribute_error(format!(
                     "'Queue' object has no attribute '{}'",
                     name
