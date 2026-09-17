@@ -296,11 +296,7 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         PyObject::Str(s) => {
             check_int_str_digit_limit(s, base_obj.as_ref())?;
-            int_from_digit_string(
-                s,
-                base_obj.as_ref(),
-                &format!("'{}'", crate::object::escape_string(s)),
-            )
+            int_from_digit_string(s, base_obj.as_ref(), &obj.repr())
         }
         PyObject::Bytes(b) => {
             let latin: String = b.iter().map(|&x| x as char).collect();
