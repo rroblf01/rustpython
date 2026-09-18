@@ -68,10 +68,28 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
                 py_str("Instruction"),
                 py_list(vec![
                     py_str("opname"),
-                    py_str("argval"),
+                    py_str("opcode"),
                     py_str("arg"),
+                    py_str("argval"),
+                    py_str("argrepr"),
                     py_str("offset"),
                     py_str("starts_line"),
+                    py_str("positions"),
+                ]),
+            ],
+            vec![],
+        )?;
+        // CPython 3.11+ per-instruction positions (dis uses
+        // `inst.positions.lineno` for jump-threading checks).
+        let positions_type = crate::object::call_function_disposable(
+            &namedtuple,
+            vec![
+                py_str("Positions"),
+                py_list(vec![
+                    py_str("lineno"),
+                    py_str("end_lineno"),
+                    py_str("col_offset"),
+                    py_str("end_col_offset"),
                 ]),
             ],
             vec![],
@@ -113,10 +131,22 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
                 &instruction_type,
                 vec![
                     py_str(&opname),
-                    argval.unwrap_or_else(|| PyObjectRef::new(PyObject::None)),
+                    py_int(instr.op as i64),
                     py_int(arg),
+                    argval.unwrap_or_else(|| PyObjectRef::new(PyObject::None)),
+                    py_str(""),
                     py_int(offset),
                     PyObjectRef::new(PyObject::None),
+                    crate::object::call_function_disposable(
+                        &positions_type,
+                        vec![
+                            py_int(code.line_number(i) as i64),
+                            py_int(code.line_number(i) as i64),
+                            py_int(0),
+                            py_int(0),
+                        ],
+                        vec![],
+                    )?,
                 ],
                 vec![],
             )?);

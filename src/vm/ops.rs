@@ -224,7 +224,17 @@ impl VirtualMachine {
                 let invert = arg != 0;
                 let right = self.frames[fi].pop()?;
                 let left = self.frames[fi].pop()?;
-                let result = contains_op(&right, &left)?;
+                // Operand order matches the JIT lowering (which pops
+                // into (second, top) and calls the contains runtime the
+                // same way) and what match-statement codegen emits:
+                // the container is pushed first, the item second, so
+                // `left` is the container here. (This used to pass them
+                // swapped, which made every mapping-pattern key check
+                // test `subject in key` instead of `key in subject` —
+                // real trigger: `case {"key": x}` raised
+                // `TypeError: 'in <string>' requires string as left
+                // operand` for any dict subject.)
+                let result = contains_op(&left, &right)?;
                 let result = if invert { !result } else { result };
                 self.frames[fi].push(py_bool(result));
             }

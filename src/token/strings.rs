@@ -255,7 +255,11 @@ impl Lexer {
                             Some(c) => {
                                 invalid_escapes.push(c);
                                 w.push(b'\\');
-                                w.push(c as u8);
+                                // Invalid escapes keep the char literally
+                                // (with a SyntaxWarning) — as full UTF-8,
+                                // not `as u8`-truncated: `"\П"` is
+                                // backslash + U+041F (PEP 3120).
+                                push_wtf8_codepoint(&mut w, c as u32);
                             }
                             None => w.push(b'\\'),
                         }
@@ -263,7 +267,7 @@ impl Lexer {
                     Some(c) if c == '\\' && raw => {
                         w.push(c as u8);
                         if let Some(next) = self.advance() {
-                            w.push(next as u8);
+                            push_wtf8_codepoint(&mut w, next as u32);
                         }
                     }
                     Some(c) if c == quote => {
@@ -358,7 +362,11 @@ impl Lexer {
                             Some(c) => {
                                 invalid_escapes.push(c);
                                 w.push(b'\\');
-                                w.push(c as u8);
+                                // Invalid escapes keep the char literally
+                                // (with a SyntaxWarning) — as full UTF-8,
+                                // not `as u8`-truncated: `"\П"` is
+                                // backslash + U+041F (PEP 3120).
+                                push_wtf8_codepoint(&mut w, c as u32);
                             }
                             None => w.push(b'\\'),
                         }
@@ -366,7 +374,7 @@ impl Lexer {
                     Some(c) if c == '\\' && raw => {
                         w.push(c as u8);
                         if let Some(next) = self.advance() {
-                            w.push(next as u8);
+                            push_wtf8_codepoint(&mut w, next as u32);
                         }
                     }
                     Some(c) if c == '{' && fstring => {

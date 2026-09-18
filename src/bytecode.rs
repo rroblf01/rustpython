@@ -101,6 +101,8 @@ pub enum Opcode {
     MATCH_MAPPING = 23,
     MATCH_SEQUENCE = 24,
     MATCH_KEYS = 22,
+    MATCH_CLASS_CHECK = 17,
+    MATCH_CLASS_GETATTR = 18,
     CHECK_EXC_MATCH = 6,
     PUSH_EXC_INFO = 30,
     END_FOR = 9,
@@ -452,6 +454,8 @@ pub(crate) fn needs_arg(op: Opcode) -> bool {
             | MATCH_MAPPING
             | MATCH_SEQUENCE
             | MATCH_KEYS
+            | MATCH_CLASS_CHECK
+            | MATCH_CLASS_GETATTR
             | CHECK_EXC_MATCH
             | PUSH_EXC_INFO
             | END_FOR

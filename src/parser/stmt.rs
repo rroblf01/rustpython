@@ -568,6 +568,7 @@ impl Parser {
 
     pub(crate) fn parse_global(&mut self) -> Result<Stmt, String> {
         let (gline, gcol) = self.lexer.get_line_col();
+        let gcol = gcol.saturating_sub("global".len());
         self.next();
         let mut names = vec![self.expect_name()?];
         while self.eat(&Token::Comma) {
@@ -591,12 +592,14 @@ impl Parser {
                 }
             }
         }
+        self.check_global_order(&names, gline, gcol)?;
         let _ = self.expect_newline_or_eof();
         Ok(Stmt::Global(names))
     }
 
     pub(crate) fn parse_nonlocal(&mut self) -> Result<Stmt, String> {
         let (nline, ncol) = self.lexer.get_line_col();
+        let ncol = ncol.saturating_sub("nonlocal".len());
         self.next();
         let mut names = vec![self.expect_name()?];
         while self.eat(&Token::Comma) {
@@ -620,6 +623,7 @@ impl Parser {
                 }
             }
         }
+        self.check_nonlocal_order(&names, nline, ncol)?;
         let _ = self.expect_newline_or_eof();
         Ok(Stmt::Nonlocal(names))
     }
@@ -881,7 +885,8 @@ impl Parser {
             let result: Result<(), String> = (|| {
                 if !self.at(&Token::Dedent) && !self.at(&Token::EndOfFile) {
                     let line = self.lexer.get_line_col().0;
-                    stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
+                    let stmt = self.parse_stmt()?;
+                    self.push_tracked_stmt(&mut stmts, line, stmt);
                     while self.eat(&Token::Semicolon) {
                         if self.at(&Token::Newline)
                             || self.at(&Token::Dedent)
@@ -890,7 +895,8 @@ impl Parser {
                             break;
                         }
                         let line = self.lexer.get_line_col().0;
-                        stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
+                        let stmt = self.parse_stmt()?;
+                        self.push_tracked_stmt(&mut stmts, line, stmt);
                     }
                 }
                 Ok(())
@@ -928,7 +934,8 @@ impl Parser {
                     continue;
                 }
                 let line = self.lexer.get_line_col().0;
-                stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
+                let stmt = self.parse_stmt()?;
+                self.push_tracked_stmt(&mut stmts, line, stmt);
             }
         }
         // No Indent yet — the block may begin after one or more blank
@@ -964,7 +971,8 @@ impl Parser {
                 continue;
             }
             let line = self.lexer.get_line_col().0;
-            stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
+            let stmt = self.parse_stmt()?;
+            self.push_tracked_stmt(&mut stmts, line, stmt);
         }
     }
 

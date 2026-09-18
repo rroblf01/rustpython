@@ -4,8 +4,8 @@
 Deliberately simplified relative to real CPython's ``dataclasses.py``: no
 lazy/string-format annotation support (that needs a much more complete
 ``annotationlib``/``ast`` module than this interpreter currently has — see
-the project's compat notes), no ``__slots__`` generation, no ``match_args``/
-``kw_only`` defaults interacting with ``__future__`` annotations, no
+the project's compat notes), no ``__slots__`` generation, no ``kw_only``
+defaults interacting with ``__future__`` annotations, no
 ``ClassVar``/``InitVar`` detection beyond a simple string/typing check. Covers
 the overwhelming majority of real-world ``@dataclass`` usage: field
 generation from annotations (in definition order), ``field()`` with
@@ -306,7 +306,7 @@ def _add_slots(cls, fields_list):
 
 
 def _process_class(cls, init, repr, eq, order, unsafe_hash, frozen, kw_only,
-                    slots=False):
+                    match_args=True, slots=False):
     fields_dict = _collect_fields(cls)
     if kw_only:
         for f in fields_dict.values():
@@ -346,6 +346,14 @@ def _process_class(cls, init, repr, eq, order, unsafe_hash, frozen, kw_only,
         # unhashable, matching real dataclasses (mutable-by-default).
         cls.__hash__ = None
 
+    if match_args and "__match_args__" not in cls.__dict__:
+        # Real dataclasses always add __match_args__ (tuple of the
+        # positional __init__ parameter names) unless the class already
+        # defines it — this is what `match Point(x, y)` binds against.
+        cls.__match_args__ = tuple(
+            f.name for f in fields_list if f.init and not f.kw_only
+        )
+
     if slots:
         cls = _add_slots(cls, fields_list)
 
@@ -363,10 +371,11 @@ class _DataclassParams:
 
 
 def dataclass(cls=None, /, *, init=True, repr=True, eq=True, order=False,
-              unsafe_hash=False, frozen=False, kw_only=False, slots=False):
+              unsafe_hash=False, frozen=False, match_args=True, kw_only=False,
+              slots=False):
     def wrap(c):
         return _process_class(c, init, repr, eq, order, unsafe_hash, frozen,
-                               kw_only, slots)
+                               kw_only, match_args, slots)
 
     if cls is None:
         return wrap

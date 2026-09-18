@@ -277,6 +277,14 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         // self-referential source first).
                         let it = builtin_iter(&[args[1].clone()])?;
                         let mut items = Vec::new();
+                        // Length-hint preallocation (CPython listextend):
+                        // errors from __length_hint__/__len__ propagate
+                        // (test_iterlen's BadLen/BadLengthHint), they are
+                        // not swallowed.
+                        if let Some(hint) = crate::object::builtins::iterable_length_hint(&args[1])?
+                        {
+                            let _ = items.try_reserve_exact(hint);
+                        }
                         loop {
                             match builtin_next(&[it.clone()]) {
                                 Ok(v) => items.push(v),

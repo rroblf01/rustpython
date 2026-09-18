@@ -112,7 +112,7 @@ pub fn builtin_list(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 // generic message here was actually a REGRESSION from that.
                 let it = builtin_iter(&[args[0].clone()])?;
                 let mut collected = Vec::new();
-                if let Some(hint) = iterable_length_hint(&args[0]) {
+                if let Some(hint) = iterable_length_hint(&args[0])? {
                     if collected.try_reserve_exact(hint).is_err() {
                         return Err(PyError::memory_error("could not allocate list"));
                     }
@@ -247,7 +247,7 @@ pub fn builtin_tuple(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     let iterator = builtin_iter(&[args[0].clone()])?;
     let mut items: Vec<PyObjectRef> = Vec::new();
-    if let Some(hint) = iterable_length_hint(&args[0]) {
+    if let Some(hint) = iterable_length_hint(&args[0])? {
         if items.try_reserve_exact(hint).is_err() {
             return Err(PyError::memory_error("could not allocate tuple"));
         }

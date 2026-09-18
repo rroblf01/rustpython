@@ -86,6 +86,8 @@ impl VirtualMachine {
             | Opcode::MATCH_MAPPING
             | Opcode::MATCH_SEQUENCE
             | Opcode::MATCH_KEYS
+            | Opcode::MATCH_CLASS_CHECK
+            | Opcode::MATCH_CLASS_GETATTR
             | Opcode::CALL_INTRINSIC_1
             | Opcode::CALL_INTRINSIC_2
             | Opcode::UNPACK_SEQUENCE_TWO_TUPLE => {

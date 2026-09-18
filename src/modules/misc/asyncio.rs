@@ -212,6 +212,9 @@ pub fn create_asyncio_dict() -> HashMap<String, PyObjectRef> {
     });
 
     asyncio_func!("run", asyncio_run_builtin);
+    asyncio_func!("new_event_loop", |_args| Ok(crate::object::py_none()));
+    asyncio_func!("get_event_loop", |_args| Ok(crate::object::py_none()));
+    asyncio_func!("set_event_loop", |_args| Ok(crate::object::py_none()));
 
     // asyncio.sleep(delay) -> Future
     // Returns a Future that resolves after the delay

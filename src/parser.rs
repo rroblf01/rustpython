@@ -42,6 +42,11 @@ pub struct Parser {
     // `global`/`nonlocal` applied to a parameter (test_syntax's
     // test_global_param_err_first / test_nonlocal_param_err_first).
     fn_params_stack: Vec<std::collections::HashSet<String>>,
+    // Per-function names bound/used/annotated so far, to reject
+    // `global`/`nonlocal` after prior use in the same scope
+    // (CPython symtable's Global_kind checks). Pushed/popped in
+    // lockstep with `fn_params_stack` in `parse_function_def`.
+    pub(crate) fn_scope_stack: Vec<FnScopeTracker>,
     // Depth of nested class definitions — `nonlocal`/`global` inside a
     // class body refers to the enclosing *function* scope, not the class
     // itself (class scopes are not function scopes). Without this, the
@@ -82,6 +87,8 @@ mod import;
 pub use import::*;
 mod pattern;
 pub use pattern::*;
+mod scope;
+pub use scope::*;
 mod stmt;
 pub use stmt::*;
 mod compound;
@@ -106,6 +113,7 @@ impl Parser {
             allow_top_level_await: false,
             barry_as_bdfl: false,
             fn_params_stack: Vec::new(),
+            fn_scope_stack: Vec::new(),
             class_depth: 0,
         }
     }
@@ -240,14 +248,16 @@ impl Parser {
                 return Err(format!("L{}:{}: unexpected indent", line, col));
             }
             let line = self.lexer.get_line_col().0;
-            stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
+            let stmt = self.parse_stmt()?;
+            self.push_tracked_stmt(&mut stmts, line, stmt);
             // Handle semicolon-separated statements on the same line: `while i: i = 0; continue`
             while self.eat(&Token::Semicolon) {
                 if self.at(&Token::Dedent) || self.at(&Token::EndOfFile) {
                     break;
                 }
                 let line = self.lexer.get_line_col().0;
-                stmts.push(Stmt::Located(line, Box::new(self.parse_stmt()?)));
+                let stmt = self.parse_stmt()?;
+                self.push_tracked_stmt(&mut stmts, line, stmt);
             }
         }
         Ok(Program::Module(stmts))
@@ -289,4 +299,115 @@ pub fn try_parse_as_expression(source: &str) -> Result<Program, String> {
         crate::ast::Expr::Tuple(exprs)
     };
     Ok(Program::Expression(Box::new(expr)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Parser;
+
+    #[test]
+    fn parameter_declaration_error_locations() {
+        for keyword in ["global", "nonlocal"] {
+            for (source, line, column) in [
+                (format!("def f(x):\n    {keyword} x\n"), 2, 5),
+                (format!("def f(x): {keyword} x\n"), 1, 11),
+                (format!("def f(x):\n  {keyword} x\n"), 2, 3),
+                (format!("def f(x):\n    {keyword} y, x\n"), 2, 5),
+            ] {
+                let error = Parser::new(&source).parse_program().unwrap_err();
+                assert_eq!(
+                    error,
+                    format!("L{line}:{column}: name 'x' is parameter and {keyword}"),
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn global_after_prior_binding_errors() {
+        for (source, message) in [
+            (
+                "def f():\n    x = 1\n    global x\n",
+                "L3:5: name 'x' is assigned to before global declaration",
+            ),
+            (
+                "def f():\n    print(x)\n    global x\n",
+                "L3:5: name 'x' is used prior to global declaration",
+            ),
+            (
+                "def f():\n    x: int\n    global x\n",
+                "L3:5: annotated name 'x' can't be global",
+            ),
+            (
+                "def f():\n    x = 1\n    nonlocal x\n",
+                "L3:5: name 'x' is assigned to before nonlocal declaration",
+            ),
+            (
+                "def f():\n    print(x)\n    nonlocal x\n",
+                "L3:5: name 'x' is used prior to nonlocal declaration",
+            ),
+            (
+                "def f():\n    x: int\n    nonlocal x\n",
+                "L3:5: annotated name 'x' can't be nonlocal",
+            ),
+        ] {
+            let error = Parser::new(source).parse_program().unwrap_err();
+            assert_eq!(error, message, "{source}");
+        }
+    }
+
+    #[test]
+    fn global_before_binding_is_legal() {
+        for source in [
+            "def f():\n    global x\n    x = 1\n",
+            "def f():\n    global x\n    print(x)\n",
+            "def f():\n    global x\n    global x\n",
+            "x = 1\nglobal x\n",
+        ] {
+            Parser::new(source).parse_program().unwrap();
+        }
+    }
+
+    #[test]
+    fn parenthesized_patterns_are_grouping_not_sequences() {
+        use super::{MatchCase, Pattern, Program, Stmt};
+        fn first_pattern(source: &str) -> Pattern {
+            let Program::Module(stmts) = Parser::new(source).parse_program().unwrap() else {
+                panic!("not a module: {source}");
+            };
+            let [Stmt::Located(_, body)] = stmts.as_slice() else {
+                panic!("one stmt: {source}");
+            };
+            let Stmt::Match { cases, .. } = body.as_ref() else {
+                panic!("match stmt: {source}");
+            };
+            let [MatchCase { pattern, .. }] = cases.as_slice() else {
+                panic!("one case: {source}");
+            };
+            pattern.clone()
+        }
+        // `(p)` groups: as-capture and or-alternatives pass through.
+        assert!(matches!(
+            first_pattern("match x:\n    case (0 as z):\n        pass\n"),
+            Pattern::MatchAs { .. }
+        ));
+        assert!(matches!(
+            first_pattern("match x:\n    case (1 | 2):\n        pass\n"),
+            Pattern::MatchOr(_)
+        ));
+        // Comma makes it a sequence; brackets always do.
+        assert!(matches!(
+            first_pattern("match x:\n    case (0,):\n        pass\n"),
+            Pattern::MatchSequence(_)
+        ));
+        assert!(matches!(
+            first_pattern("match x:\n    case [0]:\n        pass\n"),
+            Pattern::MatchSequence(_)
+        ));
+        assert!(matches!(
+            first_pattern("match x:\n    case ():\n        pass\n"),
+            Pattern::MatchSequence(_)
+        ));
+    }
 }

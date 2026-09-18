@@ -210,13 +210,40 @@ pub fn builtin_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// Returns `None` (not an error) when the object has no usable `__len__` —
 /// callers should just skip pre-reservation and fall back to incremental
 /// growth, which is fine for ordinary bounded iterables/generators.
-pub(crate) fn iterable_length_hint(obj: &PyObjectRef) -> Option<usize> {
-    let len_obj = builtin_len(std::slice::from_ref(obj)).ok()?;
-    let borrowed = len_obj.borrow();
-    match &*borrowed {
-        PyObject::Int(n) => n.to_usize(),
-        _ => None,
+/// CPython `PyObject_LengthHint` semantics for preallocation: try
+/// `__length_hint__` first (a non-NotImplemented int result wins;
+/// NotImplemented falls through to `__len__`), then `__len__`.
+/// ERRORS PROPAGATE — only ABSENT methods default to `None`:
+/// `list(BadLen())` must raise the RuntimeError from `__len__`, and
+/// `list(BadLengthHint())` the one from `__length_hint__`, never swallow
+/// them (test_iterlen). Non-int results are treated as unknown (`None`).
+pub(crate) fn iterable_length_hint(obj: &PyObjectRef) -> PyResult<Option<usize>> {
+    if let Ok(m) = obj.borrow().get_attribute("__length_hint__") {
+        // Our own range_iterator exposes the hint as a plain int
+        // attribute rather than a bound method — take the value as-is
+        // (it is exactly what calling it would return).
+        if let PyObject::Int(n) = &*m.borrow() {
+            return Ok(n.to_usize());
+        }
+        let v = crate::object::builtin_call(&m, &[])?;
+        if !crate::object::is_not_implemented(&v) {
+            if let PyObject::Int(n) = &*v.borrow() {
+                if let Some(n) = n.to_usize() {
+                    return Ok(Some(n));
+                }
+            }
+            return Ok(None);
+        }
     }
+    if obj.borrow().get_attribute("__len__").is_ok() {
+        let len_obj = crate::object::builtin_len(std::slice::from_ref(obj))?;
+        let borrowed = len_obj.borrow();
+        match &*borrowed {
+            PyObject::Int(n) => return Ok(n.to_usize()),
+            _ => return Ok(None),
+        }
+    }
+    Ok(None)
 }
 
 // real `range()` accepts anything implementing `__index__`, not just a

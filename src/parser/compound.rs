@@ -55,6 +55,9 @@ impl Parser {
         let param_names: std::collections::HashSet<String> =
             args.iter().map(|a| a.arg.clone()).collect();
         self.fn_params_stack.push(param_names);
+        let mut tracker = crate::parser::FnScopeTracker::default();
+        tracker.class_depth_at_entry = self.class_depth;
+        self.fn_scope_stack.push(tracker);
         self.expect(&Token::Colon)?;
         // `async for`/`async with` (and `await`) are only legal inside an
         // `async def` body — CPython raises SyntaxError otherwise
@@ -63,6 +66,7 @@ impl Parser {
         let body = self.parse_block()?;
         self.async_depth -= usize::from(async_token);
         self.fn_params_stack.pop();
+        self.fn_scope_stack.pop();
         Ok(Stmt::FunctionDef {
             name,
             args,

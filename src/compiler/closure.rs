@@ -323,6 +323,7 @@ impl Compiler {
                 Stmt::Match { subject, cases } => {
                     Self::collect_comprehension_targets_in_expr(subject, assigned);
                     for case in cases {
+                        Self::collect_pattern_bindings(&case.pattern, assigned);
                         if let Some(guard) = &case.guard {
                             Self::collect_comprehension_targets_in_expr(guard, assigned);
                         }
@@ -510,6 +511,169 @@ impl Compiler {
         }
     }
 
+    /// Names READ by a match-case pattern: value expressions, the class
+    /// expression, mapping keys (recursed through or/sequence/class/kwd
+    /// subpatterns). Capture targets are bindings, not reads. Without
+    /// this, a name referenced ONLY inside a case pattern (e.g. `case
+    /// Color.RED` where `Color` is an enclosing function's local) was
+    /// invisible to the upfront free-variable analysis — no cell was
+    /// created, and the pattern's load emitted `LOAD_GLOBAL`, raising
+    /// `NameError` at match time (test_patma_198/199).
+    pub(crate) fn collect_pattern_uses(pat: &Pattern, uses: &mut HashSet<String>) {
+        match pat {
+            Pattern::MatchValue(e) => Self::collect_names_expr(e, uses),
+            Pattern::MatchClass {
+                cls,
+                patterns,
+                kwd_patterns,
+                ..
+            } => {
+                Self::collect_names_expr(cls, uses);
+                for p in patterns.iter().chain(kwd_patterns.iter()) {
+                    Self::collect_pattern_uses(p, uses);
+                }
+            }
+            Pattern::MatchSequence(pats) | Pattern::MatchOr(pats) => {
+                for p in pats {
+                    Self::collect_pattern_uses(p, uses);
+                }
+            }
+            Pattern::MatchMapping { keys, .. } => {
+                for k in keys {
+                    Self::collect_pattern_uses(k, uses);
+                }
+            }
+            Pattern::MatchAs {
+                pattern: Some(inner),
+                ..
+            } => Self::collect_pattern_uses(inner, uses),
+            _ => {}
+        }
+    }
+
+    /// Names BOUND by a match-case pattern: captures (`case x`, `case
+    /// p as q`), star captures, mapping `**rest`. These are assignments
+    /// in the containing scope (CPython binds them as locals unless
+    /// declared global/nonlocal).
+    pub(crate) fn collect_pattern_bindings(pat: &Pattern, bound: &mut HashSet<String>) {
+        match pat {
+            Pattern::MatchAs { pattern, name } => {
+                if let Some(n) = name {
+                    bound.insert(n.clone());
+                }
+                if let Some(inner) = pattern {
+                    Self::collect_pattern_bindings(inner, bound);
+                }
+            }
+            Pattern::MatchStar { name } => {
+                if let Some(n) = name {
+                    bound.insert(n.clone());
+                }
+            }
+            Pattern::MatchMapping { keys, rest } => {
+                if let Some(n) = rest {
+                    bound.insert(n.clone());
+                }
+                for k in keys {
+                    Self::collect_pattern_bindings(k, bound);
+                }
+            }
+            Pattern::MatchClass {
+                patterns,
+                kwd_patterns,
+                ..
+            } => {
+                for p in patterns.iter().chain(kwd_patterns.iter()) {
+                    Self::collect_pattern_bindings(p, bound);
+                }
+            }
+            Pattern::MatchSequence(pats) | Pattern::MatchOr(pats) => {
+                for p in pats {
+                    Self::collect_pattern_bindings(p, bound);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `collect_nested_refs_in_expr` counterpart for patterns: routes the
+    /// value/class expressions read by a pattern through the nested-refs
+    /// pass (lambdas/comprehensions nested inside a case pattern close
+    /// over the same scope a plain expression would).
+    pub(crate) fn collect_nested_refs_in_pattern(
+        pat: &Pattern,
+        local_names: &HashSet<String>,
+        global_names: &HashSet<String>,
+        nonlocal_names: &HashSet<String>,
+        refs: &mut HashSet<String>,
+    ) {
+        match pat {
+            Pattern::MatchValue(e) => Self::collect_nested_refs_in_expr(
+                e,
+                local_names,
+                global_names,
+                nonlocal_names,
+                refs,
+            ),
+            Pattern::MatchClass {
+                cls,
+                patterns,
+                kwd_patterns,
+                ..
+            } => {
+                Self::collect_nested_refs_in_expr(
+                    cls,
+                    local_names,
+                    global_names,
+                    nonlocal_names,
+                    refs,
+                );
+                for p in patterns.iter().chain(kwd_patterns.iter()) {
+                    Self::collect_nested_refs_in_pattern(
+                        p,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+            }
+            Pattern::MatchSequence(pats) | Pattern::MatchOr(pats) => {
+                for p in pats {
+                    Self::collect_nested_refs_in_pattern(
+                        p,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+            }
+            Pattern::MatchMapping { keys, .. } => {
+                for k in keys {
+                    Self::collect_nested_refs_in_pattern(
+                        k,
+                        local_names,
+                        global_names,
+                        nonlocal_names,
+                        refs,
+                    );
+                }
+            }
+            Pattern::MatchAs {
+                pattern: Some(inner),
+                ..
+            } => Self::collect_nested_refs_in_pattern(
+                inner,
+                local_names,
+                global_names,
+                nonlocal_names,
+                refs,
+            ),
+            _ => {}
+        }
+    }
+
     pub(crate) fn collect_assigned_inner(stmts: &[Stmt], assigned: &mut HashSet<String>) {
         for stmt in stmts {
             let stmt = Self::unwrap_located(stmt);
@@ -563,6 +727,7 @@ impl Compiler {
                 }
                 Stmt::Match { cases, .. } => {
                     for case in cases {
+                        Self::collect_pattern_bindings(&case.pattern, assigned);
                         Self::collect_assigned_inner(&case.body, assigned);
                     }
                 }
@@ -721,6 +886,7 @@ impl Compiler {
                 Stmt::Match { subject, cases } => {
                     Self::collect_names_expr(subject, names);
                     for case in cases {
+                        Self::collect_pattern_uses(&case.pattern, names);
                         if let Some(guard) = &case.guard {
                             Self::collect_names_expr(guard, names);
                         }
@@ -1380,6 +1546,13 @@ impl Compiler {
                         refs,
                     );
                     for case in cases {
+                        Self::collect_nested_refs_in_pattern(
+                            &case.pattern,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
                         if let Some(guard) = &case.guard {
                             Self::collect_nested_refs_in_expr(
                                 guard,

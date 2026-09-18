@@ -118,6 +118,10 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             return Err(PyError::type_error("extend() takes exactly one argument"));
                         }
                         let it = builtin_iter(&[args[1].clone()])?;
+                        // Length-hint probe (CPython bytearrayextend):
+                        // errors from __length_hint__/__len__ propagate
+                        // (test_iterlen's BadLen/BadLengthHint).
+                        let _ = crate::object::builtins::iterable_length_hint(&args[1])?;
                         loop {
                             match builtin_next(&[it.clone()]) {
                                 Ok(v) => {

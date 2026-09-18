@@ -10,7 +10,6 @@ mod try_block;
 mod with_block;
 impl Compiler {
     pub(crate) fn compile_stmts(&mut self, stmts: &[Stmt]) -> Result<(), String> {
-        let mut first = true;
         for stmt in stmts {
             let stmt = if let Stmt::Located(line, inner) = stmt {
                 self.set_line(*line);
@@ -18,12 +17,6 @@ impl Compiler {
             } else {
                 stmt
             };
-            if first {
-                first = false;
-                if matches!(stmt, Stmt::Match { .. }) {
-                    self.emit(Opcode::NOP, 0);
-                }
-            }
             self.compile_stmt(stmt)?;
         }
         Ok(())
