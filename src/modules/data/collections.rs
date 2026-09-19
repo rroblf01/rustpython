@@ -597,13 +597,12 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
                     .set_attribute(f, full_vals[i].clone())
                     .ok();
             }
-            self_obj
-                .borrow_mut()
-                .set_attribute(
-                    "_fields",
-                    PyObjectRef::new(PyObject::Tuple(f_clone.iter().map(|f| py_str(f)).collect())),
-                )
-                .ok();
+            // NOTE: `_fields` lives ONLY in the TYPE dict (inserted below),
+            // never stamped per-instance: stamping the factory's field list
+            // here shadowed a subclass's own `_fields` override on every
+            // instance (`class Sub(Base)` redefining `_fields` read back
+            // the base's — real CPython reads the type). Method helpers
+            // below resolve it via `get_attribute` (MRO walk) instead.
             Ok(py_none())
         };
         let init_obj = PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(init_fn)));
@@ -740,6 +739,80 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
         fn nt_field_values(self_obj: &PyObjectRef) -> PyResult<Vec<PyObjectRef>> {
             nt_fields(self_obj)?
                 .iter()
+                .map(|f| {
+                    let v = self_obj.borrow().get_attribute(f)?;
+                    // Invoke generic descriptors found via the TYPE (never
+                    // instance-dict entries, which are plain field data):
+                    // native `get_attribute` returns type-dict values raw,
+                    // but attribute reads must run `__get__` (CPython
+                    // `__getattribute__`) — e.g. a `functools.
+                    // cached_property` shadowing a field name, like
+                    // `platform.uname_result.processor` (iteration/`_asdict`
+                    // surfaced the raw descriptor instead of its value).
+                    // Plain functions are deliberately NOT excluded here:
+                    // reading a method-like through an instance binds it
+                    // on real CPython too.
+                    let from_instance = matches!(&*self_obj.borrow(), PyObject::Instance { dict, .. } if dict.contains_key_str(f));
+                    if !from_instance {
+                        if let Ok(get) = v.borrow().get_attribute("__get__") {
+                            // Unbound `__get__(desc, instance)` convention
+                            // (attribute lookup here yields the plain
+                            // function, not a bound method).
+                            return crate::object::call_function_disposable(
+                                &get,
+                                vec![v.clone(), self_obj.clone()],
+                                vec![],
+                            );
+                        }
+                    }
+                    Ok(v)
+                })
+                .collect()
+        }
+        /// Tuple-ITEM values: only fields actually present in the instance
+        /// dict, in `_fields` order — EXCLUDING names whose type-dict
+        /// entry is a descriptor with `__get__` (computed values, never
+        /// constructor slots). Real namedtuples store exactly the
+        /// constructor positional args as items; `_fields` may name MORE
+        /// (e.g. `platform.uname_result.processor`, a cached_property).
+        /// Without the exclusion, the first `__get__` invocation caches
+        /// the computed value into the instance dict, after which it
+        /// would wrongly count as an item (tuple grew 6→7, copy broke).
+        fn nt_item_values(self_obj: &PyObjectRef) -> PyResult<Vec<PyObjectRef>> {
+            let (present, typ_opt): (std::collections::HashSet<String>, Option<PyObjectRef>) =
+                match &*self_obj.borrow() {
+                    PyObject::Instance { dict, typ } => (
+                        dict.iter().map(|(k, _)| k.to_string()).collect(),
+                        Some(typ.clone()),
+                    ),
+                    _ => (std::collections::HashSet::new(), None),
+                };
+            let is_computed = |f: &str| -> bool {
+                // Is the NAME backed by a descriptor in the type (rather
+                // than plain field data)? Check the type entry itself —
+                // NOT the value (a field legitimately HOLDING a function
+                // must still count as an item).
+                let typ = match &typ_opt {
+                    Some(t) => t,
+                    None => return false,
+                };
+                let entry = match &*typ.borrow() {
+                    PyObject::Type { dict, mro, .. } => dict.get_str(f).cloned().or_else(|| {
+                        mro.iter().skip(1).find_map(|b| match &*b.borrow() {
+                            PyObject::Type { dict: bd, .. } => bd.get_str(f).cloned(),
+                            _ => None,
+                        })
+                    }),
+                    _ => None,
+                };
+                match entry {
+                    Some(v) => v.borrow().get_attribute("__get__").is_ok(),
+                    None => false,
+                }
+            };
+            nt_fields(self_obj)?
+                .iter()
+                .filter(|f| present.contains(f.as_str()) && !is_computed(f))
                 .map(|f| self_obj.borrow().get_attribute(f))
                 .collect()
         }
@@ -766,11 +839,13 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
             if args.len() < 2 {
                 return Ok(py_bool(false));
             }
-            let a = nt_field_values(&args[0])?;
+            let a = nt_item_values(&args[0])?;
             let b_tuple = match &*args[1].borrow() {
                 PyObject::Tuple(t) => Some(t.clone()),
-                PyObject::Instance { dict, .. } if dict.get_str("_fields").is_some() => {
-                    Some(nt_field_values(&args[1])?)
+                // Namedtuple-ness via MRO-visible `_fields` (never the
+                // instance dict — instances no longer carry a stamped copy).
+                PyObject::Instance { .. } if args[1].borrow().get_attribute("_fields").is_ok() => {
+                    Some(nt_item_values(&args[1])?)
                 }
                 _ => None,
             };
@@ -787,19 +862,19 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
             }
         }
         fn nt_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-            builtin_iter(&[py_tuple(nt_field_values(&args[0])?)])
+            builtin_iter(&[py_tuple(nt_item_values(&args[0])?)])
         }
         fn nt_getitem(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             if args.len() < 2 {
                 return Err(PyError::type_error("expected an index"));
             }
-            py_getitem(&py_tuple(nt_field_values(&args[0])?), &args[1])
+            py_getitem(&py_tuple(nt_item_values(&args[0])?), &args[1])
         }
         fn nt_len(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-            Ok(py_int(nt_fields(&args[0])?.len() as i64))
+            Ok(py_int(nt_item_values(&args[0])?.len() as i64))
         }
         fn nt_hash(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-            Ok(py_int(py_tuple(nt_field_values(&args[0])?).hash()? as i64))
+            Ok(py_int(py_tuple(nt_item_values(&args[0])?).hash()? as i64))
         }
         fn nt_asdict(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             let fields = nt_fields(&args[0])?;
@@ -835,10 +910,8 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
                     .unwrap_or(self_obj.borrow().get_attribute(f)?);
                 new_dict.insert_str(f, v);
             }
-            new_dict.insert_str(
-                "_fields",
-                PyObjectRef::new(PyObject::Tuple(fields.iter().map(|f| py_str(f)).collect())),
-            );
+            // No per-instance `_fields` stamp (type dict owns it — same
+            // reason as `__init__` above).
             Ok(PyObjectRef::new(PyObject::Instance {
                 typ,
                 dict: new_dict,
@@ -849,11 +922,15 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
             if args.len() < 2 {
                 return Ok(py_bool(false));
             }
-            let a_vals = nt_field_values(&args[0])?;
+            let a_vals = nt_item_values(&args[0])?;
             let b_vals = match &*args[1].borrow() {
                 PyObject::Tuple(t) => t.clone(),
-                PyObject::Instance { dict, .. } if dict.get_str("_fields").is_some() => {
-                    nt_field_values(&args[1])?
+                // Namedtuple-ness via MRO-visible `_fields` (instances no
+                // longer carry a stamped copy — see `__init__` above).
+                // Item values (present attrs only), symmetric with the
+                // a-side: tuple comparison runs on items, not metadata.
+                PyObject::Instance { .. } if args[1].borrow().get_attribute("_fields").is_ok() => {
+                    nt_item_values(&args[1])?
                 }
                 _ => return Ok(py_not_implemented()),
             };
@@ -865,11 +942,15 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
             if args.len() < 2 {
                 return Ok(py_bool(false));
             }
-            let a_vals = nt_field_values(&args[0])?;
+            let a_vals = nt_item_values(&args[0])?;
             let b_vals = match &*args[1].borrow() {
                 PyObject::Tuple(t) => t.clone(),
-                PyObject::Instance { dict, .. } if dict.get_str("_fields").is_some() => {
-                    nt_field_values(&args[1])?
+                // Namedtuple-ness via MRO-visible `_fields` (instances no
+                // longer carry a stamped copy — see `__init__` above).
+                // Item values (present attrs only), symmetric with the
+                // a-side: tuple comparison runs on items, not metadata.
+                PyObject::Instance { .. } if args[1].borrow().get_attribute("_fields").is_ok() => {
+                    nt_item_values(&args[1])?
                 }
                 _ => return Ok(py_not_implemented()),
             };
@@ -881,11 +962,15 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
             if args.len() < 2 {
                 return Ok(py_bool(false));
             }
-            let a_vals = nt_field_values(&args[0])?;
+            let a_vals = nt_item_values(&args[0])?;
             let b_vals = match &*args[1].borrow() {
                 PyObject::Tuple(t) => t.clone(),
-                PyObject::Instance { dict, .. } if dict.get_str("_fields").is_some() => {
-                    nt_field_values(&args[1])?
+                // Namedtuple-ness via MRO-visible `_fields` (instances no
+                // longer carry a stamped copy — see `__init__` above).
+                // Item values (present attrs only), symmetric with the
+                // a-side: tuple comparison runs on items, not metadata.
+                PyObject::Instance { .. } if args[1].borrow().get_attribute("_fields").is_ok() => {
+                    nt_item_values(&args[1])?
                 }
                 _ => return Ok(py_not_implemented()),
             };
@@ -897,11 +982,15 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
             if args.len() < 2 {
                 return Ok(py_bool(false));
             }
-            let a_vals = nt_field_values(&args[0])?;
+            let a_vals = nt_item_values(&args[0])?;
             let b_vals = match &*args[1].borrow() {
                 PyObject::Tuple(t) => t.clone(),
-                PyObject::Instance { dict, .. } if dict.get_str("_fields").is_some() => {
-                    nt_field_values(&args[1])?
+                // Namedtuple-ness via MRO-visible `_fields` (instances no
+                // longer carry a stamped copy — see `__init__` above).
+                // Item values (present attrs only), symmetric with the
+                // a-side: tuple comparison runs on items, not metadata.
+                PyObject::Instance { .. } if args[1].borrow().get_attribute("_fields").is_ok() => {
+                    nt_item_values(&args[1])?
                 }
                 _ => return Ok(py_not_implemented()),
             };
@@ -990,12 +1079,7 @@ pub fn create_collections_dict(object_type: PyObjectRef) -> HashMap<String, PyOb
                         )));
                     }
                     let mut new_dict = AttrMap::new();
-                    new_dict.insert_str(
-                        "_fields",
-                        PyObjectRef::new(PyObject::Tuple(
-                            make_fields.iter().map(|f| py_str(f)).collect(),
-                        )),
-                    );
+                    // No per-instance `_fields` stamp (type dict owns it).
                     for (f, v) in make_fields.iter().zip(vals.into_iter()) {
                         new_dict.insert_str(f, v);
                     }

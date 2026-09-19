@@ -28,9 +28,14 @@ impl Parser {
                 if self.eat(&Token::Colon) {
                     self.parse_expr()?; // skip bound expression
                 }
-                // Optional default: [T = int]  or [T: str = int]
+                // Optional default: [T = int]  or [T: str = int].
+                // A default may itself be starred (`*Ts = *int`).
                 if self.eat(&Token::Equal) {
-                    self.parse_expr()?; // skip default expression
+                    if self.eat(&Token::Star) {
+                        self.parse_expr()?; // skip starred default
+                    } else {
+                        self.parse_expr()?; // skip default expression
+                    }
                 }
                 if !self.eat(&Token::Comma) {
                     break;
@@ -131,7 +136,11 @@ impl Parser {
                     self.parse_expr()?;
                 }
                 if self.eat(&Token::Equal) {
-                    self.parse_expr()?;
+                    if self.eat(&Token::Star) {
+                        self.parse_expr()?;
+                    } else {
+                        self.parse_expr()?;
+                    }
                 }
                 if !self.eat(&Token::Comma) {
                     break;
@@ -605,7 +614,12 @@ impl Parser {
                     self.parse_expr()?; // skip bound
                 }
                 if self.eat(&Token::Equal) {
-                    self.parse_expr()?; // skip default
+                    // Starred defaults (`*Ts = *int`) parse too.
+                    if self.eat(&Token::Star) {
+                        self.parse_expr()?;
+                    } else {
+                        self.parse_expr()?; // skip default
+                    }
                 }
                 if !self.eat(&Token::Comma) {
                     break;

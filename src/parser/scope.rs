@@ -614,6 +614,19 @@ fn collect_expr_uses(expr: &Expr, used: &mut Vec<String>) {
                 }
             }
         }
+        Expr::TemplateStr(parts) => {
+            for p in parts {
+                if let TemplateStrPart::Interpolation {
+                    expr, format_spec, ..
+                } = p
+                {
+                    collect_expr_uses(expr, used);
+                    if let Some(fs) = format_spec {
+                        collect_expr_uses(fs, used);
+                    }
+                }
+            }
+        }
         Expr::JoinedStr(elts) => {
             for e in elts {
                 collect_expr_uses(e, used);

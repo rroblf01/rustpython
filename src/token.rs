@@ -58,6 +58,14 @@ pub enum Token {
     FStringEnd,
     FormatSpec(String),
     FStringConversion(u8),
+    // Template strings (PEP 750, `t'...'`): same lexical shape as
+    // f-strings, but the parser builds TemplateStr/Interpolation nodes.
+    // TStringExpr carries the raw source text of the interpolation
+    // expression (CPython's `Interpolation.str` field).
+    TStringStart,
+    TStringMiddle(String),
+    TStringExpr(String),
+    TStringEnd,
     Indent,
     Dedent,
     Newline,
@@ -184,6 +192,9 @@ pub struct Lexer {
     fstring_parts: Vec<(String, String, String, u8)>, // (literal, expr_text, format_spec, conversion)
     fstring_part_idx: usize,
     fstring_expr_pending: Vec<Token>,
+    /// True while emitting parts of a template string (`t'...'`) rather
+    /// than an f-string — same pending-part machinery, TString* tokens.
+    fstring_is_tstring: bool,
     /// Lexer-detected error pending emission (e.g. unindent does not match).
     pending_error: Option<String>,
 }
@@ -204,6 +215,7 @@ impl Lexer {
             fstring_parts: Vec::new(),
             fstring_part_idx: 0,
             fstring_expr_pending: Vec::new(),
+            fstring_is_tstring: false,
             pending_error: None,
         }
     }

@@ -386,17 +386,41 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     name: "split".to_string(),
                     func: |args| {
                         let s = args[0].str();
-                        let sep = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None)
-                        {
-                            Some(args[1].str())
-                        } else {
-                            None
+                        // Positional-or-keyword `sep`/`maxsplit`: plain
+                        // builtins receive kwargs packed as a trailing
+                        // PyDict (`'a b'.split(maxsplit=1)`), which the
+                        // old positional-only indexing misread as the
+                        // separator itself (test_platform.test_libc_ver
+                        // via `ver.split(maxsplit=1)`).
+                        let (pos, kwargs) = match args.get(1..) {
+                            Some(rest) if !rest.is_empty() => match rest.last() {
+                                Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
+                                    (&rest[..rest.len() - 1], Some(last.clone()))
+                                }
+                                _ => (rest, None),
+                            },
+                            _ => (&[][..], None),
                         };
-                        let maxsplit = if args.len() > 2 {
-                            args[2].as_i64().unwrap_or(-1)
-                        } else {
-                            -1
+                        let kw = |name: &str| {
+                            kwargs.as_ref().and_then(|d| {
+                                if let PyObject::Dict(d) = &*d.borrow() {
+                                    d.get(&py_str(name)).ok().flatten()
+                                } else {
+                                    None
+                                }
+                            })
                         };
+                        let sep_obj = pos.first().cloned().or_else(|| kw("sep"));
+                        let sep = match sep_obj {
+                            Some(v) if !matches!(&*v.borrow(), PyObject::None) => Some(v.str()),
+                            _ => None,
+                        };
+                        let maxsplit = pos
+                            .get(1)
+                            .cloned()
+                            .or_else(|| kw("maxsplit"))
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(-1);
                         let parts: Vec<PyObjectRef> = match (sep, maxsplit) {
                             (Some(sep), n) if n >= 0 => {
                                 s.splitn(n as usize + 1, &sep).map(py_str).collect()
@@ -438,17 +462,37 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     name: "rsplit".to_string(),
                     func: |args| {
                         let s = args[0].str();
-                        let sep = if args.len() > 1 && !matches!(&*args[1].borrow(), PyObject::None)
-                        {
-                            Some(args[1].str())
-                        } else {
-                            None
+                        // Same positional-or-keyword convention as `split`
+                        // above: kwargs arrive packed as a trailing PyDict.
+                        let (pos, kwargs) = match args.get(1..) {
+                            Some(rest) if !rest.is_empty() => match rest.last() {
+                                Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
+                                    (&rest[..rest.len() - 1], Some(last.clone()))
+                                }
+                                _ => (rest, None),
+                            },
+                            _ => (&[][..], None),
                         };
-                        let maxsplit = if args.len() > 2 {
-                            args[2].as_i64().unwrap_or(-1)
-                        } else {
-                            -1
+                        let kw = |name: &str| {
+                            kwargs.as_ref().and_then(|d| {
+                                if let PyObject::Dict(d) = &*d.borrow() {
+                                    d.get(&py_str(name)).ok().flatten()
+                                } else {
+                                    None
+                                }
+                            })
                         };
+                        let sep_obj = pos.first().cloned().or_else(|| kw("sep"));
+                        let sep = match sep_obj {
+                            Some(v) if !matches!(&*v.borrow(), PyObject::None) => Some(v.str()),
+                            _ => None,
+                        };
+                        let maxsplit = pos
+                            .get(1)
+                            .cloned()
+                            .or_else(|| kw("maxsplit"))
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(-1);
                         let parts: Vec<PyObjectRef> = match (sep, maxsplit) {
                             (Some(sep), n) if n >= 0 => {
                                 let mut parts: Vec<&str> =

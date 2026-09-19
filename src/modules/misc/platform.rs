@@ -33,6 +33,9 @@ pub fn create_platform_dict() -> HashMap<String, PyObjectRef> {
     // the executable's dynamic-linker strings on real CPython. Honest
     // empty-string stub (matches what real CPython itself reports for a
     // non-Linux or otherwise-undetectable target) rather than guessing.
+    // NOTE: `import platform` resolves to the vendored Lib/platform.py
+    // (real confstr/regex logic), not this native table — this stays a
+    // fallback for environments without the stdlib present.
     plat_func!("libc_ver", |_| {
         Ok(py_tuple(vec![py_str(""), py_str("")]))
     });

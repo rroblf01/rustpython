@@ -12,20 +12,30 @@ impl Lexer {
         if let Some(tok) = self.fstring_expr_pending.pop() {
             return tok;
         }
-        // Check if we're in the middle of emitting f-string parts
+        // Check if we're in the middle of emitting f-string/t-string parts
         if let Some(_quote) = self.fstring_quote {
             if self.fstring_part_idx < self.fstring_parts.len() {
                 let (ref literal, ref expr_text, ref format_spec, conversion) =
                     self.fstring_parts[self.fstring_part_idx];
                 self.fstring_part_idx += 1;
+                let is_tstring = self.fstring_is_tstring;
                 // to_push holds tokens in OUTPUT order (first to last)
                 let mut to_push: Vec<Token> = Vec::new();
                 // Push literal text (if any) — this should come FIRST
                 if !literal.is_empty() {
-                    to_push.push(Token::FStringMiddle(literal.clone()));
+                    if is_tstring {
+                        to_push.push(Token::TStringMiddle(literal.clone()));
+                    } else {
+                        to_push.push(Token::FStringMiddle(literal.clone()));
+                    }
                 }
                 // Push expression tokens (if any) — these come AFTER the literal
                 if !expr_text.is_empty() {
+                    if is_tstring {
+                        // The raw expression text becomes CPython's
+                        // `Interpolation.str` field.
+                        to_push.push(Token::TStringExpr(expr_text.clone()));
+                    }
                     let expr_tokens = self.tokenize_fstring_expr(expr_text);
                     to_push.extend(expr_tokens);
                     // If there's a conversion, push the FStringConversion token
@@ -37,7 +47,7 @@ impl Lexer {
                         to_push.push(Token::FormatSpec(format_spec.clone()));
                     }
                 }
-                // If this is the last part, end the f-string
+                // If this is the last part, end the f-string/t-string
                 let is_last = self.fstring_part_idx >= self.fstring_parts.len()
                     || self.fstring_parts[self.fstring_part_idx..]
                         .iter()
@@ -45,8 +55,13 @@ impl Lexer {
                             l.is_empty() && e.is_empty() && fs.is_empty() && *c == 0
                         });
                 if is_last {
-                    to_push.push(Token::FStringEnd);
+                    if is_tstring {
+                        to_push.push(Token::TStringEnd);
+                    } else {
+                        to_push.push(Token::FStringEnd);
+                    }
                     self.fstring_quote = None;
+                    self.fstring_is_tstring = false;
                 }
                 // Push to pending stack in REVERSE (so they come out in correct order)
                 for t in to_push.into_iter().rev() {
@@ -56,6 +71,7 @@ impl Lexer {
             }
             // Cleanup if we somehow reach here without emitting FStringEnd
             self.fstring_quote = None;
+            self.fstring_is_tstring = false;
             self.fstring_parts = Vec::new();
             self.fstring_part_idx = 0;
             return self.next_token(); // Try again with fstring_quote cleared
@@ -167,15 +183,18 @@ impl Lexer {
                     let lower_name = name.to_ascii_lowercase();
                     let is_string_prefix = matches!(
                         lower_name.as_str(),
-                        "f" | "r" | "b" | "u" | "t" | "fr" | "rf" | "br" | "rb"
+                        "f" | "r" | "b" | "u" | "t" | "fr" | "rf" | "br" | "rb" | "tr" | "rt"
                     );
                     if is_string_prefix && (self.peek() == Some('"') || self.peek() == Some('\'')) {
                         let quote = self.advance().unwrap();
                         let raw = lower_name.contains('r');
                         let is_fstring = lower_name.contains('f');
+                        let is_tstring = lower_name.contains('t');
                         let is_bytes = lower_name.contains('b');
                         if is_fstring {
-                            return self.tokenize_fstring(quote, raw);
+                            return self.tokenize_fstring(quote, raw, false);
+                        } else if is_tstring {
+                            return self.tokenize_fstring(quote, raw, true);
                         } else if is_bytes {
                             return self.read_bytes(quote, raw);
                         } else {
@@ -546,7 +565,144 @@ impl Lexer {
         }
     }
 
-    fn tokenize_fstring(&mut self, quote: char, raw: bool) -> Token {
+    /// If `buf` ends with a string-prefix word (e.g. the `f` in
+    /// `{f"`), return whether it interpolates (`f`/`t` prefixes do;
+    /// `r`/`b`/`u` don't). `None` when there is no prefix (plain
+    /// string literal, or the quote follows an identifier char —
+    /// `{name"x"}` is a syntax error in CPython anyway).
+    fn string_prefix_kind(buf: &str) -> Option<bool> {
+        let run_len = buf
+            .bytes()
+            .rev()
+            .take_while(|b| b.is_ascii_alphabetic())
+            .count();
+        if run_len == 0 {
+            return None;
+        }
+        let run = &buf[buf.len() - run_len..];
+        // The run must be a standalone prefix, not the tail of an
+        // identifier (`{myvar"x"}` isn't a nested string).
+        if buf.len() > run_len {
+            let prev = buf[..buf.len() - run_len].chars().next_back().unwrap();
+            if prev == '_' || prev.is_alphanumeric() {
+                return None;
+            }
+        }
+        let lower = run.to_ascii_lowercase();
+        if !matches!(
+            lower.as_str(),
+            "f" | "r" | "b" | "u" | "t" | "fr" | "rf" | "tr" | "rt" | "br" | "rb"
+        ) {
+            return None;
+        }
+        Some(lower.contains('f') || lower.contains('t'))
+    }
+
+    /// Consume a complete quoted string starting at its opening quote
+    /// (`self.peek() == quote`), appending it verbatim to `dest`.
+    /// Triple quotes and backslash escapes are honored; for
+    /// interpolating prefixes (`f`/`t`), `{...}` fields nest (brace
+    /// depth tracked) and strings inside fields recurse through this
+    /// same function — enabling PEP 701 same-quote nesting.
+    fn skip_nested_string(&mut self, dest: &mut String, quote: char, interpolating: bool) {
+        // NOTE: the opening quote was already consumed by the caller's
+        // `match self.advance()` — `quote` carries it.
+        dest.push(quote);
+        let triple = self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote);
+        if triple {
+            dest.push(self.advance().unwrap());
+            dest.push(self.advance().unwrap());
+        }
+        let mut depth = 0u32;
+        loop {
+            match self.advance() {
+                None => break,
+                Some('\\') => {
+                    dest.push('\\');
+                    if let Some(n) = self.advance() {
+                        dest.push(n);
+                    }
+                }
+                Some(c) if c == '\'' || c == '"' => {
+                    if Self::string_prefix_kind(dest).is_some() {
+                        // Nested string with its own prefix — recurse.
+                        let inner_interp = Self::string_prefix_kind(dest).unwrap_or(false);
+                        self.skip_nested_string(dest, c, inner_interp);
+                    } else if c == quote {
+                        if depth == 0 {
+                            if triple {
+                                // Need all three quotes to close
+                                // (`don't` inside triple quotes is
+                                // literal, not a closer).
+                                if self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote) {
+                                    dest.push(c);
+                                    dest.push(self.advance().unwrap());
+                                    dest.push(self.advance().unwrap());
+                                    break;
+                                }
+                                dest.push(c);
+                            } else {
+                                dest.push(c);
+                                break;
+                            }
+                        } else {
+                            // Same-quote plain string inside a field
+                            // (`f"{"k"}"`): skip to its own closer.
+                            dest.push(c);
+                            self.skip_plain_rest(dest, c);
+                        }
+                    } else {
+                        dest.push(c);
+                    }
+                }
+                Some('{') if interpolating => {
+                    dest.push('{');
+                    depth += 1;
+                }
+                Some('}') if interpolating && depth > 0 => {
+                    dest.push('}');
+                    depth -= 1;
+                }
+                Some(c) => dest.push(c),
+            }
+        }
+    }
+
+    /// Skip the remainder of a plain (non-interpolating) string whose
+    /// opening quote was already consumed, through its matching closer.
+    fn skip_plain_rest(&mut self, dest: &mut String, quote: char) {
+        let triple = self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote);
+        if triple {
+            dest.push(self.advance().unwrap());
+            dest.push(self.advance().unwrap());
+        }
+        loop {
+            match self.advance() {
+                None => break,
+                Some('\\') => {
+                    dest.push('\\');
+                    if let Some(n) = self.advance() {
+                        dest.push(n);
+                    }
+                }
+                Some(c) if c == quote => {
+                    dest.push(c);
+                    if triple {
+                        if self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote) {
+                            dest.push(self.advance().unwrap());
+                            dest.push(self.advance().unwrap());
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                Some(c) => dest.push(c),
+            }
+        }
+    }
+
+    fn tokenize_fstring(&mut self, quote: char, raw: bool, is_tstring: bool) -> Token {
         // Read the entire f-string, splitting into literal and expression parts
         // Each part: (literal_text, expr_text, format_spec_text, conversion)
         let triple = self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote);
@@ -610,17 +766,65 @@ impl Lexer {
                             if c == '\n' {
                                 continue;
                             }
-                            literal.push(match c {
-                                'n' => '\n',
-                                't' => '\t',
-                                'r' => '\r',
-                                '\\' => '\\',
-                                '\'' => '\'',
-                                '"' => '"',
-                                '{' => '{',
-                                '}' => '}',
-                                c => c,
-                            });
+                            // Full escape decoding (mirrors read_string):
+                            // \a \b \f \v \xHH \uHHHH \UHHHHHHHH
+                            // \0-\7 octal. Undecoded escapes (e.g. `\d`)
+                            // stay literal here; invalid ones in format
+                            // specs warn separately (see the `\\`-outside-
+                            // strings arm below).
+                            match c {
+                                'n' => literal.push('\n'),
+                                't' => literal.push('\t'),
+                                'r' => literal.push('\r'),
+                                '\\' => literal.push('\\'),
+                                '\'' => literal.push('\''),
+                                '"' => literal.push('"'),
+                                '{' => literal.push('{'),
+                                '}' => literal.push('}'),
+                                'a' => literal.push('\x07'),
+                                'b' => literal.push('\x08'),
+                                'f' => literal.push('\x0C'),
+                                'v' => literal.push('\x0B'),
+                                'x' => {
+                                    let h1 = self.advance().unwrap_or('0');
+                                    let h2 = self.advance().unwrap_or('0');
+                                    let val = u32::from_str_radix(&format!("{}{}", h1, h2), 16)
+                                        .unwrap_or(0);
+                                    literal.push(char::from_u32(val).unwrap_or('\u{FFFD}'));
+                                }
+                                'u' => {
+                                    let mut val = 0u32;
+                                    for _ in 0..4 {
+                                        let h = self.advance().unwrap_or('0');
+                                        val = val * 16 + h.to_digit(16).unwrap_or(0);
+                                    }
+                                    literal.push(char::from_u32(val).unwrap_or('\u{FFFD}'));
+                                }
+                                'U' => {
+                                    let mut val = 0u32;
+                                    for _ in 0..8 {
+                                        let h = self.advance().unwrap_or('0');
+                                        val = val * 16 + h.to_digit(16).unwrap_or(0);
+                                    }
+                                    literal.push(char::from_u32(val).unwrap_or('\u{FFFD}'));
+                                }
+                                d if ('0'..='7').contains(&d) => {
+                                    let mut val = d.to_digit(8).unwrap();
+                                    let mut digits = 1;
+                                    while digits < 3 {
+                                        match self.peek() {
+                                            Some(nc) if ('0'..='7').contains(&nc) => {
+                                                val = val * 8 + nc.to_digit(8).unwrap();
+                                                self.advance();
+                                                digits += 1;
+                                            }
+                                            _ => break,
+                                        }
+                                    }
+                                    literal.push(char::from_u32(val).unwrap_or('\u{FFFD}'));
+                                }
+                                c => literal.push(c),
+                            }
                         }
                         None => literal.push('\\'),
                     }
@@ -669,6 +873,16 @@ impl Lexer {
                                     }
                                 }
                                 Some(c) if str_char != '\0' => {
+                                    // In a format spec, `}` closes an
+                                    // unterminated string AND the spec
+                                    // itself (CPython accepts `f"{x:'}"`
+                                    // with spec=`'`; a truly stray `}`
+                                    // errors downstream as usual).
+                                    if c == '}' && state == 2 {
+                                        str_char = '\0';
+                                        depth -= 1;
+                                        continue;
+                                    }
                                     if state == 2 {
                                         format_spec.push(c);
                                     } else {
@@ -715,9 +929,90 @@ impl Lexer {
                                         }
                                     }
                                 }
+                                Some('\\') if str_char == '\0' => {
+                                    // A backslash outside strings escapes
+                                    // the next char: an escaped quote must
+                                    // NOT open string tracking (else
+                                    // `f"{x:\'}"` misread `\'` as opening
+                                    // a string, desynced brace depth, and
+                                    // ate the real terminator). Applies in
+                                    // both expression and format-spec.
+                                    // In format specs, an invalid escape
+                                    // keeps both chars literally but emits
+                                    // a SyntaxWarning (mirrors CPython;
+                                    // `test_backslash_in_format_spec`).
+                                    if state == 2 {
+                                        if let Some(next) = self.peek() {
+                                            if !matches!(
+                                                next,
+                                                'n' | 't'
+                                                    | 'r'
+                                                    | '\\'
+                                                    | '\''
+                                                    | '"'
+                                                    | 'a'
+                                                    | 'b'
+                                                    | 'f'
+                                                    | 'v'
+                                                    | 'x'
+                                                    | 'u'
+                                                    | 'U'
+                                                    | 'N'
+                                                    | '\n'
+                                                    | '{'
+                                                    | '}'
+                                                    | '0'
+                                                    ..='7'
+                                            ) {
+                                                crate::modules::warnings_emit(
+                                                    &format!(
+                                                        "\"\\{}\" is an invalid escape sequence. Such sequences will not work in the future. Did you mean \"\\\\{}\"? A raw string is also an option.",
+                                                        next, next
+                                                    ),
+                                                    "SyntaxWarning",
+                                                );
+                                            }
+                                        }
+                                    }
+                                    if state == 2 {
+                                        format_spec.push('\\');
+                                    } else {
+                                        expr.push('\\');
+                                    }
+                                    if let Some(next) = self.advance() {
+                                        if state == 2 {
+                                            format_spec.push(next);
+                                        } else {
+                                            expr.push(next);
+                                        }
+                                    }
+                                }
                                 Some(c @ ('\'' | '"'))
                                     if str_char == '\0' && (state == 0 || state == 2) =>
                                 {
+                                    // PEP 701: a quote directly after a string
+                                    // prefix (`f"`, `t'`, `rf"""`, ...) opens a
+                                    // NESTED string, not a string literal —
+                                    // same-quote nesting like `f"{f"{x}"}"`
+                                    // must be skipped whole, or the open/close
+                                    // toggling below desyncs brace depth and
+                                    // eats the real terminator.
+                                    let has_prefix = {
+                                        let buf = if state == 2 { &format_spec } else { &expr };
+                                        Self::string_prefix_kind(buf).is_some()
+                                    };
+                                    if has_prefix {
+                                        let kind = {
+                                            let buf = if state == 2 { &format_spec } else { &expr };
+                                            Self::string_prefix_kind(buf).unwrap()
+                                        };
+                                        if state == 2 {
+                                            self.skip_nested_string(&mut format_spec, c, kind);
+                                        } else {
+                                            self.skip_nested_string(&mut expr, c, kind);
+                                        }
+                                        continue;
+                                    }
                                     // Detect a triple-quoted string (""" / '''):
                                     // the three quotes must all be consumed
                                     // together so the single-quote closer logic
@@ -966,8 +1261,13 @@ impl Lexer {
         self.fstring_parts = parts;
         self.fstring_part_idx = 0;
         self.fstring_expr_pending = Vec::new();
+        self.fstring_is_tstring = is_tstring;
 
-        Token::FStringStart
+        if is_tstring {
+            Token::TStringStart
+        } else {
+            Token::FStringStart
+        }
     }
 
     fn tokenize_fstring_expr(&self, text: &str) -> Vec<Token> {

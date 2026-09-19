@@ -316,7 +316,39 @@ pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
         } else {
             String::new()
         };
-        println!("DeprecationWarning: {} is deprecated", name);
+        // Route through the shared emitter (record stack, filters,
+        // stderr fallback) — a bare println bypassed
+        // `catch_warnings(record=True)`, so `assertWarns` never saw it
+        // (test_platform.test_java_ver). Message shape mirrors CPython's
+        // `_DEPRECATED_MSG`: `'name' is deprecated and slated for
+        // removal in Python X.Y` (from the `remove=(X, Y)` kwarg).
+        let mut remove = String::from("?");
+        for a in args.iter().skip(1) {
+            if let PyObject::Tuple(items) = &*a.borrow() {
+                if items.len() == 2 {
+                    remove = format!("{}.{}", items[0].str(), items[1].str());
+                    break;
+                }
+            }
+        }
+        // `remove=` may also arrive packed as a trailing kwargs dict.
+        if remove == "?" {
+            if let Some(last) = args.last() {
+                if let PyObject::Dict(d) = &*last.borrow() {
+                    if let Ok(Some(rv)) = d.get(&py_str("remove")) {
+                        if let PyObject::Tuple(items) = &*rv.borrow() {
+                            if items.len() == 2 {
+                                remove = format!("{}.{}", items[0].str(), items[1].str());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        warnings_emit(
+            &format!("'{name}' is deprecated and slated for removal in Python {remove}"),
+            "DeprecationWarning",
+        );
         Ok(py_none())
     });
 

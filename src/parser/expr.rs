@@ -36,26 +36,73 @@ impl Parser {
     }
 
     pub(crate) fn parse_or_expr(&mut self) -> Result<Expr, String> {
+        self.group_paren = false;
         let mut expr = self.parse_and_expr()?;
+        let mut expr_paren = std::mem::replace(&mut self.group_paren, false);
         while self.eat(&Token::Or) {
+            self.group_paren = false;
             let right = self.parse_and_expr()?;
-            expr = Expr::BoolOp {
-                op: BoolOp::Or,
-                values: vec![expr, right],
-            };
+            let _right_paren = std::mem::replace(&mut self.group_paren, false);
+            // Flatten chained `or` into a single BoolOp (CPython AST
+            // shape), but never across parens (`(x or y) or z` nests).
+            match expr {
+                Expr::BoolOp {
+                    op: BoolOp::Or,
+                    mut values,
+                } if !expr_paren => {
+                    values.push(right);
+                    expr = Expr::BoolOp {
+                        op: BoolOp::Or,
+                        values,
+                    };
+                }
+                _ => {
+                    expr = Expr::BoolOp {
+                        op: BoolOp::Or,
+                        values: vec![expr, right],
+                    };
+                }
+            }
+            expr_paren = false;
         }
+        // A lone parenthesized operand stays marked for the outer level
+        // (`(x or y) or z` must not flatten); a built chain never is.
+        self.group_paren = expr_paren;
         Ok(expr)
     }
 
     pub(crate) fn parse_and_expr(&mut self) -> Result<Expr, String> {
+        self.group_paren = false;
         let mut expr = self.parse_not_expr()?;
+        let mut expr_paren = std::mem::replace(&mut self.group_paren, false);
         while self.eat(&Token::And) {
+            self.group_paren = false;
             let right = self.parse_not_expr()?;
-            expr = Expr::BoolOp {
-                op: BoolOp::And,
-                values: vec![expr, right],
-            };
+            let _right_paren = std::mem::replace(&mut self.group_paren, false);
+            // Flatten chained `and` (same rule as `or` above).
+            match expr {
+                Expr::BoolOp {
+                    op: BoolOp::And,
+                    mut values,
+                } if !expr_paren => {
+                    values.push(right);
+                    expr = Expr::BoolOp {
+                        op: BoolOp::And,
+                        values,
+                    };
+                }
+                _ => {
+                    expr = Expr::BoolOp {
+                        op: BoolOp::And,
+                        values: vec![expr, right],
+                    };
+                }
+            }
+            expr_paren = false;
         }
+        // A lone parenthesized operand stays marked for the outer level
+        // (`(x and y) and z` must not flatten); a built chain never is.
+        self.group_paren = expr_paren;
         Ok(expr)
     }
 

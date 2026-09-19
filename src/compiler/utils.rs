@@ -191,6 +191,17 @@ pub fn contains_yield_in_expr(expr: &Expr) -> bool {
             }
             FStringPart::String(_) => false,
         }),
+        Expr::TemplateStr(parts) => parts.iter().any(|p| match p {
+            TemplateStrPart::Interpolation {
+                expr, format_spec, ..
+            } => {
+                contains_yield_in_expr(expr)
+                    || format_spec
+                        .as_ref()
+                        .is_some_and(|fs| contains_yield_in_expr(fs))
+            }
+            TemplateStrPart::String(_) => false,
+        }),
         Expr::JoinedStr(exprs) => exprs.iter().any(contains_yield_in_expr),
         _ => false,
     }

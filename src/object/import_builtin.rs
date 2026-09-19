@@ -279,6 +279,27 @@ pub(crate) fn decode_source_bytes(bytes: &[u8]) -> PyResult<String> {
     }
 }
 
+/// If `obj` is an `ast.*` node, unparse it back to source (`Some`),
+/// else `None` (caller falls back to `.str()`). Used by `compile(tree)`.
+fn try_unparse_ast_arg(obj: &PyObjectRef) -> Option<PyResult<String>> {
+    let ast_mod = crate::modules::get_module("ast")?;
+    let ast_cls = ast_mod.borrow().get_attribute("AST").ok()?;
+    let is_ast = crate::object::builtin_isinstance(&[obj.clone(), ast_cls])
+        .map(|b| b.truthy())
+        .unwrap_or(false);
+    if !is_ast {
+        return None;
+    }
+    Some((|| {
+        let unparse = ast_mod
+            .borrow()
+            .get_attribute("unparse")
+            .map_err(|_| PyError::runtime_error("ast.unparse missing".to_string()))?;
+        let src = crate::object::call_function_disposable(&unparse, vec![obj.clone()], vec![])?;
+        Ok(src.str())
+    })())
+}
+
 pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() < 3 {
         return Err(PyError::type_error(
@@ -296,8 +317,40 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Bytes(b) | PyObject::ByteArray(b) => decode_source_bytes(b)?,
         _ => args[0].str(),
     };
+    // `compile(tree, ...)` where tree is an `ast.*` node: unparse back to
+    // source first (CPython compiles straight from the tree; we go through
+    // our own parser — same language, same result). Detected via isinstance
+    // against `ast.AST` (not mere `_fields` presence — namedtuples have
+    // `_fields` too and must NOT take this path).
+    let source = match try_unparse_ast_arg(&args[0]) {
+        Some(r) => r?,
+        None => source,
+    };
     let filename = args[1].str();
     let mode = args[2].str();
+    // `flags=ast.PyCF_ONLY_AST` (0x400) returns the AST tree instead of
+    // compiling to bytecode — checked up front so it applies to every
+    // mode (exec/eval/single). Test_ast's test_pickling roundtrips
+    // `compile(code, "?", kind, 0x400)` through pickle for all three.
+    {
+        let mut flags: i64 = 0;
+        if args.len() >= 4 {
+            flags |= args[3].as_i64().unwrap_or(0);
+        }
+        for a in args {
+            if let PyObject::Dict(kw) = &*a.borrow() {
+                flags |= kw
+                    .get(&py_str("flags"))
+                    .ok()
+                    .flatten()
+                    .and_then(|f| f.as_i64())
+                    .unwrap_or(0);
+            }
+        }
+        if flags & 0x400 != 0 {
+            return crate::modules::misc::ast_bridge::parse_tree(&source, &filename, &mode);
+        }
+    }
     // The `mode` argument was previously READ but never actually consulted
     // (`_mode`, underscore-prefixed — deliberately unused) — every call
     // parsed as a plain statement/module body regardless of "eval"/"exec"/

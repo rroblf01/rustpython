@@ -89,6 +89,8 @@ mod uuid;
 pub use uuid::*;
 mod ast;
 pub use ast::*;
+pub mod ast_bridge;
+pub use ast_bridge::*;
 
 mod email;
 pub use email::*;

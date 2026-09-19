@@ -741,6 +741,42 @@ impl Compiler {
                     self.emit(Opcode::BUILD_STRING, count as u32);
                 }
             }
+            // TODO(PEP 750): TemplateStr should evaluate to a
+            // `string.templatelib.Template`, not a plain str. Compiling
+            // it like an f-string keeps execution working until the
+            // Template runtime type exists.
+            Expr::TemplateStr(parts) => {
+                let mut count = 0usize;
+                for part in parts {
+                    match part {
+                        TemplateStrPart::String(s) => {
+                            self.compile_expr(&Expr::Constant(Constant::String(s.clone().into())))?;
+                            count += 1;
+                        }
+                        TemplateStrPart::Interpolation {
+                            expr,
+                            conversion,
+                            format_spec,
+                            ..
+                        } => {
+                            self.compile_expr(&expr)?;
+                            if *conversion != 0 {
+                                self.emit(Opcode::CONVERT_VALUE, *conversion as u32);
+                            }
+                            if let Some(spec) = format_spec {
+                                self.compile_expr(&spec)?;
+                                self.emit(Opcode::FORMAT_WITH_SPEC, 0);
+                            } else if *conversion == 0 {
+                                self.emit(Opcode::FORMAT_SIMPLE, 0);
+                            }
+                            count += 1;
+                        }
+                    }
+                }
+                if count > 1 {
+                    self.emit(Opcode::BUILD_STRING, count as u32);
+                }
+            }
             Expr::JoinedStr(parts) => {
                 for part in parts {
                     self.compile_expr(part)?;

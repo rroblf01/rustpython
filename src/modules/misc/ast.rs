@@ -5,7 +5,7 @@ pub fn create_ast_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     // compile() flags (CPython's ast.PyCF_* constants) — test_builtin's
     // test_compile_top_level_await references PyCF_ALLOW_TOP_LEVEL_AWAIT.
-    d.insert("PyCF_ONLY_AST".to_string(), py_int(0x40));
+    d.insert("PyCF_ONLY_AST".to_string(), py_int(0x400));
     d.insert("PyCF_ALLOW_TOP_LEVEL_AWAIT".to_string(), py_int(0x8000));
     d.insert("PyCF_TYPE_COMMENTS".to_string(), py_int(0x1000));
     d.insert("PyCF_DONT_IMPLY_DEDENT".to_string(), py_int(0x200));
@@ -56,14 +56,28 @@ pub fn create_ast_dict() -> HashMap<String, PyObjectRef> {
 
     d.insert_str("AST", py_str("AST"));
     d.insert_str("Node", py_str("Node"));
-    d.insert_str("Expr", py_str("Expr"));
-    d.insert_str("Module", py_str("Module"));
-    d.insert_str("Load", py_str("Load"));
-    d.insert_str("Store", py_str("Store"));
-    d.insert_str("Del", py_str("Del"));
-    d.insert_str("Pass", py_str("Pass"));
-    d.insert_str("Break", py_str("Break"));
-    d.insert_str("Continue", py_str("Continue"));
+
+    // Bridge into this interpreter's own parser: `ast.parse(source,
+    // filename, mode)` (Lib/ast.py) delegates here. Builds real
+    // `ast.*` node trees (Instances of the Lib/ast.py classes) from
+    // `crate::parser::Parser` output — see ast_bridge.rs.
+    ast_func!("_parse_tree", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error(
+                "_parse_tree() missing required argument: 'source'",
+            ));
+        }
+        let source = args[0].str();
+        let filename = args
+            .get(1)
+            .map(|f| f.str())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let mode = args
+            .get(2)
+            .map(|m| m.str())
+            .unwrap_or_else(|| "exec".to_string());
+        super::ast_bridge::parse_tree(&source, &filename, &mode)
+    });
 
     d
 }

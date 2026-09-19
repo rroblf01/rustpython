@@ -258,6 +258,9 @@ pub enum Expr {
         keywords: Vec<Keyword>,
     },
     FString(Vec<FStringPart>),
+    // Template strings (PEP 750, `t'...'`): same lexical shape as
+    // f-strings, but interpolations keep their raw source text.
+    TemplateStr(Vec<TemplateStrPart>),
     // Superseded by FString/FStringPart; the compiler still has a handler
     // for it but the parser never constructs one. Kept for compatibility
     // with the existing compiler.rs arm rather than ripping both out.
@@ -288,6 +291,19 @@ pub enum FStringPart {
     String(String),
     Expr {
         expr: Box<Expr>,
+        conversion: u8, // 0=none, 1=repr(!r), 2=str(!s), 3=ascii(!a)
+        format_spec: Option<Box<Expr>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TemplateStrPart {
+    String(String),
+    Interpolation {
+        expr: Box<Expr>,
+        /// Raw source text of the interpolated expression
+        /// (CPython's `Interpolation.str`).
+        str_text: String,
         conversion: u8, // 0=none, 1=repr(!r), 2=str(!s), 3=ascii(!a)
         format_spec: Option<Box<Expr>>,
     },

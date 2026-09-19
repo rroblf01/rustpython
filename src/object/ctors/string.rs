@@ -32,28 +32,68 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
             // namedtuple instances are tuple subclasses in real CPython, so
             // `'%d %d %r' % a_namedtuple` unpacks positionally like a tuple
             // (unittest's `_Mismatch` in assertCountEqual relies on it).
-            PyObject::Instance { dict, .. } if dict.get_str("_fields").is_some() => {
-                let mut vals: Vec<PyObjectRef> = Vec::new();
-                if let Some(fields) = dict.get_str("_fields") {
-                    match &*fields.borrow() {
-                        PyObject::List(fields) => {
-                            for f in fields {
-                                if let Some(v) = dict.get(&f.str()) {
-                                    vals.push(v.clone());
-                                }
-                            }
+            // Namedtuple-ness is MRO-visible `_fields` (instances no longer
+            // carry a stamped copy — see collections.rs); values come from
+            // the instance dict for present fields (tuple items are exactly
+            // the constructor slots, never computed extras).
+            PyObject::Instance { dict, typ } => {
+                let fields: Option<Vec<String>> = (|| {
+                    let typ_ref = typ.borrow();
+                    let td: Option<PyObjectRef> = match &*typ_ref {
+                        PyObject::Type { dict: td, mro, .. } => {
+                            td.get_str("_fields").cloned().or_else(|| {
+                                mro.iter().skip(1).find_map(|b| match &*b.borrow() {
+                                    PyObject::Type { dict: bd, .. } => {
+                                        bd.get_str("_fields").cloned()
+                                    }
+                                    _ => None,
+                                })
+                            })
                         }
-                        PyObject::Tuple(fields) => {
-                            for f in fields {
-                                if let Some(v) = dict.get(&f.str()) {
-                                    vals.push(v.clone());
-                                }
+                        _ => None,
+                    };
+                    drop(typ_ref);
+                    match td {
+                        Some(t) => match &*t.borrow() {
+                            PyObject::List(items) | PyObject::Tuple(items) => {
+                                Some(items.iter().map(|v| v.str()).collect())
                             }
-                        }
-                        _ => {}
+                            _ => None,
+                        },
+                        None => None,
                     }
+                })();
+                if let Some(fields) = fields {
+                    let mut vals: Vec<PyObjectRef> = Vec::new();
+                    for f in &fields {
+                        // Present field data only — skip names backed by a
+                        // type-level descriptor with `__get__` (computed
+                        // values like a cached `processor`, never tuple
+                        // items even once cached into the instance dict;
+                        // mirrors `nt_item_values` in collections.rs).
+                        if let Some(v) = dict.get(f) {
+                            let computed = match &*typ.borrow() {
+                                PyObject::Type { dict: td, mro, .. } => td
+                                    .get_str(f)
+                                    .cloned()
+                                    .or_else(|| {
+                                        mro.iter().skip(1).find_map(|b| match &*b.borrow() {
+                                            PyObject::Type { dict: bd, .. } => {
+                                                bd.get_str(f).cloned()
+                                            }
+                                            _ => None,
+                                        })
+                                    })
+                                    .is_some_and(|e| e.borrow().get_attribute("__get__").is_ok()),
+                                _ => false,
+                            };
+                            if !computed {
+                                vals.push(v.clone());
+                            }
+                        }
+                    }
+                    arg_iter = Some(Box::new(vals.into_iter()));
                 }
-                arg_iter = Some(Box::new(vals.into_iter()));
             }
             _ => {}
         }

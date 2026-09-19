@@ -143,16 +143,31 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         Ok(py_str(&s))
     });
     os_func!("listdir", |args| {
+        // Bytes paths (`os.listdir(b'...')`) must list through the decoded
+        // path but return BYTES names (CPython contract) — the old
+        // `args[0].str()` stringified bytes to a literal `"b'...'"` path
+        // (test_unicode_file_functions). Route through `os_path_arg`
+        // (PathLike/NUL handling) like `stat` does.
+        let want_bytes = args
+            .first()
+            .is_some_and(|a| matches!(&*a.borrow(), PyObject::Bytes(_)));
         let path = if args.len() > 0 {
-            args[0].str()
+            os_path_arg(&args[0])?
         } else {
             ".".to_string()
         };
         match std::fs::read_dir(&path) {
             Ok(entries) => {
+                use std::os::unix::ffi::OsStrExt;
                 let names: Vec<PyObjectRef> = entries
                     .filter_map(|e| e.ok())
-                    .map(|e| py_str(&e.file_name().to_string_lossy()))
+                    .map(|e| {
+                        if want_bytes {
+                            PyObjectRef::new(PyObject::Bytes(e.file_name().as_bytes().to_vec()))
+                        } else {
+                            py_str(&e.file_name().to_string_lossy())
+                        }
+                    })
                     .collect();
                 Ok(py_list(names))
             }

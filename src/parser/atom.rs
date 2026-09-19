@@ -68,7 +68,8 @@ impl Parser {
                     // Only eat newlines if followed by a string or f-string (implicit concatenation)
                     while self.at(&Token::Newline)
                         && (matches!(self.peek(), Token::String(_))
-                            || matches!(self.peek(), Token::FStringStart))
+                            || matches!(self.peek(), Token::FStringStart)
+                            || matches!(self.peek(), Token::TStringStart))
                     {
                         self.next();
                     }
@@ -89,6 +90,15 @@ impl Parser {
                                 left: Box::new(expr),
                                 op: Operator::Add,
                                 right: Box::new(fstr),
+                            };
+                        }
+                        Token::TStringStart => {
+                            self.next();
+                            let tstr = self.parse_tstring()?;
+                            expr = Expr::BinOp {
+                                left: Box::new(expr),
+                                op: Operator::Add,
+                                right: Box::new(tstr),
                             };
                         }
                         _ => break,
@@ -126,11 +136,60 @@ impl Parser {
                     // Only eat newlines if followed by an f-string or string (implicit concatenation)
                     while self.at(&Token::Newline)
                         && (matches!(self.peek(), Token::FStringStart)
+                            || matches!(self.peek(), Token::TStringStart)
                             || matches!(self.peek(), Token::String(_)))
                     {
                         self.next();
                     }
                     match &self.current {
+                        Token::FStringStart => {
+                            self.next();
+                            parts.push(self.parse_fstring()?);
+                        }
+                        Token::TStringStart => {
+                            self.next();
+                            parts.push(self.parse_tstring()?);
+                        }
+                        Token::String(s) => {
+                            let s = s.clone();
+                            self.next();
+                            parts.push(Expr::Constant(Constant::String(s)));
+                        }
+                        _ => break,
+                    }
+                }
+                if parts.len() == 1 {
+                    Ok(parts.into_iter().next().unwrap())
+                } else {
+                    let result = parts
+                        .into_iter()
+                        .reduce(|a, b| Expr::BinOp {
+                            left: Box::new(a),
+                            op: Operator::Add,
+                            right: Box::new(b),
+                        })
+                        .unwrap();
+                    Ok(result)
+                }
+            }
+
+            Token::TStringStart => {
+                self.next();
+                let mut parts = vec![self.parse_tstring()?];
+                // Implicit concatenation: adjacent t-strings and regular strings
+                loop {
+                    while self.at(&Token::Newline)
+                        && (matches!(self.peek(), Token::TStringStart)
+                            || matches!(self.peek(), Token::FStringStart)
+                            || matches!(self.peek(), Token::String(_)))
+                    {
+                        self.next();
+                    }
+                    match &self.current {
+                        Token::TStringStart => {
+                            self.next();
+                            parts.push(self.parse_tstring()?);
+                        }
                         Token::FStringStart => {
                             self.next();
                             parts.push(self.parse_fstring()?);
@@ -255,6 +314,9 @@ impl Parser {
                         }
                     } else {
                         self.expect(&Token::RightParen)?;
+                        // Plain parenthesized group: mark it so `and`/`or`
+                        // chains don't flatten across the parens.
+                        self.group_paren = true;
                         first
                     }
                 } else {
@@ -343,6 +405,9 @@ impl Parser {
                         Expr::Tuple(elts)
                     } else {
                         self.expect(&Token::RightParen)?;
+                        // Plain parenthesized group: mark it so `and`/`or`
+                        // chains don't flatten across the parens.
+                        self.group_paren = true;
                         first
                     }
                 };
@@ -780,6 +845,104 @@ impl Parser {
             }
         }
         Ok(Expr::FString(parts))
+    }
+
+    /// Template strings (PEP 750): mirrors `parse_fstring`, but each
+    /// interpolation keeps its raw source text (`Interpolation.str`),
+    /// delivered by the lexer as `Token::TStringExpr`.
+    pub(crate) fn parse_tstring(&mut self) -> Result<Expr, String> {
+        let mut parts = Vec::new();
+        loop {
+            match &self.current {
+                Token::TStringMiddle(s) => {
+                    let s = s.clone();
+                    self.next();
+                    parts.push(TemplateStrPart::String(s));
+                }
+                Token::TStringExpr(raw) => {
+                    let str_text = raw.clone();
+                    self.next();
+                    let (expr, conversion, format_spec) = self.parse_tstring_value()?;
+                    parts.push(TemplateStrPart::Interpolation {
+                        expr: Box::new(expr),
+                        str_text,
+                        conversion,
+                        format_spec,
+                    });
+                }
+                Token::TStringEnd => {
+                    self.next();
+                    break;
+                }
+                _ => {
+                    if self.at(&Token::EndOfFile) {
+                        break;
+                    }
+                    // Fallback: value without recorded source text
+                    // (unreachable with the current lexer, which always
+                    // emits TStringExpr before interpolation tokens).
+                    let (expr, conversion, format_spec) = self.parse_tstring_value()?;
+                    parts.push(TemplateStrPart::Interpolation {
+                        expr: Box::new(expr),
+                        str_text: String::new(),
+                        conversion,
+                        format_spec,
+                    });
+                }
+            }
+        }
+        Ok(Expr::TemplateStr(parts))
+    }
+
+    /// Parse one interpolation value + optional `!conversion` / `:spec`.
+    fn parse_tstring_value(&mut self) -> Result<(Expr, u8, Option<Box<Expr>>), String> {
+        let mut expr = self.parse_expr()?;
+        // Handle tuple expressions inside interpolation: {x, y, z}
+        if self.eat(&Token::Comma) {
+            let mut elts = vec![expr];
+            loop {
+                if self.at(&Token::RightBrace)
+                    || self.at(&Token::TStringEnd)
+                    || matches!(&self.current, Token::FStringConversion(_))
+                    || matches!(&self.current, Token::FormatSpec(_))
+                {
+                    break;
+                }
+                elts.push(self.parse_expr()?);
+                if !self.eat(&Token::Comma) {
+                    break;
+                }
+            }
+            expr = Expr::Tuple(elts);
+        }
+        let mut conversion: u8 = 0;
+        if let Token::FStringConversion(c) = &self.current {
+            conversion = *c;
+            self.next();
+        }
+        let mut format_spec: Option<Box<Expr>> = None;
+        if let Token::FormatSpec(spec_text) = &self.current {
+            let spec = spec_text.clone();
+            self.next();
+            // Format specs render as JoinedStr (same as f-strings).
+            if spec.contains('{') {
+                let mut nested_lex = crate::token::Lexer::new(&format!("f\"{}\"", spec));
+                let first_tok = nested_lex.next_token();
+                if first_tok == Token::FStringStart {
+                    let mut nested_parser = Parser::new(&format!("f\"{}\"", spec));
+                    if let Ok(Expr::FString(inner)) = nested_parser.parse_expr() {
+                        format_spec = Some(Box::new(Expr::FString(inner)));
+                    } else {
+                        format_spec = Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
+                    }
+                } else {
+                    format_spec = Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
+                }
+            } else {
+                format_spec = Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
+            }
+        }
+        Ok((expr, conversion, format_spec))
     }
 
     pub(crate) fn parse_lambda(&mut self) -> Result<Expr, String> {

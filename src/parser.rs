@@ -55,6 +55,13 @@ pub struct Parser {
     // testNonLocalClass). Incremented in parse_class while parsing the
     // class body.
     class_depth: usize,
+    // True when the most recently parsed atom was a parenthesized group.
+    // `and`/`or` chains flatten into one BoolOp (CPython AST shape) but
+    // must NOT merge across parens: `(x and y) and z` stays nested while
+    // `x and y and z` is flat. The chain loops reset this before each
+    // operand and read it after; the paren-group arm in parse_atom sets
+    // it (after its inner parse, so inner chains still flatten).
+    group_paren: bool,
 }
 
 const MAX_UNARY_DEPTH: usize = 2000;
@@ -115,6 +122,7 @@ impl Parser {
             fn_params_stack: Vec::new(),
             fn_scope_stack: Vec::new(),
             class_depth: 0,
+            group_paren: false,
         }
     }
 
@@ -232,6 +240,23 @@ impl Parser {
     }
 
     // ---- Program ----
+
+    /// Parse a single expression (for `ast.parse(..., mode="eval")`).
+    /// Rejects trailing tokens after the expression.
+    pub fn parse_single_expr(&mut self) -> Result<Expr, String> {
+        while self.at(&Token::Newline) {
+            self.next();
+        }
+        let e = self.parse_expr()?;
+        while self.at(&Token::Newline) {
+            self.next();
+        }
+        if !self.at(&Token::EndOfFile) {
+            let (line, col) = self.lexer.get_line_col();
+            return Err(format!("L{}:{}: invalid syntax", line, col));
+        }
+        Ok(e)
+    }
 
     pub fn parse_program(&mut self) -> Result<Program, String> {
         let mut stmts = Vec::new();

@@ -264,7 +264,10 @@ impl Parser {
                     if self.at(&Token::Newline)
                         || self.at(&Token::Semicolon)
                         || self.at(&Token::EndOfFile)
+                        || self.at(&Token::Equal)
                     {
+                        // Trailing `=` ends the tuple for a chained
+                        // assignment (same as the non-star branch below).
                         break;
                     }
                     if self.at(&Token::Star) {
@@ -297,7 +300,12 @@ impl Parser {
                         if self.at(&Token::Newline)
                             || self.at(&Token::Semicolon)
                             || self.at(&Token::EndOfFile)
+                            || self.at(&Token::Equal)
                         {
+                            // Trailing `=` ends a tuple target in a chained
+                            // assignment (`a, = a, = bar`): the tuple is
+                            // complete, the outer `while eat(Equal)` loop
+                            // continues the chain.
                             break;
                         }
                         if self.at(&Token::Star) {
@@ -320,6 +328,7 @@ impl Parser {
                         if self.at(&Token::Newline)
                             || self.at(&Token::Semicolon)
                             || self.at(&Token::EndOfFile)
+                            || self.at(&Token::Equal)
                         {
                             break;
                         }
@@ -350,7 +359,11 @@ impl Parser {
                             if self.at(&Token::Newline)
                                 || self.at(&Token::Semicolon)
                                 || self.at(&Token::EndOfFile)
+                                || self.at(&Token::Equal)
                             {
+                                // Trailing `=` ends a tuple target in a
+                                // chained assignment (same as the first
+                                // value branch above).
                                 break;
                             }
                             if self.at(&Token::Star) {

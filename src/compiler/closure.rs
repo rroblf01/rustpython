@@ -36,6 +36,19 @@ impl Compiler {
                     }
                 }
             }
+            Expr::TemplateStr(parts) => {
+                for part in parts {
+                    if let TemplateStrPart::Interpolation {
+                        expr, format_spec, ..
+                    } = part
+                    {
+                        Self::collect_names_expr(expr, names);
+                        if let Some(fs) = format_spec {
+                            Self::collect_names_expr(fs, names);
+                        }
+                    }
+                }
+            }
             Expr::JoinedStr(exprs) => {
                 for e in exprs {
                     Self::collect_names_expr(e, names);
@@ -466,6 +479,19 @@ impl Compiler {
             Expr::FString(parts) => {
                 for part in parts {
                     if let FStringPart::Expr {
+                        expr, format_spec, ..
+                    } = part
+                    {
+                        Self::collect_comprehension_targets_in_expr(expr, assigned);
+                        if let Some(fs) = format_spec {
+                            Self::collect_comprehension_targets_in_expr(fs, assigned);
+                        }
+                    }
+                }
+            }
+            Expr::TemplateStr(parts) => {
+                for part in parts {
+                    if let TemplateStrPart::Interpolation {
                         expr, format_spec, ..
                     } = part
                     {
@@ -1873,6 +1899,31 @@ impl Compiler {
             Expr::FString(parts) => {
                 for part in parts {
                     if let FStringPart::Expr {
+                        expr, format_spec, ..
+                    } = part
+                    {
+                        Self::collect_nested_refs_in_expr(
+                            expr,
+                            local_names,
+                            global_names,
+                            nonlocal_names,
+                            refs,
+                        );
+                        if let Some(fs) = format_spec {
+                            Self::collect_nested_refs_in_expr(
+                                fs,
+                                local_names,
+                                global_names,
+                                nonlocal_names,
+                                refs,
+                            );
+                        }
+                    }
+                }
+            }
+            Expr::TemplateStr(parts) => {
+                for part in parts {
+                    if let TemplateStrPart::Interpolation {
                         expr, format_spec, ..
                     } = part
                     {
