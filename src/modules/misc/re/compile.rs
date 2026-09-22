@@ -239,6 +239,12 @@ pub fn count_capturing_groups(pattern: &str) -> usize {
         }
         if chars[i] == '(' {
             if i + 1 < chars.len() && chars[i + 1] == '?' {
+                if i + 2 < chars.len() && chars[i + 2] == '(' {
+                    // Conditional `(?(` — the inner `(` is part of the syntax,
+                    // not a capturing group; skip past `(?(` so it isn't counted.
+                    i += 3;
+                    continue;
+                }
                 if i + 3 < chars.len() && chars[i + 2] == 'P' && chars[i + 3] == '<' {
                     count += 1;
                 }
@@ -1507,6 +1513,302 @@ fn counted_repeat_end(chars: &[char], i: usize) -> Option<usize> {
     Some(j)
 }
 
+/// CPython group-structure validation: named-group definition/backref
+/// checks, duplicate names, and backreferences to still-open groups.
+/// Returns `Err((msg, pos))` on the first violation.
+fn validate_group_syntax(pattern: &str) -> Result<(), (String, Option<i64>)> {
+    fn bad_name_char(name: &str) -> Option<char> {
+        // CPython group names: identifier chars, but NOT starting with a digit.
+        name.chars().enumerate().find(|(i, c)| {
+            if *i == 0 {
+                !(c.is_alphabetic() || *c == '_')
+            } else {
+                !(c.is_alphanumeric() || *c == '_')
+            }
+        }).map(|(_, c)| c)
+    }
+    // Total capturing groups in the WHOLE pattern — conditionals may reference
+    // groups defined later (forward refs), so validate against this total.
+    let total_groups = count_capturing_groups(pattern);
+    let chars: Vec<char> = pattern.chars().collect();
+    let n = chars.len();
+    let mut named: Vec<(String, usize)> = Vec::new();
+    let mut next_group: usize = 0;
+    // Stack: Some(group_num) for capturing `(`, None for non-capturing.
+    let mut paren_stack: Vec<Option<usize>> = Vec::new();
+    let mut open_captures: Vec<usize> = Vec::new();
+    let mut i = 0;
+    let mut in_class = false;
+    let mut class_first = false;
+    let is_open = |g: usize, open: &Vec<usize>| open.contains(&g);
+    while i < n {
+        let c = chars[i];
+        if c == '\\' && !in_class && i + 1 < n && chars[i + 1].is_ascii_digit() {
+            // Backreference `\N` — reject if group N is still open.
+            let mut j = i + 1;
+            while j < n && chars[j].is_ascii_digit() {
+                j += 1;
+            }
+            let digits: String = chars[i + 1..j].iter().collect();
+            let gnum: usize = digits.chars().take(2).collect::<String>().parse().unwrap_or(0);
+            if gnum >= 1 && is_open(gnum, &open_captures) {
+                return Err(("cannot refer to an open group".to_string(), Some(i as i64)));
+            }
+            i = j;
+            continue;
+        }
+        if c == '\\' {
+            i += 2;
+            continue;
+        }
+        if in_class {
+            if c == ']' && !class_first {
+                in_class = false;
+            }
+            class_first = false;
+            i += 1;
+            continue;
+        }
+        if c == '[' {
+            in_class = true;
+            class_first = true;
+            i += 1;
+            continue;
+        }
+        if c == '(' {
+            if i + 1 < n && chars[i + 1] == '?' {
+                let c2 = chars.get(i + 2).copied();
+                match c2 {
+                    Some('P') => {
+                        let c3 = chars.get(i + 3).copied();
+                        if c3 == Some('<') {
+                            let name_start = i + 4;
+                            let mut j = name_start;
+                            while j < n && chars[j] != '>' {
+                                j += 1;
+                            }
+                            if j >= n {
+                                return Err((
+                                    "missing >, unterminated name".to_string(),
+                                    Some(name_start as i64),
+                                ));
+                            }
+                            let name: String = chars[name_start..j].iter().collect();
+                            if name.is_empty() {
+                                return Err((
+                                    "missing group name".to_string(),
+                                    Some(name_start as i64),
+                                ));
+                            }
+                            if bad_name_char(&name).is_some() {
+                                return Err((
+                                    format!("bad character in group name '{}'", name),
+                                    Some(name_start as i64),
+                                ));
+                            }
+                            if let Some((_, prev)) = named.iter().find(|(nm, _)| *nm == name) {
+                                return Err((
+                                    format!(
+                                        "redefinition of group name '{}' as group {}; was group {}",
+                                        name,
+                                        next_group + 1,
+                                        prev
+                                    ),
+                                    None,
+                                ));
+                            }
+                            next_group += 1;
+                            named.push((name, next_group));
+                            paren_stack.push(Some(next_group));
+                            open_captures.push(next_group);
+                            i = j + 1;
+                            continue;
+                        } else if c3 == Some('=') {
+                            // Named backref `(?P=name)`.
+                            let name_start = i + 4;
+                            let mut j = name_start;
+                            while j < n && chars[j] != ')' {
+                                j += 1;
+                            }
+                            if j >= n {
+                                return Err((
+                                    "missing ), unterminated name".to_string(),
+                                    Some(name_start as i64),
+                                ));
+                            }
+                            let name: String = chars[name_start..j].iter().collect();
+                            if name.is_empty() {
+                                return Err((
+                                    "missing group name".to_string(),
+                                    Some(name_start as i64),
+                                ));
+                            }
+                            if bad_name_char(&name).is_some() {
+                                return Err((
+                                    format!("bad character in group name '{}'", name),
+                                    Some(name_start as i64),
+                                ));
+                            }
+                            match named.iter().find(|(nm, _)| *nm == name) {
+                                None => {
+                                    return Err((
+                                        format!("unknown group name '{}'", name),
+                                        None,
+                                    ))
+                                }
+                                Some((_, gnum)) => {
+                                    if is_open(*gnum, &open_captures) {
+                                        return Err((
+                                            "cannot refer to an open group".to_string(),
+                                            Some((i + 4) as i64),
+                                        ));
+                                    }
+                                }
+                            }
+                            paren_stack.push(None);
+                            i = j + 1;
+                            continue;
+                        } else {
+                            return Err(("unknown extension ?Px".to_string(), None));
+                        }
+                    }
+                    Some('<') => {
+                        // `(?<=`/`(?<!` lookbehind, or `(?<name>` (Py3.12 extended).
+                        let c3 = chars.get(i + 3).copied();
+                        if c3 == Some('=') || c3 == Some('!') {
+                            paren_stack.push(None);
+                            i += 4; // past (?<= / (?<!
+                            continue;
+                        }
+                        // `(?<name>` named group (extended syntax).
+                        let name_start = i + 3;
+                        let mut j = name_start;
+                        while j < n && chars[j] != '>' {
+                            j += 1;
+                        }
+                        if j >= n {
+                            return Err((
+                                "missing >, unterminated name".to_string(),
+                                Some(name_start as i64),
+                            ));
+                        }
+                        let name: String = chars[name_start..j].iter().collect();
+                        if name.is_empty() {
+                            return Err((
+                                "missing group name".to_string(),
+                                Some(name_start as i64),
+                            ));
+                        }
+                        if bad_name_char(&name).is_some() {
+                            return Err((
+                                format!("bad character in group name '{}'", name),
+                                Some(name_start as i64),
+                            ));
+                        }
+                        if let Some((_, prev)) = named.iter().find(|(nm, _)| *nm == name) {
+                            return Err((
+                                format!(
+                                    "redefinition of group name '{}' as group {}; was group {}",
+                                    name,
+                                    next_group + 1,
+                                    prev
+                                ),
+                                None,
+                            ));
+                        }
+                        next_group += 1;
+                        named.push((name, next_group));
+                        paren_stack.push(Some(next_group));
+                        open_captures.push(next_group);
+                        i = j + 1;
+                        continue;
+                    }
+                    Some(':') | Some('=') | Some('!') | Some('#') => {
+                        paren_stack.push(None);
+                        i += 3;
+                        continue;
+                    }
+                    Some('(') => {
+                        // Conditional `(?(cond)...)` — validate the condition.
+                        let cond_start = i + 3;
+                        let mut j = cond_start;
+                        while j < n && chars[j] != ')' {
+                            j += 1;
+                        }
+                        if j >= n {
+                            return Err((
+                                "missing ), unterminated subpattern".to_string(),
+                                Some(cond_start as i64),
+                            ));
+                        }
+                        let cond: String = chars[cond_start..j].iter().collect();
+                        if cond.is_empty() {
+                            return Err((
+                                "missing group name".to_string(),
+                                Some(cond_start as i64),
+                            ));
+                        }
+                        if cond.chars().all(|c| c.is_ascii_digit()) {
+                            let num: usize = cond.parse().unwrap_or(0);
+                            if num == 0 {
+                                return Err((
+                                    "bad group number".to_string(),
+                                    Some(cond_start as i64),
+                                ));
+                            }
+                            if num > total_groups {
+                                return Err((
+                                    format!("invalid group reference {}", num),
+                                    Some(cond_start as i64),
+                                ));
+                            }
+                        } else {
+                            if bad_name_char(&cond).is_some() {
+                                return Err((
+                                    format!("bad character in group name '{}'", cond),
+                                    Some(cond_start as i64),
+                                ));
+                            }
+                            if named.iter().find(|(nm, _)| *nm == cond).is_none() {
+                                return Err((
+                                    format!("unknown group name '{}'", cond),
+                                    None,
+                                ));
+                            }
+                        }
+                        paren_stack.push(None);
+                        i = j + 1; // past the condition's `)`; body follows.
+                        continue;
+                    }
+                    _ => {
+                        // Flags `(?i)` / `(?flags:` — treat as non-capturing.
+                        paren_stack.push(None);
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+            // Plain capturing group.
+            next_group += 1;
+            paren_stack.push(Some(next_group));
+            open_captures.push(next_group);
+            i += 1;
+            continue;
+        }
+        if c == ')' {
+            if let Some(gnum) = paren_stack.pop() {
+                if let Some(g) = gnum {
+                    open_captures.retain(|&x| x != g);
+                }
+            }
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
 /// Scan for octal escapes whose value exceeds 0o377 and return the byte
 /// position + digit string of the first offender (CPython raises
 /// "octal escape value \NNN outside of range0-0o377" during parse).
@@ -1585,6 +1887,13 @@ pub fn compile_python_regex_flags(
         return Err(fancy_regex::Error::ParseError(
             byte_idx,
             fancy_regex::ParseError::TargetNotRepeatable,
+        ));
+    }
+    // Group-structure validation (duplicate names, open-group backrefs, etc).
+    if let Err((msg, pos)) = validate_group_syntax(pattern) {
+        return Err(fancy_regex::Error::ParseError(
+            pos.unwrap_or(0) as usize,
+            fancy_regex::ParseError::GeneralParseError(msg),
         ));
     }
     // Octal-escape range check (CPython raises at parse time).
