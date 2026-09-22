@@ -19,7 +19,7 @@ impl Compiler {
         // Extract docstring from first statement if present
         let docstring = body.first().and_then(|s| {
             if let Stmt::Expr(expr) = Self::unwrap_located(s) {
-                if let Expr::Constant(Constant::String(doc)) = expr.as_ref() {
+                if let Expr::Constant(Constant::String(doc)) = expr.as_ref().unlocate() {
                     Some(doc.clone())
                 } else {
                     None

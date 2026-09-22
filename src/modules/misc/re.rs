@@ -7,15 +7,252 @@ pub use compile::*;
 mod match_obj;
 pub use match_obj::*;
 
-/// Extract a regex and its pattern string from either a raw string or a
-/// pre-compiled `re.Pattern` (`PyObject::CompiledRegex`).
-fn extract_regex(arg: &PyObjectRef) -> PyResult<(fancy_regex::Regex, String)> {
+/// Wrap a backing dict in a read-only `mappingproxy`-like Instance
+/// (CPython's `re.Pattern.groupindex`): reads/iteration work, item
+/// assignment raises TypeError (no `__setitem__` in the type dict).
+/// Same "last arg is the real key" trick as `types.MappingProxyType`
+/// for the two shapes (bound `m[k]`/`len(m)` pass self first, plain
+/// `m.get(k)` passes nothing).
+pub(crate) fn make_readonly_mapping(inner: PyObjectRef) -> PyObjectRef {
+    let mut dict = AttrMap::new();
+    let key_arg = |args: &[PyObjectRef]| args.last().cloned();
+    let typ = PyObjectRef::new(PyObject::Type {
+        name: "mappingproxy".to_string(),
+        dict: Box::new(str_map_to_typedict({
+            let mut td = HashMap::new();
+            for (name, field) in [
+                ("keys", "keys"),
+                ("values", "values"),
+                ("items", "items"),
+                ("__len__", "len"),
+                ("__iter__", "keys"),
+            ] {
+                let inner = inner.clone();
+                let field = field.to_string();
+                td.insert_str(
+                    name,
+                    PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(
+                        move |_args: &[PyObjectRef]| {
+                            if let PyObject::Dict(d) = &*inner.borrow() {
+                                match field.as_str() {
+                                    "keys" => Ok(py_list(d.keys().iter().cloned().collect())),
+                                    "values" => Ok(py_list(d.values().iter().cloned().collect())),
+                                    "items" => Ok(py_list(
+                                        d.items()
+                                            .into_iter()
+                                            .map(|(k, v)| py_tuple(vec![k, v]))
+                                            .collect(),
+                                    )),
+                                    "len" => Ok(py_int(d.len() as i64)),
+                                    _ => Err(PyError::runtime_error("unhandled mapping field")),
+                                }
+                            } else {
+                                Err(PyError::type_error("readonly mapping wrapping a non-dict"))
+                            }
+                        },
+                    ))),
+                );
+            }
+            for (name, field) in [
+                ("get", "get"),
+                ("__getitem__", "getitem"),
+                ("__contains__", "contains"),
+            ] {
+                let inner = inner.clone();
+                let field = field.to_string();
+                td.insert_str(
+                    name,
+                    PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(
+                        move |args: &[PyObjectRef]| {
+                            let k = key_arg(args)
+                                .ok_or_else(|| PyError::type_error("missing key argument"))?;
+                            if let PyObject::Dict(d) = &*inner.borrow() {
+                                match field.as_str() {
+                                    "contains" => {
+                                        Ok(py_bool(d.contains(&k).unwrap_or(false)))
+                                    }
+                                    "get" => match d.get(&k).ok().flatten() {
+                                        Some(v) => Ok(v),
+                                        None => Ok(args
+                                            .get(1)
+                                            .cloned()
+                                            .unwrap_or_else(|| PyObjectRef::new(PyObject::None))),
+                                    },
+                                    "getitem" => match d.get(&k).ok().flatten() {
+                                        Some(v) => Ok(v),
+                                        None => Err(PyError::key_error(k.repr())),
+                                    },
+                                    _ => Err(PyError::runtime_error("unhandled mapping field")),
+                                }
+                            } else {
+                                Err(PyError::type_error("readonly mapping wrapping a non-dict"))
+                            }
+                        },
+                    ))),
+                );
+            }
+            for (name, message) in [
+                ("__setitem__", "mappingproxy object does not support item assignment"),
+                ("__delitem__", "mappingproxy object does not support item deletion"),
+            ] {
+                let message = message.to_string();
+                td.insert_str(
+                    name,
+                    PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(
+                        move |_args: &[PyObjectRef]| Err(PyError::type_error(message.clone())),
+                    ))),
+                );
+            }
+            td
+        })),
+        bases: vec![],
+        mro: vec![],
+    });
+    dict.insert(NATIVE_BACKING_KEY.to_string(), inner.clone());
+    PyObjectRef::new(PyObject::Instance { typ, dict })
+}
+
+/// Decode a regex pattern-or-subject argument: bytes-like objects
+/// (bytes/bytearray, their subclasses, memoryview) decode via latin-1
+/// (1:1 byte mapping, mirroring CPython's bytes-pattern semantics);
+/// returns (text, is_bytes).
+pub(crate) fn re_text_arg(arg: &PyObjectRef) -> (String, bool) {
     match &*arg.borrow() {
-        PyObject::CompiledRegex { regex, pattern, .. } => Ok(((**regex).clone(), pattern.clone())),
+        PyObject::Bytes(b) => (b.iter().map(|&x| x as char).collect(), true),
+        PyObject::ByteArray(b) => (b.iter().map(|&x| x as char).collect(), true),
+        PyObject::MemoryView { .. } => match crate::object::mv_tobytes(arg) {
+            Ok(bytes) => (bytes.iter().map(|&x| x as char).collect(), true),
+            Err(_) => (arg.str(), false),
+        },
+        PyObject::Instance { .. } => {
+            // bytes/bytearray subclasses carry the native backing.
+            match crate::object::native_backing_of(arg) {
+                Some(backing) => {
+                    let (s, b) = re_text_arg(&backing);
+                    // Only accept genuine bytes backings, not e.g. ints.
+                    if b {
+                        (s, true)
+                    } else {
+                        (arg.str(), false)
+                    }
+                }
+                None => (arg.str(), false),
+            }
+        }
+        _ => (arg.str(), false),
+    }
+}
+
+/// Encode text back into a bytes object (latin-1 inverse of `re_text_arg`).
+pub(crate) fn re_bytes_obj(s: &str) -> PyObjectRef {
+    PyObjectRef::new(PyObject::Bytes(s.chars().map(|c| c as u8).collect()))
+}
+
+/// Whether `repl` is a string template (str/bytes/bytearray, or a
+/// subclass carrying one of those native backings) rather than a
+/// callable replacement function.
+pub(crate) fn re_is_template_repl(repl: &PyObjectRef) -> bool {
+    match &*repl.borrow() {
+        PyObject::Str(_) | PyObject::Bytes(_) | PyObject::ByteArray(_) | PyObject::MemoryView { .. } => {
+            true
+        }
+        PyObject::Instance { .. } => match crate::object::native_backing_of(repl) {
+            Some(backing) => matches!(
+                &*backing.borrow(),
+                PyObject::Str(_) | PyObject::Bytes(_) | PyObject::ByteArray(_)
+            ),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// Validate flag combinations against the pattern flavor (mirrors
+/// CPython's `fix_flags`): LOCALE is bytes-only, UNICODE is str-only,
+/// and ASCII is incompatible with both UNICODE and LOCALE.
+pub(crate) fn re_check_flags(flags: i32, is_bytes: bool) -> PyResult<()> {
+    // LOCALE = 4, UNICODE = 32, ASCII = 256.
+    if !is_bytes {
+        if flags & 4 != 0 {
+            return Err(PyError::value_error(
+                "cannot use LOCALE flag with a str pattern",
+            ));
+        }
+        if flags & 256 != 0 && flags & 32 != 0 {
+            return Err(PyError::value_error(
+                "ASCII and UNICODE flags are incompatible",
+            ));
+        }
+    } else {
+        if flags & 32 != 0 {
+            return Err(PyError::value_error(
+                "cannot use UNICODE flag with a bytes pattern",
+            ));
+        }
+        if flags & 256 != 0 && flags & 4 != 0 {
+            return Err(PyError::value_error(
+                "ASCII and LOCALE flags are incompatible",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Reject mixed str/bytes pattern+subject (mirrors CPython); returns
+/// the shared bytes-ness on success.
+pub(crate) fn re_check_compat(pat_bytes: bool, subj_bytes: bool) -> PyResult<bool> {
+    match (pat_bytes, subj_bytes) {
+        (true, false) => Err(PyError::type_error(
+            "cannot use a bytes pattern on a string-like object",
+        )),
+        (false, true) => Err(PyError::type_error(
+            "cannot use a string pattern on a bytes-like object",
+        )),
+        (b, _) => Ok(b),
+    }
+}
+
+/// Extract a regex and its pattern string from either a raw string or a
+/// pre-compiled `re.Pattern` (`PyObject::CompiledRegex`). Also returns
+/// whether the pattern is bytes-flavored.
+fn extract_regex(arg: &PyObjectRef) -> PyResult<(fancy_regex::Regex, String, bool)> {
+    extract_regex_flags(arg, 0)
+}
+
+/// Like `extract_regex`, honoring caller-supplied flags for raw
+/// patterns (mirrors CPython: `re.search(p, s, re.ASCII)`).
+fn extract_regex_flags(
+    arg: &PyObjectRef,
+    flags: i32,
+) -> PyResult<(fancy_regex::Regex, String, bool)> {
+    match &*arg.borrow() {
+        PyObject::CompiledRegex {
+            regex,
+            pattern,
+            is_bytes,
+            ..
+        } => Ok(((**regex).clone(), pattern.clone(), *is_bytes)),
         _ => {
-            let pattern = arg.str();
-            match compile_python_regex(&pattern) {
-                Ok(re) => Ok((re, pattern.clone())),
+            let (pattern, is_bytes) = re_text_arg(arg);
+            re_check_flags(flags, is_bytes)?;
+            // Bytes patterns use ASCII word semantics (see `compile`).
+            let flags = if is_bytes { flags | 256 } else { flags };
+            // Validate inline flag groups with CPython's exact errors
+            // and rewrite `a`/`L` groups the engine rejects.
+            let (pattern, ascii_scope, global_bits) =
+                match compile::preprocess_inline_flags(&pattern, is_bytes, flags) {
+                    Ok((p, a, g)) => (p, a, g),
+                    Err((msg, pos)) => {
+                        return Err(re_pattern_error(msg, Some(pattern), Some(pos as i64)));
+                    }
+                };
+            // Inline globals participate in combination validation
+            // (mirrors CPython: `re.compile(b'(?L)', re.ASCII)` is a
+            // ValueError).
+            re_check_flags(flags | global_bits, is_bytes)?;
+            let flags = if ascii_scope { flags | 256 } else { flags };
+            match compile_python_regex_flags(&pattern, flags) {
+                Ok(re) => Ok((re, pattern.clone(), is_bytes)),
                 Err(e) => Err(re_pattern_error(
                     map_regex_error(&e.to_string()),
                     Some(pattern),
@@ -24,6 +261,318 @@ fn extract_regex(arg: &PyObjectRef) -> PyResult<(fancy_regex::Regex, String)> {
             }
         }
     }
+}
+
+
+/// Convert a byte index (as reported by the regex engine) into a
+/// char index (as CPython reports positions). ASCII-fast: byte and
+/// char indices coincide below the first multibyte char.
+pub(crate) fn byte_to_char_idx(s: &str, byte_idx: usize) -> usize {
+    let byte_idx = byte_idx.min(s.len());
+    if s.is_ascii() {
+        return byte_idx;
+    }
+    s[..byte_idx].chars().count()
+}
+
+/// Resolve the trailing-`count`/`flags` (or `maxsplit`) arguments for a
+/// module-level `re` function, mirroring CPython 3.14:
+/// - positional `count`/`maxsplit` (the 4th positional arg for
+///   `sub`/`subn`/`split`) raises a `DeprecationWarning` ("'count' is
+///   passed as positional argument") — real script_helper callers pass
+///   these by position.
+/// - a value for the same slot via both position AND kwarg raises
+///   `TypeError: ... got multiple values for argument 'count'`.
+/// - exceeding the positional bound raises the `takes from N to M
+///   positional arguments but K were given` TypeError.
+/// Returns `(count_or_maxsplit, flags)`.
+pub(crate) fn re_resolve_count_flags(
+    args: &[PyObjectRef],
+    fname: &str,
+    count_kw: &str,
+    min_pos: usize,
+    max_pos: usize,
+) -> PyResult<(i64, i64)> {
+    let has_kwargs = match args.last() {
+        Some(a) => matches!(&*a.borrow(), PyObject::Dict(_)),
+        None => false,
+    };
+    let kw = if has_kwargs {
+        if let PyObject::Dict(d) = &*args.last().unwrap().borrow() {
+            Some(d.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let npos = args.len() - usize::from(has_kwargs);
+    if npos > max_pos {
+        return Err(PyError::type_error(format!(
+            "{}() takes from {} to {} positional arguments but {} were given",
+            fname, min_pos, max_pos, npos
+        )));
+    }
+    let kw_get = |k: &str| -> Option<PyObjectRef> {
+        kw.as_ref().and_then(|d| d.get(&py_str(k)).ok().flatten().map(|v| v.clone()))
+    };
+    if npos >= min_pos + 1 && kw_get(count_kw).is_some() {
+        return Err(PyError::type_error(format!(
+            "{}() got multiple values for argument '{}'",
+            fname, count_kw
+        )));
+    }
+    if npos >= min_pos + 2 && kw_get("flags").is_some() {
+        return Err(PyError::type_error(format!(
+            "{}() got multiple values for argument 'flags'",
+            fname
+        )));
+    }
+    if npos >= min_pos + 1 && kw.is_none() {
+        crate::modules::warnings_emit(
+            &format!("'{}' is passed as positional argument", count_kw),
+            "DeprecationWarning",
+        );
+    }
+    let count = if npos >= min_pos + 1 {
+        args[min_pos].as_i64().unwrap_or(0)
+    } else {
+        kw_get(count_kw)
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+    };
+    let flags = if npos >= min_pos + 2 {
+        args[min_pos + 1].as_i64().unwrap_or(0)
+    } else {
+        kw_get("flags")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+    };
+    Ok((count, flags))
+}
+
+/// Match sequence for `split`, mirroring CPython's own matcher order:
+
+/// Build one `findall` result for a match: full-match string when the
+/// pattern has no groups, the single group (or `None`) with one group,
+/// and a tuple of groups otherwise (mirrors CPython `re.findall`).
+pub(crate) fn findall_groups(
+    caps: &fancy_regex::Captures,
+    n_groups: usize,
+    is_bytes: bool,
+) -> PyObjectRef {
+    let piece = |m: Option<&fancy_regex::Match>| -> PyObjectRef {
+        // CPython's findall reports unparticipated groups as '' (not None).
+        match m {
+            Some(m) => {
+                if is_bytes {
+                    re_bytes_obj(m.as_str())
+                } else {
+                    py_str(m.as_str())
+                }
+            }
+            None => {
+                if is_bytes {
+                    re_bytes_obj("")
+                } else {
+                    py_str("")
+                }
+            }
+        }
+    };
+    if n_groups == 0 {
+        return piece(caps.get(0).as_ref());
+    }
+    if n_groups == 1 {
+        return piece(caps.get(1).as_ref());
+    }
+    let items: Vec<PyObjectRef> = (1..=n_groups).map(|i| piece(caps.get(i).as_ref())).collect();
+    py_tuple(items)
+}
+
+/// Convert a char index (CPython position argument) into a byte index
+/// for the regex engine.
+pub(crate) fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
+    if s.is_ascii() {
+        return char_idx.min(s.len());
+    }
+    let mut count = 0;
+    for (b, _) in s.char_indices() {
+        if count >= char_idx {
+            return b;
+        }
+        count += 1;
+    }
+    s.len()
+}
+
+/// True when the final `args` entry is this project's packed kwargs dict.
+pub(crate) fn has_packed_kwargs(args: &[PyObjectRef]) -> bool {
+    match args.last() {
+        Some(a) => matches!(&*a.borrow(), PyObject::Dict(_)),
+        None => false,
+    }
+}
+
+/// Read the subject string for Pattern methods: positional `args[0]`, or
+/// the `string=` keyword from the packed trailing kwargs dict.
+pub(crate) fn re_method_string(args: &[PyObjectRef]) -> (String, bool) {
+    let has_kw = has_packed_kwargs(args);
+    let npos = if has_kw { args.len() - 1 } else { args.len() };
+    if npos >= 1 {
+        re_text_arg(&args[0])
+    } else if let PyObject::Dict(d) = &*args[0].borrow() {
+        if let Some(v) = d.get(&py_str("string")).ok().flatten() {
+            re_text_arg(&v)
+        } else {
+            re_text_arg(&args[0])
+        }
+    } else {
+        re_text_arg(&args[0])
+    }
+}
+
+/// Read `pos`/`endpos` (CPython char indices) for Pattern methods, from
+/// positional args or the packed trailing kwargs dict. `full_len` is the
+/// subject's char count (used as the default `endpos`). Missing values
+/// fall back to `pos`/`endpos` defaults of CPython.
+pub(crate) fn re_pos_endpos(args: &[PyObjectRef], full_len: usize) -> (usize, usize) {
+    let has_kw = has_packed_kwargs(args);
+    let npos = if has_kw { args.len() - 1 } else { args.len() };
+    let kwval = |key: &str| -> Option<i64> {
+        if !has_kw {
+            return None;
+        }
+        if let PyObject::Dict(d) = &*args.last().unwrap().borrow() {
+            if let Some(v) = d.get(&py_str(key)).ok().flatten() {
+                return v.as_i64();
+            }
+        }
+        None
+    };
+    let pos_c = if npos > 1 {
+        args[1].as_i64().or_else(|| kwval("pos"))
+    } else {
+        kwval("pos")
+    }
+    .unwrap_or(0)
+    .max(0) as usize;
+    let endpos_c = if npos > 2 {
+        args[2].as_i64().or_else(|| kwval("endpos"))
+    } else {
+        kwval("endpos")
+    }
+    .unwrap_or(full_len as i64)
+    .max(0) as usize;
+    (pos_c, endpos_c)
+}
+
+/// Left-to-right match scan over `s[pos_byte..endpos_byte]` in CPython
+/// order: adjacent empty matches are kept (probing the end of every
+/// non-empty match too) and empty matches advance one char. Match
+/// positions are relative to the returned slice (add `pos_byte` to get
+/// absolute byte offsets). Mirrors `split_match_spans` but with bounds.
+pub(crate) fn scan_captures<'t>(
+    re: &fancy_regex::Regex,
+    s: &'t str,
+    pos_byte: usize,
+    endpos_byte: usize,
+) -> Vec<fancy_regex::Captures<'t>> {
+    let start = pos_byte.min(s.len());
+    let end = endpos_byte.min(s.len()).max(start);
+    let sub: &'t str = &s[start..end];
+    let mut cur = 0usize;
+    let mut out = Vec::new();
+    while cur <= sub.len() {
+        let caps = match re.captures_from_pos(sub, cur) {
+            Ok(Some(c)) => c,
+            _ => break,
+        };
+        let m = caps.get(0).unwrap();
+        let (ms, me) = (m.start(), m.end());
+        out.push(caps);
+        if ms == me {
+            if me >= sub.len() {
+                break;
+            }
+            cur = me + sub[me..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        } else {
+            cur = me;
+        }
+    }
+    out
+}
+
+/// Match sequence for `split`, mirroring CPython's own matcher order:
+/// `fancy_regex`'s iterator skips empty matches adjacent to a previous
+/// match end, but CPython yields them (their `None` groups appear in
+/// the output, e.g. `re.split('(:)*', ...)`). After each non-empty
+/// match ending at `e`, probe `e` for an adjacent empty match.
+/// Empty matches advance one char (sre progress rule); iteration stops
+/// past the end of the string.
+pub(crate) fn split_match_spans<'t>(
+    re: &fancy_regex::Regex,
+    s: &'t str,
+) -> Vec<fancy_regex::Captures<'t>> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos <= s.len() {
+        let caps = match re.captures_from_pos(s, pos) {
+            Ok(Some(c)) => c,
+            _ => break,
+        };
+        let m = caps.get(0).unwrap();
+        let (ms, me) = (m.start(), m.end());
+        out.push(caps);
+        if ms == me {
+            if me >= s.len() {
+                break;
+            }
+            pos = me + s[me..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        } else {
+            // Probe for an adjacent empty match at the end position
+            // (`captures_from_pos`, unlike the iterator, does not skip
+            // them). A consumed probe position must be advanced past,
+            // or the main loop re-finds the same empty match.
+            if me < s.len() {
+                if let Ok(Some(c2)) = re.captures_from_pos(s, me) {
+                    if let Some(m2) = c2.get(0) {
+                        if m2.start() == me && m2.end() == me {
+                            out.push(c2);
+                            pos = me
+                                + s[me..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                            continue;
+                        }
+                    }
+                }
+            }
+            pos = me;
+        }
+    }
+    out
+}
+
+/// Read an optional `flags` argument: positional int at `idx`, or a
+/// trailing kwargs dict's `"flags"` entry (this project's calling
+/// convention packs kwargs as a trailing dict).
+fn re_call_flags(args: &[PyObjectRef], idx: usize) -> i32 {
+    let mut flags = 0;
+    if let Some(a) = args.get(idx) {
+        if !matches!(&*a.borrow(), PyObject::Dict(_)) {
+            flags |= a.as_i64().unwrap_or(0) as i32;
+        }
+    }
+    if let Some(last) = args.last() {
+        if let PyObject::Dict(d) = &*last.borrow() {
+            flags |= d
+                .get(&py_str("flags"))
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as i32;
+        }
+    }
+    flags
 }
 
 pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
@@ -44,8 +593,9 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 {
             return Err(PyError::type_error("search() takes at least 2 arguments"));
         }
-        let (re, pattern) = extract_regex(&args[0])?;
-        let string = args[1].str();
+        let (re, pattern, pat_bytes) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
+        let (string, subj_bytes) = re_text_arg(&args[1]);
+        let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
         let caps = re.captures(&string).unwrap_or(None);
         Ok(make_match_object_detailed(
             &re,
@@ -54,7 +604,8 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             &pattern,
             0,
             0,
-            string.len(),
+            string.chars().count(),
+            is_bytes,
         ))
     });
 
@@ -62,8 +613,9 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 {
             return Err(PyError::type_error("match() takes at least 2 arguments"));
         }
-        let (re, pattern) = extract_regex(&args[0])?;
-        let string = args[1].str();
+        let (re, pattern, pat_bytes) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
+        let (string, subj_bytes) = re_text_arg(&args[1]);
+        let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
         let caps = re.captures(&string).unwrap_or(None);
         let result = match caps {
             Some(c) if c.get(0).map(|m| m.start()) == Some(0) => Some(c),
@@ -76,7 +628,8 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             &pattern,
             0,
             0,
-            string.len(),
+            string.chars().count(),
+            is_bytes,
         ))
     });
 
@@ -86,8 +639,9 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 "fullmatch() takes at least 2 arguments",
             ));
         }
-        let (re, pattern) = extract_regex(&args[0])?;
-        let string = args[1].str();
+        let (re, pattern, pat_bytes) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
+        let (string, subj_bytes) = re_text_arg(&args[1]);
+        let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
         let caps = re.captures(&string).unwrap_or(None).filter(|c| {
             c.get(0)
                 .map(|m| m.start() == 0 && m.end() == string.len())
@@ -100,7 +654,8 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             &pattern,
             0,
             0,
-            string.len(),
+            string.chars().count(),
+            is_bytes,
         ))
     });
 
@@ -108,12 +663,14 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 {
             return Err(PyError::type_error("findall() takes at least 2 arguments"));
         }
-        let (re, _pattern) = extract_regex(&args[0])?;
-        let string = args[1].str();
-        let results: Vec<PyObjectRef> = re
-            .find_iter(&string)
-            .filter_map(|r| r.ok())
-            .map(|m| py_str(m.as_str()))
+        let (re, _pattern, pat_bytes) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
+        let (string, subj_bytes) = re_text_arg(&args[1]);
+        let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
+        let groups = re.captures_len().saturating_sub(1);
+        let caps_list = scan_captures(&re, &string, 0, string.len());
+        let results: Vec<PyObjectRef> = caps_list
+            .iter()
+            .map(|caps| findall_groups(caps, groups, is_bytes))
             .collect();
         Ok(py_list(results))
     });
@@ -134,38 +691,32 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         // invoke a callback) — this also adds real `count` support (the
         // 4th positional arg), which the previous `replace_all`-based
         // version silently ignored entirely.
-        let (re, pattern) = extract_regex(&args[0])?;
-        let is_callable_repl = !matches!(&*args[1].borrow(), PyObject::Str(_));
+        let (re, pattern, pat_bytes) = extract_regex_flags(&args[0], re_call_flags(args, 4))?;
+        let is_callable_repl = !re_is_template_repl(&args[1]);
+        let (repl_text, repl_bytes) = re_text_arg(&args[1]);
+        let (string, subj_bytes) = re_text_arg(&args[2]);
+        let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
+        if !is_callable_repl && repl_bytes != subj_bytes {
+            return Err(PyError::type_error(
+                "cannot use a string replacement on a bytes-like object",
+            ));
+        }
         let repl_template = if is_callable_repl {
             String::new()
         } else {
-            translate_python_replacement(&args[1].str())
+            translate_python_replacement(&repl_text)?
         };
-        let string = args[2].str();
         // `count`/`flags` may arrive positionally (args[3]) OR as a trailing
         // kwargs dict (`re.sub(p, r, s, count=1)` — a real, common call
         // shape; this project's calling convention appends a `{"count":
         // ..., "flags": ...}` dict as the final positional arg for keyword
         // calls, same as `sorted`'s own `key=`/`reverse=` handling).
-        let count = if args.len() > 3 {
-            if let PyObject::Dict(kwargs) = &*args[3].borrow() {
-                kwargs
-                    .get(&py_str("count"))
-                    .ok()
-                    .flatten()
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0)
-            } else {
-                args[3].as_i64().unwrap_or(0)
-            }
-        } else {
-            0
-        };
+        let (count, _flags) = re_resolve_count_flags(args, "sub", "count", 3, 5)?;
         if !is_callable_repl {
-            if let Err(e) = validate_g_template(&args[1].str(), &re) {
+            if let Err(e) = validate_g_template(&repl_text, &re, is_bytes) {
                 return Err(e);
             }
-            let repl_str = args[1].str();
+            let repl_str = repl_text.clone();
             for cap in re.capture_names().filter_map(|n| n) {
                 let _ = cap;
             }
@@ -228,9 +779,17 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                     0,
                     m_start,
                     string.len(),
+                    is_bytes,
                 );
                 let replaced = call_bound_method(args[1].clone(), match_obj, vec![])?;
-                result.push_str(&replaced.str());
+                // A bytes-returning callable decodes via latin-1 so the
+                // substitution stays in the subject's domain.
+                if is_bytes {
+                    let (rs, _) = re_text_arg(&replaced);
+                    result.push_str(&rs);
+                } else {
+                    result.push_str(&replaced.str());
+                }
             } else {
                 let mut expanded = String::new();
                 caps.expand(&repl_template, &mut expanded);
@@ -240,54 +799,43 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             n += 1;
         }
         result.push_str(&string[last_end..]);
-        Ok(py_str(&result))
+        if is_bytes {
+            Ok(re_bytes_obj(&result))
+        } else {
+            Ok(py_str(&result))
+        }
     });
 
     re_func!("split", |args| {
         if args.len() < 2 {
             return Err(PyError::type_error("split() takes at least 2 arguments"));
         }
-        let has_kwargs = args
-            .last()
-            .map_or(false, |a| matches!(&*a.borrow(), PyObject::Dict(_)));
-        let (string, maxsplit, flags) = if has_kwargs {
-            let d = if let PyObject::Dict(d) = &*args.last().unwrap().borrow() {
-                d.clone()
-            } else {
-                Box::new(crate::object::PyDict::new())
-            };
-            let ms = d
-                .get(&py_str("maxsplit"))
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0) as usize;
-            let fl = d
-                .get(&py_str("flags"))
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0) as i32;
-            (args[1].str(), ms, fl)
-        } else {
-            let ms = if args.len() > 2 {
-                args[2].as_i64().unwrap_or(0) as usize
-            } else {
-                0
-            };
-            let fl = if args.len() > 3 {
-                args[3].as_i64().unwrap_or(0) as i32
-            } else {
-                0
-            };
-            (args[1].str(), ms, fl)
-        };
-        let re = match &*args[0].borrow() {
-            PyObject::CompiledRegex { regex, .. } => (**regex).clone(),
+        let (maxsplit_i, flags_i) = re_resolve_count_flags(args, "split", "maxsplit", 2, 4)?;
+        let (string, maxsplit, flags) = (re_text_arg(&args[1]), maxsplit_i as usize, flags_i as i32);
+        let ((string, subj_bytes), maxsplit, flags) = (string, maxsplit, flags);
+        let (re, pat_is_bytes): (fancy_regex::Regex, bool) = match &*args[0].borrow() {
+            PyObject::CompiledRegex {
+                regex, is_bytes, ..
+            } => ((**regex).clone(), *is_bytes),
             _ => {
-                let pattern = args[0].str();
+                let (pattern, pb) = re_text_arg(&args[0]);
+                // Bytes patterns use ASCII word semantics (see `compile`).
+                let flags = if pb { flags | 256 } else { flags };
+                let (pattern, ascii_scope, global_bits) =
+                    match compile::preprocess_inline_flags(&pattern, pb, flags) {
+                        Ok((p, a, g)) => (p, a, g),
+                        Err((msg, pos)) => {
+                            return Err(re_pattern_error(
+                                msg,
+                                Some(pattern),
+                                Some(pos as i64),
+                            ));
+                        }
+                    };
+                re_check_flags(flags | global_bits, pb)?;
+                let flags = if ascii_scope { flags | 256 } else { flags };
                 match compile_python_regex_flags(&pattern, flags) {
-                    Ok(r) => r,
+                    Ok(r) => (r, pb),
                     Err(e) => {
                         return Err(re_pattern_error(
                             map_regex_error(&e.to_string()),
@@ -298,48 +846,37 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 }
             }
         };
+        let is_bytes = re_check_compat(pat_is_bytes, subj_bytes)?;
+        // Pieces and captured groups come back in the subject domain.
+        let piece = |s: &str| -> PyObjectRef {
+            if is_bytes {
+                re_bytes_obj(s)
+            } else {
+                py_str(s)
+            }
+        };
         // Python's re.split includes captured groups; manual loop over captures
+        // in CPython match order (see `split_match_spans`: adjacent
+        // empties included).
         let mut result: Vec<PyObjectRef> = Vec::new();
         let mut last_end = 0usize;
         let mut n = 0usize;
-        let mut caps_iter = re.captures_iter(&string);
-        while let Some(caps_res) = caps_iter.next() {
-            let caps = match caps_res {
-                Ok(c) => c,
-                Err(_) => break,
-            };
+        for caps in split_match_spans(&re, &string) {
             if maxsplit != 0 && n >= maxsplit {
                 break;
             }
             let m = caps.get(0).unwrap();
             let (s, e) = (m.start(), m.end());
-            if s == e {
-                if s == string.len() {
-                    break;
-                }
-                if s == last_end {
-                    result.push(py_str(&string[last_end..s]));
-                    for i in 1..caps.len() {
-                        if let Some(g) = caps.get(i) {
-                            result.push(py_str(g.as_str()));
-                        } else {
-                            result.push(py_none());
-                        }
-                    }
-                    let next_len = string[s..]
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1);
-                    last_end = s + next_len;
-                    n += 1;
-                    continue;
-                }
-            }
-            result.push(py_str(&string[last_end..s]));
+            // Every yielded match (including empty and end-of-string
+            // ones) contributes its piece — mirroring CPython, whose
+            // own matcher yields them (verified: `re.split('', 'ab')`
+            // is `['', 'a', 'b', '']`, `re.split('x*', 'axb')` keeps
+            // the adjacent empties). The iterator is finite, so no
+            // progress guard is needed here.
+            result.push(piece(&string[last_end..s]));
             for i in 1..caps.len() {
                 if let Some(g) = caps.get(i) {
-                    result.push(py_str(g.as_str()));
+                    result.push(piece(g.as_str()));
                 } else {
                     result.push(py_none());
                 }
@@ -347,7 +884,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             last_end = e;
             n += 1;
         }
-        result.push(py_str(&string[last_end..]));
+        result.push(piece(&string[last_end..]));
         Ok(py_list(result))
     });
 
@@ -360,17 +897,48 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if matches!(&*args[0].borrow(), PyObject::CompiledRegex { .. }) {
             return Ok(args[0].clone());
         }
-        let pattern = args[0].str();
+        let (pattern, is_bytes) = re_text_arg(&args[0]);
         let flags = if args.len() > 1 {
             args[1].as_i64().unwrap_or(0) as i32
         } else {
             0
         };
-        match compile_python_regex_flags(&pattern, flags) {
+        // Bytes patterns use ASCII word semantics (mirrors CPython);
+        // the stored `.flags` keeps the caller's value.
+        re_check_flags(flags, is_bytes)?;
+        let original_pattern = pattern.clone();
+        let compile_flags = if is_bytes { flags | 256 } else { flags };
+        let (pattern, ascii_scope, global_bits) =
+            match compile::preprocess_inline_flags(&original_pattern, is_bytes, flags) {
+                Ok((p, a, g)) => (p, a, g),
+                Err((msg, pos)) => {
+                    return Err(re_pattern_error(msg, Some(original_pattern), Some(pos as i64)));
+                }
+            };
+        re_check_flags(flags | global_bits, is_bytes)?;
+        // Inline global flags (e.g. `(?i)`) fold into the stored flags,
+        // and the *original* pattern is kept (CPython stores both).
+        // `fix_flags` semantics: str patterns imply UNICODE (unless
+        // ASCII is set); bytes patterns never carry UNICODE.
+        let stored_flags = flags | global_bits;
+        let stored_flags = if is_bytes {
+            stored_flags & !32
+        } else if stored_flags & 256 == 0 {
+            stored_flags | 32
+        } else {
+            stored_flags
+        };
+        let compile_flags = if ascii_scope {
+            compile_flags | 256
+        } else {
+            compile_flags
+        };
+        match compile_python_regex_flags(&pattern, compile_flags) {
             Ok(re) => Ok(PyObjectRef::new(PyObject::CompiledRegex {
                 regex: Box::new(re),
-                pattern: pattern.to_string(),
-                flags,
+                pattern: original_pattern,
+                flags: stored_flags,
+                is_bytes,
             })),
             Err(e) => Err(re_pattern_error(
                 map_regex_error(&e.to_string()),
@@ -385,14 +953,25 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 {
             return Err(PyError::type_error("finditer() takes at least 2 arguments"));
         }
-        let (re, pattern) = extract_regex(&args[0])?;
-        let string = args[1].str();
-        let matches: Vec<PyObjectRef> = re
-            .captures_iter(&string)
-            .filter_map(|r| r.ok())
+        let (re, pattern, pat_bytes) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
+        let (string, subj_bytes) = re_text_arg(&args[1]);
+        let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
+        let caps_list = scan_captures(&re, &string, 0, string.len());
+        let matches: Vec<PyObjectRef> = caps_list
+            .into_iter()
             .map(|c| {
                 let start = c.get(0).map(|m| m.start()).unwrap_or(0);
-                make_match_object_detailed(&re, Some(c), &string, &pattern, 0, start, string.len())
+                make_match_object_prefixed(
+                    &re,
+                    Some(c),
+                    &string,
+                    &pattern,
+                    0,
+                    start,
+                    string.len(),
+                    is_bytes,
+                    0,
+                )
             })
             .collect();
         Ok(py_list(matches))
@@ -402,9 +981,31 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("escape() missing required argument"));
         }
-        let s = args[0].str();
-        let escaped = regex::escape(&s);
-        Ok(py_str(&escaped))
+        // Bytes input escapes to bytes (mirrors CPython: decode
+        // latin-1, escape, re-encode).
+        let (s, is_bytes) = re_text_arg(&args[0]);
+        // Mirrors CPython's _sre escape: every char/byte whose ordinal is
+        // an ASCII non-alphanumeric and not in LITERAL_CHARS gets a '\'
+        // prefix; everything >= 0x80 passes through untouched.
+        let literals = "!\"%',/:;<=>@_`";
+        let mut escaped = String::new();
+        for c in s.chars() {
+            if (c.is_ascii_alphanumeric() || literals.contains(c))
+                && c.is_ascii()
+            {
+                escaped.push(c);
+            } else if c.is_ascii() {
+                escaped.push('\\');
+                escaped.push(c);
+            } else {
+                escaped.push(c);
+            }
+        }
+        if is_bytes {
+            Ok(re_bytes_obj(&escaped))
+        } else {
+            Ok(py_str(&escaped))
+        }
     });
 
     // Regex compile flags
@@ -495,33 +1096,27 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 3 {
             return Err(PyError::type_error("subn() takes at least 3 arguments"));
         }
-        let (re, pattern) = extract_regex(&args[0])?;
-        let is_callable_repl = !matches!(&*args[1].borrow(), PyObject::Str(_));
+        let (re, pattern, pat_bytes) = extract_regex_flags(&args[0], re_call_flags(args, 4))?;
+        let is_callable_repl = !re_is_template_repl(&args[1]);
+        let (repl_text, repl_bytes) = re_text_arg(&args[1]);
+        let (string, subj_bytes) = re_text_arg(&args[2]);
+        let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
+        if !is_callable_repl && repl_bytes != subj_bytes {
+            return Err(PyError::type_error(
+                "cannot use a string replacement on a bytes-like object",
+            ));
+        }
         let repl_template = if is_callable_repl {
             String::new()
         } else {
-            translate_python_replacement(&args[1].str())
+            translate_python_replacement(&repl_text)?
         };
-        let string = args[2].str();
-        let count = if args.len() > 3 {
-            if let PyObject::Dict(kwargs) = &*args[3].borrow() {
-                kwargs
-                    .get(&py_str("count"))
-                    .ok()
-                    .flatten()
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0)
-            } else {
-                args[3].as_i64().unwrap_or(0)
-            }
-        } else {
-            0
-        };
+        let (count, _flags) = re_resolve_count_flags(args, "subn", "count", 3, 5)?;
         if !is_callable_repl {
-            if let Err(e) = validate_g_template(&args[1].str(), &re) {
+            if let Err(e) = validate_g_template(&repl_text, &re, is_bytes) {
                 return Err(e);
             }
-            let repl_str = args[1].str();
+            let repl_str = repl_text.clone();
             for cap in re.capture_names().filter_map(|n| n) {
                 let _ = cap;
             }
@@ -584,9 +1179,17 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                     0,
                     m_start,
                     string.len(),
+                    is_bytes,
                 );
                 let replaced = call_bound_method(args[1].clone(), match_obj, vec![])?;
-                result.push_str(&replaced.str());
+                // A bytes-returning callable decodes via latin-1 so the
+                // substitution stays in the subject's domain.
+                if is_bytes {
+                    let (rs, _) = re_text_arg(&replaced);
+                    result.push_str(&rs);
+                } else {
+                    result.push_str(&replaced.str());
+                }
             } else {
                 let mut expanded = String::new();
                 caps.expand(&repl_template, &mut expanded);
@@ -596,7 +1199,11 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             n += 1;
         }
         result.push_str(&string[last_end..]);
-        Ok(py_tuple(vec![py_str(&result), py_int(n)]))
+        if is_bytes {
+            Ok(py_tuple(vec![re_bytes_obj(&result), py_int(n)]))
+        } else {
+            Ok(py_tuple(vec![py_str(&result), py_int(n)]))
+        }
     });
 
     // Scanner — tokenizer helper
@@ -631,12 +1238,24 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                             continue;
                         }
                         let pat = pair[0].str();
+                        let (pat, _) =
+                            match compile::preprocess_inline_flags(&pat, false, flags) {
+                                Ok((p, _, _)) => (p, false),
+                                Err((msg, pos)) => {
+                                    return Err(re_pattern_error(
+                                        msg,
+                                        Some(pat),
+                                        Some(pos as i64),
+                                    ));
+                                }
+                            };
                         match compile_python_regex_flags(&pat, flags) {
                             Ok(r) => {
                                 compiled_list.push(PyObjectRef::new(PyObject::CompiledRegex {
                                     regex: Box::new(r),
                                     pattern: pat,
                                     flags,
+                                    is_bytes: false,
                                 }));
                             }
                             Err(e) => {
@@ -653,6 +1272,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                         regex: Box::new(dummy_re),
                         pattern: "".to_string(),
                         flags: 0,
+                        is_bytes: false,
                     });
                     if let PyObject::Instance { dict, .. } = &mut *self_obj.borrow_mut() {
                         dict.insert_str("lexicon", lexicon.clone());
@@ -760,6 +1380,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                                                 0,
                                                 i,
                                                 string.len(),
+                                                false,
                                             );
                                             if let PyObject::Instance { dict, .. } =
                                                 &mut *self_obj.borrow_mut()
@@ -847,7 +1468,11 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
 
     let re_match_type = PyObjectRef::new(PyObject::Type {
         name: "Match".to_string(),
-        dict: Box::new(str_map_to_typedict(HashMap::new())),
+        dict: {
+            let mut m: HashMap<String, PyObjectRef> = HashMap::new();
+            m.insert("__module__".to_string(), py_str("re"));
+            Box::new(str_map_to_typedict(m))
+        },
         bases: vec![],
         mro: vec![],
     });

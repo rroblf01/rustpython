@@ -406,8 +406,36 @@ fn build_datetime_type() -> PyObjectRef {
         }),
     );
     type_dict.insert_str(
-        "__lt__",
-        bf!("__lt__", |args| {
+        "__format__",
+        bf!("__format__", |args| {
+            // Mirrors CPython: empty spec → str(self), otherwise the
+            // spec is strftime-processed (so `f"{dt:h1{y=}}"` works).
+            let fmt = if args.len() > 1 {
+                args[1].str()
+            } else {
+                String::new()
+            };
+            if fmt.is_empty() {
+                return Ok(py_str(&datetime_isoformat(&args[0], ' ')));
+            }
+            let ord = datetime_ordinal(&args[0]);
+            let year = inst_get_i64(&args[0], "year");
+            Ok(py_str(&format_strftime(
+                &fmt,
+                year,
+                inst_get_i64(&args[0], "month"),
+                inst_get_i64(&args[0], "day"),
+                inst_get_i64(&args[0], "hour"),
+                inst_get_i64(&args[0], "minute"),
+                inst_get_i64(&args[0], "second"),
+                weekday_from_ordinal(ord),
+                day_of_year(year, ord),
+            )))
+        }),
+    );
+    type_dict.insert_str(
+        "__eq__",
+        bf!("__eq__", |args| {
             if instance_type_name(&args[1]) != "datetime" {
                 return Err(PyError::type_error(
                     "'<' not supported between instances of 'datetime.datetime' and other type",

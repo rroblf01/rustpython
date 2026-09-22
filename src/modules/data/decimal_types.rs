@@ -52,6 +52,26 @@ pub fn build_decimal_type() -> PyObjectRef {
         }),
     );
     type_dict.insert_str(
+        "__format__",
+        bf!("__format__", |args| {
+            if args.len() < 2 {
+                return Err(PyError::type_error("__format__ requires 1 argument"));
+            }
+            if matches!(&*args[1].borrow(), PyObject::None) {
+                return Err(PyError::type_error(
+                    "format() argument 2 must be str, not NoneType",
+                ));
+            }
+            let v = instance_to_decval(&args[0])
+                .ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+            let spec = args[1].str();
+            // `format_decimal_spec` raises ValueError ("invalid format
+            // string") for bad specs, mirroring CPython.
+            let out = crate::modules::data::decimal::format_decimal_spec(&v, &spec)?;
+            Ok(py_str(&out))
+        }),
+    );
+    type_dict.insert_str(
         "__int__",
         bf!("__int__", |args| {
             let v = instance_to_decval(&args[0])

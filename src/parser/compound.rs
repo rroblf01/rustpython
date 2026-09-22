@@ -302,6 +302,27 @@ impl Parser {
     /// (e.g., `for (a, b) in ...`) don't confuse tuple element separators.
     /// Also works for comprehension `for` clauses.
     pub(crate) fn parse_for_target_elt(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_for_target_elt_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_for_target_elt_inner(&mut self) -> Result<Expr, String> {
         // `for head, *tail in ...:` — a starred sub-target collects the rest
         // of the iterable's items into a list, same as in assignment targets.
         if self.eat(&Token::Star) {
@@ -311,6 +332,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_for_target(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_for_target_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_for_target_inner(&mut self) -> Result<Expr, String> {
         let mut target = self.parse_for_target_elt()?;
         if self.at(&Token::Comma) {
             let mut elts = vec![target];

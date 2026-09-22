@@ -51,6 +51,57 @@ impl VirtualMachine {
                 parts.reverse();
                 self.frames[fi].push(py_str(&parts.join("")));
             }
+            // PEP 750: pop the interpolations tuple, then the strings
+            // tuple, and build a `Template`.
+            Opcode::BUILD_TEMPLATE => {
+                let interpolations = self.frames[fi].pop()?;
+                let strings = self.frames[fi].pop()?;
+                let strings_vec = match &*strings.borrow() {
+                    PyObject::Tuple(v) => v.clone(),
+                    _ => {
+                        return Err(PyError::type_error(
+                            "BUILD_TEMPLATE expects a strings tuple".to_string(),
+                        ))
+                    }
+                };
+                let interpolations_vec = match &*interpolations.borrow() {
+                    PyObject::Tuple(v) => v.clone(),
+                    _ => {
+                        return Err(PyError::type_error(
+                            "BUILD_TEMPLATE expects an interpolations tuple".to_string(),
+                        ))
+                    }
+                };
+                let template = crate::object::build_template(strings_vec, interpolations_vec)?;
+                self.frames[fi].push(template);
+            }
+            // PEP 750: stack is [value, expression, (format_spec?)] where
+            // oparg bit 0 = has format_spec and bits >> 2 = conversion
+            // (0 none, 1 !r, 2 !s, 3 !a — our internal codes).
+            Opcode::BUILD_INTERPOLATION => {
+                let has_spec = (arg & 1) != 0;
+                let conversion =
+                    match arg >> 2 {
+                        0 => None,
+                        1 => Some('r'),
+                        2 => Some('s'),
+                        3 => Some('a'),
+                        _ => return Err(PyError::system_error(
+                            "Interpolation() argument 'conversion' must be one of 's', 'a' or 'r'"
+                                .to_string(),
+                        )),
+                    };
+                let format_spec = if has_spec {
+                    self.frames[fi].pop()?
+                } else {
+                    py_str("")
+                };
+                let expression = self.frames[fi].pop()?.str();
+                let value = self.frames[fi].pop()?;
+                let interpolation =
+                    crate::object::build_interpolation(value, expression, conversion, format_spec)?;
+                self.frames[fi].push(interpolation);
+            }
             Opcode::BUILD_SLICE => {
                 let nargs = arg as usize;
                 let step = if nargs >= 3 {

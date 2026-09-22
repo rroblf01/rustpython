@@ -58,6 +58,15 @@ pub enum Token {
     FStringEnd,
     FormatSpec(String),
     FStringConversion(u8),
+    /// Source span marker for one f/t-string part (never reaches the
+    /// AST): `open`/`close` are the field braces (past-`}` for close)
+    /// when `is_field`, else the literal text span. Lets the parser
+    /// stamp FormattedValue/Constant positions exactly.
+    FStringSpan {
+        open: (usize, usize),
+        close: (usize, usize),
+        is_field: bool,
+    },
     // Template strings (PEP 750, `t'...'`): same lexical shape as
     // f-strings, but the parser builds TemplateStr/Interpolation nodes.
     // TStringExpr carries the raw source text of the interpolation
@@ -173,9 +182,34 @@ impl fmt::Display for Token {
             Token::Number(s) => write!(f, "NUMBER({})", s),
             Token::String(s) => write!(f, "STRING({:?})", s),
             Token::Bytes(b) => write!(f, "BYTES({:?})", String::from_utf8_lossy(b)),
+            // Lexer errors surface inside SyntaxError texts (matched by
+            // `assertRaisesRegex` in CPython's suite), so render the raw
+            // message — NOT `{:?}` (which would double every backslash
+            // and break patterns like `malformed \\N`).
+            Token::LexerError(s) => write!(f, "LexerError({})", s),
             t => write!(f, "{:?}", t),
         }
     }
+}
+
+/// One scanned f/t-string part with absolute source spans.
+/// `field_open` is the `{` position, `field_end` is just past the
+/// closing `}` (both `(0, 0)` when the part holds no field);
+/// `lit_start` is where the literal text begins; `spec_start` is the
+/// `:` position (`(0, 0)` without spec); `field_start` is where the
+/// field content begins.
+#[derive(Clone)]
+pub(crate) struct FStringPartScan {
+    pub literal: String,
+    pub expr_text: String,
+    pub format_spec: String,
+    pub conversion: u8,
+    pub has_spec: bool,
+    pub lit_start: (usize, usize),
+    pub field_open: (usize, usize),
+    pub field_start: (usize, usize),
+    pub spec_start: (usize, usize),
+    pub field_end: (usize, usize),
 }
 
 #[derive(Clone)]
@@ -189,18 +223,49 @@ pub struct Lexer {
     at_line_start: bool,
     paren_level: usize,
     fstring_quote: Option<char>,
-    fstring_parts: Vec<(String, String, String, u8)>, // (literal, expr_text, format_spec, conversion)
+    fstring_parts: Vec<FStringPartScan>,
     fstring_part_idx: usize,
     fstring_expr_pending: Vec<Token>,
+    /// Start positions parallel to `fstring_expr_pending` (popped in
+    /// lockstep) so the parser can stamp expression source spans.
+    fstring_expr_pos: Vec<(usize, usize)>,
+    /// End positions parallel to `fstring_expr_pending` (popped in
+    /// lockstep) for node end spans.
+    fstring_expr_end: Vec<(usize, usize)>,
+    /// Start of the f/t-string currently being scanned (fallback
+    /// position for synthesized tokens).
+    fstring_start_pos: (usize, usize),
+    /// Past-the-closing-quote position of the f/t-string currently
+    /// being scanned (end span for the string node itself).
+    fstring_close_end: (usize, usize),
     /// True while emitting parts of a template string (`t'...'`) rather
     /// than an f-string — same pending-part machinery, TString* tokens.
     fstring_is_tstring: bool,
     /// Lexer-detected error pending emission (e.g. unindent does not match).
     pending_error: Option<String>,
+    /// When true, treat backslash-at-EOF as "unexpected character after line continuation"
+    /// (mirrors CPython eval mode); when false, treat as "unexpected EOF while parsing" (exec mode).
+    eval_mode: bool,
+    /// Absolute start position (1-indexed line/col) of the most recently
+    /// scanned token — refreshed on every main-loop iteration so trivia
+    /// is skipped. Feeds expression source positions (see
+    /// `Expr::Located`).
+    tok_start: (usize, usize),
+    /// Absolute end position (just past the last character) of the most
+    /// recently scanned token. Recorded via `emit` on every produced
+    /// token and via the f-string queues on replay; feeds node end
+    /// spans through the parser's `prev_end` tracking.
+    tok_end: (usize, usize),
+    /// Absolute offset of this lexer's scanned text within the original
+    /// source: raw `(1, 1)` means "this text starts here". Sub-lexers
+    /// over f-string field text inherit the field's absolute start so
+    /// token positions map back to real source coordinates.
+    base_line: usize,
+    base_col: usize,
 }
 
 impl Lexer {
-    pub fn new(source: &str) -> Self {
+    pub fn new(source: &str, eval_mode: bool) -> Self {
         let chars: Vec<char> = source.chars().collect();
         Lexer {
             chars,
@@ -215,13 +280,95 @@ impl Lexer {
             fstring_parts: Vec::new(),
             fstring_part_idx: 0,
             fstring_expr_pending: Vec::new(),
+            fstring_expr_pos: Vec::new(),
+            fstring_expr_end: Vec::new(),
+            fstring_start_pos: (1, 1),
+            fstring_close_end: (1, 1),
             fstring_is_tstring: false,
             pending_error: None,
+            eval_mode,
+            tok_start: (1, 1),
+            tok_end: (1, 1),
+            base_line: 1,
+            base_col: 1,
         }
     }
 
     fn peek(&self) -> Option<char> {
         self.chars.get(self.pos).copied()
+    }
+
+    /// Start position of the current token in absolute source
+    /// coordinates. Invariant: the `tok_start` field always holds an
+    /// absolute position (the main loop maps through `abs_pos` at
+    /// record time), so f-string queue replay never double-offsets.
+    pub(crate) fn tok_start(&self) -> (usize, usize) {
+        self.tok_start
+    }
+
+    /// End position (just past the last character) of the current
+    /// token in absolute source coordinates.
+    pub(crate) fn tok_end(&self) -> (usize, usize) {
+        self.tok_end
+    }
+
+    /// Wrap a freshly scanned token, recording its end span.
+    pub(crate) fn emit(&mut self, tok: Token) -> Token {
+        self.tok_end = self.abs_pos(self.line, self.col);
+        tok
+    }
+
+    /// Advance `start` past `text`, tracking newlines (for computing
+    /// literal/spec span ends).
+    pub(crate) fn advance_pos(&self, start: (usize, usize), text: &str) -> (usize, usize) {
+        let (mut line, mut col) = start;
+        for c in text.chars() {
+            if c == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        (line, col)
+    }
+
+    /// Start of the f/t-string currently being scanned (the prefix
+    /// position recorded at prefix detection).
+    pub(crate) fn fstring_start_pos(&self) -> (usize, usize) {
+        self.fstring_start_pos
+    }
+
+    /// Position for a trailing-backslash EOF error: the EOF column,
+    /// except column 0 when the backslash is the only non-trivia
+    /// content in the source (mirrors CPython's file tokenizer, whose
+    /// buffer reset yields a falsy offset there, so no caret prints;
+    /// e.g. a file containing just `\`). Call right after consuming
+    /// the backslash (`self.pos` sits past it).
+    pub(crate) fn trailing_backslash_pos(&self) -> (usize, usize) {
+        let only_trivia = self.chars[..self.pos.saturating_sub(1)]
+            .iter()
+            .all(|c| matches!(c, ' ' | '\t' | '\n' | '\r'));
+        if only_trivia {
+            (self.line, 0)
+        } else {
+            (self.line, self.col)
+        }
+    }
+
+    /// Map a raw (text-relative, 1-indexed) position into absolute
+    /// source coordinates via this lexer's base offset.
+    pub(crate) fn abs_pos(&self, line: usize, col: usize) -> (usize, usize) {
+        if self.base_line == 1 && self.base_col == 1 {
+            return (line, col);
+        }
+        let aline = self.base_line + line.saturating_sub(1);
+        let acol = if line <= 1 {
+            self.base_col + col.saturating_sub(1)
+        } else {
+            col
+        };
+        (aline, acol.max(1))
     }
 
     fn peek_ahead(&self, n: usize) -> Option<char> {
@@ -249,6 +396,37 @@ impl Lexer {
         }
     }
 
+    /// Emit a syntax warning with source location (mirrors CPython's
+    /// `file:line: Category: msg` + source-line stderr format).
+    pub(crate) fn emit_syntax_warning(&self, msg: &str, category: &str) {
+        // Text of the current (1-indexed) line, sliced from chars.
+        let mut line_no = 1usize;
+        let mut start = 0usize;
+        let mut end = self.chars.len();
+        let mut i = 0usize;
+        while i < self.chars.len() {
+            if self.chars[i] == '\n' {
+                if line_no == self.line {
+                    end = i;
+                    break;
+                }
+                line_no += 1;
+                start = i + 1;
+            }
+            i += 1;
+        }
+        let text: String = self.chars[start..end.min(self.chars.len())]
+            .iter()
+            .collect();
+        crate::modules::warnings_emit_at(
+            msg,
+            category,
+            None,
+            self.line,
+            text.trim_end_matches(['\r', '\n']),
+        );
+    }
+
     fn is_hex_char(c: char) -> bool {
         c.is_ascii_hexdigit()
     }
@@ -261,11 +439,11 @@ impl Lexer {
         matches!(c, '0' | '1')
     }
 
-    fn is_identifier_start(c: char) -> bool {
+    pub(crate) fn is_identifier_start(c: char) -> bool {
         c.is_ascii_alphabetic() || c == '_' || c.is_alphabetic()
     }
 
-    fn is_identifier_continue(c: char) -> bool {
+    pub(crate) fn is_identifier_continue(c: char) -> bool {
         // XID_Continue approximates alphanumeric + combining marks (Mn/Mc)
         // + connector punctuation (Pc) + ZWNJ/ZWJ. Variation selectors
         // (U+FE00..U+FE0F, U+E0100..U+E01EF) are Mn — `x\U000e0100` is one
@@ -634,7 +812,7 @@ impl Lexer {
                     {
                         s.push(self.advance().unwrap());
                     }
-                    return Token::Number(s);
+                    return self.emit(Token::Number(s));
                 }
                 Some('o' | 'O') => {
                     s.push(self.advance().unwrap());
@@ -644,7 +822,7 @@ impl Lexer {
                     {
                         s.push(self.advance().unwrap());
                     }
-                    return Token::Number(s);
+                    return self.emit(Token::Number(s));
                 }
                 Some('b' | 'B') => {
                     s.push(self.advance().unwrap());
@@ -654,7 +832,7 @@ impl Lexer {
                     {
                         s.push(self.advance().unwrap());
                     }
-                    return Token::Number(s);
+                    return self.emit(Token::Number(s));
                 }
                 _ => {}
             }
@@ -688,7 +866,7 @@ impl Lexer {
                 break;
             }
         }
-        Token::Number(s)
+        self.emit(Token::Number(s))
     }
 }
 

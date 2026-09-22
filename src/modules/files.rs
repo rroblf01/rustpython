@@ -733,31 +733,73 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
         crate::object::builtin_iter(&[py_list(entries)])
     });
 
-    // .glob(pattern) -> list[Path] (shallow: only "*"/plain-name patterns
-    // and a leading "**/" are handled; enough for the common recursive-glob
-    // idiom, not full fnmatch-on-every-component).
+    // .glob(pattern) / .rglob(pattern): full component-wise matching
+    // (`*`/`?` via glob_component_match, `**` for recursion) — mirrors
+    // CPython pathlib semantics. Previously only literal `*`/`**`/exact
+    // names matched, so `Path("tests/cpython/..").glob("*.py")` returned
+    // nothing (test_unparse's DirectoryTestCase.test_files).
     fn collect_glob(
         base: &std::path::Path,
         pattern: &str,
         recursive_all: bool,
     ) -> Vec<std::path::PathBuf> {
+        let mut parts: Vec<&str> = pattern.split('/').filter(|p| !p.is_empty()).collect();
+        if parts.is_empty() {
+            return vec![];
+        }
+        let mut full: Vec<&str> = vec![];
+        if recursive_all {
+            // rglob(pattern) == glob("**/" + pattern)
+            full.push("**");
+        }
+        full.extend(parts.drain(..));
         let mut out = vec![];
-        let entries = match std::fs::read_dir(base) {
+        walk_glob_parts(base, &full, &mut out);
+        out
+    }
+
+    fn walk_glob_parts(dir: &std::path::Path, parts: &[&str], out: &mut Vec<std::path::PathBuf>) {
+        if parts.is_empty() {
+            return;
+        }
+        if parts[0] == "**" {
+            if parts.len() == 1 {
+                // Trailing `**`: everything at this level.
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        out.push(entry.path());
+                    }
+                }
+            } else {
+                // `**` matches zero or more directories.
+                walk_glob_parts(dir, &parts[1..], out);
+            }
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        walk_glob_parts(&path, parts, out);
+                    }
+                }
+            }
+            return;
+        }
+        let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
-            Err(_) => return out,
+            Err(_) => return,
         };
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            let matches = pattern == "*" || pattern == "**" || name == pattern;
-            if matches {
-                out.push(path.clone());
+            if !glob_component_match(&name, parts[0]) {
+                continue;
             }
-            if recursive_all && path.is_dir() {
-                out.extend(collect_glob(&path, pattern, recursive_all));
+            if parts.len() == 1 {
+                out.push(path);
+            } else if path.is_dir() {
+                walk_glob_parts(&path, &parts[1..], out);
             }
         }
-        out
     }
 
     path_func!("rglob", |args| {

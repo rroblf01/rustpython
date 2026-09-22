@@ -998,7 +998,15 @@ def _unparse_formatted_f(node):
             inner = []
             for v in spec.values:
                 if isinstance(v, Constant) and isinstance(v.value, str):
-                    inner.append(v.value)
+                    # Inside a format spec, quotes/backslashes/newlines
+                    # escape with a backslash (mirrors CPython
+                    # `_write_ftstring_inner(is_format_spec=True)`).
+                    inner.append(
+                        v.value.replace("\\", "\\\\")
+                        .replace("'", "\\'")
+                        .replace('"', '\\"')
+                        .replace("\n", "\\n")
+                    )
                 elif isinstance(v, (FormattedValue, Interpolation)):
                     inner.append("{" + _unparse_formatted_f(v) + "}")
                 elif isinstance(v, TemplateStr):

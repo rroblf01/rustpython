@@ -328,6 +328,10 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     };
     let filename = args[1].str();
     let mode = args[2].str();
+    // Warnings raised while parsing/compiling (invalid escapes,
+    // `is`-with-literal) render with this filename (mirrors CPython:
+    // `codeop.compile_command` records `<input>`, not `<string>`).
+    crate::modules::set_warn_filename(&filename);
     // `flags=ast.PyCF_ONLY_AST` (0x400) returns the AST tree instead of
     // compiling to bytecode — checked up front so it applies to every
     // mode (exec/eval/single). Test_ast's test_pickling roundtrips
@@ -654,7 +658,7 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // `flags=__future__.CO_FUTURE_BARRY_AS_BDFL` (0x400000) switches the
         // `<>`/`!=` comparison operators (barry_as_FLUFL, test_flufl).
         let barry_as_bdfl = flags & 0x400000 != 0;
-        let mut parser = crate::parser::Parser::new(&source);
+        let mut parser = crate::parser::Parser::new(&source, false);
         parser.allow_top_level_await = allow_top_level_await;
         parser.barry_as_bdfl = barry_as_bdfl;
         let program = match parser.parse_program() {

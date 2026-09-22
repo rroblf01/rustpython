@@ -125,6 +125,8 @@ impl VirtualMachine {
             | Opcode::BUILD_MAP
             | Opcode::BUILD_SET
             | Opcode::BUILD_STRING
+            | Opcode::BUILD_TEMPLATE
+            | Opcode::BUILD_INTERPOLATION
             | Opcode::BUILD_SLICE
             | Opcode::BINARY_OP
             | Opcode::SUPER_FAST2_BIN
@@ -307,7 +309,10 @@ impl VirtualMachine {
 
             Opcode::FORMAT_SIMPLE => {
                 let val = self.frames[fi].pop()?;
-                self.frames[fi].push(py_str(&val.str()));
+                // An empty spec still dispatches `__format__('')`
+                // (mirrors CPython: `f'{x}'` calls `type(x).__format__`
+                // with `''`, so custom formatters apply).
+                self.frames[fi].push(py_str(&crate::vm::format::format_with_spec(&val, "")?));
             }
 
             Opcode::FORMAT_WITH_SPEC => {

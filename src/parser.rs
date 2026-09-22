@@ -5,6 +5,29 @@ pub struct Parser {
     lexer: Lexer,
     current: Token,
     peeked: Option<Token>,
+    /// Start span of the current token (recorded at scan time, in
+    /// lockstep with `current`). Unlike the lexer's `tok_start`,
+    /// this never goes stale from lookahead scans, so wrapper starts
+    /// are always exact.
+    current_start: (usize, usize),
+    /// Start span of the peeked lookahead token, if any.
+    peeked_start: Option<(usize, usize)>,
+    /// End span of the current token (recorded at scan time, in lockstep
+    /// with `current`/`peeked`).
+    current_end: (usize, usize),
+    /// End span of the peeked lookahead token, if any.
+    peeked_end: Option<(usize, usize)>,
+    /// End span of the most recently consumed token — expression node
+    /// ends (see `Expr::Located`). Updated on every `next()` from the
+    /// outgoing current token's end.
+    prev_end: (usize, usize),
+    /// Start positions of consumed f/t-string openers, as a stack:
+    /// nested strings parse (and pop) before outer ones resume, so
+    /// LIFO order always matches. Read by `parse_fstring` /
+    /// `parse_tstring` for the JoinedStr/TemplateStr start (the
+    /// opener's own token position, which plain `tok_start` has
+    /// already moved past by then).
+    string_starts: Vec<(usize, usize)>,
     // >0 while parsing the body of an `async def` — gates `async for`/
     // `async with`/`await` (SyntaxError when used at top level, matching
     // CPython; see the emit sites in parse_stmt/parse_unary).
@@ -38,6 +61,11 @@ pub struct Parser {
     // body itself starts another single-line suite (`if True: if False: a
     // = 1`), though that's a rare style choice, not the common trigger.
     suite_depth: usize,
+    // Interpolated-string nesting depth (mirrors CPython's
+    // MAXFSTRINGLEVEL=150): `f"{"f"{"..."}"}"` 160 deep is a
+    // SyntaxError, while sequential f-strings must not accumulate
+    // (decremented on success, like suite_depth's single-level use).
+    fstring_depth: usize,
     // Stack of the enclosing function's parameter names, used to reject
     // `global`/`nonlocal` applied to a parameter (test_syntax's
     // test_global_param_err_first / test_nonlocal_param_err_first).
@@ -67,15 +95,23 @@ pub struct Parser {
 const MAX_UNARY_DEPTH: usize = 2000;
 
 macro_rules! unexpected_token {
-    ($self:expr, $expected:expr) => {
-        Err(format!(
-            "L{}:{}: Expected {}, got {}",
-            $self.lexer.get_line_col().0,
-            $self.lexer.get_line_col().1,
-            $expected,
-            $self.current
-        ))
-    };
+    ($self:expr, $expected:expr) => {{
+        // A pending lexer error surfaces with its own message (and any
+        // `L<line>:<col>:` position it carries) rather than wrapped as
+        // "Expected ..., got LexerError(...)" — mirrors CPython, where
+        // tokenizer errors propagate verbatim.
+        if let Token::LexerError(msg) = &$self.current {
+            Err(msg.clone())
+        } else {
+            Err(format!(
+                "L{}:{}: Expected {}, got {}",
+                $self.lexer.get_line_col().0,
+                $self.lexer.get_line_col().1,
+                $expected,
+                $self.current
+            ))
+        }
+    }};
 }
 
 // --- Submodules (proof-of-concept split) ---
@@ -106,15 +142,28 @@ mod atom;
 pub use atom::*;
 
 impl Parser {
-    pub fn new(source: &str) -> Self {
-        let mut lexer = Lexer::new(source);
+    pub fn new(source: &str, eval_mode: bool) -> Self {
+        let mut lexer = Lexer::new(source, eval_mode);
         let first = lexer.next_token();
+        let first_start = lexer.tok_start();
+        let first_end = lexer.tok_end();
         Parser {
             lexer,
             current: first,
             peeked: None,
+            current_start: first_start,
+            peeked_start: None,
+            current_end: first_end,
+            peeked_end: None,
+            // Deliberately NOT `first_end`: the no-consumption
+            // passthrough in expression wrappers compares against
+            // this, and a single-token node (e.g. bare `a`) must
+            // count as consuming.
+            prev_end: (1, 1),
+            string_starts: Vec::new(),
             unary_depth: 0,
             suite_depth: 0,
+            fstring_depth: 0,
             async_depth: 0,
             genexpr_depth: 0,
             allow_top_level_await: false,
@@ -127,16 +176,35 @@ impl Parser {
     }
 
     fn next(&mut self) -> Token {
-        let tok = self
-            .peeked
-            .take()
-            .unwrap_or_else(|| self.lexer.next_token());
+        let (tok, start, end) = match self.peeked.take() {
+            Some(t) => (
+                t,
+                self.peeked_start.take().unwrap_or((1, 1)),
+                self.peeked_end.take().unwrap_or((1, 1)),
+            ),
+            None => {
+                let t = self.lexer.next_token();
+                let s = self.lexer.tok_start();
+                let e = self.lexer.tok_end();
+                (t, s, e)
+            }
+        };
+        // Record f/t-string openers for their wrappers (start travels
+        // with the token here, immune to later lookahead scans).
+        if matches!(tok, Token::FStringStart | Token::TStringStart) {
+            self.string_starts.push(start);
+        }
+        self.prev_end = self.current_end;
+        self.current_end = end;
+        self.current_start = start;
         std::mem::replace(&mut self.current, tok)
     }
 
     fn peek(&mut self) -> &Token {
         if self.peeked.is_none() {
             self.peeked = Some(self.lexer.next_token());
+            self.peeked_start = Some(self.lexer.tok_start());
+            self.peeked_end = Some(self.lexer.tok_end());
         }
         self.peeked.as_ref().unwrap()
     }
@@ -272,7 +340,10 @@ impl Parser {
                 let (line, col) = self.lexer.get_line_col();
                 return Err(format!("L{}:{}: unexpected indent", line, col));
             }
-            let line = self.lexer.get_line_col().0;
+            // Statement start line = current token start
+            // (live lexer position already ran ahead over
+            // eagerly scanned multiline strings).
+            let line = self.current_start.0;
             let stmt = self.parse_stmt()?;
             self.push_tracked_stmt(&mut stmts, line, stmt);
             // Handle semicolon-separated statements on the same line: `while i: i = 0; continue`
@@ -280,7 +351,10 @@ impl Parser {
                 if self.at(&Token::Dedent) || self.at(&Token::EndOfFile) {
                     break;
                 }
-                let line = self.lexer.get_line_col().0;
+                // Statement start line = current token start
+                // (live lexer position already ran ahead over
+                // eagerly scanned multiline strings).
+                let line = self.current_start.0;
                 let stmt = self.parse_stmt()?;
                 self.push_tracked_stmt(&mut stmts, line, stmt);
             }
@@ -295,11 +369,44 @@ impl Parser {
 /// Used by the REPL to detect expression statements whose value should
 /// be displayed via sys.displayhook instead of being discarded by POP_TOP.
 pub fn try_parse_as_expression(source: &str) -> Result<Program, String> {
-    let mut parser = Parser::new(source);
+    let mut parser = Parser::new(source, true);
     // CPython's eval mode accepts a comma-separated test list (a tuple
-    // display with optional trailing comma) — plain `parse_expr` alone
-    // rejects `eval("1, 2")` with "extra tokens after expression". (No
-    // starred elements: real CPython raises SyntaxError for those.)
+    // display with optional trailing comma). Trailing tokens are plain
+    // "invalid syntax" (mirrors CPython; `f'{0}' = x` must match that).
+    // (No starred elements: real CPython raises SyntaxError for those.)
+    // A statement-only keyword in first position (`del`, `return`,
+    // `import`, ...) is also plain "invalid syntax", not a precise
+    // expression error (mirrors CPython's `eval("del x")`).
+    if matches!(
+        &parser.current,
+        Token::Del
+            | Token::Return
+            | Token::Raise
+            | Token::Import
+            | Token::From
+            | Token::Class
+            | Token::Def
+            | Token::Async
+            | Token::Global
+            | Token::Nonlocal
+            | Token::Pass
+            | Token::Break
+            | Token::Continue
+            | Token::Assert
+            | Token::If
+            | Token::For
+            | Token::While
+            | Token::With
+            | Token::Try
+    ) {
+        return Err("invalid syntax".to_string());
+    }
+    // A leading lexer error surfaces raw (mirrors CPython: `eval("'")`
+    // reports "unterminated string literal ...", not wrapped as
+    // "Expected expression, got LexerError(...)").
+    if let Token::LexerError(msg) = &parser.current {
+        return Err(msg.clone());
+    }
     let first = parser.parse_expr()?;
     let mut exprs = vec![first];
     let mut saw_comma = false;
@@ -316,7 +423,24 @@ pub fn try_parse_as_expression(source: &str) -> Result<Program, String> {
     // Consume trailing newlines
     while parser.eat(&Token::Newline) || parser.eat(&Token::Semicolon) {}
     if !parser.at(&Token::EndOfFile) {
-        return Err("extra tokens after expression".to_string());
+        // A tokenizer error downstream (e.g. an unterminated string past
+        // the first `=`) preempts the trailing-tokens error (mirrors
+        // CPython, whose tokenizer runs ahead: `eval("ä = '''x")`
+        // reports the unterminated string, not "invalid syntax").
+        // (Includes one already pending as the current token.)
+        if let Token::LexerError(msg) = &parser.current {
+            return Err(msg.clone());
+        }
+        loop {
+            parser.next();
+            if let Token::LexerError(msg) = &parser.current {
+                return Err(msg.clone());
+            }
+            if parser.at(&Token::EndOfFile) {
+                break;
+            }
+        }
+        return Err("invalid syntax".to_string());
     }
     let expr = if exprs.len() == 1 && !saw_comma {
         exprs.pop().unwrap()
@@ -339,7 +463,7 @@ mod tests {
                 (format!("def f(x):\n  {keyword} x\n"), 2, 3),
                 (format!("def f(x):\n    {keyword} y, x\n"), 2, 5),
             ] {
-                let error = Parser::new(&source).parse_program().unwrap_err();
+                let error = Parser::new(&source, false).parse_program().unwrap_err();
                 assert_eq!(
                     error,
                     format!("L{line}:{column}: name 'x' is parameter and {keyword}"),
@@ -377,7 +501,7 @@ mod tests {
                 "L3:5: annotated name 'x' can't be nonlocal",
             ),
         ] {
-            let error = Parser::new(source).parse_program().unwrap_err();
+            let error = Parser::new(source, false).parse_program().unwrap_err();
             assert_eq!(error, message, "{source}");
         }
     }
@@ -390,7 +514,7 @@ mod tests {
             "def f():\n    global x\n    global x\n",
             "x = 1\nglobal x\n",
         ] {
-            Parser::new(source).parse_program().unwrap();
+            Parser::new(source, false).parse_program().unwrap();
         }
     }
 
@@ -398,7 +522,7 @@ mod tests {
     fn parenthesized_patterns_are_grouping_not_sequences() {
         use super::{MatchCase, Pattern, Program, Stmt};
         fn first_pattern(source: &str) -> Pattern {
-            let Program::Module(stmts) = Parser::new(source).parse_program().unwrap() else {
+            let Program::Module(stmts) = Parser::new(source, false).parse_program().unwrap() else {
                 panic!("not a module: {source}");
             };
             let [Stmt::Located(_, body)] = stmts.as_slice() else {

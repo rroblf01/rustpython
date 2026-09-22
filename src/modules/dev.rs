@@ -40,7 +40,7 @@ pub fn create_profile_dict() -> HashMap<String, PyObjectRef> {
         }
         let cmd = args[0].str();
         let _ = crate::object::with_vm_mut(|vm| {
-            let mut parser = crate::parser::Parser::new(&cmd);
+            let mut parser = crate::parser::Parser::new(&cmd, false);
             if let Ok(program) = parser.parse_program() {
                 let mut compiler = crate::compiler::Compiler::new();
                 if let Ok(code) = compiler.compile(&program, "<profile>") {
@@ -61,7 +61,7 @@ pub fn create_profile_dict() -> HashMap<String, PyObjectRef> {
         let _globals = &args[1];
         let _locals = &args[2];
         let _ = crate::object::with_vm_mut(|vm| {
-            let mut parser = crate::parser::Parser::new(&cmd);
+            let mut parser = crate::parser::Parser::new(&cmd, false);
             if let Ok(program) = parser.parse_program() {
                 let mut compiler = crate::compiler::Compiler::new();
                 if let Ok(code) = compiler.compile(&program, "<profile>") {
@@ -229,7 +229,7 @@ pub fn create_trace_dict() -> HashMap<String, PyObjectRef> {
                         String::new()
                     };
                     let _ = crate::object::with_vm_mut(|vm| {
-                        let mut parser = crate::parser::Parser::new(&cmd);
+                        let mut parser = crate::parser::Parser::new(&cmd, false);
                         if let Ok(program) = parser.parse_program() {
                             let mut compiler = crate::compiler::Compiler::new();
                             if let Ok(code) = compiler.compile(&program, "<trace>") {

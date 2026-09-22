@@ -195,9 +195,9 @@ impl Compiler {
                 if targets.len() == 1 {
                     let target = &targets[0];
                     // For subscript assignment, compile obj and index before value
-                    if let Expr::Subscript { value: obj, slice } = target {
+                    if let Expr::Subscript { value: obj, slice } = target.unlocate() {
                         self.compile_expr(obj)?;
-                        if let Expr::Starred(inner) = slice.as_ref() {
+                        if let Expr::Starred(inner) = slice.as_ref().unlocate() {
                             self.emit(Opcode::BUILD_LIST, 0);
                             self.compile_expr(inner)?;
                             self.emit(Opcode::LIST_EXTEND, 0);
@@ -243,11 +243,12 @@ impl Compiler {
                 }
             }
             Stmt::AugAssign { target, op, value } => {
-                match &**target {
+                match target.as_ref().unlocate() {
+                    Expr::Located { .. } => unreachable!("peeled via unlocate"),
                     Expr::Subscript { value: obj, slice } => {
                         // For subscript augmented assignment like x[0] += 1:
                         self.compile_expr(obj)?;
-                        if let Expr::Starred(inner) = slice.as_ref() {
+                        if let Expr::Starred(inner) = slice.as_ref().unlocate() {
                             self.emit(Opcode::BUILD_LIST, 0);
                             self.compile_expr(inner)?;
                             self.emit(Opcode::LIST_EXTEND, 0);
@@ -507,7 +508,7 @@ impl Compiler {
                 // Extract docstring from first statement if present
                 let docstring = body.first().and_then(|s| {
                     if let Stmt::Expr(expr) = Self::unwrap_located(s) {
-                        if let Expr::Constant(Constant::String(doc)) = expr.as_ref() {
+                        if let Expr::Constant(Constant::String(doc)) = expr.as_ref().unlocate() {
                             Some(doc.clone())
                         } else {
                             None
@@ -539,7 +540,7 @@ impl Compiler {
                     } else {
                         self.emit(Opcode::BUILD_LIST, 0);
                         for base in bases {
-                            if let Expr::Starred(inner) = base {
+                            if let Expr::Starred(inner) = base.unlocate() {
                                 self.compile_expr(inner)?;
                                 self.emit(Opcode::LIST_EXTEND, 0);
                             } else {
@@ -737,10 +738,11 @@ impl Compiler {
             }
             Stmt::Delete(targets) => {
                 for target in targets {
-                    match target {
+                    match target.unlocate() {
+                        Expr::Located { .. } => unreachable!("peeled via unlocate"),
                         Expr::Subscript { value, slice } => {
                             self.compile_expr(value)?;
-                            if let Expr::Starred(inner) = slice.as_ref() {
+                            if let Expr::Starred(inner) = slice.as_ref().unlocate() {
                                 self.emit(Opcode::BUILD_LIST, 0);
                                 self.compile_expr(inner)?;
                                 self.emit(Opcode::LIST_EXTEND, 0);
@@ -766,7 +768,8 @@ impl Compiler {
                         }
                         Expr::Tuple(elts) | Expr::List(elts) => {
                             for e in elts {
-                                match e {
+                                match e.unlocate() {
+                                    Expr::Located { .. } => unreachable!("peeled via unlocate"),
                                     Expr::Subscript { value, slice } => {
                                         self.compile_expr(value)?;
                                         self.compile_expr(slice)?;
@@ -790,7 +793,7 @@ impl Compiler {
                                     Expr::Tuple(inner) | Expr::List(inner) => {
                                         for ie in inner {
                                             // Recurse one level
-                                            if let Expr::Name(n) = ie {
+                                            if let Expr::Name(n) = ie.unlocate() {
                                                 if self.scope == ScopeType::Module {
                                                     let idx = self.get_name_index(n) as u32;
                                                     self.emit(Opcode::DELETE_NAME, idx);
@@ -890,7 +893,7 @@ impl Compiler {
                 // value-assignment path below, nothing stored) — real
                 // CPython doesn't expose local variable annotations anywhere
                 // either.
-                if let Expr::Name(name) = target.as_ref() {
+                if let Expr::Name(name) = target.as_ref().unlocate() {
                     if self.scope == ScopeType::ClassBody {
                         self.emit(Opcode::SETUP_ANNOTATIONS, 0);
                         let ann_idx = self.get_name_index("__annotations__") as u32;

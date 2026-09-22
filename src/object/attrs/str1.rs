@@ -3,6 +3,71 @@ use super::*;
 use crate::interner;
 use crate::object::*;
 
+/// Apply `.attr` / `[key]` sub-accessors to a format field base value
+/// (mirrors CPython: `{d[a]}` getitems `'a'` after looking up `d`;
+/// `[0]` uses integer 0).
+fn format_apply_accessors(mut obj: PyObjectRef, mut rest: &str) -> PyResult<PyObjectRef> {
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix('.') {
+            let end = r.find(|c| c == '.' || c == '[').unwrap_or(r.len());
+            let attr = &r[..end];
+            let got = {
+                let b = obj.borrow();
+                let tname = b.type_name().to_string();
+                b.get_attribute(attr).map_err(|_| {
+                    PyError::attribute_error(format!(
+                        "'{}' object has no attribute '{}'",
+                        tname, attr
+                    ))
+                })?
+            };
+            obj = got;
+            rest = &r[end..];
+        } else if let Some(r) = rest.strip_prefix('[') {
+            let close = r
+                .find(']')
+                .ok_or_else(|| PyError::value_error("unterminated format field"))?;
+            let key = &r[..close];
+            obj = if let Ok(n) = key.parse::<usize>() {
+                match &*obj.borrow() {
+                    PyObject::List(l) => l
+                        .get(n)
+                        .cloned()
+                        .ok_or_else(|| PyError::index_error("list index out of range"))?,
+                    PyObject::Tuple(t) => t
+                        .get(n)
+                        .cloned()
+                        .ok_or_else(|| PyError::index_error("tuple index out of range"))?,
+                    PyObject::Str(s) => s
+                        .chars()
+                        .nth(n)
+                        .map(|c| py_str(&c.to_string()))
+                        .ok_or_else(|| PyError::index_error("string index out of range"))?,
+                    PyObject::Dict(dd) => dd
+                        .get(&py_int(n as i64))
+                        .ok()
+                        .flatten()
+                        .ok_or_else(|| PyError::key_error(format!("'{}'", n)))?,
+                    _ => {
+                        return Err(PyError::type_error("string indices must be integers"));
+                    }
+                }
+            } else if let PyObject::Dict(dd) = &*obj.borrow() {
+                dd.get(&py_str(key))
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| PyError::key_error(format!("'{}'", key)))?
+            } else {
+                return Err(PyError::type_error("string indices must be integers"));
+            };
+            rest = &r[close + 1..];
+        } else {
+            return Err(PyError::key_error(format!("'{}'", rest)));
+        }
+    }
+    Ok(obj)
+}
+
 pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
     match o {
         PyObject::Str(_s) => {
@@ -324,26 +389,45 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                                 ));
                                             }
                                         } else {
-                                            return Err(PyError::key_error(format!(
-                                                "'{}'",
-                                                name_part
-                                            )));
+                                            // Named base with sub-access
+                                            // (`{d[a]}`): resolve via kwargs,
+                                            // then apply accessors.
+                                            let base = &name_part[..bracket_pos];
+                                            let rest = &name_part[bracket_pos..];
+                                            let obj = kwargs_dict
+                                                .as_ref()
+                                                .and_then(|d| {
+                                                    if let PyObject::Dict(dd) = &*d.borrow() {
+                                                        dd.get(&py_str(base)).ok().flatten()
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                                .ok_or_else(|| {
+                                                    PyError::key_error(format!("'{}'", base))
+                                                })?;
+                                            format_apply_accessors(obj, rest)
                                         }
                                     } else {
-                                        // Named field — bare name (no
-                                        // `.attr`/`[index]` sub-access).
-                                        kwargs_dict
+                                        // Bare named field, possibly with
+                                        // `.attr` / `[key]` sub-access.
+                                        let split = name_part
+                                            .find(|c| c == '.' || c == '[')
+                                            .unwrap_or(name_part.len());
+                                        let (base, rest) = name_part.split_at(split);
+                                        let obj = kwargs_dict
                                             .as_ref()
                                             .and_then(|d| {
                                                 if let PyObject::Dict(dd) = &*d.borrow() {
-                                                    dd.get(&py_str(name_part)).ok().flatten()
+                                                    dd.get(&py_str(base)).ok().flatten()
                                                 } else {
                                                     None
                                                 }
                                             })
                                             .ok_or_else(|| {
-                                                PyError::key_error(format!("'{}'", name_part))
-                                            })
+                                                PyError::key_error(format!("'{}'", base))
+                                            })?;
+                                        format_apply_accessors(obj, rest)
                                     }
                                 };
                                 let val = val?;

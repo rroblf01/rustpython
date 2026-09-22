@@ -132,7 +132,7 @@ impl Compiler {
                 // __doc__`, not a discarded expression statement.
                 let mut start = 0;
                 if let Some(Stmt::Expr(expr)) = stmts.first().map(Self::unwrap_located) {
-                    if let Expr::Constant(Constant::String(doc)) = expr.as_ref() {
+                    if let Expr::Constant(Constant::String(doc)) = expr.as_ref().unlocate() {
                         let doc_idx = self.get_const_index(ConstValue::String(doc.clone())) as u32;
                         self.emit(Opcode::LOAD_CONST, doc_idx);
                         let doc_name_idx = self.get_name_index("__doc__") as u32;

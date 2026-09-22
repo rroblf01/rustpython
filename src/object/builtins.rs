@@ -812,7 +812,43 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
             PyObject::Bytes(b) => Ok(PyObjectRef::imm(PyObject::Bytes(b.clone()))),
             PyObject::ByteArray(b) => Ok(PyObjectRef::imm(PyObject::Bytes(b.clone()))),
-            PyObject::Str(s) => Ok(PyObjectRef::imm(PyObject::Bytes(s.as_bytes().to_vec()))),
+            PyObject::Str(_) => {
+                // bytes(str[, encoding[, errors]]) — honor encoding and
+                // errors, positionally or by keyword (mirrors CPython;
+                // previously always UTF-8, so bytes('\ufffd', 'ascii')
+                // silently produced UTF-8 bytes instead of raising
+                // UnicodeEncodeError). A str source REQUIRES an encoding.
+                let mut rest: Vec<PyObjectRef> = args[1..].to_vec();
+                let kwargs = match rest.last() {
+                    Some(last) if matches!(&*last.borrow(), PyObject::Dict(_)) => {
+                        Some(rest.pop().unwrap())
+                    }
+                    _ => None,
+                };
+                let kw = |name: &str| {
+                    kwargs.as_ref().and_then(|d| {
+                        if let PyObject::Dict(d) = &*d.borrow() {
+                            d.get(&py_str(name)).ok().flatten()
+                        } else {
+                            None
+                        }
+                    })
+                };
+                let has_encoding = rest.first().is_some() || kw("encoding").is_some();
+                if !has_encoding {
+                    return Err(PyError::type_error(
+                        "string argument without an encoding",
+                    ));
+                }
+                let mut call = vec![args[0].clone()];
+                if let Some(e) = rest.first().cloned().or_else(|| kw("encoding")) {
+                    call.push(e);
+                    if let Some(r) = rest.get(1).cloned().or_else(|| kw("errors")) {
+                        call.push(r);
+                    }
+                }
+                crate::object::attrs::str_encode_builtin(&call)
+            }
             PyObject::List(v) => {
                 let mut result = Vec::new();
                 for item in v {

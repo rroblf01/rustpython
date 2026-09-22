@@ -614,7 +614,14 @@ pub fn builtin_bool(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 pub fn builtin_format(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     match args.len() {
         0 => Err(PyError::type_error("format() requires at least 1 argument")),
-        1 => Ok(py_str(&args[0].str())),
+        // `format(x)` is `format(x, '')`, which still dispatches
+        // `type(x).__format__` (mirrors CPython: instance `__format__`
+        // attributes are bypassed, the type's is used).
+        1 => {
+            let result = crate::vm::format_with_spec(&args[0], "")
+                .map_err(|e| PyError::value_error(format!("Format spec: {}", e)))?;
+            Ok(py_str(&result))
+        }
         2 => {
             if matches!(&*args[1].borrow(), PyObject::None) {
                 return Err(PyError::type_error(
@@ -622,9 +629,6 @@ pub fn builtin_format(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 ));
             }
             let spec = args[1].str();
-            if spec.is_empty() {
-                return Ok(py_str(&args[0].str()));
-            }
             // Use the comprehensive format_with_spec from vm.rs
             let result = crate::vm::format_with_spec(&args[0], &spec)
                 .map_err(|e| PyError::value_error(format!("Format spec: {}", e)))?;

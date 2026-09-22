@@ -39,6 +39,8 @@ mod exceptions_ctor;
 pub use exceptions_ctor::*;
 mod memoryview;
 pub use memoryview::*;
+mod template;
+pub use template::*;
 
 use crate::bytecode::CodeObject;
 use crate::interner::{self, StrId};

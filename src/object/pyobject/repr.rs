@@ -81,6 +81,22 @@ fn repr_pstr(s: &PyStr) -> String {
     format!("{}{}{}", quote, out, quote)
 }
 
+fn repr_bytes_inner(b: &[u8]) -> String {
+    let mut s = String::with_capacity(b.len());
+    for &byte in b {
+        match byte {
+            b'\\' => s.push_str("\\\\"),
+            b'\'' => s.push_str("\\'"),
+            b'\n' => s.push_str("\\n"),
+            b'\t' => s.push_str("\\t"),
+            b'\r' => s.push_str("\\r"),
+            0x20..=0x7e => s.push(byte as char),
+            _ => s.push_str(&format!("\\x{:02x}", byte)),
+        }
+    }
+    s
+}
+
 impl PyObject {
     pub fn repr(&self) -> String {
         match self {
@@ -105,36 +121,8 @@ impl PyObject {
                 }
             }
             PyObject::Str(s) => repr_pstr(s),
-            PyObject::Bytes(b) => {
-                let s: String = b
-                    .iter()
-                    .map(|&byte| match byte {
-                        b'\\' => "\\\\".to_string(),
-                        b'\'' => "\\'".to_string(),
-                        b'\n' => "\\n".to_string(),
-                        b'\t' => "\\t".to_string(),
-                        b'\r' => "\\r".to_string(),
-                        0x20..=0x7e => (byte as char).to_string(),
-                        _ => format!("\\x{:02x}", byte),
-                    })
-                    .collect();
-                format!("b'{}'", s)
-            }
-            PyObject::ByteArray(b) => {
-                let s: String = b
-                    .iter()
-                    .map(|&byte| match byte {
-                        b'\\' => "\\\\".to_string(),
-                        b'\'' => "\\'".to_string(),
-                        b'\n' => "\\n".to_string(),
-                        b'\t' => "\\t".to_string(),
-                        b'\r' => "\\r".to_string(),
-                        0x20..=0x7e => (byte as char).to_string(),
-                        _ => format!("\\x{:02x}", byte),
-                    })
-                    .collect();
-                format!("bytearray(b'{}')", s)
-            }
+            PyObject::Bytes(b) => format!("b'{}'", repr_bytes_inner(b)),
+            PyObject::ByteArray(b) => format!("bytearray(b'{}')", repr_bytes_inner(b)),
             PyObject::List(items) => {
                 let items: Vec<String> = items.iter().map(|x| x.repr()).collect();
                 format!("[{}]", items.join(", "))
@@ -268,7 +256,11 @@ impl PyObject {
                     None => format!("<built-in method {}>", name),
                 }
             }
-            PyObject::Module { name, .. } => format!("<module '{}'>", name),
+            PyObject::Module { name, dict } => match dict.get_str("__file__") {
+                // Mirrors CPython: `<module 'unittest' from '.../__init__.py'>`.
+                Some(f) => format!("<module '{}' from '{}'>", name, f),
+                None => format!("<module '{}'>", name),
+            },
             PyObject::Type { name, dict, .. } => {
                 // Real CPython: `<class 'module.Name'>` unless the module is
                 // `builtins` (or unset), which prints the bare name instead.
@@ -575,7 +567,51 @@ impl PyObject {
             PyObject::MemoryView { .. } => {
                 format!("<memory at 0x{:012x}>", self as *const PyObject as usize)
             }
-            PyObject::CompiledRegex { pattern, .. } => format!("re.compile('{}')", pattern),
+            PyObject::CompiledRegex { pattern, flags, is_bytes, .. } => {
+                let pattern_repr = if *is_bytes {
+                    format!("b'{}'", repr_bytes_inner(pattern.as_bytes()))
+                } else {
+                    repr_pstr(&PyStr::from_str(pattern))
+                };
+                // CPython's `%.200R` — truncate the pattern repr at 200
+                // chars, appending `...`.
+                let pattern_repr: String = if pattern_repr.chars().count() > 200 {
+                    pattern_repr.chars().take(200).chain("...".chars()).collect()
+                } else {
+                    pattern_repr
+                };
+                // Omit re.UNICODE for valid string patterns (same
+                // condition as CPython's `pattern_repr`).
+                let mut flags = *flags;
+                if !*is_bytes && (flags & (4 | 32 | 256)) == 32 {
+                    flags &= !32;
+                }
+                let mut parts: Vec<String> = Vec::new();
+                macro_rules! push_flag {
+                    ($bit:expr, $name:literal) => {
+                        if flags & $bit != 0 {
+                            parts.push($name.to_string());
+                            flags &= !$bit;
+                        }
+                    };
+                }
+                push_flag!(2, "re.IGNORECASE");
+                push_flag!(4, "re.LOCALE");
+                push_flag!(8, "re.MULTILINE");
+                push_flag!(16, "re.DOTALL");
+                push_flag!(32, "re.UNICODE");
+                push_flag!(64, "re.VERBOSE");
+                push_flag!(128, "re.DEBUG");
+                push_flag!(256, "re.ASCII");
+                if flags != 0 {
+                    parts.push(format!("0x{:x}", flags));
+                }
+                if parts.is_empty() {
+                    format!("re.compile({})", pattern_repr)
+                } else {
+                    format!("re.compile({}, {})", pattern_repr, parts.join("|"))
+                }
+            }
             PyObject::Closure(_) => "<builtin function>".to_string(),
             PyObject::FutureAwaitIterator { future, yielded } => {
                 format!(

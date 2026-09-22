@@ -22,6 +22,47 @@ fn push_wtf8_codepoint(out: &mut Vec<u8>, cp: u32) {
 }
 
 impl Lexer {
+    /// Consume a `\N{...}` escape (called right after `\N` when the next
+    /// char is `{`). Returns the decoded char, or a lexer error for a
+    /// malformed escape (no closing `}` before the quote/newline/EOF) —
+    /// mirrors CPython: `(unicode error) 'unicodeescape' codec can't
+    /// decode bytes ...: malformed \N character escape`. Unknown names
+    /// stay lenient (U+FFFD), as before.
+    pub(crate) fn lex_unicode_name_escape(
+        &mut self,
+        quote: char,
+        triple: bool,
+    ) -> Result<char, Token> {
+        debug_assert_eq!(self.peek(), Some('{'));
+        self.advance(); // consume '{'
+        let malformed = || {
+            Token::LexerError(
+                "(unicode error) 'unicodeescape' codec can't decode bytes in position 0-2: malformed \\N character escape"
+                    .to_string(),
+            )
+        };
+        let mut name = String::new();
+        loop {
+            match self.advance() {
+                Some('}') => break,
+                None => return Err(malformed()),
+                Some('\n') => return Err(malformed()),
+                Some(c) if c == quote && !triple => return Err(malformed()),
+                Some(c) => name.push(c),
+            }
+        }
+        Ok(unicode_name_to_char(&name).unwrap_or('\u{FFFD}'))
+    }
+
+    /// Error token for `\N` NOT followed by `{` (mirrors CPython's
+    /// malformed-escape `SyntaxError`, not a literal backslash-N).
+    pub(crate) fn malformed_n_escape() -> Token {
+        Token::LexerError(
+            "(unicode error) 'unicodeescape' codec can't decode bytes in position 0-1: malformed \\N character escape"
+                .to_string(),
+        )
+    }
+
     pub(crate) fn read_bytes(&mut self, quote: char, raw: bool) -> Token {
         let mut bytes = Vec::new();
         let triple = self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote);
@@ -69,6 +110,13 @@ impl Lexer {
                                 bytes.push(val);
                             }
                             Some(c) if c == '\n' => {}
+                            Some(c) if c == '\r' => {
+                                // `\<CR>` / `\<CRLF>` are line
+                                // continuations too (mirrors CPython).
+                                if self.peek() == Some('\n') {
+                                    self.advance();
+                                }
+                            }
                             Some(c) => {
                                 bytes.push(b'\\');
                                 bytes.push(c as u8);
@@ -142,6 +190,13 @@ impl Lexer {
                                 bytes.push(val);
                             }
                             Some(c) if c == '\n' => {}
+                            Some(c) if c == '\r' => {
+                                // `\<CR>` / `\<CRLF>` are line
+                                // continuations too (mirrors CPython).
+                                if self.peek() == Some('\n') {
+                                    self.advance();
+                                }
+                            }
                             Some(c) => {
                                 bytes.push(b'\\');
                                 bytes.push(c as u8);
@@ -172,10 +227,14 @@ impl Lexer {
             }
         }
 
-        Token::Bytes(bytes)
+        self.emit(Token::Bytes(bytes))
     }
 
     pub(crate) fn read_string(&mut self, quote: char, raw: bool, fstring: bool) -> Token {
+        // Start position = the opening quote (already consumed by the
+        // caller, so one column back) — unterminated-string errors
+        // report HERE (mirrors CPython: offset points at the opener).
+        let (start_line, start_col) = (self.line, self.col.saturating_sub(1));
         let mut w: Vec<u8> = Vec::new(); // WTF-8 byte buffer
         let triple = self.peek() == Some(quote) && self.peek_ahead(1) == Some(quote);
         let mut terminated = false;
@@ -235,23 +294,23 @@ impl Lexer {
                                 push_wtf8_codepoint(&mut w, val);
                             }
                             Some('N') => {
-                                if self.advance() == Some('{') {
-                                    let mut name = String::new();
-                                    loop {
-                                        match self.advance() {
-                                            Some('}') => break,
-                                            Some(c) => name.push(c),
-                                            None => break,
-                                        }
+                                if self.peek() == Some('{') {
+                                    match self.lex_unicode_name_escape(quote, triple) {
+                                        Ok(ch) => push_wtf8_codepoint(&mut w, ch as u32),
+                                        Err(tok) => return tok,
                                     }
-                                    let ch = unicode_name_to_char(&name).unwrap_or('\u{FFFD}');
-                                    push_wtf8_codepoint(&mut w, ch as u32);
                                 } else {
-                                    w.push(b'\\');
-                                    w.push(b'N');
+                                    return Self::malformed_n_escape();
                                 }
                             }
                             Some(c) if c == '\n' => {}
+                            Some(c) if c == '\r' => {
+                                // `\<CR>` / `\<CRLF>` are line
+                                // continuations too (mirrors CPython).
+                                if self.peek() == Some('\n') {
+                                    self.advance();
+                                }
+                            }
                             Some(c) => {
                                 invalid_escapes.push(c);
                                 w.push(b'\\');
@@ -286,8 +345,8 @@ impl Lexer {
             }
             if !terminated {
                 return Token::LexerError(format!(
-                    "unterminated triple-quoted string literal (detected at line {})",
-                    self.line
+                    "L{}:{}: unterminated triple-quoted string literal (detected at line {})",
+                    start_line, start_col, self.line
                 ));
             }
         } else {
@@ -342,23 +401,23 @@ impl Lexer {
                                 push_wtf8_codepoint(&mut w, val);
                             }
                             Some('N') => {
-                                if self.advance() == Some('{') {
-                                    let mut name = String::new();
-                                    loop {
-                                        match self.advance() {
-                                            Some('}') => break,
-                                            Some(c) => name.push(c),
-                                            None => break,
-                                        }
+                                if self.peek() == Some('{') {
+                                    match self.lex_unicode_name_escape(quote, triple) {
+                                        Ok(ch) => push_wtf8_codepoint(&mut w, ch as u32),
+                                        Err(tok) => return tok,
                                     }
-                                    let ch = unicode_name_to_char(&name).unwrap_or('\u{FFFD}');
-                                    push_wtf8_codepoint(&mut w, ch as u32);
                                 } else {
-                                    w.push(b'\\');
-                                    w.push(b'N');
+                                    return Self::malformed_n_escape();
                                 }
                             }
                             Some(c) if c == '\n' => {}
+                            Some(c) if c == '\r' => {
+                                // `\<CR>` / `\<CRLF>` are line
+                                // continuations too (mirrors CPython).
+                                if self.peek() == Some('\n') {
+                                    self.advance();
+                                }
+                            }
                             Some(c) => {
                                 invalid_escapes.push(c);
                                 w.push(b'\\');
@@ -411,8 +470,8 @@ impl Lexer {
             }
             if !terminated {
                 return Token::LexerError(format!(
-                    "unterminated string literal (detected at line {})",
-                    self.line
+                    "L{}:{}: unterminated string literal (detected at line {})",
+                    start_line, start_col, self.line
                 ));
             }
         }
@@ -427,13 +486,13 @@ impl Lexer {
             }
         } else {
             for esc in invalid_escapes {
-                crate::modules::warnings_emit(
+                self.emit_syntax_warning(
                     &format!("\"\\{}\" is an invalid escape sequence. Did you mean \"\\\\{}\"? A raw string is also an option.", esc, esc),
                     "SyntaxWarning",
                 );
             }
         }
 
-        Token::String(PyStr::from_wtf8(w))
+        self.emit(Token::String(PyStr::from_wtf8(w)))
     }
 }

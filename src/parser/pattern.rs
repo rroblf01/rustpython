@@ -578,7 +578,7 @@ fn bound_names(pat: &Pattern) -> Result<Vec<String>, String> {
 /// Value patterns must be literals or dotted attribute lookups (complex
 /// literals included, with real/imaginary side rules).
 fn validate_value_expr(expr: &Expr) -> Result<(), String> {
-    match expr {
+    match expr.unlocate() {
         Expr::Constant(
             Constant::None
             | Constant::Bool(_)
@@ -592,7 +592,7 @@ fn validate_value_expr(expr: &Expr) -> Result<(), String> {
         Expr::Attribute { .. } => {
             let mut e = expr;
             loop {
-                match e {
+                match e.unlocate() {
                     Expr::Attribute { value, .. } => e = value,
                     Expr::Name(_) => return Ok(()),
                     _ => {
@@ -618,7 +618,7 @@ fn validate_value_expr(expr: &Expr) -> Result<(), String> {
 
 /// `-5`/`+5` (and signed imaginary): operand must be a plain number.
 fn validate_signed_number(expr: &Expr) -> Result<(), String> {
-    match expr {
+    match expr.unlocate() {
         Expr::Constant(Constant::Int(_) | Constant::Float(_) | Constant::Complex { .. }) => Ok(()),
         _ => Err("patterns may only match literals and attribute lookups".to_string()),
     }
@@ -636,7 +636,7 @@ fn validate_complex_parts(real: &Expr, imag: &Expr) -> Result<(), String> {
 }
 
 fn is_real_number(expr: &Expr) -> bool {
-    match expr {
+    match expr.unlocate() {
         Expr::Constant(Constant::Int(_) | Constant::Float(_)) => true,
         Expr::UnaryOp {
             op: UnaryOp::USub | UnaryOp::UAdd,
@@ -647,7 +647,7 @@ fn is_real_number(expr: &Expr) -> bool {
 }
 
 fn is_imaginary_number(expr: &Expr) -> bool {
-    match expr {
+    match expr.unlocate() {
         Expr::Constant(Constant::Complex { .. }) => true,
         Expr::UnaryOp {
             op: UnaryOp::USub | UnaryOp::UAdd,
@@ -684,7 +684,7 @@ fn parse_py_int(s: &str) -> Option<i128> {
 }
 
 fn pat_key_of(expr: &Expr) -> Option<PatKey> {
-    match expr {
+    match expr.unlocate() {
         Expr::Constant(Constant::None) => Some(PatKey::None),
         Expr::Constant(Constant::Bool(b)) => Some(PatKey::Bool(*b)),
         Expr::Constant(Constant::Int(s)) => parse_py_int(s).map(PatKey::Int),
@@ -745,7 +745,7 @@ fn patkey_real_value(expr: &Expr) -> Option<f64> {
 }
 
 fn patkey_imag_value(expr: &Expr) -> Option<f64> {
-    match expr {
+    match expr.unlocate() {
         Expr::Constant(Constant::Complex { real, imag }) => {
             let r: f64 = real.replace('_', "").parse().ok()?;
             let i: f64 = imag.replace('_', "").parse().ok()?;

@@ -9,25 +9,36 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
             regex,
             pattern,
             flags,
+            is_bytes,
         } => {
             let re = (**regex).clone();
             let pat = pattern.clone();
             let fl = *flags;
+            let pat_is_bytes = *is_bytes;
             match name {
-                "pattern" => Ok(py_str(&pat)),
+                "pattern" => {
+                    if pat_is_bytes {
+                        Ok(crate::modules::re_bytes_obj(&pat))
+                    } else {
+                        Ok(py_str(&pat))
+                    }
+                }
                 "flags" => Ok(py_int(fl as i64)),
                 "groups" => {
                     let n = re.capture_names().count().saturating_sub(1);
                     Ok(py_int(n as i64))
                 }
                 "groupindex" => {
+                    // CPython exposes a read-only mappingproxy: reads work,
+                    // item assignment raises TypeError.
                     let mut d = PyDict::new();
                     for (i, name) in re.capture_names().enumerate() {
                         if let Some(name) = name {
                             let _ = d.set(py_str(name), py_int(i as i64));
                         }
                     }
-                    Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
+                    let inner = PyObjectRef::new(PyObject::Dict(Box::new(d)));
+                    Ok(crate::modules::make_readonly_mapping(inner))
                 }
                 // `match`/`search`/`fullmatch` used to return a bare
                 // `(start, end, matched_text)` tuple instead of a real
@@ -55,13 +66,15 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         if args.len() < 1 {
                             return Err(PyError::type_error("match() takes at least 1 argument"));
                         }
-                        let string = args[0].str();
-                        let pos = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize;
-                        let endpos = args
-                            .get(2)
-                            .and_then(|a| a.as_i64())
-                            .unwrap_or(string.len() as i64)
-                            .max(0) as usize;
+                        let (string, subj_bytes) = crate::modules::re_method_string(args);
+                        let is_bytes = crate::modules::re_check_compat(pat_is_bytes, subj_bytes)?;
+                        // User positions are CHAR indices (mirrors CPython);
+                        // the engine wants BYTE indices.
+                        let (pos_c, raw_end) =
+                            crate::modules::re_pos_endpos(args, string.chars().count());
+                        let endpos_c = raw_end;
+                        let pos = crate::modules::char_to_byte_idx(&string, pos_c);
+                        let endpos = crate::modules::char_to_byte_idx(&string, endpos_c);
                         let caps = re
                             .captures_from_pos(&string, pos.min(string.len()))
                             .unwrap_or(None);
@@ -82,8 +95,9 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             &string,
                             &pat,
                             fl,
-                            pos,
-                            endpos.min(string.len()),
+                            pos_c,
+                            endpos_c.min(string.chars().count()),
+                            is_bytes,
                         ))
                     },
                 )))),
@@ -92,13 +106,14 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         if args.len() < 1 {
                             return Err(PyError::type_error("search() takes at least 1 argument"));
                         }
-                        let string = args[0].str();
-                        let pos = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize;
-                        let endpos = args
-                            .get(2)
-                            .and_then(|a| a.as_i64())
-                            .unwrap_or(string.len() as i64)
-                            .max(0) as usize;
+                        let (string, subj_bytes) = crate::modules::re_method_string(args);
+                        let is_bytes = crate::modules::re_check_compat(pat_is_bytes, subj_bytes)?;
+                        // User positions are CHAR indices (mirrors CPython);
+                        // the engine wants BYTE indices.
+                        let (pos_c, endpos_c) =
+                            crate::modules::re_pos_endpos(args, string.chars().count());
+                        let pos = crate::modules::char_to_byte_idx(&string, pos_c);
+                        let endpos = crate::modules::char_to_byte_idx(&string, endpos_c);
                         let caps = re
                             .captures_from_pos(&string, pos.min(string.len()))
                             .unwrap_or(None);
@@ -113,8 +128,9 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             &string,
                             &pat,
                             fl,
-                            pos,
-                            endpos.min(string.len()),
+                            pos_c,
+                            endpos_c.min(string.chars().count()),
+                            is_bytes,
                         ))
                     },
                 )))),
@@ -123,12 +139,19 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         if args.len() < 1 {
                             return Err(PyError::type_error("findall() takes at least 1 argument"));
                         }
-                        let string = args[0].str();
-                        let results: Vec<PyObjectRef> = re
-                            .find_iter(&string)
-                            .filter_map(|r| r.ok())
-                            .map(|m| py_str(m.as_str()))
-                            .collect();
+                        let (string, subj_bytes) = crate::modules::re_method_string(args);
+                        let is_bytes = crate::modules::re_check_compat(pat_is_bytes, subj_bytes)?;
+                        let (pos_c, endpos_c) =
+                            crate::modules::re_pos_endpos(args, string.chars().count());
+                        let pos = crate::modules::char_to_byte_idx(&string, pos_c);
+                        let endpos = crate::modules::char_to_byte_idx(&string, endpos_c);
+                        let groups = re.captures_len().saturating_sub(1);
+                        let results: Vec<PyObjectRef> = crate::modules::scan_captures(
+                            &re, &string, pos, endpos,
+                        )
+                        .iter()
+                        .map(|c| crate::modules::findall_groups(c, groups, is_bytes))
+                        .collect();
                         Ok(py_list(results))
                     },
                 )))),
@@ -139,23 +162,30 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 "finditer() takes at least 1 argument",
                             ));
                         }
-                        let string = args[0].str();
-                        let matches: Vec<PyObjectRef> = re
-                            .captures_iter(&string)
-                            .filter_map(|r| r.ok())
-                            .map(|c| {
-                                let start = c.get(0).map(|m| m.start()).unwrap_or(0);
-                                crate::modules::make_match_object_detailed(
-                                    &re,
-                                    Some(c),
-                                    &string,
-                                    &pat,
-                                    fl,
-                                    start,
-                                    string.len(),
-                                )
-                            })
-                            .collect();
+                        let (string, subj_bytes) = crate::modules::re_method_string(args);
+                        let is_bytes = crate::modules::re_check_compat(pat_is_bytes, subj_bytes)?;
+                        let (pos_c, endpos_c) =
+                            crate::modules::re_pos_endpos(args, string.chars().count());
+                        let pos = crate::modules::char_to_byte_idx(&string, pos_c);
+                        let endpos = crate::modules::char_to_byte_idx(&string, endpos_c);
+                        let matches: Vec<PyObjectRef> =
+                            crate::modules::scan_captures(&re, &string, pos, endpos)
+                                .into_iter()
+                                .map(|c| {
+                                    let start = c.get(0).map(|m| m.start()).unwrap_or(0);
+                                    crate::modules::make_match_object_prefixed(
+                                        &re,
+                                        Some(c),
+                                        &string,
+                                        &pat,
+                                        fl,
+                                        pos_c,
+                                        endpos_c.min(string.chars().count()),
+                                        is_bytes,
+                                        pos,
+                                    )
+                                })
+                                .collect();
                         Ok(py_list(matches))
                     },
                 )))),
@@ -169,13 +199,20 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         if args.len() < 2 {
                             return Err(PyError::type_error("sub() takes at least 2 arguments"));
                         }
-                        let is_callable_repl = !matches!(&*args[0].borrow(), PyObject::Str(_));
+                        let is_callable_repl = !crate::modules::re_is_template_repl(&args[0]);
+                        let (repl_text, repl_bytes) = crate::modules::re_text_arg(&args[0]);
                         let repl_template = if is_callable_repl {
                             String::new()
                         } else {
-                            crate::modules::translate_python_replacement(&args[0].str())
+                            crate::modules::translate_python_replacement(&repl_text)?
                         };
-                        let string = args[1].str();
+                        let (string, subj_bytes) = crate::modules::re_text_arg(&args[1]);
+                        let is_bytes = crate::modules::re_check_compat(pat_is_bytes, subj_bytes)?;
+                        if !is_callable_repl && repl_bytes != subj_bytes {
+                            return Err(PyError::type_error(
+                                "cannot use a string replacement on a bytes-like object",
+                            ));
+                        }
                         let count = if args.len() > 2 {
                             args[2].as_i64().unwrap_or(0)
                         } else {
@@ -209,10 +246,16 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     fl,
                                     m_start,
                                     string.len(),
+                                    is_bytes,
                                 );
                                 let replaced =
                                     call_bound_method(args[0].clone(), match_obj, vec![])?;
-                                result.push_str(&replaced.str());
+                                if is_bytes {
+                                    let (rs, _) = crate::modules::re_text_arg(&replaced);
+                                    result.push_str(&rs);
+                                } else {
+                                    result.push_str(&replaced.str());
+                                }
                             } else {
                                 let mut expanded = String::new();
                                 caps.expand(&repl_template, &mut expanded);
@@ -222,7 +265,11 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             n += 1;
                         }
                         result.push_str(&string[last_end..]);
-                        Ok(py_str(&result))
+                        if is_bytes {
+                            Ok(crate::modules::re_bytes_obj(&result))
+                        } else {
+                            Ok(py_str(&result))
+                        }
                     },
                 )))),
                 "split" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(
@@ -230,72 +277,54 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         if args.len() < 1 {
                             return Err(PyError::type_error("split() takes at least 1 argument"));
                         }
-                        let string = args[0].str();
+                        let (string, subj_bytes) = crate::modules::re_method_string(args);
+                        let is_bytes =
+                            crate::modules::re_check_compat(pat_is_bytes, subj_bytes)?;
+                        // Pieces and captured groups come back in the subject domain.
+                        let piece = |s: &str| -> PyObjectRef {
+                            if is_bytes {
+                                crate::modules::re_bytes_obj(s)
+                            } else {
+                                py_str(s)
+                            }
+                        };
                         let maxsplit = {
-                            let has_kwargs = args
-                                .last()
-                                .map_or(false, |a| matches!(&*a.borrow(), PyObject::Dict(_)));
-                            if has_kwargs {
+                            let has_kwargs = crate::modules::has_packed_kwargs(args);
+                            let npos = if has_kwargs { args.len() - 1 } else { args.len() };
+                            let posv = if npos > 1 {
+                                args[1].as_i64()
+                            } else {
+                                None
+                            };
+                            let kwv = if has_kwargs {
                                 if let PyObject::Dict(d) = &*args.last().unwrap().borrow() {
                                     d.get(&py_str("maxsplit"))
                                         .ok()
                                         .flatten()
                                         .and_then(|v| v.as_i64())
-                                        .unwrap_or(0) as usize
                                 } else {
-                                    0
-                                }
-                            } else if args.len() > 1 {
-                                if matches!(&*args[1].borrow(), PyObject::Dict(_)) {
-                                    0
-                                } else {
-                                    args[1].as_i64().unwrap_or(0) as usize
+                                    None
                                 }
                             } else {
-                                0
-                            }
+                                None
+                            };
+                            posv.or(kwv).unwrap_or(0).max(0) as usize
                         };
                         let mut result: Vec<PyObjectRef> = Vec::new();
                         let mut last_end = 0usize;
                         let mut n = 0usize;
-                        let mut caps_iter = re.captures_iter(&string);
-                        while let Some(caps_res) = caps_iter.next() {
-                            let caps = match caps_res {
-                                Ok(c) => c,
-                                Err(_) => break,
-                            };
+                        for caps in crate::modules::split_match_spans(&re, &string) {
                             if maxsplit != 0 && n >= maxsplit {
                                 break;
                             }
                             let m = caps.get(0).unwrap();
                             let (s, e) = (m.start(), m.end());
-                            if s == e {
-                                if s == string.len() {
-                                    break;
-                                }
-                                if s == last_end {
-                                    result.push(py_str(&string[last_end..s]));
-                                    for i in 1..caps.len() {
-                                        if let Some(g) = caps.get(i) {
-                                            result.push(py_str(g.as_str()));
-                                        } else {
-                                            result.push(py_none());
-                                        }
-                                    }
-                                    let next_len = string[s..]
-                                        .chars()
-                                        .next()
-                                        .map(|c| c.len_utf8())
-                                        .unwrap_or(1);
-                                    last_end = s + next_len;
-                                    n += 1;
-                                    continue;
-                                }
-                            }
-                            result.push(py_str(&string[last_end..s]));
+                            // Every yielded match contributes (see the
+                            // free-`split` fix: no end-of-string guard).
+                            result.push(piece(&string[last_end..s]));
                             for i in 1..caps.len() {
                                 if let Some(g) = caps.get(i) {
-                                    result.push(py_str(g.as_str()));
+                                    result.push(piece(g.as_str()));
                                 } else {
                                     result.push(py_none());
                                 }
@@ -303,7 +332,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             last_end = e;
                             n += 1;
                         }
-                        result.push(py_str(&string[last_end..]));
+                        result.push(piece(&string[last_end..]));
                         Ok(py_list(result))
                     },
                 )))),
@@ -314,20 +343,32 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 "fullmatch() takes at least 1 argument",
                             ));
                         }
-                        let string = args[0].str();
-                        let caps = re.captures(&string).unwrap_or(None).filter(|c| {
-                            c.get(0)
-                                .map(|m| m.start() == 0 && m.end() == string.len())
-                                .unwrap_or(false)
-                        });
+                        let (string, subj_bytes) = crate::modules::re_method_string(args);
+                        let is_bytes = crate::modules::re_check_compat(pat_is_bytes, subj_bytes)?;
+                        let (pos_c, endpos_c) =
+                            crate::modules::re_pos_endpos(args, string.chars().count());
+                        let pos = crate::modules::char_to_byte_idx(&string, pos_c);
+                        let endpos = crate::modules::char_to_byte_idx(&string, endpos_c);
+                        let caps = re
+                            .captures_from_pos(&string, pos.min(string.len()))
+                            .unwrap_or(None)
+                            .filter(|c| {
+                                c.get(0)
+                                    .map(|m| {
+                                        m.start() == pos.min(string.len())
+                                            && m.end() == endpos.min(string.len())
+                                    })
+                                    .unwrap_or(false)
+                            });
                         Ok(crate::modules::make_match_object_detailed(
                             &re,
                             caps,
                             &string,
                             &pat,
                             fl,
-                            0,
-                            string.len(),
+                            pos_c,
+                            endpos_c.min(string.chars().count()),
+                            is_bytes,
                         ))
                     },
                 )))),
@@ -336,13 +377,20 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         if args.len() < 2 {
                             return Err(PyError::type_error("subn() takes at least 2 arguments"));
                         }
-                        let is_callable_repl = !matches!(&*args[0].borrow(), PyObject::Str(_));
+                        let is_callable_repl = !crate::modules::re_is_template_repl(&args[0]);
+                        let (repl_text, repl_bytes) = crate::modules::re_text_arg(&args[0]);
                         let repl_template = if is_callable_repl {
                             String::new()
                         } else {
-                            crate::modules::translate_python_replacement(&args[0].str())
+                            crate::modules::translate_python_replacement(&repl_text)?
                         };
-                        let string = args[1].str();
+                        let (string, subj_bytes) = crate::modules::re_text_arg(&args[1]);
+                        let is_bytes = crate::modules::re_check_compat(pat_is_bytes, subj_bytes)?;
+                        if !is_callable_repl && repl_bytes != subj_bytes {
+                            return Err(PyError::type_error(
+                                "cannot use a string replacement on a bytes-like object",
+                            ));
+                        }
                         let count = if args.len() > 2 {
                             args[2].as_i64().unwrap_or(0)
                         } else {
@@ -376,10 +424,16 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     fl,
                                     m_start,
                                     string.len(),
+                                    is_bytes,
                                 );
                                 let replaced =
                                     call_bound_method(args[0].clone(), match_obj, vec![])?;
-                                result.push_str(&replaced.str());
+                                if is_bytes {
+                                    let (rs, _) = crate::modules::re_text_arg(&replaced);
+                                    result.push_str(&rs);
+                                } else {
+                                    result.push_str(&replaced.str());
+                                }
                             } else {
                                 let mut expanded = String::new();
                                 caps.expand(&repl_template, &mut expanded);
@@ -389,7 +443,14 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             n += 1;
                         }
                         result.push_str(&string[last_end..]);
-                        Ok(py_tuple(vec![py_str(&result), py_int(n)]))
+                        if is_bytes {
+                            Ok(py_tuple(vec![
+                                crate::modules::re_bytes_obj(&result),
+                                py_int(n),
+                            ]))
+                        } else {
+                            Ok(py_tuple(vec![py_str(&result), py_int(n)]))
+                        }
                     },
                 )))),
                 "scanner" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(
@@ -397,13 +458,14 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         if args.is_empty() {
                             return Err(PyError::type_error("scanner() missing string argument"));
                         }
-                        let string = args[0].str();
-                        let pos = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0).max(0) as usize;
-                        let endpos = args
-                            .get(2)
-                            .and_then(|a| a.as_i64())
-                            .unwrap_or(string.len() as i64)
-                            .max(0) as usize;
+                        let (string, subj_bytes) = crate::modules::re_method_string(args);
+                        let is_bytes = crate::modules::re_check_compat(pat_is_bytes, subj_bytes)?;
+                        // User positions are CHAR indices (mirrors CPython);
+                        // the engine wants BYTE indices.
+                        let (pos_c, endpos_c) =
+                            crate::modules::re_pos_endpos(args, string.chars().count());
+                        let pos = crate::modules::char_to_byte_idx(&string, pos_c);
+                        let endpos = crate::modules::char_to_byte_idx(&string, endpos_c);
                         let s = string.clone();
                         let p = pat.clone();
                         let fl = fl;
@@ -483,6 +545,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                                         fl2,
                                                         m.start(),
                                                         s.len(),
+                                                        false,
                                                     ),
                                                 );
                                             }
@@ -564,6 +627,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                                         fl2,
                                                         m.start(),
                                                         s.len(),
+                                                        false,
                                                     ),
                                                 );
                                             }
@@ -586,6 +650,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             regex: Box::new(re.clone()),
                             pattern: p.clone(),
                             flags: fl,
+                            is_bytes: pat_is_bytes,
                         });
                         let mut inst_dict = AttrMap::new();
                         inst_dict.insert_str("_re", re_obj.clone());

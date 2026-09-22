@@ -32,6 +32,31 @@ thread_local! {
     static WARN_AS_ERROR: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
 }
 
+// Filename used when rendering un-recorded warnings to stderr
+// (mirrors CPython's `file:line: Category: msg` format). Set by
+// `main.rs` when running a script file; defaults to `<string>`.
+thread_local! {
+    static WARN_FILENAME: std::cell::RefCell<String> =
+        const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Set the filename rendered in stderr warnings (call before
+/// parsing/executing a named script).
+pub fn set_warn_filename(name: &str) {
+    WARN_FILENAME.with(|f| *f.borrow_mut() = name.to_string());
+}
+
+fn warn_filename() -> String {
+    WARN_FILENAME.with(|f| {
+        let s = f.borrow();
+        if s.is_empty() {
+            "<string>".to_string()
+        } else {
+            s.clone()
+        }
+    })
+}
+
 fn warning_message_obj(message: PyObjectRef) -> PyObjectRef {
     let mut dict = AttrMap::new();
     dict.insert_str("message", message);
@@ -101,7 +126,7 @@ pub fn warnings_emit(msg: &str, category: &str) {
                     .set_attribute("__class__", cat_obj.clone());
                 dict.insert_str("message", msg_obj);
                 dict.insert_str("category", cat_obj.clone());
-                dict.insert_str("filename", py_str("<input>"));
+                dict.insert_str("filename", py_str(&warn_filename()));
                 dict.insert_str("lineno", py_int(1));
                 dict.insert_str("line", py_str(""));
                 let warn_type = PyObjectRef::new(PyObject::Type {
@@ -120,7 +145,103 @@ pub fn warnings_emit(msg: &str, category: &str) {
         }
     });
     if !recorded {
-        println!("Warning: {}", msg);
+        // Un-recorded warnings go to stderr (mirrors CPython; stdout
+        // printing polluted program output and broke subprocess tests
+        // asserting on stderr line counts).
+        eprintln!("{}: {}: {}", warn_filename(), category, msg);
+    }
+}
+
+/// Syntax-warning variant with source location, rendered CPython-style:
+/// `{file}:{line}: {Category}: {msg}` plus the indented source line
+/// (mirrors CPython, whose file-run warnings occupy 2 stderr lines).
+pub fn warnings_emit_at(
+    msg: &str,
+    category: &str,
+    filename: Option<&str>,
+    lineno: usize,
+    line_text: &str,
+) {
+    let filter = WARN_FILTER.with(|f| f.borrow().clone());
+    if filter == "ignore" {
+        return;
+    }
+    if filter == "error" {
+        WARN_AS_ERROR.with(|c| {
+            *c.borrow_mut() = Some((msg.to_string(), category.to_string()));
+        });
+        return;
+    }
+    let mut recorded = false;
+    WARN_RECORD_STACK.with(|s| {
+        if let Some(Some(list)) = s.borrow().last() {
+            if let PyObject::List(items) = &mut *list.borrow_mut() {
+                let cat_obj = {
+                    let mut found: Option<PyObjectRef> = None;
+                    let result =
+                        std::panic::catch_unwind(|| crate::vm::get_shared_builtins_module());
+                    if let Ok(bmod) = result {
+                        if let PyObject::Module { dict, .. } = &*bmod.borrow() {
+                            if let Some(obj) = dict.get_str(category) {
+                                found = Some(obj.clone());
+                            }
+                        }
+                    }
+                    found.unwrap_or_else(|| {
+                        PyObjectRef::new(PyObject::Type {
+                            name: category.to_string(),
+                            dict: Box::new(str_map_to_typedict(HashMap::new())),
+                            bases: vec![],
+                            mro: vec![],
+                        })
+                    })
+                };
+                let mut msg_obj = PyObjectRef::new(PyObject::Exception {
+                    typ: category.to_string(),
+                    args: vec![py_str(msg)],
+                    cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
+                    extra: None,
+                });
+                let _ = msg_obj
+                    .borrow_mut()
+                    .set_attribute("__class__", cat_obj.clone());
+                let mut dict = AttrMap::new();
+                dict.insert_str("message", msg_obj);
+                dict.insert_str("category", cat_obj.clone());
+                dict.insert_str(
+                    "filename",
+                    py_str(
+                        &filename
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(warn_filename),
+                    ),
+                );
+                dict.insert_str("lineno", py_int(lineno as i64));
+                dict.insert_str("line", py_str(line_text));
+                let warn_type = PyObjectRef::new(PyObject::Type {
+                    name: "WarningMessage".to_string(),
+                    dict: Box::new(str_map_to_typedict(HashMap::new())),
+                    bases: vec![],
+                    mro: vec![],
+                });
+                let warn_obj = PyObjectRef::new(PyObject::Instance {
+                    typ: warn_type,
+                    dict,
+                });
+                items.push(warn_obj);
+                recorded = true;
+            }
+        }
+    });
+    if !recorded {
+        let fname = filename
+            .map(|s| s.to_string())
+            .unwrap_or_else(warn_filename);
+        eprintln!("{}:{}: {}: {}", fname, lineno, category, msg);
+        eprintln!("  {}", line_text.trim_end_matches(['\r', '\n']));
     }
 }
 
@@ -838,7 +959,7 @@ fn zi_code_from_member(member: &str, data: &[u8], virtual_path: &str) -> Option<
         crate::modules::code_object_from_marshal_bytes(&data[16..])
     } else {
         let source = crate::object::import_builtin::decode_source_bytes(data).ok()?;
-        let mut parser = crate::parser::Parser::new(&source);
+        let mut parser = crate::parser::Parser::new(&source, false);
         let program = parser.parse_program().ok()?;
         let mut compiler = crate::compiler::Compiler::new();
         compiler.compile(&program, virtual_path).ok()

@@ -422,6 +422,9 @@ pub enum PyObject {
         regex: Box<fancy_regex::Regex>,
         pattern: String,
         flags: i32,
+        /// True when compiled from a bytes pattern (match subjects must
+        /// be bytes-like, groups come back as bytes).
+        is_bytes: bool,
     },
     Closure(Rc<dyn Fn(&[PyObjectRef]) -> PyResult<PyObjectRef>>),
     /// Implements the await protocol for Futures.
@@ -1020,14 +1023,16 @@ impl PyObject {
                 PyObject::CompiledRegex {
                     pattern: a,
                     flags: af,
+                    is_bytes: ab,
                     ..
                 },
                 PyObject::CompiledRegex {
                     pattern: b,
                     flags: bf,
+                    is_bytes: bb,
                     ..
                 },
-            ) => a == b && af == bf,
+            ) => a == b && af == bf && ab == bb,
             // Code objects compare structurally — real CPython's
             // `code.__eq__` does (test_codeop asserts `compile_command(src)
             // == compile(src, ...)`). Two separately compiled-but-identical

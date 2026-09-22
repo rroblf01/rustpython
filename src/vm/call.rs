@@ -561,6 +561,11 @@ impl VirtualMachine {
             }
         }
 
+        // (Bare `eval`/`exec` caller-namespace handling lives in the
+        // `exec(source[, globals[, locals]])` interception further below,
+        // which already snapshots caller fast-locals for argument-less
+        // calls — see the bare-`exec` namespace branch there.)
+
         // `globals()`/`locals()` — same `with_vm_mut`-is-unconditional-UB
         // class of bug (confirmed via a general repro: `def f(): locals()`
         // — not a segfault this time, but `vm.frames` reading back empty
@@ -980,7 +985,7 @@ impl VirtualMachine {
                                 PyError::syntax_error_with_filename(e, "<string>", &source)
                             })?
                         } else {
-                            let mut parser = crate::parser::Parser::new(&source);
+                            let mut parser = crate::parser::Parser::new(&source, false);
                             parser.parse_program().map_err(|e| {
                                 PyError::syntax_error_with_filename(e, "<string>", &source)
                             })?
@@ -1093,6 +1098,40 @@ impl VirtualMachine {
                             }
                         }
                         Some(Rc::new(RefCell::new(hm)))
+                    } else {
+                        None
+                    }
+                } else if is_exec && args.len() == 1 {
+                    // Bare `exec(source)` in function scope: merge the
+                    // caller frame's globals, fast-locals (by varname)
+                    // and frame locals into one namespace so reads
+                    // resolve (mirrors the bare-`eval` snapshot above
+                    // plus `locals()`' frame-locals merge). Writes stay
+                    // contained in the copy, matching CPython's
+                    // exec-in-function gotcha. Module scope (no
+                    // populated fast locals) keeps the live globals
+                    // below so writes stay visible. Explicit-non-dict
+                    // globals args keep the historical fallthrough.
+                    if let Some(f) = self.frames.last() {
+                        if f.fast_locals.iter().any(|s| s.is_some()) {
+                            let mut hm: HashMap<StrId, PyObjectRef> = f
+                                .globals
+                                .borrow()
+                                .iter()
+                                .map(|(k, v)| (*k, v.clone()))
+                                .collect();
+                            for (i, name) in f.code.varnames.iter().enumerate() {
+                                if let Some(v) = f.fast_locals.get(i).and_then(|v| v.clone()) {
+                                    hm.insert(*name, v);
+                                }
+                            }
+                            for (k, v) in f.locals.iter() {
+                                hm.insert(interner::intern(&crate::interner::lookup(k)), v.clone());
+                            }
+                            Some(Rc::new(RefCell::new(hm)))
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }

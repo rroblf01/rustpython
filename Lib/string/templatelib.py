@@ -1,25 +1,33 @@
-"""String template library submodule stub."""
+"""Support for template string literals (t-strings)."""
 
-class Interpolation:
-    """Represents a template interpolation field."""
-    pass
+t = t"{0}"
+Template = type(t)
+Interpolation = type(t.interpolations[0])
+del t
 
+def convert(obj, /, conversion):
+    """Convert *obj* using formatted string literal semantics."""
+    if conversion is None:
+        return obj
+    if conversion == 'r':
+        return repr(obj)
+    if conversion == 's':
+        return str(obj)
+    if conversion == 'a':
+        return ascii(obj)
+    raise ValueError(f'invalid conversion specifier: {conversion}')
 
-class Template:
-    """String template with $variable substitution."""
+def _template_unpickle(*args):
+    import itertools
 
-    def __init__(self, template):
-        self.template = template
+    if len(args) != 2:
+        raise ValueError('Template expects tuple of length 2 to unpickle')
 
-    def safe_substitute(self, mapping={}, **kwargs):
-        result = self.template
-        d = dict(mapping)
-        d.update(kwargs)
-        for key, value in d.items():
-            result = result.replace(f'${{{key}}}', str(value))
-            result = result.replace(f'${key}', str(value))
-        return result
-
-    def substitute(self, mapping={}, **kwargs):
-        result = self.safe_substitute(mapping, **kwargs)
-        return result
+    strings, interpolations = args
+    parts = []
+    for string, interpolation in itertools.zip_longest(strings, interpolations):
+        if string is not None:
+            parts.append(string)
+        if interpolation is not None:
+            parts.append(interpolation)
+    return Template(*parts)

@@ -31,11 +31,45 @@ pub fn resolve_group_arg(obj: &PyObjectRef, arg: Option<&PyObjectRef>) -> Option
                 }
                 _ => {
                     drop(b);
-                    a.as_i64().map(|i| i as usize)
+                    to_group_index(a)
                 }
             }
         }
     }
+}
+
+/// Resolve a group index, honoring the `__index__` protocol (CPython's
+/// `m.group(Index(1))` works). Returns None for out-of-range/huge values.
+fn to_group_index(arg: &PyObjectRef) -> Option<usize> {
+    if let Some(i) = arg.as_i64() {
+        return Some(i as usize);
+    }
+    let typ = {
+        let b = arg.borrow();
+        if let PyObject::Instance { typ, .. } = &*b {
+            Some(typ.clone())
+        } else {
+            None
+        }
+    };
+    if let Some(typ) = typ {
+        if let Some(f) = crate::object::lookup_dunder_via_mro(&typ, "__index__") {
+            if let Ok(result) = crate::object::call_bound_method(f, arg.clone(), vec![]) {
+                if let Some(i) = result.as_i64() {
+                    return Some(i as usize);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn match_no_setitem(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    Err(PyError::type_error("Match object does not support item assignment"))
+}
+
+fn match_no_delitem(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    Err(PyError::type_error("Match object does not support item deletion"))
 }
 
 /// Build a re.Match object with group(), groups(), groupdict(), start(),
@@ -52,7 +86,7 @@ pub fn make_match_object(
     re: &fancy_regex::Regex,
     caps: Option<fancy_regex::Captures<'_>>,
 ) -> PyObjectRef {
-    make_match_object_detailed(re, caps, "", "", 0, 0, 0)
+    make_match_object_detailed(re, caps, "", "", 0, 0, 0, false)
 }
 
 pub fn make_match_object_detailed(
@@ -63,12 +97,44 @@ pub fn make_match_object_detailed(
     flags: i32,
     pos: usize,
     endpos: usize,
+    is_bytes: bool,
+) -> PyObjectRef {
+    make_match_object_prefixed(
+        re,
+        caps,
+        original_string,
+        pattern,
+        flags,
+        pos,
+        endpos,
+        is_bytes,
+        0,
+    )
+}
+
+/// Like `make_match_object_detailed`, but the `caps` positions are
+/// relative to a subject slice starting `byte_offset` bytes into
+/// `original_string` (used by the pos/endpos scan).
+pub fn make_match_object_prefixed(
+    re: &fancy_regex::Regex,
+    caps: Option<fancy_regex::Captures<'_>>,
+    original_string: &str,
+    pattern: &str,
+    flags: i32,
+    pos: usize,
+    endpos: usize,
+    is_bytes: bool,
+    byte_offset: usize,
 ) -> PyObjectRef {
     match caps {
         Some(caps) => {
+            // The engine reports BYTE indices; CPython positions are
+            // CHAR indices (identical for ASCII). The subject text here
+            // is the latin-1-decoded view in bytes mode, still 1:1 with
+            // the raw bytes, so one conversion covers both modes.
             let whole = caps.get(0).unwrap();
-            let start_pos = whole.start();
-            let end_pos = whole.end();
+            let start_pos = super::byte_to_char_idx(original_string, whole.start() + byte_offset);
+            let end_pos = super::byte_to_char_idx(original_string, whole.end() + byte_offset);
             let text = whole.as_str().to_string();
 
             // Per-group text/start/end (index 0 = whole match, matching
@@ -81,9 +147,18 @@ pub fn make_match_object_detailed(
             for i in 0..n_groups {
                 match caps.get(i) {
                     Some(g) => {
-                        groups_text.push(py_str(g.as_str()));
-                        starts.push(py_int(g.start() as i64));
-                        ends.push(py_int(g.end() as i64));
+                        if is_bytes {
+                            groups_text.push(super::re_bytes_obj(g.as_str()));
+                        } else {
+                            groups_text.push(py_str(g.as_str()));
+                        }
+                        starts.push(py_int(
+                            super::byte_to_char_idx(original_string, g.start() + byte_offset)
+                                as i64,
+                        ));
+                        ends.push(py_int(
+                            super::byte_to_char_idx(original_string, g.end() + byte_offset) as i64,
+                        ));
                     }
                     None => {
                         groups_text.push(py_none());
@@ -100,6 +175,7 @@ pub fn make_match_object_detailed(
             }
 
             let mut type_dict = HashMap::new();
+            type_dict.insert_str("__module__", py_str("re"));
 
             // group([n_or_name, ...]) — with no args, the whole match; with
             // one arg, that group's text (`None` if the group didn't
@@ -342,6 +418,22 @@ pub fn make_match_object_detailed(
                 }),
             );
 
+            // Match objects are read-only (CPython: no item assignment).
+            type_dict.insert_str(
+                "__setitem__",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__setitem__".to_string(),
+                    func: match_no_setitem,
+                }),
+            );
+            type_dict.insert_str(
+                "__delitem__",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__delitem__".to_string(),
+                    func: match_no_delitem,
+                }),
+            );
+
             type_dict.insert_str(
                 "expand",
                 PyObjectRef::new(PyObject::BuiltinFunction {
@@ -352,7 +444,7 @@ pub fn make_match_object_detailed(
                         }
                         let self_obj = &args[0];
                         let template = args[1].str();
-                        let translated = translate_python_replacement(&template);
+                        let translated = translate_python_replacement(&template)?;
                         let group_texts = self_obj
                             .borrow()
                             .get_attribute("_groups_text")
@@ -406,7 +498,11 @@ pub fn make_match_object_detailed(
                                     }
                                 };
                                 if !matches!(&*val.borrow(), PyObject::None) {
-                                    result.push_str(&val.str());
+                                    // Bytes groups decode via latin-1 so
+                                    // template expansion stays textual
+                                    // (the caller re-encodes for bytes).
+                                    let (vs, _) = super::re_text_arg(&val);
+                                    result.push_str(&vs);
                                 }
                                 i = if j < chars.len() { j + 1 } else { j };
                             } else if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '$'
@@ -429,11 +525,21 @@ pub fn make_match_object_detailed(
                     name: "__repr__".to_string(),
                     func: |args| {
                         let self_obj = &args[0];
-                        let text = self_obj
+                        let text_obj = self_obj
                             .borrow()
                             .get_attribute("_text")
-                            .unwrap_or_else(|_| py_str(""))
-                            .str();
+                            .unwrap_or_else(|_| py_str(""));
+                        // Matches render `match='...'` / `match=b'...'`
+                        // (mirrors CPython: the matched text repr).
+                        let text = match &*text_obj.borrow() {
+                            PyObject::Bytes(b) => {
+                                let s: String = b.iter().map(|&x| x as char).collect();
+                                format!("b'{}'", s.replace('\'', "\\'"))
+                            }
+                            _ => {
+                                format!("'{}'", text_obj.str().replace('\'', "\\'"))
+                            }
+                        };
                         let s = self_obj
                             .borrow()
                             .get_attribute("_start")
@@ -493,10 +599,17 @@ pub fn make_match_object_detailed(
                 regex: Box::new(re.clone()),
                 pattern: pattern.to_string(),
                 flags,
+                is_bytes,
             });
 
             let mut instance_dict = AttrMap::new();
-            instance_dict.insert_str("_text", py_str(&text));
+            // In bytes mode the whole-match text and the `.string`
+            // attribute are bytes objects (mirrors CPython).
+            if is_bytes {
+                instance_dict.insert_str("_text", super::re_bytes_obj(&text));
+            } else {
+                instance_dict.insert_str("_text", py_str(&text));
+            }
             instance_dict.insert_str("_start", py_int(start_pos as i64));
             instance_dict.insert_str("_end", py_int(end_pos as i64));
             // `_groups_text`/`_starts`/`_ends` are 0-indexed with index 0 =
@@ -511,7 +624,11 @@ pub fn make_match_object_detailed(
                 PyObjectRef::new(PyObject::Dict(Box::new(name_to_index))),
             );
             instance_dict.insert_str("re", re_obj.clone());
-            instance_dict.insert_str("string", py_str(&effective_string));
+            if is_bytes {
+                instance_dict.insert_str("string", super::re_bytes_obj(&effective_string));
+            } else {
+                instance_dict.insert_str("string", py_str(&effective_string));
+            }
             instance_dict.insert_str("pos", py_int(effective_pos as i64));
             instance_dict.insert_str("endpos", py_int(effective_endpos as i64));
             instance_dict.insert_str("regs", py_tuple(regs_items));

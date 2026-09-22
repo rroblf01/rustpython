@@ -5,6 +5,27 @@ use super::Parser;
 
 impl Parser {
     pub(crate) fn parse_primary(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_primary_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_primary_inner(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_atom()?;
         loop {
             if self.eat(&Token::Dot) {
@@ -193,6 +214,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_slice_or_expr(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_slice_or_expr_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_slice_or_expr_inner(&mut self) -> Result<Expr, String> {
         if self.eat(&Token::Colon) {
             let mut upper = None;
             let step;

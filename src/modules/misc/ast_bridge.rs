@@ -56,6 +56,25 @@ impl AstBuilder {
         }
     }
 
+    /// Stamp a built node with a source span from `Expr::position`.
+    /// Lexer columns are 1-indexed; `col_offset`/`end_col_offset` are
+    /// 0-indexed like CPython's.
+    fn set_span(
+        &self,
+        node: &PyObjectRef,
+        line: usize,
+        col: usize,
+        end_line: usize,
+        end_col: usize,
+    ) {
+        if let PyObject::Instance { dict, .. } = &mut *node.borrow_mut() {
+            dict.insert_str("lineno", py_int(line as i64));
+            dict.insert_str("col_offset", py_int(col.saturating_sub(1) as i64));
+            dict.insert_str("end_lineno", py_int(end_line as i64));
+            dict.insert_str("end_col_offset", py_int(end_col.saturating_sub(1) as i64));
+        }
+    }
+
     fn const_none(&self) -> PyObjectRef {
         py_none()
     }
@@ -763,7 +782,19 @@ impl AstBuilder {
     }
 
     fn build_expr(&self, e: &Expr, ctx: &str) -> PyResult<PyObjectRef> {
-        match e {
+        // Stamp source spans from `Expr::Located` (children stamp
+        // themselves via their own recursive `build_expr` calls).
+        let pos = e.position();
+        let node = self.build_expr_inner(e.unlocate(), ctx)?;
+        if let Some((line, col, end_line, end_col)) = pos {
+            self.set_span(&node, line, col, end_line, end_col);
+        }
+        Ok(node)
+    }
+
+    fn build_expr_inner(&self, e: &Expr, ctx: &str) -> PyResult<PyObjectRef> {
+        match e.unlocate() {
+            Expr::Located { .. } => unreachable!("peeled via unlocate"),
             Expr::BoolOp { op, values } => {
                 let on = match op {
                     BoolOp::And => "And",
@@ -935,14 +966,20 @@ impl AstBuilder {
                 let mut values: Vec<PyObjectRef> = vec![];
                 for p in parts {
                     match p {
-                        FStringPart::String(s) => values.push(self.mk(
-                            "Constant",
-                            vec![("value", py_str(s)), ("kind", self.const_none())],
-                        )?),
+                        FStringPart::String(s, span) => {
+                            let node = self.mk(
+                                "Constant",
+                                vec![("value", py_str(s)), ("kind", self.const_none())],
+                            )?;
+                            let ((sl, sc), (el, ec)) = *span;
+                            self.set_span(&node, sl, sc, el, ec);
+                            values.push(node);
+                        }
                         FStringPart::Expr {
                             expr,
                             conversion,
                             format_spec,
+                            span,
                         } => {
                             let conv = match conversion {
                                 0 => py_int(-1),
@@ -950,7 +987,7 @@ impl AstBuilder {
                                 2 => py_int(115),
                                 _ => py_int(97),
                             };
-                            values.push(self.mk(
+                            let fv = self.mk(
                                 "FormattedValue",
                                 vec![
                                     ("value", self.build_expr(expr, "Load")?),
@@ -959,37 +996,58 @@ impl AstBuilder {
                                         "format_spec",
                                         match format_spec {
                                             Some(f) => {
-                                                let inner = self.build_expr(f, "Load")?;
-                                                // The spec expression may already
-                                                // be a JoinedStr (nested
-                                                // replacement fields parse as
-                                                // f-strings) — don't
-                                                // double-wrap.
-                                                let is_joined = match &*inner.borrow() {
-                                                    PyObject::Instance { typ, .. } => {
-                                                        match &*typ.borrow() {
-                                                            PyObject::Type { name, .. } => {
-                                                                name == "JoinedStr"
-                                                            }
-                                                            _ => false,
-                                                        }
-                                                    }
-                                                    _ => false,
-                                                };
-                                                if is_joined {
-                                                    inner
-                                                } else {
+                                                // An explicit-but-empty spec
+                                                // (`f'{a:}'`) is `JoinedStr`
+                                                // with no values (mirrors
+                                                // CPython), not None.
+                                                let is_empty_str = matches!(
+                                                    f.as_ref(),
+                                                    Expr::Constant(
+                                                        crate::ast::Constant::String(s)
+                                                    ) if s.as_str().is_empty()
+                                                );
+                                                if is_empty_str {
                                                     self.mk(
                                                         "JoinedStr",
-                                                        vec![("values", py_list(vec![inner]))],
+                                                        vec![("values", py_list(vec![]))],
                                                     )?
+                                                } else {
+                                                    let inner = self.build_expr(f, "Load")?;
+                                                    // The spec expression may
+                                                    // already be a JoinedStr
+                                                    // (nested replacement
+                                                    // fields parse as
+                                                    // f-strings) — don't
+                                                    // double-wrap.
+                                                    let is_joined = match &*inner.borrow() {
+                                                        PyObject::Instance { typ, .. } => {
+                                                            match &*typ.borrow() {
+                                                                PyObject::Type { name, .. } => {
+                                                                    name == "JoinedStr"
+                                                                }
+                                                                _ => false,
+                                                            }
+                                                        }
+                                                        _ => false,
+                                                    };
+                                                    if is_joined {
+                                                        inner
+                                                    } else {
+                                                        self.mk(
+                                                            "JoinedStr",
+                                                            vec![("values", py_list(vec![inner]))],
+                                                        )?
+                                                    }
                                                 }
                                             }
                                             None => self.const_none(),
                                         },
                                     ),
                                 ],
-                            )?);
+                            )?;
+                            let ((fsl, fsc), (fel, fec)) = *span;
+                            self.set_span(&fv, fsl, fsc, fel, fec);
+                            values.push(fv);
                         }
                     }
                 }
@@ -999,15 +1057,21 @@ impl AstBuilder {
                 let mut values: Vec<PyObjectRef> = vec![];
                 for p in parts {
                     match p {
-                        TemplateStrPart::String(s) => values.push(self.mk(
-                            "Constant",
-                            vec![("value", py_str(s)), ("kind", self.const_none())],
-                        )?),
+                        TemplateStrPart::String(s, span) => {
+                            let node = self.mk(
+                                "Constant",
+                                vec![("value", py_str(s)), ("kind", self.const_none())],
+                            )?;
+                            let ((sl, sc), (el, ec)) = *span;
+                            self.set_span(&node, sl, sc, el, ec);
+                            values.push(node);
+                        }
                         TemplateStrPart::Interpolation {
                             expr,
                             str_text,
                             conversion,
                             format_spec,
+                            span,
                         } => {
                             let conv = match conversion {
                                 0 => py_int(-1),
@@ -1015,7 +1079,7 @@ impl AstBuilder {
                                 2 => py_int(115),
                                 _ => py_int(97),
                             };
-                            values.push(self.mk(
+                            let interp = self.mk(
                                 "Interpolation",
                                 vec![
                                     ("value", self.build_expr(expr, "Load")?),
@@ -1050,7 +1114,10 @@ impl AstBuilder {
                                         },
                                     ),
                                 ],
-                            )?);
+                            )?;
+                            let ((fsl, fsc), (fel, fec)) = *span;
+                            self.set_span(&interp, fsl, fsc, fel, fec);
+                            values.push(interp);
                         }
                     }
                 }
@@ -1364,15 +1431,16 @@ fn parse_func_type(source: &str, filename: &str) -> PyResult<PyObjectRef> {
     let ai = arrow.ok_or_else(|| err("invalid syntax".to_string()))?;
     let args_src: String = chars[..ai].iter().collect();
     let ret_src: String = chars[ai + 2..].iter().collect();
-    let mut ap = crate::parser::Parser::new(args_src.trim());
+    let mut ap = crate::parser::Parser::new(args_src.trim(), true);
     ap.allow_top_level_await = true;
     let args_expr = ap.parse_single_expr().map_err(|m| err(m))?;
-    let mut rp = crate::parser::Parser::new(ret_src.trim());
+    let mut rp = crate::parser::Parser::new(ret_src.trim(), true);
     rp.allow_top_level_await = true;
     let ret_expr = rp.parse_single_expr().map_err(|m| err(m))?;
     let mut b = AstBuilder::new()?;
     // Args must be a parenthesized tuple (possibly empty).
-    let argtypes: Vec<PyObjectRef> = match &args_expr {
+    // Peel positions (see `Expr::Located`).
+    let argtypes: Vec<PyObjectRef> = match args_expr.unlocate() {
         Expr::Tuple(elts) => elts
             .iter()
             .map(|e| b.build_expr(e, "Load"))
@@ -1418,7 +1486,7 @@ fn parse_int_literal(s: &str) -> PyObjectRef {
 
 /// Entry point for `_ast_native._parse_tree(source, filename, mode)`.
 pub fn parse_tree(source: &str, filename: &str, mode: &str) -> PyResult<PyObjectRef> {
-    let mut parser = crate::parser::Parser::new(source);
+    let mut parser = crate::parser::Parser::new(source, mode == "eval");
     // `ast.parse` builds a tree without compiling: async constructs are
     // legal anywhere at parse time (CPython validates async context at
     // compile time, not parse time).

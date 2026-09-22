@@ -19,6 +19,11 @@ pub enum Opcode {
     BUILD_SLICE = 47,
     BUILD_STRING = 48,
     BUILD_TUPLE = 49,
+    // PEP 750 template strings (CPython numbers: BUILD_TEMPLATE is really
+    // 2; BUILD_INTERPOLATION is really 45, taken here by our BUILD_MAP, so
+    // it uses free slot 3 instead).
+    BUILD_TEMPLATE = 2,
+    BUILD_INTERPOLATION = 3,
     CALL = 50,
     CALL_FUNCTION_EX = 4,
     CALL_KW = 53,
@@ -228,6 +233,8 @@ pub fn stack_effect(opcode: Opcode, arg: u32) -> i64 {
         CALL_KW => 1 - (arg as i64 + 3).max(0),
         PUSH_NULL => 1,
         BUILD_LIST | BUILD_TUPLE | BUILD_SET | BUILD_STRING => 1 - arg as i64,
+        BUILD_TEMPLATE => -1,
+        BUILD_INTERPOLATION => 1 - (2 + (arg & 1) as i64),
         BUILD_MAP => 1 - 2 * arg as i64,
         BUILD_SLICE => 1 - arg as i64,
         LIST_APPEND | SET_ADD => -1,
@@ -265,8 +272,8 @@ impl Opcode {
             JUMP_FORWARD | JUMP_BACKWARD | JUMP | POP_JUMP_IF_FALSE | POP_JUMP_IF_TRUE
             | POP_JUMP_IF_NONE | POP_JUMP_IF_NOT_NONE | FOR_ITER => OpGroup::Control,
             BUILD_LIST | BUILD_TUPLE | BUILD_MAP | BUILD_SET | BUILD_SLICE | BUILD_STRING
-            | LIST_APPEND | LIST_EXTEND | MAP_ADD | SET_ADD | SET_UPDATE | UNPACK_SEQUENCE
-            | UNPACK_EX => OpGroup::Build,
+            | BUILD_TEMPLATE | BUILD_INTERPOLATION | LIST_APPEND | LIST_EXTEND | MAP_ADD
+            | SET_ADD | SET_UPDATE | UNPACK_SEQUENCE | UNPACK_EX => OpGroup::Build,
             DUP_TOP | POP_TOP | COPY | SWAP | GET_ITER => OpGroup::Stack,
             RETURN_VALUE | YIELD_VALUE | RAISE_VARARGS | RERAISE | SEND => OpGroup::Control,
             _ => OpGroup::Other,
@@ -276,6 +283,8 @@ impl Opcode {
     pub fn from_u16(n: u16) -> Option<Opcode> {
         use Opcode::*;
         Some(match n {
+            2 => BUILD_TEMPLATE,
+            3 => BUILD_INTERPOLATION,
             4 => CALL_FUNCTION_EX,
             42 => BINARY_OP,
             44 => BUILD_LIST,
@@ -386,6 +395,8 @@ pub(crate) fn needs_arg(op: Opcode) -> bool {
             | BUILD_SET
             | BUILD_SLICE
             | BUILD_STRING
+            | BUILD_TEMPLATE
+            | BUILD_INTERPOLATION
             | BUILD_TUPLE
             | CALL
             | CALL_FUNCTION_EX

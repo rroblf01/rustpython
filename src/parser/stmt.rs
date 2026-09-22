@@ -457,7 +457,7 @@ impl Parser {
         } else {
             // A bare `print` followed by more tokens (`print "Hello"` — the
             // Python 2 print statement) gets CPython's dedicated hint.
-            if let Expr::Name(n) = &expr {
+            if let Expr::Name(n) = expr.unlocate() {
                 if n == "print"
                     && !self.at(&Token::Newline)
                     && !self.at(&Token::Semicolon)
@@ -503,6 +503,11 @@ impl Parser {
         }
         if self.at(&Token::EndOfFile) {
             return Ok(());
+        }
+        // A pending lexer error (e.g. a stray backslash at EOF) surfaces
+        // verbatim instead of being reported as a trailing token.
+        if let Token::LexerError(msg) = &self.current {
+            return Err(msg.clone());
         }
         // A trailing non-terminator token means two statements were jammed
         // together with no separator (`print "Hello World"` / `x = 1 y`) —
@@ -897,7 +902,10 @@ impl Parser {
             self.suite_depth += 1;
             let result: Result<(), String> = (|| {
                 if !self.at(&Token::Dedent) && !self.at(&Token::EndOfFile) {
-                    let line = self.lexer.get_line_col().0;
+                    // Statement start line = current token start
+                    // (live lexer position already ran ahead over
+                    // eagerly scanned multiline strings).
+                    let line = self.current_start.0;
                     let stmt = self.parse_stmt()?;
                     self.push_tracked_stmt(&mut stmts, line, stmt);
                     while self.eat(&Token::Semicolon) {
@@ -907,7 +915,10 @@ impl Parser {
                         {
                             break;
                         }
-                        let line = self.lexer.get_line_col().0;
+                        // Statement start line = current token start
+                        // (live lexer position already ran ahead over
+                        // eagerly scanned multiline strings).
+                        let line = self.current_start.0;
                         let stmt = self.parse_stmt()?;
                         self.push_tracked_stmt(&mut stmts, line, stmt);
                     }
@@ -946,7 +957,10 @@ impl Parser {
                 if self.at(&Token::Dedent) || self.at(&Token::EndOfFile) {
                     continue;
                 }
-                let line = self.lexer.get_line_col().0;
+                // Statement start line = current token start
+                // (live lexer position already ran ahead over
+                // eagerly scanned multiline strings).
+                let line = self.current_start.0;
                 let stmt = self.parse_stmt()?;
                 self.push_tracked_stmt(&mut stmts, line, stmt);
             }
@@ -983,7 +997,10 @@ impl Parser {
             if self.at(&Token::Dedent) || self.at(&Token::EndOfFile) {
                 continue;
             }
-            let line = self.lexer.get_line_col().0;
+            // Statement start line = current token start
+            // (live lexer position already ran ahead over
+            // eagerly scanned multiline strings).
+            let line = self.current_start.0;
             let stmt = self.parse_stmt()?;
             self.push_tracked_stmt(&mut stmts, line, stmt);
         }

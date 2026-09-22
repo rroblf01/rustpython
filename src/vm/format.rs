@@ -332,6 +332,42 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         }
     }
 
+    // An int only accepts integer presentation types (mirrors the float
+    // rule above; `f'{1000:j}'` is a ValueError, not str()).
+    if is_int {
+        if let Some(t) = fmt_type {
+            if !matches!(
+                t,
+                'b' | 'c' | 'd' | 'o' | 'x' | 'X' | 'n' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | '%'
+            ) {
+                return Err(PyError::value_error(format!(
+                    "Unknown format code '{}' for object of type 'int'",
+                    t
+                )));
+            }
+        }
+    }
+
+    // Anything without native formatting (not int/float/complex/str,
+    // not an Instance with __format__ — handled above) rejects a
+    // non-empty spec (mirrors CPython object.__format__:
+    // `f'{(lambda: 0):x}'` is a TypeError).
+    if !is_int && !is_float && !matches!(&*val_borrowed, PyObject::Complex(_, _) | PyObject::Str(_))
+    {
+        let typename = match &*val_borrowed {
+            PyObject::Instance { typ, .. } => match &*typ.borrow() {
+                PyObject::Type { name, .. } => name.clone(),
+                _ => "instance".to_string(),
+            },
+            _ => val_borrowed.type_name().to_string(),
+        };
+        drop(val_borrowed);
+        return Err(PyError::type_error(format!(
+            "unsupported format string passed to {}.__format__",
+            typename
+        )));
+    }
+
     // Complex formatting: apply the spec to BOTH parts and join
     // (format(1.2+0j, '.0f') == '1+0j').
     let complex_parts = if let PyObject::Complex(re, im) = &*val_borrowed {
@@ -585,6 +621,28 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         // Default for string or any other type: str() representation
         _ => val.str(),
     };
+    // String precision truncates (mirrors CPython:
+    // `format('True', '.3') == 'Tru'`); only the 's'/empty presentation
+    // is valid for strings.
+    let base = if matches!(&*val_borrowed, PyObject::Str(_)) {
+        if let Some(t) = fmt_type {
+            if t != 's' {
+                let t = t;
+                drop(val_borrowed);
+                return Err(PyError::value_error(format!(
+                    "Unknown format code '{}' for object of type 'str'",
+                    t
+                )));
+            }
+        }
+        let s = val.str();
+        match precision {
+            Some(p) => s.chars().take(p).collect(),
+            None => s,
+        }
+    } else {
+        base
+    };
 
     // Zero-padding that merges zeros INTO the integer digits ('0' flag with
     // NO explicit alignment) must group the padded zeros too — CPython
@@ -651,8 +709,14 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
     // The '0' flag WITHOUT explicit alignment implies '=' alignment with fill='0'
     // for numeric types. '=' alignment inserts padding after sign AND after
     // any alternate-form prefix (0x, 0b, 0o).
+    // Without explicit alignment the default is `<` (left) for strings
+    // and `>` (right) for numbers (mirrors CPython:
+    // `f'{(lambda y:x*y)("8")!r:10}'` pads right with spaces).
     let (effective_align, effective_fill) = if zero_pad && !align_explicit {
         ('=', '0')
+    } else if !align_explicit {
+        let left_default = matches!(&*val.borrow(), PyObject::Str(_));
+        (if left_default { '<' } else { '>' }, fill_char)
     } else {
         (align, fill_char)
     };

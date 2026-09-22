@@ -13,7 +13,8 @@ impl Compiler {
         target: &Expr,
         in_unpack: bool,
     ) -> Result<(), String> {
-        match target {
+        match target.unlocate() {
+            Expr::Located { .. } => unreachable!("peeled via unlocate"),
             Expr::Name(name) => {
                 // Mirrors the read-side (`compile_expr`'s own `Expr::Name`
                 // arm) mangling fix — a bare private-name ASSIGNMENT
@@ -81,7 +82,7 @@ impl Compiler {
                 // calling convention every caller of compile_assign_target
                 // relies on.
                 self.compile_expr(value)?;
-                if let Expr::Starred(inner) = slice.as_ref() {
+                if let Expr::Starred(inner) = slice.as_ref().unlocate() {
                     self.emit(Opcode::BUILD_LIST, 0);
                     self.compile_expr(inner)?;
                     self.emit(Opcode::LIST_EXTEND, 0);
@@ -124,7 +125,8 @@ impl Compiler {
                     for elt in elts {
                         // Unwrap starred: *x → x (the starred is already
                         // accounted for in UNPACK_EX)
-                        let inner = match elt {
+                        let inner = match elt.unlocate() {
+                            Expr::Located { .. } => unreachable!("peeled via unlocate"),
                             Expr::Starred(s) => s.as_ref(),
                             other => other,
                         };
@@ -150,7 +152,8 @@ impl Compiler {
                 // those are what CPython's own test suite exercises
                 // (`test_dictcomps.py`/`test_listcomps.py`/`test_setcomps.py`
                 // all assign to a comprehension to check this exact error).
-                let what = match target {
+                let what = match target.unlocate() {
+                    Expr::Located { .. } => unreachable!("peeled via unlocate"),
                     Expr::DictComp { .. } => "dict comprehension".to_string(),
                     Expr::ListComp { .. } => "list comprehension".to_string(),
                     Expr::SetComp { .. } => "set comprehension".to_string(),

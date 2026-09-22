@@ -7,7 +7,8 @@ impl Compiler {
     // ---- Closure analysis ----
 
     pub(crate) fn collect_names_expr(expr: &Expr, names: &mut HashSet<String>) {
-        match expr {
+        match expr.unlocate() {
+            Expr::Located { .. } => unreachable!("peeled via unlocate"),
             Expr::Name(n) => {
                 names.insert(n.clone());
             }
@@ -92,7 +93,7 @@ impl Compiler {
                 // class nested in a function falls back to LOAD_GLOBAL of
                 // the class name, which isn't a global there).
                 if args.is_empty() && keywords.is_empty() {
-                    if let Expr::Name(n) = func.as_ref() {
+                    if let Expr::Name(n) = func.as_ref().unlocate() {
                         if n == "super" {
                             names.insert("__class__".to_string());
                         }
@@ -400,7 +401,8 @@ impl Compiler {
         expr: &Expr,
         assigned: &mut HashSet<String>,
     ) {
-        match expr {
+        match expr.unlocate() {
+            Expr::Located { .. } => unreachable!("peeled via unlocate"),
             Expr::Lambda { .. } => {
                 // Own separate scope.
             }
@@ -789,7 +791,8 @@ impl Compiler {
     }
 
     pub(crate) fn collect_assign_target_names(target: &Expr, assigned: &mut HashSet<String>) {
-        match target {
+        match target.unlocate() {
+            Expr::Located { .. } => unreachable!("peeled via unlocate"),
             Expr::Name(n) => {
                 assigned.insert(n.clone());
             }
@@ -1662,7 +1665,8 @@ impl Compiler {
         nonlocal_names: &HashSet<String>,
         refs: &mut HashSet<String>,
     ) {
-        match expr {
+        match expr.unlocate() {
+            Expr::Located { .. } => unreachable!("peeled via unlocate"),
             Expr::Lambda { args, body } => {
                 let inner_local: HashSet<String> = args.iter().map(|a| a.arg.clone()).collect();
                 for arg in args {

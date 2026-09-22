@@ -153,16 +153,21 @@ impl PyError {
         extra.insert("lineno".to_string(), py_int(line));
         extra.insert("offset".to_string(), py_int(col));
         // `text` — the offending source line (real CPython exposes it).
-        // CPython's own `.text` always carries a trailing newline, even
-        // for the source's LAST line when the source itself has no final
-        // `\n` (test_eof.py's test_line_continuation_EOF: `exec('ä = 5\\')`
-        // needs `.text == 'ä = 5\\\n'`, not `'ä = 5\\'`) — `str::lines()`
-        // strips it from every yielded line, so it must be re-added here.
+        // The line carries NO trailing newline in general
+        // (`test_fstring.py::test_not_closing_quotes` needs exactly
+        // `'z = f"""'`), EXCEPT when the error is on the source's last
+        // line and the source itself has no final `\n` — then CPython's
+        // text ends with `\n` anyway (`test_eof.py`'s
+        // test_line_continuation_EOF: `exec('ä = 5\\')` needs
+        // `.text == 'ä = 5\\\n'`). `str::lines()` strips newlines from
+        // every yielded line, so re-add it only in that last-line case.
+        let total_lines = source.lines().count();
         let text = source.lines().nth((line - 1).max(0) as usize).unwrap_or("");
-        let text = if text.is_empty() {
-            text.to_string()
-        } else {
+        let text = if !text.is_empty() && (line as usize) >= total_lines && !source.ends_with('\n')
+        {
             format!("{}\n", text)
+        } else {
+            text.to_string()
         };
         extra.insert("text".to_string(), py_str(&text));
         // CPython: `str(SyntaxError)` is `msg (filename, line N)` where

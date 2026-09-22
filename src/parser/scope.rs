@@ -504,7 +504,8 @@ fn collect_pattern_names(pat: &Pattern, assigned: &mut Vec<String>, used: &mut V
 /// Bind targets: plain names bind; tuple/list/starred destructure; anything
 /// else (`obj.attr`, `obj[i]`) reads its sub-expressions.
 fn collect_target_names(target: &Expr, assigned: &mut Vec<String>, used: &mut Vec<String>) {
-    match target {
+    match target.unlocate() {
+        Expr::Located { .. } => unreachable!("peeled via unlocate"),
         Expr::Name(n) => assigned.push(n.clone()),
         Expr::List(elts) | Expr::Tuple(elts) => {
             for e in elts {
@@ -518,7 +519,8 @@ fn collect_target_names(target: &Expr, assigned: &mut Vec<String>, used: &mut Ve
 
 /// `x: Ann` (with or without `= value`) marks `x` annotated.
 fn collect_ann_target_names(target: &Expr, annotated: &mut Vec<String>) {
-    match target {
+    match target.unlocate() {
+        Expr::Located { .. } => unreachable!("peeled via unlocate"),
         Expr::Name(n) => annotated.push(n.clone()),
         Expr::List(elts) | Expr::Tuple(elts) => {
             for e in elts {
@@ -534,7 +536,8 @@ fn collect_ann_target_names(target: &Expr, annotated: &mut Vec<String>) {
 /// comprehensions); lambda/comprehension defaults are also skipped — a
 /// documented over-approximation gap with no test coverage.
 fn collect_expr_uses(expr: &Expr, used: &mut Vec<String>) {
-    match expr {
+    match expr.unlocate() {
+        Expr::Located { .. } => unreachable!("peeled via unlocate"),
         Expr::Name(n) => used.push(n.clone()),
         Expr::Lambda { .. }
         | Expr::ListComp { .. }

@@ -686,7 +686,7 @@ impl VirtualMachine {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                let mut parser = crate::parser::Parser::new(&source);
+                let mut parser = crate::parser::Parser::new(&source, false);
                 let program = match parser.parse_program() {
                     Ok(p) => p,
                     Err(_) => continue,
@@ -846,7 +846,7 @@ impl VirtualMachine {
         let code: CodeObject = match cached_code {
             Some(cached) => cached,
             None => {
-                let mut parser = crate::parser::Parser::new(source);
+                let mut parser = crate::parser::Parser::new(source, false);
                 let program = parser.parse_program().map_err(|e| {
                     crate::object::PyError::syntax_error_with_filename(e, path, source)
                 })?;

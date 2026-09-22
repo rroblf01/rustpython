@@ -5,6 +5,27 @@ use super::{Parser, MAX_UNARY_DEPTH};
 
 impl Parser {
     pub(crate) fn parse_expr(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_expr_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_expr_inner(&mut self) -> Result<Expr, String> {
         let expr = self.parse_conditional_expr()?;
         // Walrus operator (:=) — named expressions, allowed at top expr level
         // e.g. `if spec := getattr(...):`
@@ -20,6 +41,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_conditional_expr(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_conditional_expr_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_conditional_expr_inner(&mut self) -> Result<Expr, String> {
         let expr = self.parse_or_expr()?;
         if self.eat(&Token::If) {
             let test = self.parse_conditional_expr()?;
@@ -36,6 +78,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_or_expr(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_or_expr_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_or_expr_inner(&mut self) -> Result<Expr, String> {
         self.group_paren = false;
         let mut expr = self.parse_and_expr()?;
         let mut expr_paren = std::mem::replace(&mut self.group_paren, false);
@@ -45,6 +108,11 @@ impl Parser {
             let _right_paren = std::mem::replace(&mut self.group_paren, false);
             // Flatten chained `or` into a single BoolOp (CPython AST
             // shape), but never across parens (`(x or y) or z` nests).
+            // Peel positions: the accumulator may be `Located` once
+            // expression functions stamp spans (rebuilt below).
+            while let Expr::Located { node, .. } = expr {
+                expr = *node;
+            }
             match expr {
                 Expr::BoolOp {
                     op: BoolOp::Or,
@@ -72,6 +140,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_and_expr(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_and_expr_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_and_expr_inner(&mut self) -> Result<Expr, String> {
         self.group_paren = false;
         let mut expr = self.parse_not_expr()?;
         let mut expr_paren = std::mem::replace(&mut self.group_paren, false);
@@ -80,6 +169,10 @@ impl Parser {
             let right = self.parse_not_expr()?;
             let _right_paren = std::mem::replace(&mut self.group_paren, false);
             // Flatten chained `and` (same rule as `or` above).
+            // Peel positions (see `or` above).
+            while let Expr::Located { node, .. } = expr {
+                expr = *node;
+            }
             match expr {
                 Expr::BoolOp {
                     op: BoolOp::And,
@@ -107,6 +200,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_not_expr(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_not_expr_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_not_expr_inner(&mut self) -> Result<Expr, String> {
         if self.eat(&Token::Not) {
             let expr = self.parse_not_expr()?;
             Ok(Expr::UnaryOp {
@@ -119,6 +233,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_comparison(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_comparison_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_comparison_inner(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_bitwise_or()?;
         if self.at(&Token::Less)
             || self.at(&Token::Greater)
@@ -220,6 +355,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_bitwise_or(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_bitwise_or_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_bitwise_or_inner(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_bitwise_xor()?;
         while self.eat(&Token::Pipe) {
             let right = self.parse_bitwise_xor()?;
@@ -233,6 +389,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_bitwise_xor(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_bitwise_xor_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_bitwise_xor_inner(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_bitwise_and()?;
         while self.eat(&Token::Caret) {
             let right = self.parse_bitwise_and()?;
@@ -246,6 +423,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_bitwise_and(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_bitwise_and_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_bitwise_and_inner(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_shift()?;
         while self.eat(&Token::Ampersand) {
             let right = self.parse_shift()?;
@@ -259,6 +457,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_shift(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_shift_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_shift_inner(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_term()?;
         loop {
             if self.eat(&Token::LeftShift) {
@@ -283,6 +502,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_term(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_term_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_term_inner(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_mul()?;
         loop {
             if self.eat(&Token::Plus) {
@@ -307,6 +547,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_mul(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_mul_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_mul_inner(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_unary()?;
         loop {
             if self.eat(&Token::Star) {
@@ -352,6 +613,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_unary(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_unary_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<Expr, String> {
         let is_unary_prefix = matches!(self.current, Token::Plus | Token::Minus | Token::Tilde);
         if is_unary_prefix {
             self.unary_depth += 1;
@@ -388,6 +670,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_power(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_power_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_power_inner(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_primary()?;
         if self.eat(&Token::DoubleStar) {
             let right = self.parse_unary()?;

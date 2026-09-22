@@ -73,7 +73,7 @@ impl VirtualMachine {
         let code = match cached {
             Some(rc) => (*rc).clone(),
             None => {
-                let mut parser = Parser::new(source);
+                let mut parser = Parser::new(source, false);
                 let program = match parser.parse_program() {
                     Ok(p) => p,
                     Err(_) => return,

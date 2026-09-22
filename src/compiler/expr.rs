@@ -5,7 +5,8 @@ use crate::bytecode::*;
 
 impl Compiler {
     pub(crate) fn compile_expr(&mut self, expr: &Expr) -> Result<(), String> {
-        match expr {
+        match expr.unlocate() {
+            Expr::Located { .. } => unreachable!("peeled via unlocate"),
             Expr::Constant(c) => {
                 if matches!(c, Constant::Ellipsis) {
                     // Ellipsis singleton via LOAD_GLOBAL (the ellipsis
@@ -149,7 +150,7 @@ impl Compiler {
                         left,
                         ops,
                         comparators,
-                    } = operand.as_ref()
+                    } = operand.as_ref().unlocate()
                     {
                         if ops.len() == 1 && comparators.len() == 1 {
                             match ops[0] {
@@ -211,24 +212,25 @@ impl Compiler {
                         CmpOp::Gt => 4,
                         CmpOp::GtE => 3,
                         CmpOp::Is => {
-                            // Emit SyntaxWarning for "is" with literal (PEP 8)
+                            // Emit SyntaxWarning for "is" with literal (PEP 8).
+                            // Peel positions (see `Expr::Located`).
                             let actual_left: &Expr =
                                 if i == 0 { left } else { &comparators[i - 1] };
                             let is_none_or_bool = |e: &Expr| {
                                 matches!(
-                                    e,
+                                    e.unlocate(),
                                     Expr::Constant(Constant::None)
                                         | Expr::Constant(Constant::Bool(_))
                                         | Expr::Constant(Constant::Ellipsis)
                                 )
                             };
-                            let left_is_lit = matches!(actual_left, Expr::Constant(_))
+                            let left_is_lit = matches!(actual_left.unlocate(), Expr::Constant(_))
                                 && !is_none_or_bool(actual_left);
-                            let right_is_lit =
-                                matches!(right, Expr::Constant(_)) && !is_none_or_bool(right);
+                            let right_is_lit = matches!(right.unlocate(), Expr::Constant(_))
+                                && !is_none_or_bool(right);
                             if left_is_lit || right_is_lit {
                                 let lit_expr = if left_is_lit { actual_left } else { right };
-                                let typ_str = match lit_expr {
+                                let typ_str = match lit_expr.unlocate() {
                                     Expr::Constant(Constant::String(_)) => "str",
                                     Expr::Constant(Constant::Bytes(_)) => "bytes",
                                     Expr::Constant(Constant::Int(_)) => "int",
@@ -261,23 +263,24 @@ impl Compiler {
                             continue;
                         }
                         CmpOp::IsNot => {
+                            // Peel positions (see `Expr::Located`).
                             let actual_left: &Expr =
                                 if i == 0 { left } else { &comparators[i - 1] };
                             let is_none_or_bool = |e: &Expr| {
                                 matches!(
-                                    e,
+                                    e.unlocate(),
                                     Expr::Constant(Constant::None)
                                         | Expr::Constant(Constant::Bool(_))
                                         | Expr::Constant(Constant::Ellipsis)
                                 )
                             };
-                            let left_is_lit = matches!(actual_left, Expr::Constant(_))
+                            let left_is_lit = matches!(actual_left.unlocate(), Expr::Constant(_))
                                 && !is_none_or_bool(actual_left);
-                            let right_is_lit =
-                                matches!(right, Expr::Constant(_)) && !is_none_or_bool(right);
+                            let right_is_lit = matches!(right.unlocate(), Expr::Constant(_))
+                                && !is_none_or_bool(right);
                             if left_is_lit || right_is_lit {
                                 let lit_expr = if left_is_lit { actual_left } else { right };
-                                let typ_str = match lit_expr {
+                                let typ_str = match lit_expr.unlocate() {
                                     Expr::Constant(Constant::String(_)) => "str",
                                     Expr::Constant(Constant::Bytes(_)) => "bytes",
                                     Expr::Constant(Constant::Int(_)) => "int",
@@ -325,7 +328,7 @@ impl Compiler {
             } => {
                 // PEP 3135: super() without args in methods -> super(__class__, self)
                 let mut extra_pos = 0usize;
-                let is_bare_super = if let Expr::Name(n) = func.as_ref() {
+                let is_bare_super = if let Expr::Name(n) = func.as_ref().unlocate() {
                     n == "super" && args.is_empty() && keywords.is_empty()
                 } else {
                     false
@@ -435,7 +438,7 @@ impl Compiler {
                 if has_star_args || has_star_kwargs {
                     self.emit(Opcode::BUILD_LIST, 0);
                     for arg in args {
-                        if let Expr::Starred(inner) = arg {
+                        if let Expr::Starred(inner) = arg.unlocate() {
                             self.compile_expr(inner)?;
                             self.emit(Opcode::LIST_EXTEND, 0);
                         } else {
@@ -528,7 +531,7 @@ impl Compiler {
                 // must build a tuple via list-extend dance, not just push
                 // the bare iterable. CPython compiles `A[*b]` as
                 // BUILD_LIST, LIST_EXTEND, LIST_TO_TUPLE, SUBSCR.
-                if let Expr::Starred(inner) = slice.as_ref() {
+                if let Expr::Starred(inner) = slice.as_ref().unlocate() {
                     self.emit(Opcode::BUILD_LIST, 0);
                     self.compile_expr(inner)?;
                     self.emit(Opcode::LIST_EXTEND, 0);
@@ -543,7 +546,7 @@ impl Compiler {
                     // Star unpacking present — use incremental building with LIST_APPEND/LIST_EXTEND
                     self.emit(Opcode::BUILD_LIST, 0);
                     for elt in elts {
-                        if let Expr::Starred(inner) = elt {
+                        if let Expr::Starred(inner) = elt.unlocate() {
                             self.compile_expr(inner)?;
                             self.emit(Opcode::LIST_EXTEND, 0);
                         } else {
@@ -565,7 +568,7 @@ impl Compiler {
                     // then convert to a tuple.
                     self.emit(Opcode::BUILD_LIST, 0);
                     for elt in elts {
-                        if let Expr::Starred(inner) = elt {
+                        if let Expr::Starred(inner) = elt.unlocate() {
                             self.compile_expr(inner)?;
                             self.emit(Opcode::LIST_EXTEND, 0);
                         } else {
@@ -618,7 +621,7 @@ impl Compiler {
                     // mirroring the Tuple case above.
                     self.emit(Opcode::BUILD_SET, 0);
                     for elt in elts {
-                        if let Expr::Starred(inner) = elt {
+                        if let Expr::Starred(inner) = elt.unlocate() {
                             self.compile_expr(inner)?;
                             self.emit(Opcode::SET_UPDATE, 0);
                         } else {
@@ -711,49 +714,21 @@ impl Compiler {
                 self.emit(Opcode::YIELD_VALUE, 0);
             }
             Expr::FString(parts) => {
+                // An empty f-string (`f''`, `f"\\\n"`) still pushes one
+                // value (mirrors CPython: `JoinedStr([])` compiles to
+                // `''`, it must not leave the stack empty).
+                if parts.is_empty() {
+                    self.compile_expr(&Expr::Constant(Constant::String("".into())))?;
+                    return Ok(());
+                }
                 let mut count = 0usize;
                 for part in parts {
                     match part {
-                        FStringPart::String(s) => {
+                        FStringPart::String(s, _) => {
                             self.compile_expr(&Expr::Constant(Constant::String(s.clone().into())))?;
                             count += 1;
                         }
                         FStringPart::Expr {
-                            expr,
-                            conversion,
-                            format_spec,
-                        } => {
-                            self.compile_expr(&expr)?;
-                            if *conversion != 0 {
-                                self.emit(Opcode::CONVERT_VALUE, *conversion as u32);
-                            }
-                            if let Some(spec) = format_spec {
-                                self.compile_expr(&spec)?;
-                                self.emit(Opcode::FORMAT_WITH_SPEC, 0);
-                            } else if *conversion == 0 {
-                                self.emit(Opcode::FORMAT_SIMPLE, 0);
-                            }
-                            count += 1;
-                        }
-                    }
-                }
-                if count > 1 {
-                    self.emit(Opcode::BUILD_STRING, count as u32);
-                }
-            }
-            // TODO(PEP 750): TemplateStr should evaluate to a
-            // `string.templatelib.Template`, not a plain str. Compiling
-            // it like an f-string keeps execution working until the
-            // Template runtime type exists.
-            Expr::TemplateStr(parts) => {
-                let mut count = 0usize;
-                for part in parts {
-                    match part {
-                        TemplateStrPart::String(s) => {
-                            self.compile_expr(&Expr::Constant(Constant::String(s.clone().into())))?;
-                            count += 1;
-                        }
-                        TemplateStrPart::Interpolation {
                             expr,
                             conversion,
                             format_spec,
@@ -776,6 +751,68 @@ impl Compiler {
                 if count > 1 {
                     self.emit(Opcode::BUILD_STRING, count as u32);
                 }
+            }
+            // PEP 750: evaluate to a `string.templatelib.Template`
+            // (mirrors CPython `codegen_template_str`): a strings tuple
+            // (constants, padded with `""` so it always holds exactly one
+            // more item than there are interpolations), an interpolations
+            // tuple, then BUILD_TEMPLATE.
+            Expr::TemplateStr(parts) => {
+                let empty_idx = self.get_const_index(ConstValue::String("".into())) as u32;
+                let mut last_was_interpolation = true;
+                let mut strings_len = 0usize;
+                for part in parts {
+                    match part {
+                        TemplateStrPart::Interpolation { .. } => {
+                            if last_was_interpolation {
+                                self.emit(Opcode::LOAD_CONST, empty_idx);
+                                strings_len += 1;
+                            }
+                            last_was_interpolation = true;
+                        }
+                        TemplateStrPart::String(s, _) => {
+                            let idx =
+                                self.get_const_index(ConstValue::String(s.clone().into())) as u32;
+                            self.emit(Opcode::LOAD_CONST, idx);
+                            strings_len += 1;
+                            last_was_interpolation = false;
+                        }
+                    }
+                }
+                if last_was_interpolation {
+                    self.emit(Opcode::LOAD_CONST, empty_idx);
+                    strings_len += 1;
+                }
+                self.emit(Opcode::BUILD_TUPLE, strings_len as u32);
+                let mut interpolations_len = 0usize;
+                for part in parts {
+                    if let TemplateStrPart::Interpolation {
+                        expr,
+                        str_text,
+                        conversion,
+                        format_spec,
+                        ..
+                    } = part
+                    {
+                        self.compile_expr(&expr)?;
+                        let str_idx = self
+                            .get_const_index(ConstValue::String(str_text.clone().into()))
+                            as u32;
+                        self.emit(Opcode::LOAD_CONST, str_idx);
+                        let mut oparg = 0u32;
+                        if let Some(spec) = format_spec {
+                            self.compile_expr(&spec)?;
+                            oparg |= 1;
+                        }
+                        // Internal conversion codes (0 none, 1 !r, 2 !s,
+                        // 3 !a) ride in bits >> 2.
+                        oparg |= (*conversion as u32) << 2;
+                        self.emit(Opcode::BUILD_INTERPOLATION, oparg);
+                        interpolations_len += 1;
+                    }
+                }
+                self.emit(Opcode::BUILD_TUPLE, interpolations_len as u32);
+                self.emit(Opcode::BUILD_TEMPLATE, 0);
             }
             Expr::JoinedStr(parts) => {
                 for part in parts {

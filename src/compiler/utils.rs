@@ -71,7 +71,7 @@ pub fn contains_yield_in_stmts(stmts: &[Stmt]) -> bool {
 /// with PyCF_ALLOW_TOP_LEVEL_AWAIT) marks a module as a coroutine.
 /// CPython's per-target `del` error messages (test_syntax::test_assign_del).
 pub fn delete_error_for(expr: &Expr) -> &'static str {
-    match expr {
+    match expr.unlocate() {
         Expr::Name(_) => "cannot delete 'name'",
         Expr::Constant(_) => "cannot delete literal",
         Expr::Call { .. } => "cannot delete function call",
@@ -92,7 +92,7 @@ pub fn stmt_has_top_level_await(stmt: &Stmt) -> bool {
 }
 
 pub fn contains_yield_in_expr(expr: &Expr) -> bool {
-    match expr {
+    match expr.unlocate() {
         Expr::Yield(_) => true,
         Expr::YieldFrom(_) => true,
         Expr::Await(_) => true,
@@ -189,7 +189,7 @@ pub fn contains_yield_in_expr(expr: &Expr) -> bool {
                         .as_ref()
                         .is_some_and(|fs| contains_yield_in_expr(fs))
             }
-            FStringPart::String(_) => false,
+            FStringPart::String(_, _) => false,
         }),
         Expr::TemplateStr(parts) => parts.iter().any(|p| match p {
             TemplateStrPart::Interpolation {
@@ -200,7 +200,7 @@ pub fn contains_yield_in_expr(expr: &Expr) -> bool {
                         .as_ref()
                         .is_some_and(|fs| contains_yield_in_expr(fs))
             }
-            TemplateStrPart::String(_) => false,
+            TemplateStrPart::String(_, _) => false,
         }),
         Expr::JoinedStr(exprs) => exprs.iter().any(contains_yield_in_expr),
         _ => false,

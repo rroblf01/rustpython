@@ -292,6 +292,496 @@ pub fn format_decvalue(v: &DecValue) -> String {
     }
 }
 
+/// Parsed `Decimal.__format__` mini-language state.
+struct DecFmtSpec {
+    fill: char,
+    align: char,
+    sign: char,
+    alt: bool,
+    width: usize,
+    grouping: Option<char>,
+    precision: Option<usize>,
+    ty: char, // '\0' = none, else one of e E f F g G n %
+}
+
+fn parse_dec_fmt_spec(spec: &str) -> Result<DecFmtSpec, PyError> {
+    let invalid = || PyError::value_error("invalid format string".to_string());
+    let chars: Vec<char> = spec.chars().collect();
+    let len = chars.len();
+    let mut idx = 0;
+    let mut fill = ' ';
+    let mut align = '>';
+    let mut explicit_align = false;
+    if idx + 1 < len && matches!(chars[idx + 1], '<' | '>' | '=' | '^') {
+        fill = chars[idx];
+        align = chars[idx + 1];
+        idx += 2;
+        explicit_align = true;
+    } else if idx < len && matches!(chars[idx], '<' | '>' | '=' | '^') {
+        align = chars[idx];
+        idx += 1;
+        explicit_align = true;
+    }
+    let mut sign = '-';
+    if idx < len && matches!(chars[idx], '+' | '-' | ' ') {
+        sign = chars[idx];
+        idx += 1;
+    }
+    if idx < len && chars[idx] == 'z' {
+        idx += 1;
+    }
+    let mut alt = false;
+    if idx < len && chars[idx] == '#' {
+        alt = true;
+        idx += 1;
+    }
+    if idx < len && chars[idx] == '0' {
+        // A `0` after an explicit alignment is invalid (`>010`);
+        // otherwise it means zero-padding (`010`).
+        if explicit_align {
+            return Err(invalid());
+        }
+        fill = '0';
+        align = '=';
+        idx += 1;
+    }
+    let mut width = 0usize;
+    while idx < len && chars[idx].is_ascii_digit() {
+        width = width * 10 + (chars[idx] as usize - '0' as usize);
+        idx += 1;
+    }
+    let mut grouping = None;
+    if idx < len && (chars[idx] == ',' || chars[idx] == '_') {
+        let first = chars[idx];
+        grouping = Some(first);
+        idx += 1;
+        if idx < len && (chars[idx] == ',' || chars[idx] == '_') {
+            return Err(PyError::value_error(format!(
+                "Cannot specify '{}' with '{}'.",
+                first, chars[idx]
+            )));
+        }
+    }
+    let mut precision = None;
+    if idx < len && chars[idx] == '.' {
+        idx += 1;
+        let pstart = idx;
+        let mut p = 0usize;
+        while idx < len && chars[idx].is_ascii_digit() {
+            p = p * 10 + (chars[idx] as usize - '0' as usize);
+            idx += 1;
+        }
+        if idx == pstart {
+            return Err(invalid()); // `.f` — precision needs digits
+        }
+        precision = Some(p);
+    }
+    let mut ty = '\0';
+    if idx < len {
+        ty = chars[idx];
+        if !matches!(ty, 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 'n' | '%') {
+            return Err(invalid());
+        }
+        idx += 1;
+    }
+    if idx != len {
+        return Err(invalid());
+    }
+    Ok(DecFmtSpec {
+        fill,
+        align,
+        sign,
+        alt,
+        width,
+        grouping,
+        precision,
+        ty,
+    })
+}
+
+/// Round `coeff` down by `drop` decimal digits (ROUND_HALF_EVEN).
+fn drop_digits_half_even(coeff: &num_bigint::BigInt, drop: usize) -> num_bigint::BigInt {
+    use num_bigint::BigInt;
+    if drop == 0 {
+        return coeff.clone();
+    }
+    let divisor = ten_pow(drop as i64);
+    let q = coeff / &divisor;
+    let r = coeff % &divisor;
+    let twice = &r * BigInt::from(2);
+    use std::cmp::Ordering;
+    let up = match twice.cmp(&divisor) {
+        Ordering::Greater => true,
+        Ordering::Less => false,
+        Ordering::Equal => (&q % 2) != BigInt::from(0),
+    };
+    if up {
+        q + 1
+    } else {
+        q
+    }
+}
+
+/// Fixed-point digits for `coeff * 10^exp` with exactly `frac`
+/// fraction digits: returns (integer_digits, frac_digits).
+fn dec_fixed_parts(coeff: &num_bigint::BigInt, exp: i64, frac: usize) -> (String, String) {
+    let mut c = coeff.clone();
+    if -exp > frac as i64 {
+        c = drop_digits_half_even(&c, (-exp - frac as i64) as usize);
+    } else if -exp < frac as i64 {
+        c = c * ten_pow(frac as i64 + exp);
+    }
+    let s = c.to_string();
+    if frac == 0 {
+        return (s, String::new());
+    }
+    if s.len() <= frac {
+        ("0".to_string(), format!("{:0>width$}", s, width = frac))
+    } else {
+        let (i, f) = s.split_at(s.len() - frac);
+        (i.to_string(), f.to_string())
+    }
+}
+
+/// Group the leading integer run of a rendered number in threes
+/// (`,`/`_`), leaving sign, fraction and exponent untouched.
+fn group_leading_int(s: &str, sep: char) -> String {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    if i < bytes.len() && (bytes[i] == b'-' || bytes[i] == b'+' || bytes[i] == b' ') {
+        i += 1;
+    }
+    let int_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i - int_start <= 3 {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    out.push_str(&s[..int_start]);
+    out.push_str(&group_dec_digits(&s[int_start..i], sep));
+    out.push_str(&s[i..]);
+    out
+}
+
+/// Group an integer-digit string in threes (`,`/`_`).
+fn group_dec_digits(intpart: &str, sep: char) -> String {
+    if intpart.len() <= 3 {
+        return intpart.to_string();
+    }
+    let mut out = String::new();
+    let rem = intpart.len() % 3;
+    for (i, ch) in intpart.chars().enumerate() {
+        if i > 0 && (i - rem) % 3 == 0 {
+            out.push(sep);
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn dec_exp_str(adj: i64, upper: bool) -> String {
+    format!(
+        "{}{}{}",
+        if upper { 'E' } else { 'e' },
+        if adj < 0 { '-' } else { '+' },
+        adj.abs()
+    )
+}
+
+/// Pad `num` (already signed) to `width` with fill/align.
+fn apply_dec_width(num: &str, p: &DecFmtSpec) -> String {
+    let nchars: usize = num.chars().count();
+    if nchars >= p.width {
+        return num.to_string();
+    }
+    let pad = p.width - nchars;
+    let padstr: String = std::iter::repeat(p.fill).take(pad).collect();
+    match p.align {
+        '<' => format!("{}{}", num, padstr),
+        '^' => {
+            let left = pad / 2;
+            let right = pad - left;
+            format!(
+                "{}{}{}",
+                &padstr[..left.min(padstr.len())],
+                num,
+                &padstr[..right.min(padstr.len())]
+            )
+        }
+        '=' => {
+            // Pad after a leading sign, if any.
+            let mut chars = num.chars();
+            let first = chars.next().unwrap();
+            if matches!(first, '+' | '-' | ' ') {
+                format!("{}{}{}", first, padstr, chars.collect::<String>())
+            } else {
+                format!("{}{}", padstr, num)
+            }
+        }
+        _ => format!("{}{}", padstr, num),
+    }
+}
+
+/// General float-style rendering shared by `g`/`G`/`n` and by a
+/// precision with no type (which behaves like `G`; mirrors CPython:
+/// `format(D('1200'), '.2')` is `'1.2E+3'`). `prec_opt=None` is
+/// handled by the caller (digits as-is).
+fn render_dec_general(
+    coeff: &num_bigint::BigInt,
+    exp: i64,
+    is_zero: bool,
+    prec_opt: Option<usize>,
+    upper: bool,
+    alt: bool,
+    grouping: Option<char>,
+) -> String {
+    let mut prec = prec_opt.unwrap_or(1);
+    if prec == 0 {
+        prec = 1;
+    }
+    let mut body = String::new();
+    if is_zero {
+        body.push('0');
+        if alt {
+            body.push('.');
+        }
+        return body;
+    }
+    // Round to `prec` significant digits, then select fixed vs
+    // scientific on the rounded exponent.
+    let d = digit_count(coeff);
+    let mut q = coeff.clone();
+    let mut dd = d;
+    // Exponent of `q` (it gains the dropped orders).
+    let mut qexp = exp;
+    if d > prec {
+        q = drop_digits_half_even(coeff, d - prec);
+        qexp = exp + (d - prec) as i64;
+        if digit_count(&q) > prec {
+            q = &q / 10;
+            dd = d + 1;
+            qexp += 1;
+        } else {
+            dd = d;
+        }
+    }
+    let exp10 = dd as i64 - 1 + exp;
+    if -4 <= exp10 && exp10 < prec as i64 {
+        let frac = (prec as i64 - 1 - exp10).max(0) as usize;
+        let (mut ip, mut fp) = dec_fixed_parts(&q, qexp, frac);
+        if !alt {
+            while fp.ends_with('0') {
+                fp.pop();
+            }
+        }
+        if let Some(g) = grouping {
+            ip = group_dec_digits(&ip, g);
+        }
+        body.push_str(&ip);
+        if !fp.is_empty() || alt {
+            body.push('.');
+            body.push_str(&fp);
+        }
+    } else {
+        let mut qs = q.to_string();
+        // Decimals originally present (rounded zeros stay: `.2g` on
+        // 99.9 is `1.0e+2`); only padding-added zeros strip (`.3g`
+        // on 5 is `5`, not `5.00`).
+        let orig_decimals = qs.len().saturating_sub(1);
+        while qs.len() < prec {
+            qs.push('0');
+        }
+        let (first, rest) = qs.split_at(1);
+        body.push_str(first);
+        let mut fracpart = rest[..prec.min(rest.len())].to_string();
+        for _ in rest.len()..prec.saturating_sub(1) {
+            fracpart.push('0');
+        }
+        if !alt {
+            while fracpart.len() > orig_decimals.min(fracpart.len()) && fracpart.ends_with('0') {
+                fracpart.pop();
+            }
+        }
+        if !fracpart.is_empty() || alt {
+            body.push('.');
+            body.push_str(&fracpart);
+        }
+        body.push_str(&dec_exp_str(dd as i64 - 1 + exp, upper));
+    }
+    body
+}
+
+/// `Decimal.__format__` body (mirrors CPython: exact decimal
+/// arithmetic with ROUND_HALF_EVEN, never float).
+pub fn format_decimal_spec(v: &DecValue, spec: &str) -> Result<String, PyError> {
+    use num_traits::Zero;
+    let p = parse_dec_fmt_spec(spec)?;
+    if v.special != DecSpecial::Finite {
+        let mut s = format_decvalue(v);
+        if !v.sign {
+            if p.sign == '+' {
+                s = format!("+{}", s);
+            } else if p.sign == ' ' {
+                s = format!(" {}", s);
+            }
+        }
+        return Ok(apply_dec_width(&s, &p));
+    }
+    let is_zero = v.coeff.is_zero();
+    // `%` scales by 100 and formats fixed (mirrors CPython).
+    let (coeff, exp, mut ty) = if p.ty == '%' {
+        (v.coeff.clone(), v.exp + 2, 'f')
+    } else {
+        (v.coeff.clone(), v.exp, p.ty)
+    };
+    if ty == 'n' {
+        ty = 'g';
+    }
+    // Render the unsigned body, then sign, grouping, width.
+    let mut body = String::new();
+    if ty == '\0' {
+        if p.precision.is_some() {
+            // Precision with no type behaves like `G` (uppercase;
+            // mirrors CPython: `format(D('1200'), '.2')` is `'1.2E+3'`).
+            body.push_str(&render_dec_general(
+                &coeff,
+                exp,
+                is_zero,
+                p.precision,
+                true,
+                p.alt,
+                p.grouping,
+            ));
+        } else {
+            // No type, no precision: digits as-is (mirrors CPython:
+            // `1E+10`, trailing zeros kept). `#` forces a point.
+            // A grouping flag still groups (`format(D('1234567.8'),
+            // ',')`).
+            let mut s = format_decvalue(&DecValue {
+                special: DecSpecial::Finite,
+                sign: false,
+                coeff: coeff.clone(),
+                exp,
+            });
+            if let Some(g) = p.grouping {
+                s = group_leading_int(&s, g);
+            }
+            body.push_str(&s);
+            if p.alt && !body.contains('.') && !body.contains('e') && !body.contains('E') {
+                body.push('.');
+            }
+        }
+    } else if ty == 'f' || ty == 'F' {
+        let frac = p.precision.unwrap_or_else(|| (-exp).max(0) as usize);
+        let (mut ip, fp) = dec_fixed_parts(&coeff, exp, frac);
+        if let Some(g) = p.grouping {
+            ip = group_dec_digits(&ip, g);
+        }
+        body.push_str(&ip);
+        if frac > 0 {
+            body.push('.');
+            body.push_str(&fp);
+        } else if p.alt {
+            body.push('.');
+        }
+    } else if ty == 'e' || ty == 'E' {
+        let upper = ty == 'E';
+        if is_zero {
+            // CPython quirk: zero renders `precision + exp` as the
+            // exponent (`format(D('0'), '.2e')` is `'0.00e+2'`).
+            let prec = p.precision.unwrap_or_else(|| {
+                let d = digit_count(&coeff);
+                if d == 0 {
+                    0
+                } else {
+                    d - 1
+                }
+            });
+            body.push('0');
+            if prec > 0 || p.alt {
+                body.push('.');
+                for _ in 0..prec {
+                    body.push('0');
+                }
+            }
+            body.push_str(&dec_exp_str(prec as i64 + exp, upper));
+        } else {
+            let prec = p.precision.unwrap_or_else(|| digit_count(&coeff) - 1);
+            let d = digit_count(&coeff);
+            let mut q = coeff.clone();
+            let mut dd = d;
+            if d > prec + 1 {
+                q = drop_digits_half_even(&coeff, d - prec - 1);
+                if digit_count(&q) > prec + 1 {
+                    q = &q / 10;
+                    dd = d + 1;
+                } else {
+                    dd = d;
+                }
+            }
+            let mut qs = q.to_string();
+            while qs.len() < prec + 1 {
+                qs.push('0');
+            }
+            let (first, rest) = qs.split_at(1);
+            body.push_str(first);
+            if prec > 0 || p.alt {
+                body.push('.');
+                body.push_str(&rest[..prec.min(rest.len())]);
+                for _ in rest.len()..prec {
+                    body.push('0');
+                }
+            }
+            body.push_str(&dec_exp_str(dd as i64 - 1 + exp, upper));
+        }
+    } else {
+        // g/G (n folds in): precision or all digits.
+        let upper = ty == 'G';
+        if p.precision.is_none() {
+            // No precision: digits as-is, with `e` normalized to the
+            // type's case (mirrors CPython: `format(D('1E+10'), 'g')`
+            // is `'1e+10'`).
+            body.push_str(&format_decvalue(&DecValue {
+                special: DecSpecial::Finite,
+                sign: false,
+                coeff: coeff.clone(),
+                exp,
+            }));
+            if upper {
+                body = body.replace('e', "E");
+            } else {
+                body = body.replace('E', "e");
+            }
+        } else {
+            body.push_str(&render_dec_general(
+                &coeff,
+                exp,
+                is_zero,
+                p.precision,
+                upper,
+                p.alt,
+                p.grouping,
+            ));
+        }
+    }
+    if p.ty == '%' {
+        body.push('%');
+    }
+    // Sign.
+    let mut signed = String::new();
+    if v.sign {
+        signed.push('-');
+    } else if p.sign == '+' {
+        signed.push('+');
+    } else if p.sign == ' ' {
+        signed.push(' ');
+    }
+    signed.push_str(&body);
+    Ok(apply_dec_width(&signed, &p))
+}
+
 thread_local! {
     pub static DECIMAL_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);
     pub static DECIMAL_CONTEXT_TYPE: std::cell::RefCell<Option<PyObjectRef>> = std::cell::RefCell::new(None);

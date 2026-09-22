@@ -19,7 +19,7 @@ fn timeit_run_compiled(code: &crate::bytecode::CodeObject, number: u64) -> PyRes
 }
 
 fn timeit_compile_src(src: &str, what: &str) -> PyResult<crate::bytecode::CodeObject> {
-    let mut parser = crate::parser::Parser::new(src);
+    let mut parser = crate::parser::Parser::new(src, false);
     let program = parser
         .parse_program()
         .map_err(|e| PyError::type_error(format!("timeit {} parse error: {}", what, e)))?;

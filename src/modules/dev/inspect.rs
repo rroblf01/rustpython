@@ -21,7 +21,9 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
         };
     }
 
-    // Helper: extract a CodeObject from either a code object or a function
+    // Helper: extract a CodeObject from a code object, a function,
+    // or a source string (mirrors CPython's dis, which compiles
+    // source text).
     fn extract_code(args: &[PyObjectRef]) -> Result<CodeObject, PyError> {
         if args.is_empty() {
             return Err(PyError::type_error(
@@ -32,6 +34,26 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
         match &*obj {
             PyObject::Code(code) => Ok(code.as_ref().clone()),
             PyObject::Function(ref f) => Ok((*f.code).clone()),
+            PyObject::Str(s) => {
+                let source = s.clone();
+                drop(obj);
+                // Mirrors CPython's dis: a source string compiles as an
+                // expression when possible (no `__doc__` STORE for a
+                // leading plain string), else as a module.
+                let program = match crate::parser::try_parse_as_expression(&source) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        let mut parser = crate::parser::Parser::new(&source, false);
+                        parser.parse_program().map_err(|e| {
+                            crate::object::PyError::syntax_error_with_filename(e, "<dis>", &source)
+                        })?
+                    }
+                };
+                let mut compiler = crate::compiler::Compiler::new();
+                compiler
+                    .compile(&program, "<dis>")
+                    .map_err(|e| PyError::type_error(format!("compile error: {}", e)))
+            }
             _ => Err(PyError::type_error(
                 "argument must be a code object or function",
             )),
@@ -57,8 +79,9 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
     dis_func!("get_instructions", |args| {
         let code = extract_code(args)?;
         // Real CPython's dis returns `Instruction` objects with .opname/
-        // .argval/.arg/.offset/.starts_line attributes (and tuple
-        // unpacking). Build one shared namedtuple class.
+        // .argval/.arg/.oparg/.offset/.starts_line attributes (and tuple
+        // unpacking; `oparg` is a legacy alias of `arg` kept in 3.14).
+        // Build one shared namedtuple class.
         let namedtuple = crate::modules::get_module("collections")
             .and_then(|m| m.borrow().get_attribute("namedtuple").ok())
             .ok_or_else(|| PyError::runtime_error("collections.namedtuple missing"))?;
@@ -70,6 +93,7 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
                     py_str("opname"),
                     py_str("opcode"),
                     py_str("arg"),
+                    py_str("oparg"),
                     py_str("argval"),
                     py_str("argrepr"),
                     py_str("offset"),
@@ -132,6 +156,7 @@ pub fn create_dis_dict() -> HashMap<String, PyObjectRef> {
                 vec![
                     py_str(&opname),
                     py_int(instr.op as i64),
+                    py_int(arg),
                     py_int(arg),
                     argval.unwrap_or_else(|| PyObjectRef::new(PyObject::None)),
                     py_str(""),

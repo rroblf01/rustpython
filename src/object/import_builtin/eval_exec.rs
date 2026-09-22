@@ -7,7 +7,7 @@ pub fn builtin_eval(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("eval() requires at least 1 argument"));
     }
     let source = args[0].str();
-    let mut parser = crate::parser::Parser::new(&source);
+    let mut parser = crate::parser::Parser::new(&source, true);
     let program = parser
         .parse_program()
         .map_err(|e| PyError::type_error(format!("eval parse error: {}", e)))?;
@@ -38,7 +38,7 @@ pub fn builtin_exec(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::Code(c) => (**c).clone(),
         _ => (|| -> Result<CodeObject, String> {
             let source = args[0].str();
-            let mut parser = crate::parser::Parser::new(&source);
+            let mut parser = crate::parser::Parser::new(&source, false);
             let program = parser.parse_program()?;
             let mut compiler = crate::compiler::Compiler::new();
             compiler.compile(&program, "<exec>")

@@ -3,8 +3,122 @@ use crate::token::Token;
 
 use super::Parser;
 
+/// Merge a plain-string chunk into f-string part accumulation,
+/// folding into a trailing String part when adjacent (mirrors
+/// CPython: `f'a' 'b' f'c'` is one `Constant('abc')` inside the
+/// JoinedStr).
+fn accum_fstring_str(parts: &mut Vec<FStringPart>, s: crate::object::pystring::PyStr, span: Span) {
+    // Empty strings contribute no part (mirrors CPython: `f'{x}' ''`
+    // is `JoinedStr([FormattedValue])`).
+    if s.as_str().is_empty() {
+        return;
+    }
+    if let Some(FStringPart::String(prev, pspan)) = parts.last_mut() {
+        *prev = crate::object::pystring::PyStr::concat_wtf8(&prev.clone(), &s);
+        pspan.1 = span.1;
+    } else {
+        parts.push(FStringPart::String(s, span));
+    }
+}
+
+/// Extend accumulation with a parsed f-string's parts (boundary
+/// String parts fold together like above).
+fn accum_fstring_parts(parts: &mut Vec<FStringPart>, fstr: Expr) {
+    let inner = match fstr.into_unlocated() {
+        Expr::FString(inner) => inner,
+        // `parse_fstring` always builds `FString` on success.
+        _ => unreachable!("f-string parse produced a non-FString node"),
+    };
+    for p in inner {
+        match p {
+            FStringPart::String(s, span) => accum_fstring_str(parts, s, span),
+            other => parts.push(other),
+        }
+    }
+}
+
+/// Merge a parsed t-string's parts into template accumulation,
+/// folding adjacent String parts (mirrors CPython: `t'a' t'b'` joins
+/// to one strings tuple).
+fn accum_tstring_parts(parts: &mut Vec<TemplateStrPart>, tstr: Expr) {
+    let inner = match tstr.into_unlocated() {
+        Expr::TemplateStr(inner) => inner,
+        // `parse_tstring` always builds `TemplateStr` on success.
+        _ => unreachable!("t-string parse produced a non-TemplateStr node"),
+    };
+    for p in inner {
+        match p {
+            TemplateStrPart::String(s, span) => {
+                // Middle text is char-built (always valid UTF-8), and
+                // plain strings can no longer neighbor t-strings, so
+                // plain `push_str` is lossless here.
+                if let Some(TemplateStrPart::String(prev, pspan)) = parts.last_mut() {
+                    prev.push_str(&s);
+                    pspan.1 = span.1;
+                } else {
+                    parts.push(TemplateStrPart::String(s, span));
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+}
+
+/// Flush part accumulation into an expression: pure-string runs keep
+/// the historical BinOp/Constant shape; anything involving an f-string
+/// becomes a single `FString` (mirrors CPython's JoinedStr merging).
+fn flush_fstring_parts(parts: Vec<FStringPart>, saw_fstring: bool) -> Expr {
+    if parts.is_empty() && !saw_fstring {
+        // Only possible when every chunk was an empty plain string
+        // (`''` alone collapses to one empty Constant). An empty
+        // f-string (`f''`) still yields `FString([])` below.
+        return Expr::Constant(Constant::String(crate::object::pystring::PyStr::from_str(
+            "",
+        )));
+    }
+    if !saw_fstring {
+        let mut it = parts.into_iter().map(|p| match p {
+            FStringPart::String(s, _) => Expr::Constant(Constant::String(s)),
+            _ => unreachable!("pure-string accumulation holds only Strings"),
+        });
+        let first = it.next().unwrap();
+        return it.fold(first, |a, b| Expr::BinOp {
+            left: Box::new(a),
+            op: Operator::Add,
+            right: Box::new(b),
+        });
+    }
+    Expr::FString(parts)
+}
+
 impl Parser {
     pub(crate) fn parse_atom(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation). Transparent
+        // parentheses keep the INNER span (mirrors CPython: `(a)`
+        // positions `a`, not `(`) — but displays (`(a, b)`) keep
+        // the outer one.
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_atom_inner()?;
+        if self.group_paren && !matches!(e.unlocate(), Expr::Tuple(_) | Expr::List(_)) {
+            return Ok(e);
+        }
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation keeps inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_atom_inner(&mut self) -> Result<Expr, String> {
         match &self.current {
             Token::None => {
                 self.next();
@@ -58,53 +172,61 @@ impl Parser {
             }
 
             Token::String(s) => {
-                let parts = vec![s.clone()];
+                let s = s.clone();
+                let sstart = self.current_start;
                 self.next();
-                // Implicit string concatenation: adjacent strings and f-strings
-                // with optional newlines. Chain via BinOp::Add since we can't
-                // pre-compute f-strings at parse time.
-                let mut expr = Expr::Constant(Constant::String(parts[0].clone()));
+                let send = self.prev_end;
+                // Implicit string concatenation: adjacent String/FString
+                // parts accumulate into ONE JoinedStr (mirrors CPython:
+                // `'a' f'{x}'` is a single JoinedStr). Pure-string runs
+                // keep the historical BinOp/Constant shape; TString
+                // involvement falls back to BinOp chaining below.
+                // Empty strings contribute no part at all (mirrors
+                // CPython: `f'{x}' ''` is `JoinedStr([FormattedValue])`,
+                // not `JoinedStr([FV, Constant('')])`).
+                let mut fparts: Vec<FStringPart> = Vec::new();
+                if !s.as_str().is_empty() {
+                    fparts.push(FStringPart::String(s, (sstart, send)));
+                }
+                let mut saw_fstring = false;
                 loop {
-                    // Only eat newlines if followed by a string or f-string (implicit concatenation)
-                    while self.at(&Token::Newline)
-                        && (matches!(self.peek(), Token::String(_))
-                            || matches!(self.peek(), Token::FStringStart)
-                            || matches!(self.peek(), Token::TStringStart))
-                    {
-                        self.next();
-                    }
+                    // NOTE: newlines are NOT eaten here — implicit
+                    // concatenation never crosses a statement boundary
+                    // (mirrors CPython: `f'a'\nf'b'` parses as two
+                    // statements, not one concatenation; newlines inside
+                    // brackets never surface as tokens anyway).
                     match &self.current {
                         Token::String(s2) => {
                             let s = s2.clone();
+                            let sstart = self.current_start;
                             self.next();
-                            expr = Expr::BinOp {
-                                left: Box::new(expr),
-                                op: Operator::Add,
-                                right: Box::new(Expr::Constant(Constant::String(s))),
-                            };
+                            let send = self.prev_end;
+                            accum_fstring_str(&mut fparts, s, (sstart, send));
                         }
                         Token::FStringStart => {
                             self.next();
                             let fstr = self.parse_fstring()?;
-                            expr = Expr::BinOp {
-                                left: Box::new(expr),
-                                op: Operator::Add,
-                                right: Box::new(fstr),
-                            };
+                            accum_fstring_parts(&mut fparts, fstr);
+                            saw_fstring = true;
                         }
                         Token::TStringStart => {
-                            self.next();
-                            let tstr = self.parse_tstring()?;
-                            expr = Expr::BinOp {
-                                left: Box::new(expr),
-                                op: Operator::Add,
-                                right: Box::new(tstr),
-                            };
+                            // Mixing t-strings with text is an error
+                            // (mirrors CPython: `'a' t'{x}'`).
+                            return Err(
+                                "cannot mix t-string literals with string or bytes literals"
+                                    .to_string(),
+                            );
+                        }
+                        // Mixing bytes with text in implicit
+                        // concatenation is an error (mirrors CPython:
+                        // `f'' b''`).
+                        Token::Bytes(_) => {
+                            return Err("cannot mix bytes and nonbytes literals".to_string());
                         }
                         _ => break,
                     }
                 }
-                Ok(expr)
+                Ok(flush_fstring_parts(fparts, saw_fstring))
             }
 
             Token::Bytes(b) => {
@@ -112,10 +234,7 @@ impl Parser {
                 self.next();
                 // Implicit bytes concatenation: adjacent bytes with optional newlines
                 loop {
-                    // Only eat newlines if followed by a bytes literal
-                    while self.at(&Token::Newline) && matches!(self.peek(), Token::Bytes(_)) {
-                        self.next();
-                    }
+                    // NOTE: no newline eating (see above).
                     if !matches!(&self.current, Token::Bytes(_)) {
                         break;
                     }
@@ -124,97 +243,80 @@ impl Parser {
                         self.next();
                     }
                 }
+                // Bytes adjacent to text can never concatenate
+                // (mirrors CPython: `b'' f''`). A t-string neighbor
+                // reports the t-string mixing error instead.
+                if matches!(&self.current, Token::TStringStart) {
+                    return Err(
+                        "cannot mix t-string literals with string or bytes literals".to_string()
+                    );
+                }
+                if matches!(&self.current, Token::String(_) | Token::FStringStart) {
+                    return Err("cannot mix bytes and nonbytes literals".to_string());
+                }
                 let combined: Vec<u8> = parts.into_iter().flatten().collect();
                 Ok(Expr::Constant(Constant::Bytes(combined)))
             }
 
             Token::FStringStart => {
                 self.next();
-                let mut parts = vec![self.parse_fstring()?];
-                // Implicit concatenation: adjacent f-strings and regular strings
+                // Like the String arm: adjacent String/FString parts
+                // merge into ONE JoinedStr. TString involvement is an
+                // error (mirrors CPython).
+                let mut fparts: Vec<FStringPart> = Vec::new();
+                accum_fstring_parts(&mut fparts, self.parse_fstring()?);
                 loop {
-                    // Only eat newlines if followed by an f-string or string (implicit concatenation)
-                    while self.at(&Token::Newline)
-                        && (matches!(self.peek(), Token::FStringStart)
-                            || matches!(self.peek(), Token::TStringStart)
-                            || matches!(self.peek(), Token::String(_)))
-                    {
-                        self.next();
-                    }
                     match &self.current {
                         Token::FStringStart => {
                             self.next();
-                            parts.push(self.parse_fstring()?);
+                            let fstr = self.parse_fstring()?;
+                            accum_fstring_parts(&mut fparts, fstr);
                         }
                         Token::TStringStart => {
-                            self.next();
-                            parts.push(self.parse_tstring()?);
+                            return Err(
+                                "cannot mix t-string literals with string or bytes literals"
+                                    .to_string(),
+                            );
                         }
                         Token::String(s) => {
                             let s = s.clone();
+                            let sstart = self.current_start;
                             self.next();
-                            parts.push(Expr::Constant(Constant::String(s)));
+                            let send = self.prev_end;
+                            accum_fstring_str(&mut fparts, s, (sstart, send));
+                        }
+                        Token::Bytes(_) => {
+                            return Err("cannot mix bytes and nonbytes literals".to_string());
                         }
                         _ => break,
                     }
                 }
-                if parts.len() == 1 {
-                    Ok(parts.into_iter().next().unwrap())
-                } else {
-                    let result = parts
-                        .into_iter()
-                        .reduce(|a, b| Expr::BinOp {
-                            left: Box::new(a),
-                            op: Operator::Add,
-                            right: Box::new(b),
-                        })
-                        .unwrap();
-                    Ok(result)
-                }
+                Ok(flush_fstring_parts(fparts, true))
             }
 
             Token::TStringStart => {
                 self.next();
-                let mut parts = vec![self.parse_tstring()?];
-                // Implicit concatenation: adjacent t-strings and regular strings
+                // Adjacent t-strings merge into ONE Template (mirrors
+                // CPython: `t'a' t'b'` has a single joined strings
+                // tuple). Anything else adjacent is a mixing error.
+                let mut tparts: Vec<TemplateStrPart> = Vec::new();
+                accum_tstring_parts(&mut tparts, self.parse_tstring()?);
                 loop {
-                    while self.at(&Token::Newline)
-                        && (matches!(self.peek(), Token::TStringStart)
-                            || matches!(self.peek(), Token::FStringStart)
-                            || matches!(self.peek(), Token::String(_)))
-                    {
-                        self.next();
-                    }
                     match &self.current {
                         Token::TStringStart => {
                             self.next();
-                            parts.push(self.parse_tstring()?);
+                            accum_tstring_parts(&mut tparts, self.parse_tstring()?);
                         }
-                        Token::FStringStart => {
-                            self.next();
-                            parts.push(self.parse_fstring()?);
-                        }
-                        Token::String(s) => {
-                            let s = s.clone();
-                            self.next();
-                            parts.push(Expr::Constant(Constant::String(s)));
+                        Token::FStringStart | Token::String(_) | Token::Bytes(_) => {
+                            return Err(
+                                "cannot mix t-string literals with string or bytes literals"
+                                    .to_string(),
+                            );
                         }
                         _ => break,
                     }
                 }
-                if parts.len() == 1 {
-                    Ok(parts.into_iter().next().unwrap())
-                } else {
-                    let result = parts
-                        .into_iter()
-                        .reduce(|a, b| Expr::BinOp {
-                            left: Box::new(a),
-                            op: Operator::Add,
-                            right: Box::new(b),
-                        })
-                        .unwrap();
-                    Ok(result)
-                }
+                Ok(Expr::TemplateStr(tparts))
             }
 
             Token::Name(s) => {
@@ -725,13 +827,61 @@ impl Parser {
     }
 
     pub(crate) fn parse_fstring(&mut self) -> Result<Expr, String> {
+        // Cap interpolated-string nesting (mirrors CPython's
+        // MAXFSTRINGLEVEL: "too many nested f-strings or t-strings").
+        // Errors abort the whole parse, so only success decrements
+        // (sequential f-strings must not accumulate).
+        // The string starts at its opener, recorded on consumption
+        // (a LIFO stack, since nested strings complete first). Falls
+        // back to the lexer's prefix record, which only ever lags
+        // for the outermost string.
+        let (sl, sc) = self
+            .string_starts
+            .pop()
+            .unwrap_or_else(|| self.lexer.fstring_start_pos());
+        self.fstring_depth += 1;
+        if self.fstring_depth > 150 {
+            return Err("too many nested f-strings or t-strings".to_string());
+        }
+        let result = self.parse_fstring_inner();
+        self.fstring_depth -= 1;
+        // End of the last consumed token (tracked via
+        // `prev_end`, not the lookahead start).
+        let (el, ec) = self.prev_end;
+        return result.map(|e| Expr::located(sl, sc, el, ec, e));
+    }
+
+    fn parse_fstring_inner(&mut self) -> Result<Expr, String> {
         let mut parts = Vec::new();
+        // Pending source spans from `FStringSpan` markers (pushed just
+        // before each literal/field's tokens): consumed when building
+        // the corresponding part below.
+        let mut pending_lit: Option<((usize, usize), (usize, usize))> = None;
+        let mut pending_field: Option<((usize, usize), (usize, usize))> = None;
         loop {
             match &self.current {
+                Token::FStringSpan {
+                    open,
+                    close,
+                    is_field,
+                } => {
+                    let span = (*open, *close);
+                    if *is_field {
+                        pending_field = Some(span);
+                    } else {
+                        pending_lit = Some(span);
+                    }
+                    self.next();
+                }
                 Token::FStringMiddle(s) => {
                     let s = s.clone();
                     self.next();
-                    parts.push(FStringPart::String(s));
+                    // Middle text is built from chars (always valid
+                    // UTF-8), so `from_str` is lossless here.
+                    parts.push(FStringPart::String(
+                        crate::object::pystring::PyStr::from_str(&s),
+                        pending_lit.take().unwrap_or(((1, 1), (1, 1))),
+                    ));
                 }
                 Token::FStringStart => {
                     // Inner f-string from tokenize_fstring_expr — parse full expression
@@ -747,16 +897,22 @@ impl Parser {
                         self.next();
                         if spec.contains('{') {
                             let mut nested_lex =
-                                crate::token::Lexer::new(&format!("f\"{}\"", spec));
+                                crate::token::Lexer::new(&format!("f\"{}\"", spec), false);
                             let first_tok = nested_lex.next_token();
                             if first_tok == Token::FStringStart {
-                                let mut nested_parser = Parser::new(&format!("f\"{}\"", spec));
-                                if let Ok(Expr::FString(inner)) = nested_parser.parse_expr() {
-                                    format_spec = Some(Box::new(Expr::FString(inner)));
-                                } else {
-                                    format_spec = Some(Box::new(Expr::Constant(Constant::String(
-                                        spec.into(),
-                                    ))));
+                                let mut nested_parser =
+                                    Parser::new(&format!("f\"{}\"", spec), false);
+                                // Peel positions: the nested parse stamps
+                                // `Located` (see `Expr::Located`).
+                                match nested_parser.parse_expr().map(Expr::into_unlocated) {
+                                    Ok(Expr::FString(inner)) => {
+                                        format_spec = Some(Box::new(Expr::FString(inner)));
+                                    }
+                                    _ => {
+                                        format_spec = Some(Box::new(Expr::Constant(
+                                            Constant::String(spec.into()),
+                                        )));
+                                    }
                                 }
                             } else {
                                 format_spec =
@@ -771,6 +927,7 @@ impl Parser {
                         expr: Box::new(expr),
                         conversion,
                         format_spec,
+                        span: pending_field.take().unwrap_or(((1, 1), (1, 1))),
                     });
                 }
                 Token::FStringEnd => {
@@ -781,7 +938,18 @@ impl Parser {
                     if self.at(&Token::EndOfFile) {
                         break;
                     }
-                    let mut expr = self.parse_expr()?;
+                    // A leading `*` parses as Starred (valid in tuple
+                    // displays like `{*x,}`; a bare one is rejected
+                    // below with CPython's codegen message). A leading
+                    // `**` can never start a field expression.
+                    let mut expr = if self.at(&Token::Star) {
+                        self.next();
+                        Expr::Starred(Box::new(self.parse_expr()?))
+                    } else if self.at(&Token::DoubleStar) {
+                        return Err("f-string: expecting a valid expression after '{'".to_string());
+                    } else {
+                        self.parse_expr()?
+                    };
                     // Handle tuple expressions inside f-string: {x, y, z}
                     if self.eat(&Token::Comma) {
                         let mut elts = vec![expr];
@@ -800,6 +968,12 @@ impl Parser {
                         }
                         expr = Expr::Tuple(elts);
                     }
+                    // A bare Starred outside a tuple display is rejected
+                    // (mirrors CPython codegen's "can't use starred
+                    // expression here", e.g. `f'{*a}'`).
+                    if matches!(&expr, Expr::Starred(_)) {
+                        return Err("can't use starred expression here".to_string());
+                    }
 
                     let mut conversion: u8 = 0;
                     let mut format_spec: Option<Box<Expr>> = None;
@@ -816,16 +990,22 @@ impl Parser {
                         if spec.contains('{') {
                             // Nested format spec — parse as f-string
                             let mut nested_lex =
-                                crate::token::Lexer::new(&format!("f\"{}\"", spec));
+                                crate::token::Lexer::new(&format!("f\"{}\"", spec), false);
                             let first_tok = nested_lex.next_token();
                             if first_tok == Token::FStringStart {
-                                let mut nested_parser = Parser::new(&format!("f\"{}\"", spec));
-                                if let Ok(Expr::FString(inner)) = nested_parser.parse_expr() {
-                                    format_spec = Some(Box::new(Expr::FString(inner)));
-                                } else {
-                                    format_spec = Some(Box::new(Expr::Constant(Constant::String(
-                                        spec.into(),
-                                    ))));
+                                let mut nested_parser =
+                                    Parser::new(&format!("f\"{}\"", spec), false);
+                                // Peel positions: the nested parse stamps
+                                // `Located` (see `Expr::Located`).
+                                match nested_parser.parse_expr().map(Expr::into_unlocated) {
+                                    Ok(Expr::FString(inner)) => {
+                                        format_spec = Some(Box::new(Expr::FString(inner)));
+                                    }
+                                    _ => {
+                                        format_spec = Some(Box::new(Expr::Constant(
+                                            Constant::String(spec.into()),
+                                        )));
+                                    }
                                 }
                             } else {
                                 format_spec =
@@ -840,6 +1020,7 @@ impl Parser {
                         expr: Box::new(expr),
                         conversion,
                         format_spec,
+                        span: pending_field.take().unwrap_or(((1, 1), (1, 1))),
                     });
                 }
             }
@@ -851,13 +1032,53 @@ impl Parser {
     /// interpolation keeps its raw source text (`Interpolation.str`),
     /// delivered by the lexer as `Token::TStringExpr`.
     pub(crate) fn parse_tstring(&mut self) -> Result<Expr, String> {
+        // Same nesting cap as f-strings (CPython's message covers
+        // both: "too many nested f-strings or t-strings").
+        // Starts at the opener like f-strings (see above).
+        let (sl, sc) = self
+            .string_starts
+            .pop()
+            .unwrap_or_else(|| self.lexer.fstring_start_pos());
+        self.fstring_depth += 1;
+        if self.fstring_depth > 150 {
+            return Err("too many nested f-strings or t-strings".to_string());
+        }
+        let result = self.parse_tstring_inner();
+        self.fstring_depth -= 1;
+        // End of the last consumed token (tracked via
+        // `prev_end`, not the lookahead start).
+        let (el, ec) = self.prev_end;
+        return result.map(|e| Expr::located(sl, sc, el, ec, e));
+    }
+
+    fn parse_tstring_inner(&mut self) -> Result<Expr, String> {
         let mut parts = Vec::new();
+        // Pending source spans from `FStringSpan` markers (same
+        // mechanism as `parse_fstring_inner`).
+        let mut pending_lit: Option<((usize, usize), (usize, usize))> = None;
+        let mut pending_field: Option<((usize, usize), (usize, usize))> = None;
         loop {
             match &self.current {
+                Token::FStringSpan {
+                    open,
+                    close,
+                    is_field,
+                } => {
+                    let span = (*open, *close);
+                    if *is_field {
+                        pending_field = Some(span);
+                    } else {
+                        pending_lit = Some(span);
+                    }
+                    self.next();
+                }
                 Token::TStringMiddle(s) => {
                     let s = s.clone();
                     self.next();
-                    parts.push(TemplateStrPart::String(s));
+                    parts.push(TemplateStrPart::String(
+                        s,
+                        pending_lit.take().unwrap_or(((1, 1), (1, 1))),
+                    ));
                 }
                 Token::TStringExpr(raw) => {
                     let str_text = raw.clone();
@@ -868,6 +1089,7 @@ impl Parser {
                         str_text,
                         conversion,
                         format_spec,
+                        span: pending_field.take().unwrap_or(((1, 1), (1, 1))),
                     });
                 }
                 Token::TStringEnd => {
@@ -887,6 +1109,7 @@ impl Parser {
                         str_text: String::new(),
                         conversion,
                         format_spec,
+                        span: pending_field.take().unwrap_or(((1, 1), (1, 1))),
                     });
                 }
             }
@@ -896,7 +1119,17 @@ impl Parser {
 
     /// Parse one interpolation value + optional `!conversion` / `:spec`.
     fn parse_tstring_value(&mut self) -> Result<(Expr, u8, Option<Box<Expr>>), String> {
-        let mut expr = self.parse_expr()?;
+        // Leading `*` parses as Starred (tuple displays like `{*x,}`
+        // stay valid); a bare one is rejected below. `**` can never
+        // start an interpolation.
+        let mut expr = if self.at(&Token::Star) {
+            self.next();
+            Expr::Starred(Box::new(self.parse_expr()?))
+        } else if self.at(&Token::DoubleStar) {
+            return Err("t-string: expecting a valid expression after '{'".to_string());
+        } else {
+            self.parse_expr()?
+        };
         // Handle tuple expressions inside interpolation: {x, y, z}
         if self.eat(&Token::Comma) {
             let mut elts = vec![expr];
@@ -915,6 +1148,11 @@ impl Parser {
             }
             expr = Expr::Tuple(elts);
         }
+        // A bare Starred outside a tuple display is rejected (mirrors
+        // CPython codegen's "can't use starred expression here").
+        if matches!(&expr, Expr::Starred(_)) {
+            return Err("can't use starred expression here".to_string());
+        }
         let mut conversion: u8 = 0;
         if let Token::FStringConversion(c) = &self.current {
             conversion = *c;
@@ -926,14 +1164,19 @@ impl Parser {
             self.next();
             // Format specs render as JoinedStr (same as f-strings).
             if spec.contains('{') {
-                let mut nested_lex = crate::token::Lexer::new(&format!("f\"{}\"", spec));
+                let mut nested_lex = crate::token::Lexer::new(&format!("f\"{}\"", spec), false);
                 let first_tok = nested_lex.next_token();
                 if first_tok == Token::FStringStart {
-                    let mut nested_parser = Parser::new(&format!("f\"{}\"", spec));
-                    if let Ok(Expr::FString(inner)) = nested_parser.parse_expr() {
-                        format_spec = Some(Box::new(Expr::FString(inner)));
-                    } else {
-                        format_spec = Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
+                    let mut nested_parser = Parser::new(&format!("f\"{}\"", spec), false);
+                    // Peel positions (see above).
+                    match nested_parser.parse_expr().map(Expr::into_unlocated) {
+                        Ok(Expr::FString(inner)) => {
+                            format_spec = Some(Box::new(Expr::FString(inner)));
+                        }
+                        _ => {
+                            format_spec =
+                                Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
+                        }
                     }
                 } else {
                     format_spec = Some(Box::new(Expr::Constant(Constant::String(spec.into()))));
@@ -946,6 +1189,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_lambda(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_lambda_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_lambda_inner(&mut self) -> Result<Expr, String> {
         self.next();
         let args = if self.eat(&Token::Colon) {
             Vec::new()
@@ -1080,6 +1344,27 @@ impl Parser {
     }
 
     pub(crate) fn parse_yield_expr(&mut self) -> Result<Expr, String> {
+        // Stamp source spans on every expression node (see
+        // `Expr::Located`): start = current token, end =
+        // lookahead token start (approximation).
+        // Start of the current token (tracked through
+        // lookahead scans in `current_start`).
+        let (sl, sc) = self.current_start;
+        let e = self.parse_yield_expr_inner()?;
+        // Wrap only freshly built (unpositioned) nodes; pass through
+        // already-spanned ones (pure delegation and transparent
+        // parens keep inner spans).
+        if e.position().is_none() {
+            // End of the last consumed token (tracked via
+            // `prev_end`, not the lookahead start).
+            let (el, ec) = self.prev_end;
+            Ok(Expr::located(sl, sc, el, ec, e))
+        } else {
+            Ok(e)
+        }
+    }
+
+    fn parse_yield_expr_inner(&mut self) -> Result<Expr, String> {
         self.next();
         if self.eat(&Token::From) {
             let expr = self.parse_conditional_expr()?;

@@ -168,39 +168,71 @@ fn print_py_error(err: &PyError, fallback_file: &str) {
                 .map(|v| v.str())
                 .unwrap_or_else(|| fallback_file.to_string());
             if lineno > 0 {
-                eprintln!("  File \"{}\", line {}, in <module>", file, lineno);
+                // A bare SyntaxError file/line (no traceback frames of
+                // its own) prints without `in <module>` (mirrors
+                // CPython's `print_exception_file_and_line`, which never
+                // carries a function name — the `, in <module>` suffix
+                // belongs to traceback frame lines only).
+                let display_type_name_early = err.type_name_for_display();
+                if display_type_name_early == "SyntaxError"
+                    || display_type_name_early == "IndentationError"
+                {
+                    eprintln!("  File \"{}\", line {}", file, lineno);
+                } else {
+                    eprintln!("  File \"{}\", line {}, in <module>", file, lineno);
+                }
                 let display_text = text.as_deref().unwrap_or("");
                 if !display_text.is_empty() || (offset >= 1 && type_name == "SyntaxError") {
-                    eprintln!("    {}", display_text.trim_end());
-                    // SyntaxError caret display
-                    if offset >= 1 && type_name == "SyntaxError" {
-                        let indent = "    ";
-                        let spaces = (offset - 1) as usize;
-                        let trimmed = display_text.trim_end();
-                        // `offset` is a CHARACTER column (CPython's own
-                        // convention), but `str::len()` is a BYTE count —
-                        // for a line with any multi-byte UTF-8 character,
-                        // comparing/subtracting the two directly is wrong
-                        // (wrong caret length) and can underflow into a
-                        // panic when `offset` (in chars) legitimately
-                        // exceeds `trimmed.len()` in bytes is false but the
-                        // reverse miscount happens (confirmed crash:
-                        // `attempt to subtract with overflow` on a line
-                        // containing `ä`/`î`, test_eof.py's
-                        // test_EOFS_with_file). Count chars, not bytes, and
-                        // saturate defensively either way.
-                        let trimmed_chars = trimmed.chars().count();
-                        let caret_len = if trimmed.is_empty() {
-                            1
-                        } else {
-                            std::cmp::max(
-                                1,
-                                trimmed_chars
-                                    .saturating_sub(offset as usize)
-                                    .saturating_add(1),
-                            )
-                        };
-                        eprintln!("{}{}{}", indent, " ".repeat(spaces), "^".repeat(caret_len));
+                    // SyntaxError source/caret display, mirroring
+                    // CPython's `traceback._format_syntax_error`
+                    // verbatim: the line prints unstripped (a trailing
+                    // space is significant — test_eof.py's
+                    // test_EOFS_with_file expects it), and the caret is
+                    // a single `^` at the offset column unless end
+                    // info extends it (we never carry end info, so
+                    // always single). A falsy offset prints the line
+                    // with no caret at all (lone-backslash files).
+                    // All counts are CHARACTERS, never bytes (a line
+                    // with multi-byte UTF-8 like `ä`/`î` must not
+                    // underflow or misalign).
+                    let rtext: String = display_text
+                        .trim_end_matches('\n')
+                        .trim_end_matches('\r')
+                        .to_string();
+                    let ltext: String = rtext.trim_start_matches([' ', '\n', '\x0C']).to_string();
+                    let spaces = (rtext.chars().count() - ltext.chars().count()) as i64;
+                    let rlen = rtext.chars().count() as i64;
+                    let tlen = display_text.chars().count() as i64;
+                    eprintln!("    {}", ltext);
+                    if type_name == "SyntaxError" && offset >= 1 {
+                        // 1-based column → 0-based index into the
+                        // stripped text. We never carry end-column
+                        // info, so this always yields a single caret
+                        // (CPython's `end = offset + 1` fallback).
+                        let mut colno = offset - 1 - spaces;
+                        if !display_text.is_empty() && colno + 1 > tlen {
+                            colno = rlen + 1 - 1 - spaces;
+                        }
+                        if colno < 0 {
+                            colno = 0;
+                        }
+                        let nchars = ltext.chars().count() as i64;
+                        if colno > nchars {
+                            colno = nchars;
+                        }
+                        let colno = colno.max(0) as usize;
+                        // Tabs/whitespace in the prefix are kept for
+                        // alignment; anything past the line end pads
+                        // with plain spaces.
+                        let mut caret_pad: String = ltext
+                            .chars()
+                            .take(colno)
+                            .map(|c| if c.is_whitespace() { c } else { ' ' })
+                            .collect();
+                        while caret_pad.chars().count() < colno {
+                            caret_pad.push(' ');
+                        }
+                        eprintln!("    {}^", caret_pad);
                     }
                 }
             } else {
@@ -220,6 +252,24 @@ fn print_py_error(err: &PyError, fallback_file: &str) {
             // `assert False`/`raise SomeError()` printed a blank line, and
             // `raise ValueError("x")` printed "x: x").
             let display_type_name = err.type_name_for_display();
+            // For SyntaxError with file/line info, print the clean
+            // `.msg` (mirrors CPython's traceback, which renders
+            // `msg`, not `str(exc)` — the latter carries a
+            // ` (file, line N)` suffix that must not appear here).
+            let msg = if (display_type_name == "SyntaxError"
+                || display_type_name == "IndentationError")
+                && lineno > 0
+            {
+                exc_obj
+                    .borrow()
+                    .get_attribute("msg")
+                    .ok()
+                    .map(|v| v.str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(msg)
+            } else {
+                msg
+            };
             if msg.is_empty() {
                 eprintln!("{}", display_type_name);
             } else {
@@ -251,7 +301,7 @@ fn run_repl_source(vm: &mut VirtualMachine, source: &str) -> Result<object::PyOb
         return vm.run(code).map_err(|e| format!("{}", e));
     }
     // Fall back to module/statement mode
-    let mut parser = Parser::new(source);
+    let mut parser = Parser::new(source, false);
     let program = parser
         .parse_program()
         .map_err(|e| format!("Parse error: {}", e))?;
@@ -435,7 +485,7 @@ fn is_complete_statement(s: &str) -> bool {
         return false;
     }
     // Simple heuristic: check if parser succeeds
-    let mut parser = Parser::new(s);
+    let mut parser = Parser::new(s, false);
     parser.parse_program().is_ok()
 }
 
@@ -674,7 +724,7 @@ fn real_main() {
                 }
 
                 // Run the code
-                let mut parser = Parser::new(&code);
+                let mut parser = Parser::new(&code, false);
                 let program = match parser.parse_program() {
                     Ok(p) => p,
                     Err(e) => {
@@ -760,7 +810,7 @@ fn real_main() {
                     module_name.replace("'", "\\'"),
                 );
 
-                let mut parser = Parser::new(&script);
+                let mut parser = Parser::new(&script, false);
                 let program = match parser.parse_program() {
                     Ok(p) => p,
                     Err(e) => {
@@ -821,9 +871,22 @@ fn real_main() {
         // sys.argv = [filename, ...args]
         let sys_argv = script_args.clone();
 
-        match fs::read_to_string(filename) {
+        match fs::read(filename)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                crate::object::import_builtin::decode_source_bytes(&bytes)
+                    .map_err(|e| format!("{}", e))
+            }) {
             Ok(source) => {
-                let mut parser = Parser::new(&source);
+                // Filename for stderr warning rendering (mirrors
+                // CPython's `file:line: Category: msg` format).
+                crate::modules::set_warn_filename(filename);
+                // A leading UTF-8 BOM decodes to U+FEFF, which must be
+                // stripped so it doesn't shift columns (mirrors
+                // CPython: `decode_source_bytes` does the same for
+                // bytes input; test_eof.py's BOM file cases).
+                let source = source.strip_prefix('\u{FEFF}').unwrap_or(&source);
+                let mut parser = Parser::new(&source, false);
                 let program = match parser.parse_program() {
                     Ok(p) => p,
                     Err(e) => {

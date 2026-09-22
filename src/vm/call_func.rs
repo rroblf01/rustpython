@@ -712,6 +712,25 @@ impl VirtualMachine {
         if !matches!(&*callable.borrow(), PyObject::Type { .. }) {
             return None;
         }
+        // PEP 750 `Template(...)` / `Interpolation(...)`: constructed
+        // directly with full args+keywords (the generic packed-trailing-
+        // dict convention can't tell a positional trailing dict from
+        // real kwargs — fatal for `Interpolation({...})`).
+        if let Some(obj) = match crate::object::template_new(callable, &args, &keywords) {
+            Ok(v) => v,
+            Err(e) => return Some(Err(e)),
+        } {
+            // A subclass-declared `__init__` still runs (the base types
+            // define none, so this only fires for real overrides).
+            if let Some(init_fn) = crate::object::lookup_dunder_via_mro(callable, "__init__") {
+                let mut init_args = vec![obj.clone()];
+                init_args.extend(args);
+                if let Err(e) = self.call_function(init_fn, init_args, keywords) {
+                    return Some(Err(e));
+                }
+            }
+            return Some(Ok(obj));
+        }
         let result: PyResult<PyObjectRef> = (|| {
             let type_construct_info = if let PyObject::Type { dict, mro, .. } = &*callable.borrow()
             {

@@ -110,6 +110,52 @@ pub enum Stmt {
     Located(usize, Box<Stmt>),
 }
 
+impl Expr {
+    /// Peel `Located` wrappers to the underlying kind (mirrors
+    /// `Compiler::unwrap_located` for statements).
+    pub fn unlocate(&self) -> &Expr {
+        let mut e = self;
+        while let Expr::Located { node, .. } = e {
+            e = node;
+        }
+        e
+    }
+
+    /// Owned peel of `Located` wrappers.
+    pub fn into_unlocated(self) -> Expr {
+        let mut e = self;
+        while let Expr::Located { node, .. } = e {
+            e = *node;
+        }
+        e
+    }
+
+    /// Outermost position if located, else `None`.
+    pub fn position(&self) -> Option<(usize, usize, usize, usize)> {
+        match self {
+            Expr::Located {
+                line,
+                col,
+                end_line,
+                end_col,
+                ..
+            } => Some((*line, *col, *end_line, *end_col)),
+            _ => None,
+        }
+    }
+
+    /// Wrap an expression with source positions.
+    pub fn located(line: usize, col: usize, end_line: usize, end_col: usize, node: Expr) -> Expr {
+        Expr::Located {
+            line,
+            col,
+            end_line,
+            end_col,
+            node: Box::new(node),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Arg {
     pub arg: Ident,
@@ -196,6 +242,16 @@ pub enum Pattern {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
+    /// Source position wrapper (mirrors `Stmt::Located`): 1-indexed
+    /// line/col of the node's first token plus the end position.
+    /// Peelled via `unlocate()` wherever the kind is matched.
+    Located {
+        line: usize,
+        col: usize,
+        end_line: usize,
+        end_col: usize,
+        node: Box<Expr>,
+    },
     BoolOp {
         op: BoolOp,
         values: Vec<Expr>,
@@ -286,19 +342,25 @@ pub enum Expr {
     },
 }
 
+/// Absolute source span: (start, end), 1-indexed (line, col).
+pub type Span = ((usize, usize), (usize, usize));
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FStringPart {
-    String(String),
+    String(crate::object::pystring::PyStr, Span),
     Expr {
         expr: Box<Expr>,
         conversion: u8, // 0=none, 1=repr(!r), 2=str(!s), 3=ascii(!a)
         format_spec: Option<Box<Expr>>,
+        /// Field braces span (`{` start through past-`}`), for
+        /// FormattedValue positions.
+        span: Span,
     },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TemplateStrPart {
-    String(String),
+    String(String, Span),
     Interpolation {
         expr: Box<Expr>,
         /// Raw source text of the interpolated expression
@@ -306,6 +368,8 @@ pub enum TemplateStrPart {
         str_text: String,
         conversion: u8, // 0=none, 1=repr(!r), 2=str(!s), 3=ascii(!a)
         format_spec: Option<Box<Expr>>,
+        /// Field braces span, for Interpolation positions.
+        span: Span,
     },
 }
 

@@ -970,9 +970,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                             PyError::key_error(format!("'{}'", base))
                                         })?
                                     } else {
-                                        return Err(PyError::type_error(
-                                            "format_map() argument must be dict",
-                                        ));
+                                        py_getitem(&mapping, &py_str(base))?
                                     };
                                     py_getitem(&base_val, &py_str(key)).or_else(|_| {
                                         if let Ok(idx) = key.parse::<usize>() {
@@ -987,9 +985,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                             || PyError::key_error(format!("'{}'", name_part)),
                                         )?
                                     } else {
-                                        return Err(PyError::type_error(
-                                            "format_map() argument must be dict",
-                                        ));
+                                        py_getitem(&mapping, &py_str(name_part))?
                                     }
                                 };
                                 let val = match conv {
