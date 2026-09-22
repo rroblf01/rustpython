@@ -1027,6 +1027,16 @@ pub(crate) fn preprocess_inline_flags(
     while i < chars.len() {
         let c = chars[i];
         if c == '\\' {
+            // `\uXXXX`/`\UXXXXXXXX` (unicode escapes) are invalid in BYTES
+            // patterns (CPython: `br"\u1234"` → PatternError).
+            if is_bytes && i + 1 < chars.len() && (chars[i + 1] == 'u' || chars[i + 1] == 'U') {
+                let mut end = i + 2;
+                while end < chars.len() && chars[end].is_ascii_hexdigit() {
+                    end += 1;
+                }
+                let esc: String = chars[i..end.min(chars.len())].iter().collect();
+                return Err((format!("bad escape {}", esc), i));
+            }
             out.push(c);
             if i + 1 < chars.len() {
                 out.push(chars[i + 1]);
@@ -1497,6 +1507,67 @@ fn counted_repeat_end(chars: &[char], i: usize) -> Option<usize> {
     Some(j)
 }
 
+/// Scan for octal escapes whose value exceeds 0o377 and return the byte
+/// position + digit string of the first offender (CPython raises
+/// "octal escape value \NNN outside of range0-0o377" during parse).
+fn find_octal_range_error(pattern: &str) -> Option<(usize, String)> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut byte_pos = 0usize;
+    let mut i = 0usize;
+    let mut in_class = false;
+    let mut class_first = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            let nxt = chars[i + 1];
+            if nxt.is_ascii_digit() {
+                // Determine octal digits CPython would consume.
+                let oct_digits: String;
+                if nxt == '0' {
+                    let mut d = String::from("0");
+                    let mut k = i + 2;
+                    let mut cnt = 1;
+                    while k < chars.len() && cnt < 3 && chars[k].is_digit(8) {
+                        d.push(chars[k]);
+                        k += 1;
+                        cnt += 1;
+                    }
+                    oct_digits = d;
+                } else if nxt.is_digit(8)
+                    && i + 2 < chars.len()
+                    && chars[i + 2].is_digit(8)
+                    && i + 3 < chars.len()
+                    && chars[i + 3].is_digit(8)
+                {
+                    oct_digits = chars[i + 1..i + 4].iter().collect();
+                } else {
+                    oct_digits = String::new();
+                }
+                if !oct_digits.is_empty() {
+                    if let Ok(val) = u32::from_str_radix(&oct_digits, 8) {
+                        if val > 0o377 {
+                            return Some((byte_pos, oct_digits));
+                        }
+                    }
+                }
+            }
+            byte_pos += 2;
+            i += 2;
+            continue;
+        }
+        if c == '[' {
+            in_class = true;
+            class_first = true;
+        } else if c == ']' && !class_first {
+            in_class = false;
+        }
+        class_first = false;
+        byte_pos += c.len_utf8();
+        i += 1;
+    }
+    None
+}
+
 pub fn compile_python_regex_flags(
     pattern: &str,
     flags: i32,
@@ -1514,6 +1585,16 @@ pub fn compile_python_regex_flags(
         return Err(fancy_regex::Error::ParseError(
             byte_idx,
             fancy_regex::ParseError::TargetNotRepeatable,
+        ));
+    }
+    // Octal-escape range check (CPython raises at parse time).
+    if let Some((byte_pos, digits)) = find_octal_range_error(pattern) {
+        return Err(fancy_regex::Error::ParseError(
+            byte_pos,
+            fancy_regex::ParseError::GeneralParseError(format!(
+                "octal escape value \\{} outside of range 0-0o377",
+                digits
+            )),
         ));
     }
     let pattern = escape_loose_braces(pattern);

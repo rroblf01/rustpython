@@ -116,6 +116,18 @@ pub(crate) fn make_readonly_mapping(inner: PyObjectRef) -> PyObjectRef {
 /// (bytes/bytearray, their subclasses, memoryview) decode via latin-1
 /// (1:1 byte mapping, mirroring CPython's bytes-pattern semantics);
 /// returns (text, is_bytes).
+/// Whether `arg` is a string/bytes-like value the `re` module accepts as a
+/// pattern or subject (str/bytes/bytearray/memoryview/array or a subclass
+/// carrying one of those native backings). Used to reject `re.compile(0)` etc.
+pub(crate) fn re_is_text_like(arg: &PyObjectRef) -> bool {
+    match &*arg.borrow() {
+        PyObject::Str(_) | PyObject::Bytes(_) | PyObject::ByteArray(_)
+        | PyObject::MemoryView { .. } | PyObject::Array(_) => true,
+        PyObject::Instance { .. } => crate::object::native_backing_of(arg).is_some(),
+        _ => false,
+    }
+}
+
 pub(crate) fn re_text_arg(arg: &PyObjectRef) -> (String, bool) {
     match &*arg.borrow() {
         PyObject::Bytes(b) => (b.iter().map(|&x| x as char).collect(), true),
@@ -961,6 +973,13 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         // (CPython: re.compile(re.compile('x')) is a no-op).
         if matches!(&*args[0].borrow(), PyObject::CompiledRegex { .. }) {
             return Ok(args[0].clone());
+        }
+        // CPython: re.compile(0) → TypeError "first argument must be string
+        // or compiled pattern" (reject ints/objects, not just stringify them).
+        if !re_is_text_like(&args[0]) {
+            return Err(PyError::type_error(
+                "first argument must be string or compiled pattern",
+            ));
         }
         let (pattern, is_bytes) = re_text_arg(&args[0]);
         let flags = if args.len() > 1 {
