@@ -386,31 +386,65 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
             .last()
             .map(|c| matches!(c, 'f' | 'F' | 'e' | 'E' | 'g' | 'G' | '%' | 'n'))
             .unwrap_or(false);
-        if !has_numeric_type || width.is_some() {
+        if !has_numeric_type {
+            // No numeric type (e.g. '<', '10', '^20.2'): format via str()
+            // (WITH parens). A PRECISION (no type) must round the NUMBERS
+            // first (`format(1.123-3.123j, '^20.2')` == '     (1.1-3.1j)   ',
+            // test_format) — build the paren-wrapped rounded form, then pad.
             drop(val_borrowed);
-            // Format the complex via str(), then apply the spec as a string.
-            // A WIDTH/align spec pads the WHOLE complex string even when a
-            // numeric type is present (`format(1.5+3j, '<20g')` ==
-            // `'1.5+3j              '`, test_format) — strip the numeric type
-            // char (it formats NUMBERS, but here we format the str() whole).
+            if let Some(dot) = spec_clone.find('.') {
+                let part_spec = spec_clone[dot..].to_string(); // precision (e.g. ".2")
+                let fmt = |part: f64| -> PyResult<String> {
+                    crate::vm::format::format_with_spec(&py_float(part), &part_spec)
+                };
+                let re_s = fmt(re)?;
+                let im_abs_raw = fmt(im.abs())?;
+                let im_abs = im_abs_raw
+                    .strip_prefix('+')
+                    .or_else(|| im_abs_raw.strip_prefix('-'))
+                    .or_else(|| im_abs_raw.strip_prefix(' '))
+                    .unwrap_or(&im_abs_raw)
+                    .to_string();
+                let im_signed = fmt(im)?;
+                let sign = if im_signed.starts_with('-') { "-" } else { "+" };
+                let whole = format!("({}{}{}j)", re_s, sign, im_abs);
+                // Pad: keep align/width, drop the precision (str padding
+                // ignores precision, and `.2` on a str can error).
+                let pad_spec = spec_clone.split('.').next().unwrap_or("").to_string();
+                let p = py_str(&whole);
+                return crate::vm::format::format_with_spec(&p, &pad_spec);
+            }
             let s = val.str();
             let p = py_str(&s);
-            let spec_for_str = if has_numeric_type {
-                spec_clone
-                    .trim_end_matches(|c: char| matches!(c, 'f' | 'F' | 'e' | 'E' | 'g' | 'G' | '%' | 'n'))
-                    .to_string()
-            } else {
-                spec_clone.clone()
-            };
-            return crate::vm::format::format_with_spec(&p, &spec_for_str);
+            return crate::vm::format::format_with_spec(&p, &spec_clone);
         }
+        // Numeric type present: build the NO-PAREN complex string
+        // (`1.5+3j`) by formatting each part with the type, then pad the
+        // whole if a width is given (`format(1.5+3j, '<20g')` ==
+        // `'1.5+3j              '`, test_format — NOT `val.str()` which
+        // has parens).
+        // Spec for individual parts: WITHOUT a width, use the FULL spec (so
+        // `+g` keeps the `+` on the real part → `+1.5+3.5j`); WITH a width,
+        // use only precision+type (the whole string is padded later, and
+        // parts must not be individually padded or signed).
+        let part_spec = if width.is_some() {
+            if let Some(dot) = spec_clone.find('.') {
+                spec_clone[dot..].to_string() // precision + type (e.g. ".1f")
+            } else {
+                spec_clone
+                    .chars()
+                    .last()
+                    .map(|c| c.to_string())
+                    .unwrap_or_default() // just the type char (e.g. "g")
+            }
+        } else {
+            spec_clone.clone() // full spec (keeps sign, e.g. "+g")
+        };
         let fmt_part = |part: f64| -> PyResult<String> {
             let p = py_float(part);
-            crate::vm::format::format_with_spec(&p, &spec_clone)
+            crate::vm::format::format_with_spec(&p, &part_spec)
         };
         let re_s = fmt_part(re)?;
-        // Determine the imag sign from the FORMATTED part (z already coerced
-        // a rounded -0.0 to positive, and a negative mantissa keeps its -).
         // The imag VALUE is formatted WITHOUT the spec's sign char — the sign
         // is prepended explicitly below, so `format(1.5+3.5j, '+g')` gives
         // "+1.5+3.5j", not "+1.5++3.5j" (test_format).
@@ -423,7 +457,36 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
             .to_string();
         let im_signed = fmt_part(im)?;
         let sign = if im_signed.starts_with('-') { "-" } else { "+" };
-        return Ok(format!("{}{}{}j", re_s, sign, im_abs));
+        let whole = format!("{}{}{}j", re_s, sign, im_abs);
+        if width.is_some() {
+            // Pad the WHOLE no-paren string: keep only align/fill/width
+            // (strip precision `.N` and the type char — both format NUMBERS,
+            // not the string being padded; `format(..., '20.2f')` pads the
+            // string to20 right-aligned, test_format).
+            let mut pad_spec = if let Some(dot) = spec_clone.find('.') {
+                spec_clone[..dot].to_string() // before precision (align+width)
+            } else {
+                spec_clone
+                    .trim_end_matches(|c: char| {
+                        matches!(c, 'f' | 'F' | 'e' | 'E' | 'g' | 'G' | '%' | 'n')
+                    })
+                    .to_string()
+            };
+            // Complex pads with NUMBER default alignment (right), not the
+            // string default (left) — prepend '>' when no explicit align.
+            if !pad_spec.contains(['<', '^', '>']) && !pad_spec.starts_with(['<', '^', '>']) {
+                let has_align = pad_spec.chars().any(|c| c == '<' || c == '^' || c == '>')
+                    || spec_clone.chars().take_while(|c| !c.is_ascii_digit() && *c != '.')
+                        .any(|c| c == '<' || c == '^' || c == '>');
+                if !has_align {
+                    pad_spec.insert(0, '>');
+                }
+            }
+            drop(val_borrowed);
+            let p = py_str(&whole);
+            return crate::vm::format::format_with_spec(&p, &pad_spec);
+        }
+        return Ok(whole);
     }
 
     // Generate the formatted value based on type

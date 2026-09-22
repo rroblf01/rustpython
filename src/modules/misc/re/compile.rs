@@ -818,7 +818,7 @@ fn map_general_parse_error(s: &str) -> String {
 }
 
 pub fn compile_python_regex(pattern: &str) -> Result<fancy_regex::Regex, fancy_regex::Error> {
-    compile_python_regex_flags(pattern, 0)
+    compile_python_regex_flags(pattern, 0, false)
 }
 
 /// Single inline-flag letter to its bit (mirrors CPython's `FLAGS`).
@@ -1516,7 +1516,7 @@ fn counted_repeat_end(chars: &[char], i: usize) -> Option<usize> {
 /// CPython group-structure validation: named-group definition/backref
 /// checks, duplicate names, and backreferences to still-open groups.
 /// Returns `Err((msg, pos))` on the first violation.
-fn validate_group_syntax(pattern: &str) -> Result<(), (String, Option<i64>)> {
+fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, Option<i64>)> {
     fn bad_name_char(name: &str) -> Option<char> {
         // CPython group names: identifier chars, but NOT starting with a digit.
         name.chars().enumerate().find(|(i, c)| {
@@ -1526,6 +1526,36 @@ fn validate_group_syntax(pattern: &str) -> Result<(), (String, Option<i64>)> {
                 !(c.is_alphanumeric() || *c == '_')
             }
         }).map(|(_, c)| c)
+    }
+    // Bytes patterns: group names must be ASCII; a non-ASCII byte →
+    // "bad character in group name '\xNN...'" (test_re: b'(?P<\xc2\xb5>x)').
+    // Returns Err(msg, pos) if invalid for the given flavor.
+    fn check_name(name: &str, is_bytes: bool, pos: usize) -> Result<(), (String, Option<i64>)> {
+        if is_bytes && name.chars().any(|c| !c.is_ascii()) {
+            // Escape non-ASCII chars as \xNN (latin-1 byte values).
+            let escaped: String = name
+                .chars()
+                .map(|c| {
+                    if c.is_ascii() {
+                        c.to_string()
+                    } else {
+                        format!("\\x{:02x}", c as u32 & 0xff)
+                    }
+                })
+                .collect();
+            return Err((
+                format!("bad character in group name '{}'", escaped),
+                Some(pos as i64),
+            ));
+        }
+        if let Some(bad) = bad_name_char(name) {
+            let _ = bad;
+            return Err((
+                format!("bad character in group name '{}'", name),
+                Some(pos as i64),
+            ));
+        }
+        Ok(())
     }
     // Total capturing groups in the WHOLE pattern — conditionals may reference
     // groups defined later (forward refs), so validate against this total.
@@ -1600,12 +1630,7 @@ fn validate_group_syntax(pattern: &str) -> Result<(), (String, Option<i64>)> {
                                     Some(name_start as i64),
                                 ));
                             }
-                            if bad_name_char(&name).is_some() {
-                                return Err((
-                                    format!("bad character in group name '{}'", name),
-                                    Some(name_start as i64),
-                                ));
-                            }
+                            check_name(&name, is_bytes, name_start)?;
                             if let Some((_, prev)) = named.iter().find(|(nm, _)| *nm == name) {
                                 return Err((
                                     format!(
@@ -1643,12 +1668,7 @@ fn validate_group_syntax(pattern: &str) -> Result<(), (String, Option<i64>)> {
                                     Some(name_start as i64),
                                 ));
                             }
-                            if bad_name_char(&name).is_some() {
-                                return Err((
-                                    format!("bad character in group name '{}'", name),
-                                    Some(name_start as i64),
-                                ));
-                            }
+                            check_name(&name, is_bytes, name_start)?;
                             match named.iter().find(|(nm, _)| *nm == name) {
                                 None => {
                                     return Err((
@@ -1699,12 +1719,7 @@ fn validate_group_syntax(pattern: &str) -> Result<(), (String, Option<i64>)> {
                                 Some(name_start as i64),
                             ));
                         }
-                        if bad_name_char(&name).is_some() {
-                            return Err((
-                                format!("bad character in group name '{}'", name),
-                                Some(name_start as i64),
-                            ));
-                        }
+                        check_name(&name, is_bytes, name_start)?;
                         if let Some((_, prev)) = named.iter().find(|(nm, _)| *nm == name) {
                             return Err((
                                 format!(
@@ -1736,8 +1751,11 @@ fn validate_group_syntax(pattern: &str) -> Result<(), (String, Option<i64>)> {
                             j += 1;
                         }
                         if j >= n {
+                            // Condition's `)` never found — the group-ref
+                            // NAME inside the conditional is unterminated
+                            // (`()(?(1` → "missing ), unterminated name").
                             return Err((
-                                "missing ), unterminated subpattern".to_string(),
+                                "missing ), unterminated name".to_string(),
                                 Some(cond_start as i64),
                             ));
                         }
@@ -1763,16 +1781,55 @@ fn validate_group_syntax(pattern: &str) -> Result<(), (String, Option<i64>)> {
                                 ));
                             }
                         } else {
-                            if bad_name_char(&cond).is_some() {
-                                return Err((
-                                    format!("bad character in group name '{}'", cond),
-                                    Some(cond_start as i64),
-                                ));
-                            }
+                            check_name(&cond, is_bytes, cond_start)?;
                             if named.iter().find(|(nm, _)| *nm == cond).is_none() {
                                 return Err((
                                     format!("unknown group name '{}'", cond),
                                     None,
+                                ));
+                            }
+                        }
+                        // More than two branches in the conditional body is an error
+                        // (`(?(1)a|b|c)` → "conditional backref with more
+                        // than two branches", test_re).
+                        {
+                            let mut k = j + 1;
+                            let mut depth = 1i32;
+                            let mut pipes = 0;
+                            let mut closed = false;
+                            while k < n {
+                                let ch = chars[k];
+                                if ch == '\\' {
+                                    k += 2;
+                                    continue;
+                                }
+                                if ch == '(' {
+                                    depth += 1;
+                                } else if ch == ')' {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        closed = true;
+                                        break;
+                                    }
+                                } else if ch == '|' && depth == 1 {
+                                    pipes += 1;
+                                    if pipes >= 2 {
+                                        return Err((
+                                        "conditional backref with more than two branches"
+                                                .to_string(),
+                                            Some(k as i64),
+                                        ));
+                                    }
+                                }
+                                k += 1;
+                            }
+                            if !closed {
+                                // Conditional never closed — body unterminated
+                                // (`()(?(1)a` → "missing ), unterminated
+                                // subpattern" at the conditional's `(`).
+                                return Err((
+                                    "missing ), unterminated subpattern".to_string(),
+                                    Some(i as i64),
                                 ));
                             }
                         }
@@ -1873,6 +1930,7 @@ fn find_octal_range_error(pattern: &str) -> Option<(usize, String)> {
 pub fn compile_python_regex_flags(
     pattern: &str,
     flags: i32,
+    is_bytes: bool,
 ) -> Result<fancy_regex::Regex, fancy_regex::Error> {
     // CPython-specific quantifier validation (see `validate_quantifiers`).
     if let Err(char_idx) = validate_quantifiers(pattern) {
@@ -1890,7 +1948,7 @@ pub fn compile_python_regex_flags(
         ));
     }
     // Group-structure validation (duplicate names, open-group backrefs, etc).
-    if let Err((msg, pos)) = validate_group_syntax(pattern) {
+    if let Err((msg, pos)) = validate_group_syntax(pattern, is_bytes) {
         return Err(fancy_regex::Error::ParseError(
             pos.unwrap_or(0) as usize,
             fancy_regex::ParseError::GeneralParseError(msg),

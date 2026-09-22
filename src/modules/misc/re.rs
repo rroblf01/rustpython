@@ -283,7 +283,7 @@ fn extract_regex_flags(
             if ascii_scope || is_bytes {
                 flags |= 256;
             }
-            match compile_python_regex_flags(&pattern, flags) {
+            match compile_python_regex_flags(&pattern, flags, is_bytes) {
                 Ok(re) => Ok((re, pattern.clone(), is_bytes, flags)),
                 Err(e) => Err(fancy_error_to_pattern(&e, &pattern)),
             }
@@ -627,7 +627,7 @@ pub fn fullmatch_make(
     let pos_b = char_to_byte_idx(string, pos_c);
     let endpos_b = char_to_byte_idx(string, endpos_c);
     let anchored_src = format!("(?:{})\\z", pattern);
-    let anchored = match compile_python_regex_flags(&anchored_src, flags) {
+    let anchored = match compile_python_regex_flags(&anchored_src, flags, is_bytes) {
         Ok(r) => r,
         Err(e) => {
             return Err(re_pattern_error(
@@ -915,7 +915,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 if ascii_scope || pb {
                     flags |= 256;
                 }
-                match compile_python_regex_flags(&pattern, flags) {
+                match compile_python_regex_flags(&pattern, flags, pb) {
                     Ok(r) => (r, pb),
                     Err(e) => {
                         return Err(fancy_error_to_pattern(&e, &pattern));
@@ -1017,7 +1017,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         } else {
             compile_flags
         };
-        match compile_python_regex_flags(&pattern, compile_flags) {
+        match compile_python_regex_flags(&pattern, compile_flags, is_bytes) {
             Ok(re) => Ok(PyObjectRef::new(PyObject::CompiledRegex {
                 regex: Box::new(re),
                 pattern: original_pattern,
@@ -1329,7 +1329,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                                     ));
                                 }
                             };
-                        match compile_python_regex_flags(&pat, flags) {
+                        match compile_python_regex_flags(&pat, flags, false) {
                             Ok(r) => {
                                 compiled_list.push(PyObjectRef::new(PyObject::CompiledRegex {
                                     regex: Box::new(r),

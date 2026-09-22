@@ -466,6 +466,44 @@ pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
                     if a_cx && b_real {
                         return Ok(PyObjectRef::imm(PyObject::Complex(ar / br, ai / br)));
                     }
+                    // real / complex → CPython `_Py_rc_quot` (its recovery uses
+                    // `r.imag = 0.0 * (-a*y)`, giving the correct `-0.0` imag
+                    // sign for `1/(inf+nanj)` that the complex/complex formula
+                    // `ai*x - ar*y` would flush to `+0.0`; test_truediv).
+                    if !a_cx {
+                        let a_val = ar; // a is real, ai == 0.0
+                        let (mut rr, mut ii);
+                        if br.abs() >= bi.abs() {
+                            let ratio = bi / br;
+                            let denom = br + bi * ratio;
+                            rr = a_val / denom;
+                            ii = -a_val * ratio / denom;
+                        } else {
+                            let ratio = br / bi;
+                            let denom = br * ratio + bi;
+                            rr = a_val * ratio / denom;
+                            ii = -a_val / denom;
+                        }
+                        if rr.is_nan()
+                            && ii.is_nan()
+                            && a_val.is_finite()
+                            && (br.is_infinite() || bi.is_infinite())
+                        {
+                            let x = if br.is_infinite() {
+                                br.signum()
+                            } else {
+                                0.0_f64.copysign(br)
+                            };
+                            let y = if bi.is_infinite() {
+                                bi.signum()
+                            } else {
+                                0.0_f64.copysign(bi)
+                            };
+                            rr = 0.0 * (a_val * x);
+                            ii = 0.0 * (-a_val * y);
+                        }
+                        return Ok(PyObjectRef::imm(PyObject::Complex(rr, ii)));
+                    }
                     // Smith's algorithm (CPython's `_Py_c_quot`): avoids
                     // overflow and keeps `(1+0j) / (0.1+0j)` == 10.0 exactly,
                     // which the naive `(a*br + b*bi)/den` form loses.

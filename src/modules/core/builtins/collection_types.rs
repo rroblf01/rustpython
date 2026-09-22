@@ -785,34 +785,48 @@ pub fn register_collection_types(
             func: builtin_complex,
         }),
     );
+    // `from_number` as a CLASSMETHOD (bound: args[0] is the calling type, so
+    // `ComplexSubclass.from_number(3.14)` returns a ComplexSubclass instance
+    // — test_from_number_subclass asserts `type(...) is cls`).
+    fn complex_from_number_impl(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+        if args.len() < 2 {
+            return Err(PyError::type_error(
+                "complex.from_number() takes exactly 1 argument",
+            ));
+        }
+        let cls = args[0].clone();
+        let value = &args[1];
+        // Reject strings/bytes — from_number doesn't parse strings (unlike
+        // complex(str)); test_from_number: from_number('3.14') must TypeError.
+        {
+            let b = value.borrow();
+            if matches!(&*b, PyObject::Str(_) | PyObject::Bytes(_)) {
+                return Err(PyError::type_error(
+                    "complex() argument must be a string or a number",
+                ));
+            }
+        }
+        // Convert via complex() (handles complex pass-through, subclass
+        // backing, __complex__/__float__/__index__).
+        let cx = builtin_complex(&[value.clone()])?;
+        // The base `complex` type → return the native value; a SUBCLASS →
+        // wrap in an Instance of that class (native backing = cx).
+        let is_base = match &*cls.borrow() {
+            PyObject::Type { name, .. } => name == "complex",
+            _ => false,
+        };
+        if is_base {
+            return Ok(cx);
+        }
+        Ok(crate::object::make_subclass_instance(&cls, cx))
+    }
+    let from_number_fn = PyObjectRef::new(PyObject::BuiltinFunction {
+        name: "from_number".to_string(),
+        func: complex_from_number_impl,
+    });
     complex_dict.insert_str(
         "from_number",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "from_number".to_string(),
-            func: |args| {
-                if args.is_empty() {
-                    return Err(PyError::type_error(
-                        "complex.from_number() takes exactly 1 argument",
-                    ));
-                }
-                let a = &args[0];
-                // Reject strings/bytes — `from_number` doesn't parse strings
-                // (test_from_number: `from_number('3.14')` must TypeError),
-                // unlike `complex(str)`.
-                {
-                    let b = a.borrow();
-                    if matches!(&*b, PyObject::Str(_) | PyObject::Bytes(_)) {
-                        return Err(PyError::type_error(
-                            "complex() argument must be a string or a number",
-                        ));
-                    }
-                }
-                // Delegate to `complex()` for everything else — it handles
-                // complex pass-through, complex-subclass native backing,
-                // `__complex__`, `__float__`, and `__index__`.
-                builtin_complex(&[a.clone()])
-            },
-        }),
+        PyObjectRef::new(PyObject::ClassMethod { func: from_number_fn }),
     );
     complex_dict.insert_str(
         "__init__",
@@ -866,13 +880,28 @@ pub fn register_collection_types(
     // (not NotImplemented).
     fn cx_parts_for_cmp(o: &PyObjectRef) -> Option<(f64, f64)> {
         let borrowed = o.borrow();
-        if let Some(p) = crate::object::as_complex_parts(&borrowed) {
-            return Some(p);
-        }
+        // Check Int FIRST (with exact-representability round-trip) —
+        // `as_complex_parts` would round a huge int to f64, losing the
+        // precision distinction test_richcompare_boundaries needs.
         if let PyObject::Int(n) = &*borrowed {
-            return n.to_f64().map(|f| (f, 0.0)).or(Some((f64::INFINITY, 0.0)));
+            return match n.to_f64() {
+                Some(f) => {
+                    let exact = format!("{:.0}", f)
+                        .parse::<BigInt>()
+                        .map(|b| b == *n)
+                        .unwrap_or(false);
+                    if exact {
+                        Some((f, 0.0))
+                    } else {
+                        // Not exactly representable → sentinel that never
+                        // equals a finite complex real (so == is False).
+                        Some((f64::NAN, 0.0))
+                    }
+                }
+                None => Some((f64::INFINITY, 0.0)),
+            };
         }
-        None
+        crate::object::as_complex_parts(&borrowed)
     }
 
         complex_dict.insert_str(
@@ -941,6 +970,26 @@ pub fn register_collection_types(
             PyObjectRef::new(PyObject::BuiltinFunction {
                 name: "__ge__".to_string(),
                 func: |_args| Ok(py_not_implemented()),
+            }),
+        );
+        complex_dict.insert_str(
+            "__format__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__format__".to_string(),
+                func: |args| {
+                    if args.is_empty() {
+                        return Err(PyError::type_error(
+                            "__format__ requires at least 1 argument",
+                        ));
+                    }
+                    let spec = if args.len() > 1 {
+                        args[1].str()
+                    } else {
+                        String::new()
+                    };
+                    let result = crate::vm::format_with_spec(&args[0], &spec)?;
+                    Ok(py_str(&result))
+                },
             }),
         );
     }
