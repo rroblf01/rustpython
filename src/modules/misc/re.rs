@@ -673,7 +673,19 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 {
             return Err(PyError::type_error("search() takes at least 2 arguments"));
         }
-        let (re, pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
+        if !re_is_text_like(&args[1]) {
+            return Err(PyError::type_error(format!(
+                "expected string or bytes-like object, got '{}'",
+                args[1].borrow().type_name()
+            )));
+        }
+        let call_flags = re_call_flags(args, 2);
+        if call_flags != 0 && matches!(&*args[0].borrow(), PyObject::CompiledRegex { .. }) {
+            return Err(PyError::value_error(
+                "cannot process flags argument with a compiled pattern",
+            ));
+        }
+        let (re, pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], call_flags)?;
         let (string, subj_bytes) = re_text_arg(&args[1]);
         let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
         let caps = re.captures(&string).unwrap_or(None);
@@ -693,7 +705,19 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 {
             return Err(PyError::type_error("match() takes at least 2 arguments"));
         }
-        let (re, pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
+        if !re_is_text_like(&args[1]) {
+            return Err(PyError::type_error(format!(
+                "expected string or bytes-like object, got '{}'",
+                args[1].borrow().type_name()
+            )));
+        }
+        let call_flags = re_call_flags(args, 2);
+        if call_flags != 0 && matches!(&*args[0].borrow(), PyObject::CompiledRegex { .. }) {
+            return Err(PyError::value_error(
+                "cannot process flags argument with a compiled pattern",
+            ));
+        }
+        let (re, pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], call_flags)?;
         let (string, subj_bytes) = re_text_arg(&args[1]);
         let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
         let caps = re.captures(&string).unwrap_or(None);
@@ -719,6 +743,12 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 "fullmatch() takes at least 2 arguments",
             ));
         }
+        if !re_is_text_like(&args[1]) {
+            return Err(PyError::type_error(format!(
+                "expected string or bytes-like object, got '{}'",
+                args[1].borrow().type_name()
+            )));
+        }
         // `extract_regex_flags` validates flags/inline groups and yields the
         // effective flags; the returned non-anchored regex is unused —
         // `fullmatch_make` recompiles anchored so the engine backtracks to
@@ -741,7 +771,13 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 {
             return Err(PyError::type_error("findall() takes at least 2 arguments"));
         }
-        let (re, _pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
+        let call_flags = re_call_flags(args, 2);
+        if call_flags != 0 && matches!(&*args[0].borrow(), PyObject::CompiledRegex { .. }) {
+            return Err(PyError::value_error(
+                "cannot process flags argument with a compiled pattern",
+            ));
+        }
+        let (re, _pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], call_flags)?;
         let (string, subj_bytes) = re_text_arg(&args[1]);
         let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
         let groups = re.captures_len().saturating_sub(1);
@@ -970,8 +1006,14 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("compile() takes at least 1 argument"));
         }
         // Compiling an already-compiled pattern returns it unchanged
-        // (CPython: re.compile(re.compile('x')) is a no-op).
+        // (CPython: re.compile(re.compile('x')) is a no-op) — but passing a
+        // nonzero flags WITH a compiled pattern is a ValueError (test_bug_1661).
         if matches!(&*args[0].borrow(), PyObject::CompiledRegex { .. }) {
+            if args.len() > 1 && args[1].as_i64().unwrap_or(0) != 0 {
+                return Err(PyError::value_error(
+                    "cannot process flags argument with a compiled pattern",
+                ));
+            }
             return Ok(args[0].clone());
         }
         // CPython: re.compile(0) → TypeError "first argument must be string
