@@ -111,7 +111,16 @@ impl PyObject {
                 if *re == 0.0 && re.is_sign_positive() {
                     format!("{}j", format_complex_part(*im))
                 } else {
-                    let sign = if im.is_sign_negative() { "-" } else { "+" };
+                    // Sign for the imag part: `-` for genuinely negative
+                    // values (incl. -0.0), but `+` for ANY nan (CPython:
+                    // `repr(complex(-nan,-nan))` == "(nan+nanj)", not
+                    // "(nan-nanj)") — `is_sign_negative()` is True for -nan,
+                    // so nan must be excluded.
+                    let sign = if im.is_sign_negative() && !im.is_nan() {
+                        "-"
+                    } else {
+                        "+"
+                    };
                     format!(
                         "({}{}{}j)",
                         format_complex_part(*re),

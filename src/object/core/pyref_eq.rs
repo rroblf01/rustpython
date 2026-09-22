@@ -128,7 +128,13 @@ impl PyObjectRef {
         // is True, not an exception. Bare Instances with a custom `__eq__`
         // do NOT short-circuit (`b == b` calls `__eq__` and may raise, as
         // the same test asserts).
-        if !matches!(&*self.borrow(), PyObject::Instance { .. }) && self.is(other) {
+        // COMPLEX is excluded from this identity short-circuit: CPython compares
+        // complex by VALUE, so `nan == nan` must be False even for the SAME
+        // object (test_complex's `x != x` / test_repr_str).
+        if !matches!(&*self.borrow(), PyObject::Complex(..))
+            && !matches!(&*self.borrow(), PyObject::Instance { .. })
+            && self.is(other)
+        {
             return Ok(true);
         }
         // For container types, clone elements before element-wise comparison

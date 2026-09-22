@@ -4,8 +4,28 @@ use super::*;
 /// `complex("-3-4j")`, `complex("2j")`, `complex("(1+2j)")`) — finds the
 /// LAST top-level `+`/`-` before the trailing `j`/`J` (skipping one right
 /// after `e`/`E`, which is an exponent sign, not the real/imag separator).
+/// Supports digit-separator underscores (`complex("1_000+2_000j")`), which
+/// must sit between two digits (CPython's numeric-literal rule).
 fn parse_complex_str(s: &str) -> PyResult<(f64, f64)> {
     let malformed = || PyError::value_error(format!("complex() arg is a malformed string"));
+    // Parse a float allowing `_` digit separators (validated: each `_` must be
+    // between two digits), matching CPython's numeric-literal underscore rule.
+    let parse_num = |t: &str| -> Result<f64, ()> {
+        let chars: Vec<char> = t.chars().collect();
+        let mut out = String::with_capacity(t.len());
+        for (i, &c) in chars.iter().enumerate() {
+            if c == '_' {
+                let prev = if i > 0 { chars[i - 1] } else { '\0' };
+                let next = if i + 1 < chars.len() { chars[i + 1] } else { '\0' };
+                if !prev.is_ascii_digit() || !next.is_ascii_digit() {
+                    return Err(());
+                }
+                continue; // strip the underscore
+            }
+            out.push(c);
+        }
+        out.parse::<f64>().map_err(|_| ())
+    };
     let s = s.trim();
     let inner = s
         .strip_prefix('(')
@@ -32,11 +52,11 @@ fn parse_complex_str(s: &str) -> PyResult<(f64, f64)> {
             Some(idx) => {
                 let real_str = &stripped[..idx];
                 let imag_str = &stripped[idx..];
-                let re: f64 = real_str.parse().map_err(|_| malformed())?;
+                let re: f64 = parse_num(real_str).map_err(|_| malformed())?;
                 let im: f64 = match imag_str {
                     "+" => 1.0,
                     "-" => -1.0,
-                    _ => imag_str.parse().map_err(|_| malformed())?,
+                    _ => parse_num(imag_str).map_err(|_| malformed())?,
                 };
                 Ok((re, im))
             }
@@ -44,21 +64,63 @@ fn parse_complex_str(s: &str) -> PyResult<(f64, f64)> {
                 let im: f64 = match stripped {
                     "" | "+" => 1.0,
                     "-" => -1.0,
-                    _ => stripped.parse().map_err(|_| malformed())?,
+                    _ => parse_num(stripped).map_err(|_| malformed())?,
                 };
                 Ok((0.0, im))
             }
         }
     } else {
-        let re: f64 = inner.parse().map_err(|_| malformed())?;
+        let re: f64 = parse_num(inner).map_err(|_| malformed())?;
         Ok((re, 0.0))
     }
 }
 
 pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // Normalize positional + keyword args (`real=`/`imag=` arrive as a
+    // trailing dict). Build effective (real, imag) argument slots.
+    let mut positional: Vec<PyObjectRef> = args.to_vec();
+    let mut kw_real: Option<PyObjectRef> = None;
+    let mut kw_imag: Option<PyObjectRef> = None;
+    if let Some(last) = args.last() {
+        if let PyObject::Dict(d) = &*last.borrow() {
+            let has_kw = d.get(&py_str("real")).ok().flatten().is_some()
+                || d.get(&py_str("imag")).ok().flatten().is_some();
+            if has_kw {
+                kw_real = d.get(&py_str("real")).ok().flatten();
+                kw_imag = d.get(&py_str("imag")).ok().flatten();
+                positional.pop(); // drop the trailing kwargs dict
+            }
+        }
+    }
+    let eff_real: Option<PyObjectRef> = positional.first().cloned().or_else(|| kw_real.clone());
+    let eff_imag: Option<PyObjectRef> = positional.get(1).cloned().or(kw_imag);
+    // Track whether `real` was supplied via the `real=` keyword — CPython
+    // warns for `complex(real=<complex>)` even with no imag, but NOT for a
+    // plain positional `complex(<complex>)`.
+    let real_from_kw = positional.is_empty() && kw_real.is_some();
+    // Rebuild an equivalent positional-style args list for the logic below:
+    // [real] or [real, imag].
+    let args: Vec<PyObjectRef> = match (&eff_real, &eff_imag) {
+        (None, None) => Vec::new(),
+        (Some(r), None) => vec![r.clone()],
+        (None, Some(i)) => vec![py_float(0.0), i.clone()],
+        (Some(r), Some(i)) => vec![r.clone(), i.clone()],
+    };
     if args.is_empty() {
         return Ok(PyObjectRef::imm(PyObject::Complex(0.0, 0.0)));
     }
+    // Error message for an invalid FIRST (real) argument: with a second arg
+    // present CPython reports it as "argument 'real' must be a real number…",
+    // otherwise the generic "argument must be a string or a number…" — both
+    // WITHOUT the "complex() " prefix and WITHOUT quoting the type name
+    // (test_constructor's assertRaisesRegex expects e.g. "not dict").
+    let arg0_err = |tn: &str| -> String {
+        if args.len() > 1 {
+            format!("argument 'real' must be a real number, not {}", tn)
+        } else {
+            format!("argument must be a string or a number, not {}", tn)
+        }
+    };
     let (re, im, first_was_complex) = {
         let obj = args[0].borrow();
         match &*obj {
@@ -68,9 +130,7 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             PyObject::Bool(b) => (if *b { 1.0 } else { 0.0 }, 0.0, false),
             PyObject::Str(s) => {
                 if args.len() > 1 {
-                    return Err(PyError::type_error(
-                        "complex() can't take second arg if first is a string",
-                    ));
+                    return Err(PyError::type_error(arg0_err("str")));
                 }
                 let (re, im) = parse_complex_str(s)?;
                 (re, im, false)
@@ -87,10 +147,48 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     let self_obj = args[0].clone();
                     drop(obj);
                     let result = call_bound_method(f, self_obj, vec![])?;
-                    let result_borrow = result.borrow();
-                    match &*result_borrow {
-                        PyObject::Complex(re, im) => (*re, *im, true),
-                        _ => return Err(PyError::type_error("__complex__ returned non-complex")),
+                    // Direct complex result, OR a complex-subclass instance
+                    // (e.g. `complex1.__complex__` returns `self`) — take its
+                    // value from the native backing.
+                    let direct = {
+                        let rb = result.borrow();
+                        match &*rb {
+                            PyObject::Complex(re, im) => Some((*re, *im)),
+                            _ => None,
+                        }
+                    };
+                    if let Some((re, im)) = direct {
+                        (re, im, true)
+                    } else {
+                        match native_backing_of(&result) {
+                            Some(nb) => match &*nb.borrow() {
+                                PyObject::Complex(re, im) => {
+                                    // `__complex__` returned a non-plain-complex
+                                    // instance (e.g. `complex1.__complex__` returns
+                                    // `self`) — CPython DeprecationWarnings here
+                                    // (test_constructor's complex1 case).
+                                    let rtype = result.borrow().type_name().to_string();
+                                    crate::modules::warnings_emit(
+                                        &format!(
+                                            "argument 'real' must be a real number, not {}",
+                                            rtype
+                                        ),
+                                        "DeprecationWarning",
+                                    );
+                                    (*re, *im, true)
+                                }
+                                _ => {
+                                    return Err(PyError::type_error(
+                                        "__complex__ returned non-complex",
+                                    ))
+                                }
+                            },
+                            None => {
+                                return Err(PyError::type_error(
+                                    "__complex__ returned non-complex",
+                                ))
+                            }
+                        }
                     }
                 }
                 // A real `class ComplexSubclass(complex): ...` instance
@@ -106,29 +204,106 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     Some(native) => match &*native.borrow() {
                         PyObject::Complex(re, im) => (*re, *im, true),
                         _ => {
-                            return Err(PyError::type_error(format!(
-                                "complex() argument must be a string or a number, not '{}'",
-                                get_type_name_for_instance(typ)
+                            return Err(PyError::type_error(arg0_err(
+                                &get_type_name_for_instance(typ),
                             )))
                         }
                     },
                     None => {
-                        return Err(PyError::type_error(format!(
-                            "complex() argument must be a string or a number, not '{}'",
-                            get_type_name_for_instance(typ)
-                        )))
+                        // Compute the type name BEFORE `drop(obj)` (typ is a
+                        // borrow into obj; using it after the drop is the
+                        // borrow error). No `__complex__`, no complex backing
+                        // — try `__float__` then `__index__`
+                        // (test_constructor: `complex(WithFloat(4.25))` works
+                        // via `__float__`, `complex(WithIndex(42))` via
+                        // `__index__`; a non-float/non-int return, or a huge
+                        // `__index__` value, must TypeError/OverflowError).
+                        let tn = get_type_name_for_instance(typ);
+                        if let Some(ffn) = lookup_dunder_via_mro(typ, "__float__") {
+                            let ffn = ffn.clone();
+                            let self_obj = args[0].clone();
+                            drop(obj);
+                            let result = call_bound_method(ffn, self_obj, vec![])?;
+                            let rb = result.borrow();
+                            match &*rb {
+                                PyObject::Float(fl) => (*fl, 0.0, false),
+                                _ => return Err(PyError::type_error(arg0_err(&tn))),
+                            }
+                        } else if let Some(ifn) = lookup_dunder_via_mro(typ, "__index__") {
+                            let ifn = ifn.clone();
+                            let self_obj = args[0].clone();
+                            drop(obj);
+                            let result = call_bound_method(ifn, self_obj, vec![])?;
+                            if let Some(i) = result.as_i64() {
+                                (i as f64, 0.0, false)
+                            } else {
+                                let rb = result.borrow();
+                                match &*rb {
+                                    PyObject::Int(n) => match n.to_f64() {
+                                        Some(f) if f.is_finite() => (f, 0.0, false),
+                                        _ => {
+                                            return Err(PyError::overflow_error(
+                                                "int too large to convert to float",
+                                            ))
+                                        }
+                                    },
+                                    _ => return Err(PyError::type_error(arg0_err(&tn))),
+                                }
+                            }
+                        } else {
+                            return Err(PyError::type_error(arg0_err(&tn)));
+                        }
                     }
                 },
             },
             _ => {
-                return Err(PyError::type_error(format!(
-                    "complex() argument must be a string or a number, not '{}'",
-                    obj.type_name()
-                )))
+                return Err(PyError::type_error(arg0_err(&obj.type_name())))
             }
         }
     };
+    // DeprecationWarning when the `real` (first) argument is complex — fires
+    // when an imag is supplied OR when real came via the `real=` keyword
+    // (CPython: `complex(real=<cx>)` and `complex(<cx>, <imag>)` both warn,
+    // but a plain positional `complex(<cx>)` does not; test_constructor).
+    if first_was_complex && (args.len() > 1 || real_from_kw) {
+        let type_name = {
+            let borrowed = args[0].borrow();
+            match &*borrowed {
+                PyObject::Instance { typ, .. } => get_type_name_for_instance(typ),
+                other => other.type_name().to_string(),
+            }
+        };
+        crate::modules::warnings_emit(
+            &format!("argument 'real' must be a real number, not {}", type_name),
+            "DeprecationWarning",
+        );
+    }
     if args.len() > 1 {
+        // DeprecationWarning when the `imag` (second) argument is complex
+        // (`complex(0, 4.25+0j)` → "argument 'imag' must be a real number").
+        {
+            let direct_cx = {
+                let b = args[1].borrow();
+                matches!(&*b, PyObject::Complex(..))
+            };
+            let second_is_cx = direct_cx
+                || native_backing_of(&args[1])
+                    .map(|n| matches!(&*n.borrow(), PyObject::Complex(..)))
+                    .unwrap_or(false);
+            if second_is_cx {
+                let type_name = {
+                    let borrowed = args[1].borrow();
+                    match &*borrowed {
+                        PyObject::Instance { typ, .. } => get_type_name_for_instance(typ),
+                        other => other.type_name().to_string(),
+                    }
+                };
+                crate::modules::warnings_emit(
+                    &format!("argument 'imag' must be a real number, not {}", type_name),
+                    "DeprecationWarning",
+                );
+            }
+        }
         // (extra_re, extra_im): the second argument's own real/imaginary
         // parts. A plain number's "imaginary part" is 0.0 — real CPython
         // still supports (with a deprecation warning) the second arg
@@ -142,30 +317,83 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 PyObject::Int(i) => (i.to_f64().unwrap_or(0.0), 0.0),
                 PyObject::Float(f) => (*f, 0.0),
                 PyObject::Bool(b) => (if *b { 1.0 } else { 0.0 }, 0.0),
-                PyObject::Instance { typ, .. } => match lookup_dunder_via_mro(typ, "__complex__") {
-                    Some(f) => {
-                        let f = f.clone();
-                        let self_obj = args[1].clone();
-                        drop(obj);
-                        let result = call_bound_method(f, self_obj, vec![])?;
-                        let result_borrow = result.borrow();
-                        match &*result_borrow {
+                PyObject::Instance { typ, .. } => {
+                    // The `imag` (second) argument must be a real number or
+                    // a complex value (native backing). Objects that only
+                    // provide `__complex__` (e.g. `WithComplex`) are rejected
+                    // with TypeError (test_constructor asserts this) — unlike
+                    // the `real` (first) argument, which does use `__complex__`.
+                    match native_backing_of(&args[1]) {
+                        Some(native) => match &*native.borrow() {
                             PyObject::Complex(re, im) => (*re, *im),
                             _ => {
-                                return Err(PyError::type_error("__complex__ returned non-complex"))
+                                return Err(PyError::type_error(format!(
+                                    "argument 'imag' must be a real number, not {}",
+                                    get_type_name_for_instance(typ)
+                                )))
+                            }
+                        },
+                        None => {
+                            // No complex backing — try `__float__` (must return a
+                            // float) then `__index__` (returns an int; huge →
+                            // OverflowError). test_constructor: `complex(1.5,
+                            // WithFloat(4.25))`/`complex(1.5, WithIndex(42))`
+                            // work, but `complex(1.5, WithFloat(42))` — its
+                            // `__float__` returns an INT — must TypeError.
+                            let tn = get_type_name_for_instance(typ);
+                            if let Some(ffn) = lookup_dunder_via_mro(typ, "__float__") {
+                                let ffn = ffn.clone();
+                                let self_obj = args[1].clone();
+                                drop(obj);
+                                let result = call_bound_method(ffn, self_obj, vec![])?;
+                                let rb = result.borrow();
+                                match &*rb {
+                                    PyObject::Float(fl) => (*fl, 0.0),
+                                    _ => {
+                                        return Err(PyError::type_error(format!(
+                                            "argument 'imag' must be a real number, not {}",
+                                            tn
+                                        )))
+                                    }
+                                }
+                            } else if let Some(ifn) = lookup_dunder_via_mro(typ, "__index__") {
+                                let ifn = ifn.clone();
+                                let self_obj = args[1].clone();
+                                drop(obj);
+                                let result = call_bound_method(ifn, self_obj, vec![])?;
+                                if let Some(i) = result.as_i64() {
+                                    (i as f64, 0.0)
+                                } else {
+                                    let rb = result.borrow();
+                                    match &*rb {
+                                        PyObject::Int(n) => match n.to_f64() {
+                                            Some(f) if f.is_finite() => (f, 0.0),
+                                            _ => {
+                                                return Err(PyError::overflow_error(
+                                                    "int too large to convert to float",
+                                                ))
+                                            }
+                                        },
+                                        _ => {
+                                            return Err(PyError::type_error(format!(
+                                                "argument 'imag' must be a real number, not {}",
+                                                tn
+                                            )))
+                                        }
+                                    }
+                                }
+                            } else {
+                                return Err(PyError::type_error(format!(
+                                    "argument 'imag' must be a real number, not {}",
+                                    tn
+                                )));
                             }
                         }
-                    }
-                    None => {
-                        return Err(PyError::type_error(format!(
-                            "complex() second argument must be a number, not '{}'",
-                            get_type_name_for_instance(typ)
-                        )))
                     }
                 },
                 _ => {
                     return Err(PyError::type_error(format!(
-                        "complex() second argument must be a number, not '{}'",
+                        "argument 'imag' must be a real number, not {}",
                         obj.type_name()
                     )))
                 }
@@ -189,6 +417,16 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         };
         let new_re = if extra_im != 0.0 { re - extra_im } else { re };
         return Ok(PyObjectRef::imm(PyObject::Complex(new_re, new_im)));
+    }
+    // Single plain-complex argument → return the SAME object (complex is
+    // immutable; test_constructor asserts `complex(c) is c`). Reached for
+    // both the direct `complex(c)` call and a subclass's `CS(c)` backing
+    // synthesis — returning the identical object is safe: the subclass path
+    // stores it as NATIVE_BACKING, it is never re-wrapped/re-entered.
+    if args.len() == 1 {
+        if let PyObject::Complex(..) = &*args[0].borrow() {
+            return Ok(args[0].clone());
+        }
     }
     Ok(PyObjectRef::imm(PyObject::Complex(re, im)))
 }

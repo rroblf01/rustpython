@@ -430,10 +430,18 @@ pub(crate) fn eval_const_value(const_val: ConstValue) -> PyResult<PyObjectRef> {
         ConstValue::String(s) => py_str_pstr(&s),
         ConstValue::Bytes(b) => PyObjectRef::imm(PyObject::Bytes(b)),
         ConstValue::Complex { real, imag } => {
-            let re: f64 = real
+            let re_clean: String = crate::object::validate_underscores(&real)?
+                .chars()
+                .filter(|&c| c != '_')
+                .collect();
+            let im_clean: String = crate::object::validate_underscores(&imag)?
+                .chars()
+                .filter(|&c| c != '_')
+                .collect();
+            let re: f64 = re_clean
                 .parse()
                 .map_err(|_| PyError::value_error(format!("invalid complex literal: {}", real)))?;
-            let im: f64 = imag
+            let im: f64 = im_clean
                 .parse()
                 .map_err(|_| PyError::value_error(format!("invalid complex literal: {}", imag)))?;
             PyObjectRef::imm(PyObject::Complex(re, im))

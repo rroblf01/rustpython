@@ -653,6 +653,7 @@ impl PyObject {
             PyObject::Bool(b) => *b,
             PyObject::Int(i) => !i.is_zero(),
             PyObject::Float(f) => *f != 0.0,
+            PyObject::Complex(re, im) => *re != 0.0 || *im != 0.0,
             PyObject::Str(s) => !s.is_empty(),
             PyObject::List(v) => !v.is_empty(),
             PyObject::Deque { data, .. } => !data.is_empty(),

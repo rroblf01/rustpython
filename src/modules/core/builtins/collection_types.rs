@@ -795,8 +795,22 @@ pub fn register_collection_types(
                         "complex.from_number() takes exactly 1 argument",
                     ));
                 }
-                let n = args[0].as_f64().unwrap_or(0.0);
-                Ok(PyObjectRef::imm(PyObject::Complex(n, 0.0)))
+                let a = &args[0];
+                // Reject strings/bytes — `from_number` doesn't parse strings
+                // (test_from_number: `from_number('3.14')` must TypeError),
+                // unlike `complex(str)`.
+                {
+                    let b = a.borrow();
+                    if matches!(&*b, PyObject::Str(_) | PyObject::Bytes(_)) {
+                        return Err(PyError::type_error(
+                            "complex() argument must be a string or a number",
+                        ));
+                    }
+                }
+                // Delegate to `complex()` for everything else — it handles
+                // complex pass-through, complex-subclass native backing,
+                // `__complex__`, `__float__`, and `__index__`.
+                builtin_complex(&[a.clone()])
             },
         }),
     );
@@ -814,6 +828,122 @@ pub fn register_collection_types(
             func: crate::object::builtin_complex_repr as BuiltinFunc,
         }),
     );
+    // Rich comparisons. Complex supports ==/!= against numbers but is NOT
+    // orderable: ordering dunders always return NotImplemented (the operator
+    // dispatch turns two NotImplementeds into TypeError; test_richcompare
+    // asserts the dunders THEMSELVES return NotImplemented).
+    {
+        use crate::object::{py_compare, py_div, py_not_implemented};
+        // True iff `o` is a numeric value complex can compare for equality.
+        fn is_num(o: &PyObjectRef) -> bool {
+            matches!(
+                &*o.borrow(),
+                PyObject::Complex(..) | PyObject::Int(_) | PyObject::Float(_)
+            ) || matches!(
+                o,
+                PyObjectRef::SmallInt(_)
+                    | PyObjectRef::SmallFloat(_)
+                    | PyObjectRef::SmallBool(_)
+            )
+        }
+        complex_dict.insert_str(
+            "__truediv__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__truediv__".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error(
+                            "__truediv__() takes at least 2 arguments",
+                        ));
+                    }
+                    py_div(&args[0], &args[1])
+                },
+            }),
+        );
+
+    // Complex parts for comparison: as_complex_parts, but a huge int (that
+    // can't convert to f64) becomes ±inf so `complex == 1<<10000` is False
+    // (not NotImplemented).
+    fn cx_parts_for_cmp(o: &PyObjectRef) -> Option<(f64, f64)> {
+        let borrowed = o.borrow();
+        if let Some(p) = crate::object::as_complex_parts(&borrowed) {
+            return Some(p);
+        }
+        if let PyObject::Int(n) = &*borrowed {
+            return n.to_f64().map(|f| (f, 0.0)).or(Some((f64::INFINITY, 0.0)));
+        }
+        None
+    }
+
+        complex_dict.insert_str(
+            "__eq__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__eq__".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error("__eq__() takes at least 2 arguments"));
+                    }
+                    if !is_num(&args[1]) {
+                        return Ok(py_not_implemented());
+                    }
+                    // Compare VALUES directly — NOT via py_compare, which for
+                    // an Instance self (complex subclass) re-dispatches to this
+                    // very __eq__ → infinite recursion (c2 == c crash).
+                    match (cx_parts_for_cmp(&args[0]), cx_parts_for_cmp(&args[1])) {
+                        (Some((ar, ai)), Some((br, bi))) => Ok(py_bool(ar == br && ai == bi)),
+                        _ => Ok(py_not_implemented()),
+                    }
+                },
+            }),
+        );
+        complex_dict.insert_str(
+            "__ne__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__ne__".to_string(),
+                func: |args| {
+                    if args.len() < 2 {
+                        return Err(PyError::type_error("__ne__() takes at least 2 arguments"));
+                    }
+                    if !is_num(&args[1]) {
+                        return Ok(py_not_implemented());
+                    }
+                    match (cx_parts_for_cmp(&args[0]), cx_parts_for_cmp(&args[1])) {
+                        (Some((ar, ai)), Some((br, bi))) => Ok(py_bool(ar != br || ai != bi)),
+                        _ => Ok(py_not_implemented()),
+                    }
+                },
+            }),
+        );
+        // Ordering: always NotImplemented (complex is not orderable).
+        complex_dict.insert_str(
+            "__lt__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__lt__".to_string(),
+                func: |_args| Ok(py_not_implemented()),
+            }),
+        );
+        complex_dict.insert_str(
+            "__le__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__le__".to_string(),
+                func: |_args| Ok(py_not_implemented()),
+            }),
+        );
+        complex_dict.insert_str(
+            "__gt__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__gt__".to_string(),
+                func: |_args| Ok(py_not_implemented()),
+            }),
+        );
+        complex_dict.insert_str(
+            "__ge__",
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "__ge__".to_string(),
+                func: |_args| Ok(py_not_implemented()),
+            }),
+        );
+    }
     let complex_type = PyObjectRef::new(PyObject::Type {
         name: "complex".to_string(),
         dict: Box::new(str_map_to_typedict(complex_dict)),

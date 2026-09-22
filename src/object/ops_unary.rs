@@ -268,6 +268,22 @@ pub(crate) fn as_complex_parts(obj: &PyObject) -> Option<(f64, f64)> {
     }
 }
 
+/// Like `as_complex_parts`, but raises `OverflowError` when an integer
+/// operand is too large to convert to float (CPython: `1j + 10**1000`
+/// raises OverflowError, not TypeError). Returns `None` for genuinely
+/// non-numeric operands (caller turns that into a TypeError).
+pub(crate) fn complex_parts_checked(o: &PyObject) -> PyResult<Option<(f64, f64)>> {
+    if let PyObject::Int(n) = o {
+        // CPython raises OverflowError when an int can't fit in a float
+        // (BigInt::to_f64 saturates to ±inf instead of failing).
+        return match n.to_f64() {
+            Some(f) if f.is_finite() => Ok(Some((f, 0.0))),
+            _ => Err(PyError::overflow_error("int too large to convert to float")),
+        };
+    }
+    Ok(as_complex_parts(o))
+}
+
 pub fn py_neg(val: &PyObjectRef) -> PyResult<PyObjectRef> {
     if let Some(i) = val.as_i64() {
         // -i64::MIN overflows; it is exactly 2**63, a BigInt.
@@ -324,6 +340,13 @@ pub fn py_pos(val: &PyObjectRef) -> PyResult<PyObjectRef> {
     }
     if val.as_i64().is_some() || val.as_f64().is_some() {
         return Ok(val.clone());
+    }
+    // Numeric-subclass instances: unary `+` returns the BASE numeric type
+    // (test_pos: `type(+ComplexSubclass(1,6)) is complex`, not the subclass).
+    if matches!(&*val.borrow(), PyObject::Instance { .. }) {
+        if let Some(native) = crate::object::native_backing_of(val) {
+            return Ok(native);
+        }
     }
     let obj = val.borrow();
     match &*obj {

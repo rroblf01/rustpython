@@ -965,6 +965,20 @@ pub fn pickle_deserialize(
                 .map_err(|e| PyError::type_error(format!("failed to create frozenset: {}", e)))?;
             Ok(PyObjectRef::new(PyObject::FrozenSet(s)))
         }
+        b'W' => {
+            // enumerate iterator: <source> <pos:int> <start:str>
+            let source = pickle_deserialize(data, pos, memo)?;
+            let pos_v = pickle_deserialize(data, pos, memo)?;
+            let start_v = pickle_deserialize(data, pos, memo)?;
+            let pos_u = pos_v.as_i64().unwrap_or(0) as u64;
+            let start_str = start_v.str();
+            let start = start_str
+                .trim()
+                .trim_end_matches('L')
+                .parse::<BigInt>()
+                .unwrap_or_else(|_| BigInt::from(0));
+            Ok(PyObjectRef::new(PyObject::EnumerateIter { source, pos: pos_u, start }))
+        }
         b'{' => {
             let dict_ref = PyObjectRef::new(PyObject::Dict(Box::new(crate::object::PyDict::new())));
             memo.push(dict_ref.clone());

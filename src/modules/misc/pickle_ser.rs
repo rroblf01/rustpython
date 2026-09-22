@@ -622,6 +622,14 @@ pub fn pickle_serialize(
                 protocol,
             )?;
         }
+        PyObject::EnumerateIter { source, pos, start } => {
+            // Opcode 'W': <source> <pos:int> <start:str> — reconstructs an
+            // `enumerate` iterator (test_enumerate's pickling).
+            buf.push(b'W');
+            pickle_serialize(source, buf, memo, protocol)?;
+            pickle_serialize(&py_int(*pos as i64), buf, memo, protocol)?;
+            pickle_serialize(&py_str(&start.to_string()), buf, memo, protocol)?;
+        }
         _ => {
             // Try set/frozenset/complex before failing
             let type_name = obj.borrow().type_name().to_string();

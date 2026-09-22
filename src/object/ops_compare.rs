@@ -142,8 +142,24 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
                 }
             }
             return Ok(py_bool(match op {
-                2 => a.is(b),
-                5 => !a.is(b),
+                2 | 5 => {
+                    // Numerics (incl. complex) compare by VALUE, not identity —
+                    //  must be False even for the SAME object
+                    // (test_complex's test_repr_str/x != x). Non-numeric falls
+                    // back to identity (CPython default __eq__).
+                    match (
+                        crate::modules::numeric_parts_from_ref(a),
+                        crate::modules::numeric_parts_from_ref(b),
+                    ) {
+                        (Some(ap), Some(bp)) => {
+                            let eq = ap == bp;
+                            if op == 2 { eq } else { !eq }
+                        }
+                        _ => {
+                            if op == 2 { a.is(b) } else { !a.is(b) }
+                        }
+                    }
+                }
                 _ => {
                     let op_sym = match op {
                         0 => "<",

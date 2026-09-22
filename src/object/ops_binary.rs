@@ -269,9 +269,23 @@ pub fn py_add(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             Ok(PyObjectRef::new(PyObject::ByteArray(v)))
         }
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
-            match (as_complex_parts(a), as_complex_parts(b)) {
+            let a_cx = matches!(a, PyObject::Complex(..));
+            let b_cx = matches!(b, PyObject::Complex(..));
+            let a_real = matches!(a, PyObject::Int(_) | PyObject::Float(_) | PyObject::Bool(_));
+            let b_real = matches!(b, PyObject::Int(_) | PyObject::Float(_) | PyObject::Bool(_));
+            match (complex_parts_checked(a)?, complex_parts_checked(b)?) {
                 (Some((ar, ai)), Some((br, bi))) => {
-                    Ok(PyObjectRef::imm(PyObject::Complex(ar + br, ai + bi)))
+                    // complex + real → imag UNCHANGED (adding 0.0 would flip
+                    // -0.0 to +0.0; test_add needs `complex(-0,-0)+(-0)` to
+                    // keep imag -0.0). complex + complex → componentwise.
+                    let (rr, ii) = if a_cx && b_real {
+                        (ar + br, ai)
+                    } else if b_cx && a_real {
+                        (br + ar, bi)
+                    } else {
+                        (ar + br, ai + bi)
+                    };
+                    Ok(PyObjectRef::imm(PyObject::Complex(rr, ii)))
                 }
                 _ => Err(PyError::type_error(format!(
                     "unsupported operand type(s) for +: '{}' and '{}'",
@@ -340,7 +354,7 @@ pub fn py_sub(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
         (PyObject::Int(a), PyObject::Float(b)) => Ok(py_float(a.to_f64().unwrap() - b)),
         (PyObject::Float(a), PyObject::Int(b)) => Ok(py_float(a - b.to_f64().unwrap())),
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
-            match (as_complex_parts(a), as_complex_parts(b)) {
+            match (complex_parts_checked(a)?, complex_parts_checked(b)?) {
                 (Some((ar, ai)), Some((br, bi))) => {
                     // Sign-of-zero corner case (real CPython test:
                     // `test_complex.py`'s `test_sub`, matching CPython's own
@@ -439,23 +453,59 @@ pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             Ok(py_float(a / b.to_f64().unwrap()))
         }
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
-            match (as_complex_parts(a), as_complex_parts(b)) {
+            let a_cx = matches!(a, PyObject::Complex(..));
+            let b_real = matches!(b, PyObject::Int(_) | PyObject::Float(_) | PyObject::Bool(_));
+            match (complex_parts_checked(a)?, complex_parts_checked(b)?) {
                 (Some((ar, ai)), Some((br, bi))) => {
                     if br == 0.0 && bi == 0.0 {
                         return Err(PyError::zero_division());
                     }
+                    // complex / real → scalar division (keeps inf/nan signs:
+                    // `complex(INF,NAN)/2 == (inf+nanj)`; complex/complex via
+                    // Smith would give nan for the real part).
+                    if a_cx && b_real {
+                        return Ok(PyObjectRef::imm(PyObject::Complex(ar / br, ai / br)));
+                    }
                     // Smith's algorithm (CPython's `_Py_c_quot`): avoids
                     // overflow and keeps `(1+0j) / (0.1+0j)` == 10.0 exactly,
                     // which the naive `(a*br + b*bi)/den` form loses.
-                    let (re, im) = if br.abs() >= bi.abs() {
+                    let mut re;
+                    let mut im;
+                    if br.abs() >= bi.abs() {
                         let ratio = bi / br;
                         let denom = br + bi * ratio;
-                        ((ar + ai * ratio) / denom, (ai - ar * ratio) / denom)
+                        re = (ar + ai * ratio) / denom;
+                        im = (ai - ar * ratio) / denom;
                     } else {
                         let ratio = br / bi;
                         let denom = br * ratio + bi;
-                        ((ar * ratio + ai) / denom, (ai * ratio - ar) / denom)
-                    };
+                        re = (ar * ratio + ai) / denom;
+                        im = (ai * ratio - ar) / denom;
+                    }
+                    // Recover infinities/zeros that computed as nan+nanj
+                    // (CPython `_Py_c_quot` recovery, C11 G.5.2 `_Cdivd`).
+                    if re.is_nan() && im.is_nan() {
+                        if (ar.is_infinite() || ai.is_infinite())
+                            && br.is_finite()
+                            && bi.is_finite()
+                        {
+                            let x = if ar.is_infinite() { ar.signum() } else { 0.0_f64.copysign(ar) };
+                            let y = if ai.is_infinite() { ai.signum() } else { 0.0_f64.copysign(ai) };
+                            re = f64::INFINITY * (x * br + y * bi);
+                            im = f64::INFINITY * (y * br - x * bi);
+                        } else if (br.is_infinite() || bi.is_infinite())
+                            && ar.is_finite()
+                            && ai.is_finite()
+                        {
+                            let x = if br.is_infinite() { br.signum() } else { 0.0_f64.copysign(br) };
+                            let y = if bi.is_infinite() { bi.signum() } else { 0.0_f64.copysign(bi) };
+                            re = 0.0 * (ar * x + ai * y);
+                            im = 0.0 * (ai * x - ar * y);
+                        } else {
+                            re = f64::NAN;
+                            im = f64::NAN;
+                        }
+                    }
                     Ok(PyObjectRef::imm(PyObject::Complex(re, im)))
                 }
                 _ => Err(PyError::type_error(format!(

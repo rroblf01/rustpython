@@ -36,6 +36,19 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
             })),
             "__float__" => Err(PyError::type_error("can't convert complex to float")),
             "__int__" => Err(PyError::type_error("can't convert complex to int")),
+            "__getnewargs__" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+                name: "__getnewargs__".to_string(),
+                func: |args| {
+                    let obj = args[0].borrow();
+                    match &*obj {
+                        PyObject::Complex(re, im) => {
+                            Ok(py_tuple(vec![py_float(*re), py_float(*im)]))
+                        }
+                        _ => Err(PyError::type_error("__getnewargs__() requires a complex self")),
+                    }
+                },
+                self_obj: PyObjectRef::imm(PyObject::Complex(*re, *im)),
+            })),
             _ => Err(PyError::attribute_error(format!(
                 "'complex' object has no attribute '{}'",
                 name

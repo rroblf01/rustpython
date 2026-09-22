@@ -259,11 +259,81 @@ pub fn py_mul(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
             }
         }
         (a, b) if matches!(a, PyObject::Complex(..)) || matches!(b, PyObject::Complex(..)) => {
-            match (as_complex_parts(a), as_complex_parts(b)) {
-                (Some((ar, ai)), Some((br, bi))) => Ok(PyObjectRef::imm(PyObject::Complex(
-                    ar * br - ai * bi,
-                    ar * bi + ai * br,
-                ))),
+            let a_cx = matches!(a, PyObject::Complex(..));
+            let b_cx = matches!(b, PyObject::Complex(..));
+            // A real-number operand (int/float/bool) multiplies a complex as a
+            // SCALAR (CPython `_Py_cr_prod`): preserves inf signs, e.g.
+            // `complex(INF,1) * 2 == (inf+2j)` (complex×complex would give NaN).
+            let a_real = matches!(a, PyObject::Int(_) | PyObject::Float(_) | PyObject::Bool(_));
+            let b_real = matches!(b, PyObject::Int(_) | PyObject::Float(_) | PyObject::Bool(_));
+            match (complex_parts_checked(a)?, complex_parts_checked(b)?) {
+                (Some((ar, ai)), Some((br, bi))) => {
+                    let (rr, ii) = if a_cx && b_real {
+                        (ar * br, ai * br) // complex * scalar
+                    } else if b_cx && a_real {
+                        (br * ar, bi * ar) // scalar * complex
+                    } else {
+                        // complex × complex — CPython `_Py_c_prod`, recovering
+                        // infinities that computed as nan+nanj (C11 G.5.1).
+                        let (mut x, mut y, mut z, mut w) = (ar, ai, br, bi);
+                        let ac = x * z;
+                        let bd = y * w;
+                        let ad = x * w;
+                        let bc = y * z;
+                        let (mut rr, mut ii) = (ac - bd, ad + bc);
+                        if rr.is_nan() && ii.is_nan() {
+                            let mut recalc = false;
+                            if x.is_infinite() || y.is_infinite() {
+                                x = if x.is_infinite() { x.signum() } else { 0.0 };
+                                y = if y.is_infinite() { y.signum() } else { 0.0 };
+                                if z.is_nan() {
+                                    z = 0.0_f64.copysign(z);
+                                }
+                                if w.is_nan() {
+                                    w = 0.0_f64.copysign(w);
+                                }
+                                recalc = true;
+                            }
+                            if z.is_infinite() || w.is_infinite() {
+                                z = if z.is_infinite() { z.signum() } else { 0.0 };
+                                w = if w.is_infinite() { w.signum() } else { 0.0 };
+                                if x.is_nan() {
+                                    x = 0.0_f64.copysign(x);
+                                }
+                                if y.is_nan() {
+                                    y = 0.0_f64.copysign(y);
+                                }
+                                recalc = true;
+                            }
+                            if !recalc
+                                && (ac.is_infinite()
+                                    || bd.is_infinite()
+                                    || ad.is_infinite()
+                                    || bc.is_infinite())
+                            {
+                                if x.is_nan() {
+                                    x = 0.0_f64.copysign(x);
+                                }
+                                if y.is_nan() {
+                                    y = 0.0_f64.copysign(y);
+                                }
+                                if z.is_nan() {
+                                    z = 0.0_f64.copysign(z);
+                                }
+                                if w.is_nan() {
+                                    w = 0.0_f64.copysign(w);
+                                }
+                                recalc = true;
+                            }
+                            if recalc {
+                                rr = f64::INFINITY * (x * z - y * w);
+                                ii = f64::INFINITY * (x * w + y * z);
+                            }
+                        }
+                        (rr, ii)
+                    };
+                    Ok(PyObjectRef::imm(PyObject::Complex(rr, ii)))
+                }
                 _ => Err(PyError::type_error(format!(
                     "unsupported operand type(s) for *: '{}' and '{}'",
                     a.type_name(),

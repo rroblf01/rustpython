@@ -386,12 +386,23 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
             .last()
             .map(|c| matches!(c, 'f' | 'F' | 'e' | 'E' | 'g' | 'G' | '%' | 'n'))
             .unwrap_or(false);
-        if !has_numeric_type {
+        if !has_numeric_type || width.is_some() {
             drop(val_borrowed);
             // Format the complex via str(), then apply the spec as a string.
+            // A WIDTH/align spec pads the WHOLE complex string even when a
+            // numeric type is present (`format(1.5+3j, '<20g')` ==
+            // `'1.5+3j              '`, test_format) — strip the numeric type
+            // char (it formats NUMBERS, but here we format the str() whole).
             let s = val.str();
             let p = py_str(&s);
-            return crate::vm::format::format_with_spec(&p, &spec_clone);
+            let spec_for_str = if has_numeric_type {
+                spec_clone
+                    .trim_end_matches(|c: char| matches!(c, 'f' | 'F' | 'e' | 'E' | 'g' | 'G' | '%' | 'n'))
+                    .to_string()
+            } else {
+                spec_clone.clone()
+            };
+            return crate::vm::format::format_with_spec(&p, &spec_for_str);
         }
         let fmt_part = |part: f64| -> PyResult<String> {
             let p = py_float(part);
@@ -400,7 +411,16 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
         let re_s = fmt_part(re)?;
         // Determine the imag sign from the FORMATTED part (z already coerced
         // a rounded -0.0 to positive, and a negative mantissa keeps its -).
-        let im_abs = fmt_part(im.abs())?;
+        // The imag VALUE is formatted WITHOUT the spec's sign char — the sign
+        // is prepended explicitly below, so `format(1.5+3.5j, '+g')` gives
+        // "+1.5+3.5j", not "+1.5++3.5j" (test_format).
+        let im_abs_raw = fmt_part(im.abs())?;
+        let im_abs = im_abs_raw
+            .strip_prefix('+')
+            .or_else(|| im_abs_raw.strip_prefix('-'))
+            .or_else(|| im_abs_raw.strip_prefix(' '))
+            .unwrap_or(&im_abs_raw)
+            .to_string();
         let im_signed = fmt_part(im)?;
         let sign = if im_signed.starts_with('-') { "-" } else { "+" };
         return Ok(format!("{}{}{}j", re_s, sign, im_abs));
