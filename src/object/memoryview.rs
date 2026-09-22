@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 mod format;
-pub(crate) use format::{mv_itemsize, mv_source_bytes, mv_total_items, mv_write_bytes, nest_list};
+pub(crate) use format::{
+    array_elem_to_bytes, mv_itemsize, mv_source_bytes, mv_total_items, mv_write_bytes, nest_list,
+};
 mod codec;
 pub(crate) use codec::{
     check_buffer_flags, extract_flags_for_buffer, is_picklebuffer_obj, mv_decode_elem,

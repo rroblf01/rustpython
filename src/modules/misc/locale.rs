@@ -1,6 +1,35 @@
 use crate::object::*;
 use std::collections::HashMap;
 
+// Real libc `setlocale` — returns NULL for an unknown/unsupported locale
+// (the only honest way to validate a locale string). Category constants
+// below match glibc on Linux: LC_CTYPE=0 ... LC_ALL=6.
+extern "C" {
+    fn setlocale(
+        category: std::os::raw::c_int,
+        locale: *const std::os::raw::c_char,
+    ) -> *mut std::os::raw::c_char;
+}
+
+/// Build the `locale.Error` exception object (shared by the `Error`
+/// constructor registered below and by the native `setlocale` failure path,
+/// so both produce an identically-typed exception for `except locale.Error:`).
+fn locale_error_obj(msg: &str) -> PyObjectRef {
+    PyObjectRef::new(PyObject::Exception {
+        typ: "Error".to_string(),
+        args: vec![py_str(msg)],
+        cause: None,
+        suppress_context: false,
+        context: None,
+        traceback: None,
+        extra: None,
+    })
+}
+
+fn locale_error(msg: &str) -> PyError {
+    PyError::Exception("Error".to_string(), locale_error_obj(msg))
+}
+
 pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! loc_func {
@@ -34,22 +63,17 @@ pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str(
         "Error",
         PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "locale.Error".to_string(),
+            // Bare name (no `locale.` prefix) so `except locale.Error:`
+            // matches via `is_exception_subclass` — exactly how
+            // `binascii.Error` is registered (same representation).
+            name: "Error".to_string(),
             func: |args| {
                 let msg = if args.is_empty() {
                     String::new()
                 } else {
                     args[0].str()
                 };
-                Ok(PyObjectRef::new(PyObject::Exception {
-                    typ: "Error".to_string(),
-                    args: vec![py_str(&msg)],
-                    cause: None,
-                    suppress_context: false,
-                    context: None,
-                    traceback: None,
-                    extra: None,
-                }))
+                Ok(locale_error_obj(&msg))
             },
         }),
     );
@@ -142,10 +166,23 @@ pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
         let category = args[0].as_i64().unwrap_or(6); // default LC_ALL
         if args.len() >= 2 && !matches!(&*args[1].borrow(), PyObject::None) {
             let locale = args[1].str();
-            set_locale(category, &locale);
-            // Attempt to set locale via system
-            let _ = std::env::set_var("LANG", &locale);
-            Ok(py_str(&locale))
+            // Validate against the real libc `setlocale`: it returns NULL
+            // for an unknown locale, which we surface as `locale.Error` (so
+            // callers doing `except locale.Error: skipTest(...)` — e.g.
+            // test_re's locale tests — behave correctly).
+            let c_locale = match std::ffi::CString::new(locale.clone()) {
+                Ok(s) => s,
+                Err(_) => return Err(locale_error("embedded null character")),
+            };
+            let actual = unsafe {
+                let ret = setlocale(category as std::os::raw::c_int, c_locale.as_ptr());
+                if ret.is_null() {
+                    return Err(locale_error(&format!("unsupported locale setting: {}", locale)));
+                }
+                std::ffi::CStr::from_ptr(ret).to_string_lossy().into_owned()
+            };
+            set_locale(category, &actual);
+            Ok(py_str(&actual))
         } else {
             Ok(py_str(&get_locale(category)))
         }

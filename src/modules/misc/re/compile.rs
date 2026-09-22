@@ -2,12 +2,15 @@ use crate::object::*;
 use std::collections::HashMap;
 
 pub fn re_pattern_error(msg: String, pattern: Option<String>, pos: Option<i64>) -> PyError {
+    // CPython's PatternError: `.msg` is the bare message; `str(err)` is
+    // `"{msg} at position {pos}"`; `.lineno`/`.colno` locate `pos` (a CHAR
+    // index into the pattern) on its line. (test_error asserts all of these.)
     let mut extra = HashMap::new();
     extra.insert("msg".to_string(), py_str(&msg));
     extra.insert(
         "pattern".to_string(),
-        match pattern {
-            Some(p) => py_str(&p),
+        match &pattern {
+            Some(p) => py_str(p),
             None => py_none(),
         },
     );
@@ -18,9 +21,31 @@ pub fn re_pattern_error(msg: String, pattern: Option<String>, pos: Option<i64>) 
             None => py_none(),
         },
     );
+    if let (Some(p), Some(pat)) = (pos, &pattern) {
+        let p_usize = (p as usize).min(pat.chars().count());
+        let mut lineno = 1i64;
+        let mut colno = 1i64;
+        for (i, ch) in pat.chars().enumerate() {
+            if i >= p_usize {
+                break;
+            }
+            if ch == '\n' {
+                lineno += 1;
+                colno = 1;
+            } else {
+                colno += 1;
+            }
+        }
+        extra.insert("lineno".to_string(), py_int(lineno));
+        extra.insert("colno".to_string(), py_int(colno));
+    }
+    let display = match pos {
+        Some(p) => format!("{} at position {}", msg, p),
+        None => msg.clone(),
+    };
     let exc = PyObjectRef::new(PyObject::Exception {
         typ: "PatternError".to_string(),
-        args: vec![py_str(&msg)],
+        args: vec![py_str(&display)],
         cause: None,
         suppress_context: false,
         context: None,
@@ -255,10 +280,10 @@ pub fn translate_pattern_backrefs_and_octal(pattern: &str) -> String {
                         if let Ok(val) = u32::from_str_radix(&oct_digits, 8) {
                             if val <= 0o377 {
                                 out.push_str(&format!("\\x{{{:x}}}", val));
-                                i = k;
                                 for idx in k..j {
                                     out.push(chars[idx]);
                                 }
+                                i = j;
                                 continue;
                             }
                         }
@@ -268,25 +293,48 @@ pub fn translate_pattern_backrefs_and_octal(pattern: &str) -> String {
                     i += 2;
                     continue;
                 }
-                if digits.len() == 3 && digits.chars().all(|ch| ch.is_digit(8)) {
-                    if let Ok(val) = u32::from_str_radix(&digits, 8) {
+                // CPython: `\` + nonzero digit is an octal escape when the
+                // FIRST THREE digits are octal (value ≤ 0o377) — even if more
+                // digits follow (`\1000` → octal `\100` + literal `0`); it is
+                // a decimal group reference (max TWO digits) otherwise.
+                let d: Vec<char> = digits.chars().collect();
+                if d.len() >= 3 && d[0].is_digit(8) && d[1].is_digit(8) && d[2].is_digit(8) {
+                    let first3: String = d[..3].iter().collect();
+                    if let Ok(val) = u32::from_str_radix(&first3, 8) {
                         if val <= 0o377 {
                             out.push_str(&format!("\\x{{{:x}}}", val));
+                            for idx in (i + 1 + 3)..j {
+                                out.push(chars[idx]); // leftover digits literal
+                            }
                             i = j;
                             continue;
                         }
+                        // three octal digits but value > 0o377 → leave for the
+                        // engine's "octal escape value ... outside of range" error.
+                        out.push(c);
+                        out.extend(d.iter().take(3));
+                        for idx in (i + 1 + 3)..j {
+                            out.push(chars[idx]);
+                        }
+                        i = j;
+                        continue;
                     }
                 }
-                let num: usize = digits.parse().unwrap_or(0);
+                // Group reference (original prefix-matching behavior restored):
+                let digits_all: String = d.iter().collect();
+                let num: usize = digits_all.parse().unwrap_or(0);
                 if num != 0 && num <= num_groups {
                     out.push(c);
-                    out.extend(digits.chars());
+                    out.extend(d.iter());
                     i = j;
                     continue;
                 } else if num > num_groups && num_groups > 0 {
+                    // Overflowing backref: find the longest valid group prefix
+                    // and emit `\g<prefix>` + leftover digits (mirrors prior
+                    // behavior so `\119` with12 groups → backref11 + `9`).
                     let mut found = None;
-                    for len in (1..digits.len()).rev() {
-                        if let Ok(prefix) = digits[..len].parse::<usize>() {
+                    for len in (1..d.len()).rev() {
+                        if let Ok(prefix) = digits_all[..len].parse::<usize>() {
                             if prefix != 0 && prefix <= num_groups {
                                 found = Some(len);
                                 break;
@@ -294,14 +342,14 @@ pub fn translate_pattern_backrefs_and_octal(pattern: &str) -> String {
                         }
                     }
                     if let Some(len) = found {
-                        out.push_str(&format!("\\g<{}>", &digits[..len]));
-                        out.extend(digits[len..].chars());
+                        out.push_str(&format!("\\g<{}>", &digits_all[..len]));
+                        out.extend(digits_all[len..].chars());
                         i = j;
                         continue;
                     }
                 }
                 out.push(c);
-                out.extend(digits.chars());
+                out.extend(d.iter());
                 i = j;
                 continue;
             } else {
@@ -638,6 +686,129 @@ pub fn map_regex_error(msg: &str) -> String {
         return "nothing to repeat".to_string();
     }
     msg.to_string()
+}
+
+/// Convert a `fancy_regex::Error` into a CPython-style `PatternError`,
+/// extracting the error POSITION (so `.pos` is populated) and mapping the
+/// error KIND to CPython's exact message. The plain
+/// `map_regex_error(&e.to_string())` path lost the position (always
+/// `.pos is None`) and didn't recognize fancy's own phrasing, which broke
+/// `test_re`'s `checkPatternError(..., pos=N)` assertions.
+pub fn fancy_error_to_pattern(e: &fancy_regex::Error, pattern: &str) -> PyError {
+    match e {
+        fancy_regex::Error::ParseError(pos, kind) => {
+            // fancy reports a BYTE offset into the pattern; CPython's
+            // `PatternError.pos` is a CHAR index (differs once the pattern
+            // holds any multi-byte char, e.g. `'(€))'` → pos 3, not 5).
+            let byte_pos = (*pos).min(pattern.len());
+            let char_pos = pattern[..byte_pos].chars().count() as i64;
+            let msg = map_parse_error(kind, pattern, char_pos as usize);
+            re_pattern_error(msg, Some(pattern.to_string()), Some(char_pos))
+        }
+        fancy_regex::Error::CompileError(ce) => {
+            // Look-behind / compile-stage errors: keep prior mapping but
+            // surface a CPython message.
+            let msg = map_compile_error(ce);
+            re_pattern_error(msg, Some(pattern.to_string()), None)
+        }
+        _ => re_pattern_error(
+            map_regex_error(&e.to_string()),
+            Some(pattern.to_string()),
+            None,
+        ),
+    }
+}
+
+fn map_compile_error(ce: &fancy_regex::CompileError) -> String {
+    use fancy_regex::CompileError;
+    match ce {
+        CompileError::LookBehindNotConst => "look-behind requires fixed-width pattern".to_string(),
+        CompileError::InvalidBackref(n) => format!("invalid group reference {}", n),
+        CompileError::InvalidGroupName => "missing group name".to_string(),
+        CompileError::SubroutineCallTargetNotFound(s, _) => {
+            // fancy's message for `\g<N>` with a bad N (raised as a subroutine
+            // call) — CPython reports this as "invalid group reference N".
+            let num: String = s
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if !num.is_empty() {
+                format!("invalid group reference {}", num)
+            } else {
+                "invalid group reference".to_string()
+            }
+        }
+        _ => map_regex_error(&ce.to_string()),
+    }
+}
+
+fn map_parse_error(kind: &fancy_regex::ParseError, pattern: &str, pos: usize) -> String {
+    use fancy_regex::ParseError;
+    match kind {
+        // `TargetNotRepeatable` covers both "nothing to repeat" (`*` with no
+        // target) and "multiple repeat" (`x**`). Classify by the char just
+        // before the offending quantifier: if it is itself a quantifier
+        // suffix (`*+?}`), the target was already quantified → multiple.
+        ParseError::TargetNotRepeatable => {
+            let chars: Vec<char> = pattern.chars().collect();
+            let prev = if pos > 0 { chars.get(pos - 1).copied() } else { None };
+            if matches!(prev, Some('*') | Some('+') | Some('?') | Some('}')) {
+                "multiple repeat".to_string()
+            } else {
+                "nothing to repeat".to_string()
+            }
+        }
+        ParseError::InvalidRepeat => "nothing to repeat".to_string(),
+        ParseError::UnclosedOpenParen => "missing ), unterminated subpattern".to_string(),
+        ParseError::TrailingBackslash => "bad escape (end of pattern)".to_string(),
+        ParseError::InvalidEscape(s) => format!("bad escape {}", s),
+        ParseError::InvalidBackref => "invalid group reference".to_string(),
+        ParseError::InvalidGroupName => "missing group name".to_string(),
+        ParseError::UnclosedUnicodeName => "missing ), unterminated name".to_string(),
+        ParseError::InvalidClass => "unterminated character set".to_string(),
+        ParseError::InvalidHex => "bad escape".to_string(),
+        ParseError::GeneralParseError(s) => map_general_parse_error(s),
+        _ => map_regex_error(&kind.to_string()),
+    }
+}
+
+fn map_general_parse_error(s: &str) -> String {
+    let lower = s.to_lowercase();
+    if lower.contains("subroutine call") && lower.contains("non-existent group") {
+        // fancy's message for `\g<N>` with a bad N — CPython calls this
+        // "invalid group reference N".
+        let num: String = s.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+        let num: String = num.chars().rev().collect();
+        if !num.is_empty() {
+            return format!("invalid group reference {}", num);
+        }
+        return "invalid group reference".to_string();
+    }
+    if lower.contains("invalid back reference") || lower.contains("invalid group reference") {
+        // Extract trailing group number if present.
+        let num: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+        if !num.is_empty() && lower.contains("group") {
+            return format!("invalid group reference {}", num);
+        }
+        return "invalid group reference".to_string();
+    }
+    if lower.contains("nothing to repeat") {
+        return "nothing to repeat".to_string();
+    }
+    if lower.contains("unterminated") && lower.contains("class") {
+        return "unterminated character set".to_string();
+    }
+    if lower.contains("unterminated") || lower.contains("unclosed") {
+        if lower.contains("name") {
+            return "missing ), unterminated name".to_string();
+        }
+        return "missing ), unterminated subpattern".to_string();
+    }
+    s.to_string()
 }
 
 pub fn compile_python_regex(pattern: &str) -> Result<fancy_regex::Regex, fancy_regex::Error> {
@@ -1097,10 +1268,254 @@ pub(crate) fn preprocess_inline_flags(
 /// inline flag group (`(?ismx)...`) prepended to the pattern — `regex`/
 /// `fancy_regex`'s own flag semantics for `i`/`s`/`m`/`x` match Python's
 /// IGNORECASE/DOTALL/MULTILINE/VERBOSE closely enough for real-world use.
+/// CPython-specific quantifier validation. Returns `Err(offending_pos)` for
+/// the first quantifier that has no valid target ("nothing to repeat") or is
+/// immediately preceded by another complete quantifier ("multiple repeat").
+/// fancy-regex catches plain `*+?` with no target but accepts a leading
+/// counted repeat (`{1,2}`) and reads `Q+` as a possessive quantifier — both
+/// of which CPython rejects.
+fn validate_quantifiers(pattern: &str) -> Result<(), usize> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let n = chars.len();
+    let mut i = 0usize;
+    let mut in_class = false;
+    let mut class_first = false;
+    // `has_atom`: a preceding construct a quantifier may apply to.
+    // `after_quant`: a quantifier base has been applied (so another `*`/`{`
+    //   here is "multiple repeat").
+    // `await_suffix`: we JUST applied a quantifier base, so an immediately
+    //   following `?` (lazy) or `+` (possessive, Python 3.11+) is a valid
+    //   suffix, not a new quantifier.
+    let mut has_atom = false;
+    let mut after_quant = false;
+    let mut await_suffix = false;
+    while i < n {
+        let c = chars[i];
+        // A pending lazy/possessive suffix is only recognized immediately.
+        if await_suffix && (c == '?' || c == '+') {
+            await_suffix = false;
+            i += 1;
+            continue;
+        }
+        if c != '?' && c != '+' {
+            await_suffix = false;
+        }
+        if c == '\\' {
+            has_atom = true;
+            after_quant = false;
+            i += 2;
+            continue;
+        }
+        if in_class {
+            if c == ']' && !class_first {
+                in_class = false;
+            }
+            class_first = false;
+            i += 1;
+            continue;
+        }
+        if c == '[' {
+            in_class = true;
+            class_first = true;
+            has_atom = true;
+            after_quant = false;
+            i += 1;
+            continue;
+        }
+        match c {
+            '(' => {
+                let mut j = i + 1;
+                let mut flags_only = false;
+                if j < n && chars[j] == '?' {
+                    j += 1;
+                    if j < n {
+                        match chars[j] {
+                            // Non-capturing / lookaround / atomic: body starts
+                            // right after the opener.
+                            ':' | '=' | '!' | '>' => {
+                                j += 1;
+                            }
+                            '<' => {
+                                // `(?<=`/`(?<!` (lookbehind) or `(?<name>`
+                                // (named) — body/`>` follows.
+                                j += 1;
+                                if j < n && (chars[j] == '=' || chars[j] == '!') {
+                                    j += 1;
+                                } else {
+                                    while j < n && chars[j] != '>' {
+                                        j += 1;
+                                    }
+                                    j += 1;
+                                }
+                            }
+                            'P' => {
+                                // Python `(?P<name>`, `(?P=name)`, `(?P'name')`.
+                                j += 1;
+                                if j < n && chars[j] == '<' {
+                                    while j < n && chars[j] != '>' {
+                                        j += 1;
+                                    }
+                                    j += 1; // past '>'
+                                } else if j < n && (chars[j] == '=' || chars[j] == '\'' || chars[j] == '"')
+                                {
+                                    // Assertion / conditional — skip to close.
+                                    let q = if chars[j] == '=' { ')' } else { chars[j] };
+                                    j += 1;
+                                    while j < n && chars[j] != q {
+                                        j += 1;
+                                    }
+                                    j += 1;
+                                }
+                            }
+                            '\'' | '"' => {
+                                let q = chars[j];
+                                j += 1;
+                                while j < n && chars[j] != q {
+                                    j += 1;
+                                }
+                                j += 1;
+                            }
+                            '#' => {
+                                while j < n && chars[j] != ')' {
+                                    j += 1;
+                                }
+                                j += 1;
+                            }
+                            _ => {
+                                // Flags `(?flags)` / `(?flags:` — read letters
+                                // (and optional `-`) until `:` or `)`.
+                                while j < n && chars[j] != ':' && chars[j] != ')' {
+                                    j += 1;
+                                }
+                                if j < n && chars[j] == ':' {
+                                    j += 1; // scoped flags: body follows
+                                } else if j < n && chars[j] == ')' {
+                                    // Global flags `(?i)` — transparent, no atom.
+                                    flags_only = true;
+                                    j += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                if flags_only {
+                    // Global flags don't change the atom state.
+                    i = j;
+                    continue;
+                }
+                has_atom = false;
+                after_quant = false;
+                i = j;
+                continue;
+            }
+            ')' => {
+                has_atom = true;
+                after_quant = false;
+                i += 1;
+                continue;
+            }
+            '|' => {
+                has_atom = false;
+                after_quant = false;
+                i += 1;
+                continue;
+            }
+            '*' | '+' | '?' => {
+                // If we get here with `await_suffix` still set, c was not a
+                // suffix — it falls through as a fresh quantifier below
+                // (await_suffix was cleared above for non-suffix chars).
+                if after_quant {
+                    return Err(i); // `*`/`{` (or extra `?`/`+`) after a quantifier
+                }
+                if !has_atom {
+                    return Err(i);
+                }
+                has_atom = false;
+                after_quant = true;
+                await_suffix = true;
+                i += 1;
+                continue;
+            }
+            '{' => {
+                if let Some(end) = counted_repeat_end(&chars, i) {
+                    if after_quant {
+                        return Err(i);
+                    }
+                    if !has_atom {
+                        return Err(i);
+                    }
+                    has_atom = false;
+                    after_quant = true;
+                    await_suffix = true;
+                    i = end;
+                    continue;
+                }
+                has_atom = true;
+                after_quant = false;
+                i += 1;
+                continue;
+            }
+            _ => {
+                has_atom = true;
+                after_quant = false;
+                i += 1;
+                continue;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// If `chars[i..]` starts a valid counted repeat `{n}`/`{n,}`/`{n,m}`, return
+/// the index just past the `}`; else `None`. The optional lazy `?` is NOT
+/// consumed here — the main loop treats it as a quantifier suffix so that a
+/// following `+` is correctly seen as "multiple repeat", not a possessive.
+fn counted_repeat_end(chars: &[char], i: usize) -> Option<usize> {
+    let n = chars.len();
+    if i >= n || chars[i] != '{' {
+        return None;
+    }
+    let mut j = i + 1;
+    let mut saw_digit = false;
+    while j < n && chars[j].is_ascii_digit() {
+        saw_digit = true;
+        j += 1;
+    }
+    if !saw_digit {
+        return None;
+    }
+    if j < n && chars[j] == ',' {
+        j += 1;
+        while j < n && chars[j].is_ascii_digit() {
+            j += 1;
+        }
+    }
+    if j >= n || chars[j] != '}' {
+        return None;
+    }
+    j += 1;
+    Some(j)
+}
+
 pub fn compile_python_regex_flags(
     pattern: &str,
     flags: i32,
 ) -> Result<fancy_regex::Regex, fancy_regex::Error> {
+    // CPython-specific quantifier validation (see `validate_quantifiers`).
+    if let Err(char_idx) = validate_quantifiers(pattern) {
+        // validate works in CHAR indices; fancy's ParseError carries a BYTE
+        // offset (which `fancy_error_to_pattern` converts back to a char
+        // index for `.pos`). Round-trip so multi-byte patterns stay correct.
+        let byte_idx = pattern
+            .char_indices()
+            .nth(char_idx)
+            .map(|(b, _)| b)
+            .unwrap_or(pattern.len());
+        return Err(fancy_regex::Error::ParseError(
+            byte_idx,
+            fancy_regex::ParseError::TargetNotRepeatable,
+        ));
+    }
     let pattern = escape_loose_braces(pattern);
     let pattern = escape_leading_bracket_in_class(&pattern);
     let pattern = translate_pattern_backrefs_and_octal(&pattern);
@@ -1152,7 +1567,79 @@ pub fn compile_python_regex_flags(
     } else {
         pattern
     };
+    let pattern = translate_bare_name_conditionals(&pattern);
     fancy_regex::Regex::new(&pattern)
+}
+
+/// fancy-regex only treats a conditional's target as a group-existence
+/// check when it is delimited (`(?(<name>)` / `(?('name')`) or numeric;
+/// a BARE name `(?(name)...)` falls through to a plain sub-expression
+/// parse and is read as a literal, so the condition always evaluated
+/// false (CPython treats a bare name as "did group `name` match").
+/// Rewrite a bare ASCII group name to the `<...>` form fancy-regex
+/// understands. Numeric/relative/quoted/`DEFINE`/`(*verb)` targets are
+/// left untouched (they already dispatch correctly).
+fn translate_bare_name_conditionals(pattern: &str) -> String {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    let mut in_class = false;
+    let mut class_first = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' {
+            out.push(c);
+            if i + 1 < chars.len() {
+                out.push(chars[i + 1]);
+            }
+            i += 2;
+            continue;
+        }
+        if in_class {
+            out.push(c);
+            if c == ']' && !class_first {
+                in_class = false;
+            }
+            class_first = false;
+            i += 1;
+            continue;
+        }
+        if c == '[' {
+            in_class = true;
+            class_first = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        // `(?(` opens a conditional.
+        if c == '(' && i + 2 < chars.len() && chars[i + 1] == '?' && chars[i + 2] == '(' {
+            let after = i + 3;
+            let mut wrapped = false;
+            if after < chars.len() && (chars[after].is_ascii_alphabetic() || chars[after] == '_') {
+                let mut j = after;
+                while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                let name: String = chars[after..j].iter().collect();
+                if name != "DEFINE" && j < chars.len() && chars[j] == ')' {
+                    out.push_str("(?(");
+                    out.push('<');
+                    out.push_str(&name);
+                    out.push_str(">)");
+                    i = j + 1;
+                    wrapped = true;
+                }
+            }
+            if !wrapped {
+                out.push_str("(?(");
+                i += 3;
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 /// Remove `\v`/`\f` outside character classes and `#` comments

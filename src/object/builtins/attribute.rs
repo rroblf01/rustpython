@@ -301,6 +301,12 @@ pub fn builtin_chr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let code = n
         .to_usize()
         .ok_or_else(|| PyError::value_error("chr() arg not in range(0x110000)"))?;
+    // Lone surrogates (U+D800–U+DFFF): valid Python `chr()` results (Python
+    // strings allow them) but Rust's `char::from_u32` rejects them — build a
+    // WTF-8 PyStr directly instead (CPython: `chr(0xD800)` == `'\ud800'`).
+    if (0xD800..=0xDFFF).contains(&code) {
+        return Ok(py_str_pstr(&PyStr::from_surrogate(code as u32)));
+    }
     let c = char::from_u32(code as u32)
         .ok_or_else(|| PyError::value_error("chr() arg not in range(0x110000)"))?;
     Ok(py_str(&c.to_string()))

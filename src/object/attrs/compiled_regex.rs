@@ -347,29 +347,18 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         let is_bytes = crate::modules::re_check_compat(pat_is_bytes, subj_bytes)?;
                         let (pos_c, endpos_c) =
                             crate::modules::re_pos_endpos(args, string.chars().count());
-                        let pos = crate::modules::char_to_byte_idx(&string, pos_c);
-                        let endpos = crate::modules::char_to_byte_idx(&string, endpos_c);
-                        let caps = re
-                            .captures_from_pos(&string, pos.min(string.len()))
-                            .unwrap_or(None)
-                            .filter(|c| {
-                                c.get(0)
-                                    .map(|m| {
-                                        m.start() == pos.min(string.len())
-                                            && m.end() == endpos.min(string.len())
-                                    })
-                                    .unwrap_or(false)
-                            });
-                        Ok(crate::modules::make_match_object_detailed(
-                            &re,
-                            caps,
-                            &string,
+                        // Recompile anchored so the match spans exactly
+                        // [pos, endpos) with backtracking (the old
+                        // leftmost-match+filter wrongly returned None for
+                        // `.*?`/`a|ab` fullmatch).
+                        crate::modules::fullmatch_make(
                             &pat,
                             fl,
+                            &string,
                             pos_c,
-                            endpos_c.min(string.chars().count()),
+                            endpos_c,
                             is_bytes,
-                        ))
+                        )
                     },
                 )))),
                 "subn" => Ok(PyObjectRef::imm(PyObject::Closure(Rc::new(

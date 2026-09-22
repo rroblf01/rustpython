@@ -120,6 +120,15 @@ pub(crate) fn re_text_arg(arg: &PyObjectRef) -> (String, bool) {
     match &*arg.borrow() {
         PyObject::Bytes(b) => (b.iter().map(|&x| x as char).collect(), true),
         PyObject::ByteArray(b) => (b.iter().map(|&x| x as char).collect(), true),
+        // `array.array` exposes the buffer protocol, so a bytes pattern
+        // matches against it (CPython: `re.compile(b"").match(array)` works).
+        PyObject::Array(arr) => {
+            let mut bytes: Vec<u8> = Vec::new();
+            for &v in &arr.data {
+                bytes.extend(crate::object::array_elem_to_bytes(arr.typecode, v));
+            }
+            (bytes.iter().map(|&x| x as char).collect(), true)
+        }
         PyObject::MemoryView { .. } => match crate::object::mv_tobytes(arg) {
             Ok(bytes) => (bytes.iter().map(|&x| x as char).collect(), true),
             Err(_) => (arg.str(), false),
@@ -216,29 +225,34 @@ pub(crate) fn re_check_compat(pat_bytes: bool, subj_bytes: bool) -> PyResult<boo
 /// pre-compiled `re.Pattern` (`PyObject::CompiledRegex`). Also returns
 /// whether the pattern is bytes-flavored.
 fn extract_regex(arg: &PyObjectRef) -> PyResult<(fancy_regex::Regex, String, bool)> {
-    extract_regex_flags(arg, 0)
+    let (re, pattern, is_bytes, _flags) = extract_regex_flags(arg, 0)?;
+    Ok((re, pattern, is_bytes))
 }
 
 /// Like `extract_regex`, honoring caller-supplied flags for raw
-/// patterns (mirrors CPython: `re.search(p, s, re.ASCII)`).
+/// patterns (mirrors CPython: `re.search(p, s, re.ASCII)`). Also returns
+/// the EFFECTIVE flags (stored flags for a compiled pattern, or the
+/// validated/merged flags for a raw one) so callers like `fullmatch` can
+/// recompile an anchored variant with identical semantics.
 fn extract_regex_flags(
     arg: &PyObjectRef,
     flags: i32,
-) -> PyResult<(fancy_regex::Regex, String, bool)> {
+) -> PyResult<(fancy_regex::Regex, String, bool, i32)> {
     match &*arg.borrow() {
         PyObject::CompiledRegex {
             regex,
             pattern,
+            flags: stored_flags,
             is_bytes,
             ..
-        } => Ok(((**regex).clone(), pattern.clone(), *is_bytes)),
+        } => Ok(((**regex).clone(), pattern.clone(), *is_bytes, *stored_flags)),
         _ => {
             let (pattern, is_bytes) = re_text_arg(arg);
             re_check_flags(flags, is_bytes)?;
-            // Bytes patterns use ASCII word semantics (see `compile`).
-            let flags = if is_bytes { flags | 256 } else { flags };
             // Validate inline flag groups with CPython's exact errors
-            // and rewrite `a`/`L` groups the engine rejects.
+            // and rewrite `a`/`L` groups the engine rejects. Keep the
+            // original `flags` for validation: only the engine-facing
+            // flags below gain the implicit ASCII bit for bytes patterns.
             let (pattern, ascii_scope, global_bits) =
                 match compile::preprocess_inline_flags(&pattern, is_bytes, flags) {
                     Ok((p, a, g)) => (p, a, g),
@@ -250,14 +264,16 @@ fn extract_regex_flags(
             // (mirrors CPython: `re.compile(b'(?L)', re.ASCII)` is a
             // ValueError).
             re_check_flags(flags | global_bits, is_bytes)?;
-            let flags = if ascii_scope { flags | 256 } else { flags };
+            // `(?a)` scope forces ASCII; bytes patterns use ASCII word
+            // semantics for the engine (validation above already ran on
+            // the original flags, so LOCALE+ASCII is never re-checked).
+            let mut flags = flags | global_bits;
+            if ascii_scope || is_bytes {
+                flags |= 256;
+            }
             match compile_python_regex_flags(&pattern, flags) {
-                Ok(re) => Ok((re, pattern.clone(), is_bytes)),
-                Err(e) => Err(re_pattern_error(
-                    map_regex_error(&e.to_string()),
-                    Some(pattern),
-                    None,
-                )),
+                Ok(re) => Ok((re, pattern.clone(), is_bytes, flags)),
+                Err(e) => Err(fancy_error_to_pattern(&e, &pattern)),
             }
         }
     }
@@ -575,6 +591,58 @@ fn re_call_flags(args: &[PyObjectRef], idx: usize) -> i32 {
     flags
 }
 
+/// Build a `re.Match` for `fullmatch` semantics: the match must span
+/// exactly the char range `[pos, endpos)`. Recompiles `pattern` anchored
+/// as `(?:pattern)\z` (with `flags`) so the engine backtracks until one
+/// alternative consumes the whole window — the plain
+/// "take the leftmost match, then filter" approach wrongly rejected
+/// `re.fullmatch(r"a|ab", "ab")` (leftmost `a` never spans "ab").
+/// The subject is truncated to `endpos` so `\z` anchors at `endpos`
+/// (mirroring CPython, where `$`/`\z` match at `endpos`), while
+/// `captures_from_pos(pos)` keeps pre-`pos` context visible for
+/// `^`/`\b`/lookbehind.
+pub fn fullmatch_make(
+    pattern: &str,
+    flags: i32,
+    string: &str,
+    pos_c: usize,
+    endpos_c: usize,
+    is_bytes: bool,
+) -> PyResult<PyObjectRef> {
+    let n_chars = string.chars().count();
+    let pos_c = pos_c.min(n_chars);
+    let endpos_c = endpos_c.min(n_chars);
+    let pos_b = char_to_byte_idx(string, pos_c);
+    let endpos_b = char_to_byte_idx(string, endpos_c);
+    let anchored_src = format!("(?:{})\\z", pattern);
+    let anchored = match compile_python_regex_flags(&anchored_src, flags) {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(re_pattern_error(
+                map_regex_error(&e.to_string()),
+                Some(pattern.to_string()),
+                None,
+            ))
+        }
+    };
+    // Truncate so `\z` lands on `endpos` (not the real string end).
+    let truncated = &string[..endpos_b.min(string.len())];
+    let caps = anchored
+        .captures_from_pos(truncated, pos_b.min(truncated.len()))
+        .unwrap_or(None)
+        .filter(|c| c.get(0).map(|m| m.start() == pos_b).unwrap_or(false));
+    Ok(make_match_object_detailed(
+        &anchored,
+        caps,
+        string,
+        pattern,
+        flags,
+        pos_c,
+        endpos_c,
+        is_bytes,
+    ))
+}
+
 pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! re_func {
@@ -593,7 +661,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 {
             return Err(PyError::type_error("search() takes at least 2 arguments"));
         }
-        let (re, pattern, pat_bytes) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
+        let (re, pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
         let (string, subj_bytes) = re_text_arg(&args[1]);
         let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
         let caps = re.captures(&string).unwrap_or(None);
@@ -613,7 +681,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 {
             return Err(PyError::type_error("match() takes at least 2 arguments"));
         }
-        let (re, pattern, pat_bytes) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
+        let (re, pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
         let (string, subj_bytes) = re_text_arg(&args[1]);
         let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
         let caps = re.captures(&string).unwrap_or(None);
@@ -639,31 +707,29 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 "fullmatch() takes at least 2 arguments",
             ));
         }
-        let (re, pattern, pat_bytes) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
+        // `extract_regex_flags` validates flags/inline groups and yields the
+        // effective flags; the returned non-anchored regex is unused —
+        // `fullmatch_make` recompiles anchored so the engine backtracks to
+        // span the whole string (leftmost-match+filter rejects `a|ab`).
+        let (_re, pattern, pat_bytes, flags) =
+            extract_regex_flags(&args[0], re_call_flags(args, 2))?;
         let (string, subj_bytes) = re_text_arg(&args[1]);
         let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
-        let caps = re.captures(&string).unwrap_or(None).filter(|c| {
-            c.get(0)
-                .map(|m| m.start() == 0 && m.end() == string.len())
-                .unwrap_or(false)
-        });
-        Ok(make_match_object_detailed(
-            &re,
-            caps,
-            &string,
+        fullmatch_make(
             &pattern,
-            0,
+            flags,
+            &string,
             0,
             string.chars().count(),
             is_bytes,
-        ))
+        )
     });
 
     re_func!("findall", |args| {
         if args.len() < 2 {
             return Err(PyError::type_error("findall() takes at least 2 arguments"));
         }
-        let (re, _pattern, pat_bytes) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
+        let (re, _pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
         let (string, subj_bytes) = re_text_arg(&args[1]);
         let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
         let groups = re.captures_len().saturating_sub(1);
@@ -691,7 +757,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         // invoke a callback) — this also adds real `count` support (the
         // 4th positional arg), which the previous `replace_all`-based
         // version silently ignored entirely.
-        let (re, pattern, pat_bytes) = extract_regex_flags(&args[0], re_call_flags(args, 4))?;
+        let (re, pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], re_call_flags(args, 4))?;
         let is_callable_repl = !re_is_template_repl(&args[1]);
         let (repl_text, repl_bytes) = re_text_arg(&args[1]);
         let (string, subj_bytes) = re_text_arg(&args[2]);
@@ -819,8 +885,6 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             } => ((**regex).clone(), *is_bytes),
             _ => {
                 let (pattern, pb) = re_text_arg(&args[0]);
-                // Bytes patterns use ASCII word semantics (see `compile`).
-                let flags = if pb { flags | 256 } else { flags };
                 let (pattern, ascii_scope, global_bits) =
                     match compile::preprocess_inline_flags(&pattern, pb, flags) {
                         Ok((p, a, g)) => (p, a, g),
@@ -833,15 +897,16 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                         }
                     };
                 re_check_flags(flags | global_bits, pb)?;
-                let flags = if ascii_scope { flags | 256 } else { flags };
+                // Bytes patterns use ASCII word semantics (see `compile`);
+                // validation above ran on the original flags.
+                let mut flags = flags | global_bits;
+                if ascii_scope || pb {
+                    flags |= 256;
+                }
                 match compile_python_regex_flags(&pattern, flags) {
                     Ok(r) => (r, pb),
                     Err(e) => {
-                        return Err(re_pattern_error(
-                            map_regex_error(&e.to_string()),
-                            Some(pattern.clone()),
-                            None,
-                        ))
+                        return Err(fancy_error_to_pattern(&e, &pattern));
                     }
                 }
             }
@@ -940,11 +1005,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 flags: stored_flags,
                 is_bytes,
             })),
-            Err(e) => Err(re_pattern_error(
-                map_regex_error(&e.to_string()),
-                Some(pattern.clone()),
-                None,
-            )),
+            Err(e) => Err(fancy_error_to_pattern(&e, &pattern)),
         }
     });
 
@@ -953,7 +1014,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 {
             return Err(PyError::type_error("finditer() takes at least 2 arguments"));
         }
-        let (re, pattern, pat_bytes) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
+        let (re, pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
         let (string, subj_bytes) = re_text_arg(&args[1]);
         let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
         let caps_list = scan_captures(&re, &string, 0, string.len());
@@ -1096,7 +1157,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 3 {
             return Err(PyError::type_error("subn() takes at least 3 arguments"));
         }
-        let (re, pattern, pat_bytes) = extract_regex_flags(&args[0], re_call_flags(args, 4))?;
+        let (re, pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], re_call_flags(args, 4))?;
         let is_callable_repl = !re_is_template_repl(&args[1]);
         let (repl_text, repl_bytes) = re_text_arg(&args[1]);
         let (string, subj_bytes) = re_text_arg(&args[2]);
@@ -1259,11 +1320,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                                 }));
                             }
                             Err(e) => {
-                                return Err(re_pattern_error(
-                                    map_regex_error(&e.to_string()),
-                                    Some(pat),
-                                    None,
-                                ))
+                                return Err(fancy_error_to_pattern(&e, &pat));
                             }
                         }
                     }
@@ -1515,6 +1572,53 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             py_str("PatternError"),
         ]),
     );
+
+    // `re._compiler` — attribute-accessible submodule mirroring CPython's
+    // `from . import _compiler` in `re/__init__.py` (so `re._compiler.X`
+    // works after just `import re`). Provides the internals `test_re`'s
+    // `test_signedness` (MAXREPEAT/MAXGROUPS >= 0) and `test_overlap_table`
+    // (`_generate_overlap_table`) assert on. Built natively here (not via
+    // a file import) so attribute access needs no import-timing wiring.
+    let mut compiler_dict = HashMap::new();
+    // Match CPython's `_sre` constants: MAXREPEAT = ~0 (u32), MAXGROUPS =
+    // INT32_MAX/2 (see `Modules/_sre/sre.h`).
+    compiler_dict.insert_str("MAXREPEAT", py_int(2147483647));
+    compiler_dict.insert_str("MAXGROUPS", py_int(1073741823));
+    compiler_dict.insert_str(
+        "_generate_overlap_table",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "_generate_overlap_table".to_string(),
+            // Verbatim port of CPython's KMP self-overlap table generator
+            // (`Lib/re/_compiler.py::_generate_overlap_table`), including
+            // the `while…else` (break vs. natural-exit) distinction.
+            func: |args| {
+                if args.is_empty() {
+                    return Err(PyError::type_error(
+                        "_generate_overlap_table() takes exactly 1 argument",
+                    ));
+                }
+                let prefix: Vec<char> = args[0].str().chars().collect();
+                let mut table: Vec<i64> = vec![0; prefix.len()];
+                for i in 1..prefix.len() {
+                    let mut idx = table[i - 1] as usize;
+                    let mut broke = false;
+                    while prefix[i] != prefix[idx] {
+                        if idx == 0 {
+                            table[i] = 0;
+                            broke = true;
+                            break;
+                        }
+                        idx = table[idx - 1] as usize;
+                    }
+                    if !broke {
+                        table[i] = idx as i64 + 1;
+                    }
+                }
+                Ok(py_list(table.into_iter().map(py_int).collect()))
+            },
+        }),
+    );
+    d.insert_str("_compiler", create_module("re._compiler", compiler_dict));
 
     d
 }

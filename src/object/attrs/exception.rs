@@ -38,13 +38,14 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                 // out lazily. Defaults to None for non-syntax errors.
                 "lineno" | "offset" => {
                     let want_lineno = name == "lineno";
-                    // A ctor-set SyntaxError location tuple wins over the
-                    // lazy "L<line>:<col>:" parsing below.
-                    if typ == "SyntaxError" {
-                        if let Some(extra) = extra {
-                            if let Some(v) = extra.get(name) {
-                                return Ok(v.clone());
-                            }
+                    // A ctor-set location (SyntaxError tuple, or a
+                    // PatternError's `.pos`-derived lineno/offset in extra)
+                    // wins over the lazy "L<line>:<col>:" parsing below —
+                    // checked for ANY exception type, not just SyntaxError
+                    // (PatternError.lineno must read extra too).
+                    if let Some(extra) = extra {
+                        if let Some(v) = extra.get(name) {
+                            return Ok(v.clone());
                         }
                     }
                     let parsed = args.first().and_then(|a| {
