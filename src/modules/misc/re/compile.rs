@@ -1,16 +1,30 @@
 use crate::object::*;
 use std::collections::HashMap;
 
-pub fn re_pattern_error(msg: String, pattern: Option<String>, pos: Option<i64>) -> PyError {
+pub fn re_pattern_error(
+    msg: String,
+    pattern: Option<String>,
+    pos: Option<i64>,
+    is_bytes: bool,
+) -> PyError {
     // CPython's PatternError: `.msg` is the bare message; `str(err)` is
     // `"{msg} at position {pos}"`; `.lineno`/`.colno` locate `pos` (a CHAR
     // index into the pattern) on its line. (test_error asserts all of these.)
+    // Bytes patterns keep a bytes `.pattern` (test_re: `b'(\xa4))'`).
     let mut extra = HashMap::new();
     extra.insert("msg".to_string(), py_str(&msg));
     extra.insert(
         "pattern".to_string(),
         match &pattern {
-            Some(p) => py_str(p),
+            Some(p) => {
+                if is_bytes {
+                    PyObjectRef::imm(PyObject::Bytes(
+                        p.chars().map(|c| c as u8).collect::<Vec<u8>>(),
+                    ))
+                } else {
+                    py_str(p)
+                }
+            }
             None => py_none(),
         },
     );
@@ -39,9 +53,26 @@ pub fn re_pattern_error(msg: String, pattern: Option<String>, pos: Option<i64>) 
         extra.insert("lineno".to_string(), py_int(lineno));
         extra.insert("colno".to_string(), py_int(colno));
     }
-    let display = match pos {
-        Some(p) => format!("{} at position {}", msg, p),
-        None => msg.clone(),
+    let display = match (pos, &pattern) {
+        (Some(p), Some(pat)) if pat.contains('\n') => {
+            // Multiline patterns append line/column (CPython).
+            let p_usize = (p as usize).min(pat.chars().count());
+            let (mut lineno, mut colno) = (1i64, 1i64);
+            for (i, ch) in pat.chars().enumerate() {
+                if i >= p_usize {
+                    break;
+                }
+                if ch == '\n' {
+                    lineno += 1;
+                    colno = 1;
+                } else {
+                    colno += 1;
+                }
+            }
+            format!("{} at position {} (line {}, column {})", msg, p, lineno, colno)
+        }
+        (Some(p), _) => format!("{} at position {}", msg, p),
+        (None, _) => msg.clone(),
     };
     let exc = PyObjectRef::new(PyObject::Exception {
         typ: "PatternError".to_string(),
@@ -454,7 +485,7 @@ pub fn translate_python_replacement(repl: &str) -> PyResult<String> {
                                         ),
                                         Some(repl.to_string()),
                                         Some(0),
-                                    ));
+                                    false));
                                 }
                                 out.push(char::from_u32(v).unwrap_or('\u{FFFD}'));
                                 i += 4;
@@ -494,7 +525,7 @@ pub fn translate_python_replacement(repl: &str) -> PyResult<String> {
                         format!("bad escape \\{}", ch),
                         Some(repl.to_string()),
                         Some((i) as i64),
-                    ));
+                    false));
                 }
                 _ => {
                     // Unknown non-letter escape: keep verbatim
@@ -541,7 +572,7 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex, is_bytes: bool) 
                         "missing <".to_string(),
                         Some(repl.to_string()),
                         Some(2),
-                    ));
+                    false));
                 }
                 let mut j = i + 3;
                 while j < chars.len() && chars[j] != '>' {
@@ -553,14 +584,14 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex, is_bytes: bool) 
                         "missing >, unterminated name".to_string(),
                         Some(repl.to_string()),
                         Some(3),
-                    ));
+                    false));
                 }
                 if name.is_empty() {
                     return Err(re_pattern_error(
                         "missing group name".to_string(),
                         Some(repl.to_string()),
                         Some(3),
-                    ));
+                    false));
                 }
                 let mut bad = false;
                 for (idx, ch) in name.chars().enumerate() {
@@ -572,7 +603,7 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex, is_bytes: bool) 
                                     format!("invalid group reference {}", num),
                                     Some(repl.to_string()),
                                     Some(3),
-                                ));
+                                false));
                             }
                         } else {
                             bad = true;
@@ -603,7 +634,7 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex, is_bytes: bool) 
                         format!("bad character in group name '{}'", disp(&name)),
                         Some(repl.to_string()),
                         Some(3),
-                    ));
+                    false));
                 }
                 i = j + 1;
                 continue;
@@ -638,7 +669,7 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex, is_bytes: bool) 
                             ),
                             Some(repl.to_string()),
                             Some(0),
-                        ));
+                        false));
                     }
                     i += 4;
                     continue;
@@ -655,7 +686,7 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex, is_bytes: bool) 
                             format!("invalid group reference {}", num),
                             Some(repl.to_string()),
                             Some((i + 1) as i64),
-                        ));
+                        false));
                     }
                 }
                 i = j + 1;
@@ -700,27 +731,33 @@ pub fn map_regex_error(msg: &str) -> String {
 /// `map_regex_error(&e.to_string())` path lost the position (always
 /// `.pos is None`) and didn't recognize fancy's own phrasing, which broke
 /// `test_re`'s `checkPatternError(..., pos=N)` assertions.
-pub fn fancy_error_to_pattern(e: &fancy_regex::Error, pattern: &str) -> PyError {
+pub fn fancy_error_to_pattern(e: &fancy_regex::Error, pattern: &str, is_bytes: bool) -> PyError {
     match e {
         fancy_regex::Error::ParseError(pos, kind) => {
             // fancy reports a BYTE offset into the pattern; CPython's
             // `PatternError.pos` is a CHAR index (differs once the pattern
             // holds any multi-byte char, e.g. `'(€))'` → pos 3, not 5).
-            let byte_pos = (*pos).min(pattern.len());
+            let mut byte_pos = (*pos).min(pattern.len());
+            // Clamp down to a char boundary (fancy may report a byte
+            // offset inside a multi-byte char).
+            while byte_pos > 0 && !pattern.is_char_boundary(byte_pos) {
+                byte_pos -= 1;
+            }
             let char_pos = pattern[..byte_pos].chars().count() as i64;
             let msg = map_parse_error(kind, pattern, char_pos as usize);
-            re_pattern_error(msg, Some(pattern.to_string()), Some(char_pos))
+            re_pattern_error(msg, Some(pattern.to_string()), Some(char_pos), is_bytes)
         }
         fancy_regex::Error::CompileError(ce) => {
             // Look-behind / compile-stage errors: keep prior mapping but
             // surface a CPython message.
             let msg = map_compile_error(ce);
-            re_pattern_error(msg, Some(pattern.to_string()), None)
+            re_pattern_error(msg, Some(pattern.to_string()), None, is_bytes)
         }
         _ => re_pattern_error(
             map_regex_error(&e.to_string()),
             Some(pattern.to_string()),
             None,
+            is_bytes,
         ),
     }
 }
@@ -848,6 +885,11 @@ fn find_group_end(chars: &[char], open: usize) -> Option<usize> {
     while i < chars.len() {
         let c = chars[i];
         if c == '\\' {
+            // An escape is class content: a following `]` is NOT first
+            // (`[\w]]` closes at the second `]`).
+            if in_class {
+                class_first = false;
+            }
             i += 2;
             continue;
         }
@@ -1516,7 +1558,11 @@ fn counted_repeat_end(chars: &[char], i: usize) -> Option<usize> {
 /// CPython group-structure validation: named-group definition/backref
 /// checks, duplicate names, and backreferences to still-open groups.
 /// Returns `Err((msg, pos))` on the first violation.
-fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, Option<i64>)> {
+fn validate_group_syntax(
+    pattern: &str,
+    is_bytes: bool,
+    flags: i32,
+) -> Result<(), (String, Option<i64>)> {
     fn bad_name_char(name: &str) -> Option<char> {
         // CPython group names: identifier chars, but NOT starting with a digit.
         name.chars().enumerate().find(|(i, c)| {
@@ -1571,11 +1617,18 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
     // on entering the OUTERMOST lookbehind (`None` when outside).
     let mut lb_depth: usize = 0;
     let mut lookbehindgroups: Option<usize> = None;
+    // Open-paren positions (parallel to paren_stack) for "unterminated
+    // subpattern" error position (first unclosed `(`).
+    let mut open_pos: Vec<usize> = Vec::new();
     let mut open_captures: Vec<usize> = Vec::new();
     let mut i = 0;
     let mut in_class = false;
     let mut class_first = false;
     let mut class_start = 0usize;
+    // VERBOSE (`re.X`): `#` starts a comment (to newline) outside classes;
+    // a `)` inside such a comment is not a group closer. Inline `(?x)`
+    // also enables it (tracked when its global group is seen).
+    let mut verbose = flags & 64 != 0;
     let is_open = |g: usize, open: &Vec<usize>| open.contains(&g);
     while i < n {
         let c = chars[i];
@@ -1606,6 +1659,10 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
             continue;
         }
         if c == '\\' {
+            // An escape is class content: a following `]` is NOT first.
+            if in_class {
+                class_first = false;
+            }
             i += 2;
             continue;
         }
@@ -1656,30 +1713,55 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
             class_first = true;
             class_start = i;
             i += 1;
+            // `[^...]`: `^` is negation, not content — `[^]]` holds a
+            // literal `]` (CPython: first `]` after `[`/`[^` is literal).
+            if i < n && chars[i] == '^' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '#' && verbose && !in_class {
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
             continue;
         }
         if c == '(' {
             if i + 1 < n && chars[i + 1] == '?' {
                 let c2 = chars.get(i + 2).copied();
                 match c2 {
+                    None => {
+                        // Trailing `(?`: 'unexpected end of pattern'.
+                        return Err((
+                            "unexpected end of pattern".to_string(),
+                            Some(n as i64),
+                        ));
+                    }
                     Some('P') => {
                         let c3 = chars.get(i + 3).copied();
+                        if c3.is_none() {
+                            // Trailing `(?P`: 'unexpected end of pattern'.
+                            return Err((
+                                "unexpected end of pattern".to_string(),
+                                Some(n as i64),
+                            ));
+                        }
                         if c3 == Some('<') {
                             let name_start = i + 4;
                             let mut j = name_start;
                             while j < n && chars[j] != '>' {
                                 j += 1;
                             }
-                            if j >= n {
-                                return Err((
-                                    "missing >, unterminated name".to_string(),
-                                    Some(name_start as i64),
-                                ));
-                            }
-                            let name: String = chars[name_start..j].iter().collect();
+                            let name: String = chars[name_start..j.min(n)].iter().collect();
                             if name.is_empty() {
                                 return Err((
                                     "missing group name".to_string(),
+                                    Some(name_start as i64),
+                                ));
+                            }
+                            if j >= n {
+                                return Err((
+                                    "missing >, unterminated name".to_string(),
                                     Some(name_start as i64),
                                 ));
                             }
@@ -1697,7 +1779,7 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
                             }
                             next_group += 1;
                             named.push((name, next_group));
-                            paren_stack.push((Some(next_group), false));
+                            open_pos.push(i); paren_stack.push((Some(next_group), false));
                             open_captures.push(next_group);
                             i = j + 1;
                             continue;
@@ -1708,16 +1790,16 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
                             while j < n && chars[j] != ')' {
                                 j += 1;
                             }
-                            if j >= n {
-                                return Err((
-                                    "missing ), unterminated name".to_string(),
-                                    Some(name_start as i64),
-                                ));
-                            }
-                            let name: String = chars[name_start..j].iter().collect();
+                            let name: String = chars[name_start..j.min(n)].iter().collect();
                             if name.is_empty() {
                                 return Err((
                                     "missing group name".to_string(),
+                                    Some(name_start as i64),
+                                ));
+                            }
+                            if j >= n {
+                                return Err((
+                                    "missing ), unterminated name".to_string(),
                                     Some(name_start as i64),
                                 ));
                             }
@@ -1746,7 +1828,8 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
                                     }
                                 }
                             }
-                            paren_stack.push((None, false));
+                            // `(?P=name)` is complete (no group opens; its
+                            // `)` is consumed here, so push nothing).
                             i = j + 1;
                             continue;
                         } else {
@@ -1756,16 +1839,30 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
                     Some('<') => {
                         // `(?<=`/`(?<!` lookbehind, or `(?<name>` (Py3.12 extended).
                         let c3 = chars.get(i + 3).copied();
+                        if c3.is_none() {
+                            // Trailing `(?<`: 'unexpected end of pattern'.
+                            return Err((
+                                "unexpected end of pattern".to_string(),
+                                Some(n as i64),
+                            ));
+                        }
                         if c3 == Some('=') || c3 == Some('!') {
                             if lb_depth == 0 {
                                 lookbehindgroups = Some(next_group);
                             }
                             lb_depth += 1;
-                            paren_stack.push((None, true));
+                            open_pos.push(i); paren_stack.push((None, true));
                             i += 4; // past (?<= / (?<!
                             continue;
                         }
                         // `(?<name>` named group (extended syntax).
+                        // Empty `(?<>` is 'unknown extension', not a group.
+                        if chars.get(i + 3) == Some(&'>') {
+                            return Err((
+                                "unknown extension ?<>".to_string(),
+                                Some((i + 1) as i64),
+                            ));
+                        }
                         let name_start = i + 3;
                         let mut j = name_start;
                         while j < n && chars[j] != '>' {
@@ -1798,13 +1895,30 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
                         }
                         next_group += 1;
                         named.push((name, next_group));
-                        paren_stack.push((Some(next_group), false));
+                        open_pos.push(i); paren_stack.push((Some(next_group), false));
                         open_captures.push(next_group);
                         i = j + 1;
                         continue;
                     }
-                    Some(':') | Some('=') | Some('!') | Some('#') => {
-                        paren_stack.push((None, false));
+                    Some('#') => {
+                        // `(?#...)` comment: skip to `)` (not a group, no
+                        // push). Unterminated → 'missing ), unterminated
+                        // comment' at the `(`.
+                        let mut j = i + 3;
+                        while j < n && chars[j] != ')' {
+                            j += 1;
+                        }
+                        if j >= n {
+                            return Err((
+                                "missing ), unterminated comment".to_string(),
+                                Some(i as i64),
+                            ));
+                        }
+                        i = j + 1;
+                        continue;
+                    }
+                    Some(':') | Some('=') | Some('!') => {
+                        open_pos.push(i); paren_stack.push((None, false));
                         i += 3;
                         continue;
                     }
@@ -1815,19 +1929,19 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
                         while j < n && chars[j] != ')' {
                             j += 1;
                         }
+                        let cond: String = chars[cond_start..j.min(n)].iter().collect();
+                        if cond.is_empty() {
+                            return Err((
+                                "missing group name".to_string(),
+                                Some(cond_start as i64),
+                            ));
+                        }
                         if j >= n {
                             // Condition's `)` never found — the group-ref
                             // NAME inside the conditional is unterminated
                             // (`()(?(1` → "missing ), unterminated name").
                             return Err((
                                 "missing ), unterminated name".to_string(),
-                                Some(cond_start as i64),
-                            ));
-                        }
-                        let cond: String = chars[cond_start..j].iter().collect();
-                        if cond.is_empty() {
-                            return Err((
-                                "missing group name".to_string(),
                                 Some(cond_start as i64),
                             ));
                         }
@@ -1930,13 +2044,26 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
                                 ));
                             }
                         }
-                        paren_stack.push((None, false));
+                        open_pos.push(i); paren_stack.push((None, false));
                         i = j + 1; // past the condition's `)`; body follows.
                         continue;
                     }
                     _ => {
+                        // Unknown `(?x)` extension (CPython: 'unknown
+                        // extension ?x' at the `?`). Atomic `(?>...)` passes
+                        // through (engine extension); other punctuation /
+                        // digits are left for the engine. Only an invalid
+                        // ASCII flag LETTER errors here.
+                        if let Some(ch) = c2 {
+                            if ch.is_ascii_alphabetic() && inline_flag_bit(ch).is_none() {
+                                return Err((
+                                    format!("unknown extension ?{}", ch),
+                                    Some((i + 1) as i64),
+                                ));
+                            }
+                        }
                         // Flags `(?i)` / `(?flags:` — treat as non-capturing.
-                        paren_stack.push((None, false));
+                        open_pos.push(i); paren_stack.push((None, false));
                         i += 2;
                         continue;
                     }
@@ -1944,13 +2071,18 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
             }
             // Plain capturing group.
             next_group += 1;
-            paren_stack.push((Some(next_group), false));
+            open_pos.push(i); paren_stack.push((Some(next_group), false));
             open_captures.push(next_group);
             i += 1;
             continue;
         }
         if c == ')' {
+            if paren_stack.is_empty() {
+
+                return Err(("unbalanced parenthesis".to_string(), Some(i as i64)));
+            }
             if let Some((gnum, is_lb)) = paren_stack.pop() {
+                open_pos.pop();
                 if let Some(g) = gnum {
                     open_captures.retain(|&x| x != g);
                 }
@@ -1965,6 +2097,14 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
             continue;
         }
         i += 1;
+    }
+    if !paren_stack.is_empty() {
+        let pos = open_pos.first().copied().unwrap_or(0);
+
+        return Err((
+            "missing ), unterminated subpattern".to_string(),
+            Some(pos as i64),
+        ));
     }
     Ok(())
 }
@@ -2487,9 +2627,15 @@ pub fn compile_python_regex_flags(
         ));
     }
     // Group-structure validation (duplicate names, open-group backrefs, etc).
-    if let Err((msg, pos)) = validate_group_syntax(pattern, is_bytes) {
+    if let Err((msg, pos)) = validate_group_syntax(pattern, is_bytes, flags) {
+        // validate reports a CHAR index; fancy's ParseError carries a BYTE
+        // offset (converted back downstream) — translate so multi-byte
+        // patterns don't corrupt (e.g. `'(€))'` pos 3, not 1).
+        let byte_pos = pos
+            .and_then(|c| pattern.char_indices().nth(c as usize).map(|(b, _)| b))
+            .unwrap_or(pattern.len());
         return Err(fancy_regex::Error::ParseError(
-            pos.unwrap_or(0) as usize,
+            byte_pos,
             fancy_regex::ParseError::GeneralParseError(msg),
         ));
     }

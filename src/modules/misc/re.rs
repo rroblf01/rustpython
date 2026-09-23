@@ -269,7 +269,7 @@ fn extract_regex_flags(
                 match compile::preprocess_inline_flags(&pattern, is_bytes, flags) {
                     Ok((p, a, g)) => (p, a, g),
                     Err((msg, pos)) => {
-                        return Err(re_pattern_error(msg, Some(pattern), Some(pos as i64)));
+                        return Err(re_pattern_error(msg, Some(pattern), Some(pos as i64), is_bytes));
                     }
                 };
             // Inline globals participate in combination validation
@@ -285,7 +285,7 @@ fn extract_regex_flags(
             }
             match compile_python_regex_flags(&pattern, flags, is_bytes) {
                 Ok(re) => Ok((re, pattern.clone(), is_bytes, flags)),
-                Err(e) => Err(fancy_error_to_pattern(&e, &pattern)),
+                Err(e) => Err(fancy_error_to_pattern(&e, &pattern, is_bytes)),
             }
         }
     }
@@ -634,6 +634,7 @@ pub fn fullmatch_make(
                 map_regex_error(&e.to_string()),
                 Some(pattern.to_string()),
                 None,
+                is_bytes,
             ))
         }
     };
@@ -941,6 +942,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                                 msg,
                                 Some(pattern),
                                 Some(pos as i64),
+                                pb,
                             ));
                         }
                     };
@@ -954,7 +956,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 match compile_python_regex_flags(&pattern, flags, pb) {
                     Ok(r) => (r, pb),
                     Err(e) => {
-                        return Err(fancy_error_to_pattern(&e, &pattern));
+                        return Err(fancy_error_to_pattern(&e, &pattern, pb));
                     }
                 }
             }
@@ -1038,7 +1040,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             match compile::preprocess_inline_flags(&original_pattern, is_bytes, flags) {
                 Ok((p, a, g)) => (p, a, g),
                 Err((msg, pos)) => {
-                    return Err(re_pattern_error(msg, Some(original_pattern), Some(pos as i64)));
+                    return Err(re_pattern_error(msg, Some(original_pattern), Some(pos as i64), is_bytes));
                 }
             };
         re_check_flags(flags | global_bits, is_bytes)?;
@@ -1066,7 +1068,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 flags: stored_flags,
                 is_bytes,
             })),
-            Err(e) => Err(fancy_error_to_pattern(&e, &pattern)),
+            Err(e) => Err(fancy_error_to_pattern(&e, &pattern, is_bytes)),
         }
     });
 
@@ -1351,6 +1353,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                                         msg,
                                         Some(pat),
                                         Some(pos as i64),
+                                        false,
                                     ));
                                 }
                             };
@@ -1364,7 +1367,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                                 }));
                             }
                             Err(e) => {
-                                return Err(fancy_error_to_pattern(&e, &pat));
+                                return Err(fancy_error_to_pattern(&e, &pat, false));
                             }
                         }
                     }
