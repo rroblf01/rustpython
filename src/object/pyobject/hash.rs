@@ -7,6 +7,8 @@ impl PyObject {
             PyObject::None => Ok(0),
             PyObject::Bool(b) => Ok(if *b { 1 } else { 0 }),
             PyObject::Int(i) => Ok(hash_bigint(i)),
+            // IntFlag hashes as its int value (`hash(re.I) == hash(2)`).
+            PyObject::RegexFlag(v) => Ok(hash_bigint(&num_bigint::BigInt::from(*v))),
             // A whole-number float must hash IDENTICALLY to the equal int
             // (`1.0 == 1` is true, per the numeric-tower equality fix above,
             // and Python's dict/set invariant requires `a == b => hash(a) ==

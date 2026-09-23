@@ -288,6 +288,8 @@ pub fn builtin_int(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let obj = args_vec[0].borrow();
     match &*obj {
         PyObject::Int(_) => Ok(args_vec[0].clone()),
+        // IntFlag converts to its int value.
+        PyObject::RegexFlag(v) => Ok(py_int(*v)),
         PyObject::Float(f) => {
             // Exact float->int truncation (a plain `*f as i64` cast would
             // silently saturate at i64::MAX for e.g. 1.797e308 instead of

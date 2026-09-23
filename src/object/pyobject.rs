@@ -426,6 +426,11 @@ pub enum PyObject {
         /// be bytes-like, groups come back as bytes).
         is_bytes: bool,
     },
+    /// `re.RegexFlag` — IntFlag-like (int-valued) flag. Stored as `i64`
+    /// (may hold unknown bits like `1<<20`, or negatives from `~`).
+    /// Behaves as its int value in flag contexts (`as_i64`), with
+    /// IntFlag repr/str/operators (see `regexflag_*` helpers).
+    RegexFlag(i64),
     Closure(Rc<dyn Fn(&[PyObjectRef]) -> PyResult<PyObjectRef>>),
     /// Implements the await protocol for Futures.
     /// __await__ returns this, and SEND drives it: first yield the future,
@@ -542,6 +547,7 @@ impl PyObject {
             PyObject::Array(_) => "array",
             PyObject::MemoryView { .. } => "memoryview",
             PyObject::CompiledRegex { .. } => "re.Pattern",
+            PyObject::RegexFlag(_) => "RegexFlag",
             PyObject::Closure(_) => "builtin_function_or_method",
             PyObject::FutureAwaitIterator { .. } => "future_await_iterator",
             PyObject::Process { .. } => "Popen",
@@ -719,6 +725,8 @@ impl PyObject {
             // an empty-bytes EOF sentinel from `readline()`).
             PyObject::Bytes(b) => !b.is_empty(),
             PyObject::ByteArray(b) => !b.is_empty(),
+            // IntFlag is falsy only when zero (CPython: `bool(re.NOFLAG)`).
+            PyObject::RegexFlag(v) => *v != 0,
             PyObject::WeakProxy { target, .. } => {
                 if let Some(rc) = target.upgrade() {
                     return rc.borrow().truthy();
@@ -773,6 +781,24 @@ impl PyObject {
                 return Err(PyError::reference_error(
                     "weakly-referenced object no longer exists",
                 ));
+            }
+        }
+        // IntFlag compares by int value (dict/set key disambiguation):
+        // Flag==Flag, Flag==int, int==Flag.
+        if let PyObject::RegexFlag(v) = self {
+            if let PyObject::RegexFlag(w) = &*other_ref.borrow() {
+                return Ok(v == w);
+            }
+            if let Some(n) = other_ref.as_i64() {
+                return Ok(*v == n);
+            }
+            return Ok(false);
+        }
+        if let PyObject::RegexFlag(w) = &*other_ref.borrow() {
+            match self {
+                PyObject::Int(b) => return Ok(b.to_i64().map(|n| n == *w).unwrap_or(false)),
+                PyObject::Bool(b) => return Ok((if *b { 1 } else { 0 }) == *w),
+                _ => return Ok(false),
             }
         }
         // This structural-equality function is what PyDict/PySet actually

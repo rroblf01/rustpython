@@ -11,6 +11,8 @@ pub use pystring::PyStr;
 pub(crate) use subscript::extract_slice_fields;
 mod pyobject;
 pub use pyobject::*;
+mod regexflag;
+pub use regexflag::*;
 mod ctors;
 pub use ctors::*;
 mod ops_unary;

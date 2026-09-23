@@ -1026,6 +1026,10 @@ fn i64_binop(
 }
 
 pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    // RegexFlag (IntFlag) `|` returns a RegexFlag (CPython: `re.I|re.S`).
+    if let Some(r) = crate::object::regexflag_binop(a, b, |x, y| x | y) {
+        return r;
+    }
     // Bool __or__ returns bool, not int (CPython: True | True -> True, but True | 1 -> int)
     if let (Some(av), Some(bv)) = (a.as_i64(), b.as_i64()) {
         if matches!(&*a.borrow(), PyObject::Bool(_)) && matches!(&*b.borrow(), PyObject::Bool(_)) {
@@ -1071,6 +1075,9 @@ pub fn py_bit_or(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_bit_xor(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = crate::object::regexflag_binop(a, b, |x, y| x ^ y) {
+        return r;
+    }
     // Bool __xor__ returns bool, not int (CPython: True ^ True -> False, but True ^ 1 -> int)
     if let (Some(av), Some(bv)) = (a.as_i64(), b.as_i64()) {
         if matches!(&*a.borrow(), PyObject::Bool(_)) && matches!(&*b.borrow(), PyObject::Bool(_)) {
@@ -1102,6 +1109,9 @@ pub fn py_bit_xor(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
 }
 
 pub fn py_bit_and(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
+    if let Some(r) = crate::object::regexflag_binop(a, b, |x, y| x & y) {
+        return r;
+    }
     // Bool __and__ returns bool, not int (CPython: True & True -> True, but True & 1 -> int)
     if let (Some(av), Some(bv)) = (a.as_i64(), b.as_i64()) {
         if matches!(&*a.borrow(), PyObject::Bool(_)) && matches!(&*b.borrow(), PyObject::Bool(_)) {

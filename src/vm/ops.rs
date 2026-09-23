@@ -344,6 +344,9 @@ impl VirtualMachine {
                     let obj = val.borrow();
                     match &*obj {
                         PyObject::Int(i) => py_int(!i),
+                        // IntFlag `~` wraps into the positive range (KEEP
+                        // boundary; CPython: `int(~re.I) == 509`).
+                        PyObject::RegexFlag(v) => crate::object::regexflag_invert(*v),
                         PyObject::Bool(b) => {
                             crate::modules::warnings_emit(
                                 "Bitwise inversion '~' on bool is deprecated. Use 'not' instead",

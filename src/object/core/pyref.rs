@@ -239,6 +239,8 @@ impl PyObjectRef {
             PyObjectRef::SmallFloat(_) | PyObjectRef::SmallStr(_) | PyObjectRef::None => None,
             PyObjectRef::Imm(_) | PyObjectRef::Mut(_) => match &*self.borrow() {
                 PyObject::Int(b) => b.to_i64(),
+                // RegexFlag is int-valued (IntFlag subclasses int).
+                PyObject::RegexFlag(v) => Some(*v),
                 _ => None,
             },
         }

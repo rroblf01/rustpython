@@ -1564,12 +1564,18 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
     let n = chars.len();
     let mut named: Vec<(String, usize)> = Vec::new();
     let mut next_group: usize = 0;
-    // Stack: Some(group_num) for capturing `(`, None for non-capturing.
-    let mut paren_stack: Vec<Option<usize>> = Vec::new();
+    // Stack: (Some(group_num) for capturing `(`, None for
+    // non-capturing, is_lookbehind).
+    let mut paren_stack: Vec<(Option<usize>, bool)> = Vec::new();
+    // Lookbehind tracking (CPython `state.lookbehindgroups`): group count
+    // on entering the OUTERMOST lookbehind (`None` when outside).
+    let mut lb_depth: usize = 0;
+    let mut lookbehindgroups: Option<usize> = None;
     let mut open_captures: Vec<usize> = Vec::new();
     let mut i = 0;
     let mut in_class = false;
     let mut class_first = false;
+    let mut class_start = 0usize;
     let is_open = |g: usize, open: &Vec<usize>| open.contains(&g);
     while i < n {
         let c = chars[i];
@@ -1584,6 +1590,18 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
             if gnum >= 1 && is_open(gnum, &open_captures) {
                 return Err(("cannot refer to an open group".to_string(), Some(i as i64)));
             }
+            // CPython `checklookbehindgroup`: inside a lookbehind, refs
+            // must target closed groups defined BEFORE it.
+            if gnum >= 1 {
+                if let Some(lbg) = lookbehindgroups {
+                    if gnum > next_group || is_open(gnum, &open_captures) {
+                        return Err(("cannot refer to an open group".to_string(), Some(i as i64)));
+                    }
+                    if gnum > lbg {
+                        return Err(("cannot refer to group defined in the same lookbehind subpattern".to_string(), Some(i as i64)));
+                    }
+                }
+            }
             i = j;
             continue;
         }
@@ -1592,6 +1610,40 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
             continue;
         }
         if in_class {
+            if c == '-' && i + 1 < n && chars[i + 1] == '-' && (i as i64) > (class_start as i64) + 1 {
+                crate::modules::warnings_emit(
+                    "Possible set difference (and future set operations) in the character class",
+                    "FutureWarning",
+                );
+            }
+            if c == '&' && i + 1 < n && chars[i + 1] == '&' && (i as i64) > (class_start as i64) + 1 {
+                crate::modules::warnings_emit(
+                    "Possible set intersection (and future set operations) in the character class",
+                    "FutureWarning",
+                );
+            }
+            if c == '|' && i + 1 < n && chars[i + 1] == '|' && (i as i64) > (class_start as i64) + 1 {
+                crate::modules::warnings_emit(
+                    "Possible set union (and future set operations) in the character class",
+                    "FutureWarning",
+                );
+            }
+            if c == '~' && i + 1 < n && chars[i + 1] == '~' && (i as i64) > (class_start as i64) + 1
+            {
+                crate::modules::warnings_emit(
+                    "Possible set symmetric difference (and future set operations) in the character class",
+                    "FutureWarning",
+                );
+            }
+            // A bare `[` inside a class is a literal today but may become a
+            // nested set in the future (test_re: test_possible_set_operations).
+            // Warn regardless of position (`[[0-9]|]` warns).
+            if c == '[' {
+                crate::modules::warnings_emit(
+                    "Possible nested set (and future set operations) in the character class",
+                    "FutureWarning",
+                );
+            }
             if c == ']' && !class_first {
                 in_class = false;
             }
@@ -1602,6 +1654,7 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
         if c == '[' {
             in_class = true;
             class_first = true;
+            class_start = i;
             i += 1;
             continue;
         }
@@ -1644,7 +1697,7 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
                             }
                             next_group += 1;
                             named.push((name, next_group));
-                            paren_stack.push(Some(next_group));
+                            paren_stack.push((Some(next_group), false));
                             open_captures.push(next_group);
                             i = j + 1;
                             continue;
@@ -1683,9 +1736,17 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
                                             Some((i + 4) as i64),
                                         ));
                                     }
+                                    if let Some(lbg) = lookbehindgroups {
+                                        if *gnum > lbg {
+                                            return Err((
+                                                "cannot refer to group defined in the same lookbehind subpattern".to_string(),
+                                                Some((i + 4) as i64),
+                                            ));
+                                        }
+                                    }
                                 }
                             }
-                            paren_stack.push(None);
+                            paren_stack.push((None, false));
                             i = j + 1;
                             continue;
                         } else {
@@ -1696,7 +1757,11 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
                         // `(?<=`/`(?<!` lookbehind, or `(?<name>` (Py3.12 extended).
                         let c3 = chars.get(i + 3).copied();
                         if c3 == Some('=') || c3 == Some('!') {
-                            paren_stack.push(None);
+                            if lb_depth == 0 {
+                                lookbehindgroups = Some(next_group);
+                            }
+                            lb_depth += 1;
+                            paren_stack.push((None, true));
                             i += 4; // past (?<= / (?<!
                             continue;
                         }
@@ -1733,13 +1798,13 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
                         }
                         next_group += 1;
                         named.push((name, next_group));
-                        paren_stack.push(Some(next_group));
+                        paren_stack.push((Some(next_group), false));
                         open_captures.push(next_group);
                         i = j + 1;
                         continue;
                     }
                     Some(':') | Some('=') | Some('!') | Some('#') => {
-                        paren_stack.push(None);
+                        paren_stack.push((None, false));
                         i += 3;
                         continue;
                     }
@@ -1780,13 +1845,45 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
                                     Some(cond_start as i64),
                                 ));
                             }
+                            if let Some(lbg) = lookbehindgroups {
+                                if num > next_group || is_open(num, &open_captures) {
+                                    return Err((
+                                        "cannot refer to an open group".to_string(),
+                                        Some(cond_start as i64),
+                                    ));
+                                }
+                                if num > lbg {
+                                    return Err((
+                                        "cannot refer to group defined in the same lookbehind subpattern".to_string(),
+                                        Some(cond_start as i64),
+                                    ));
+                                }
+                            }
                         } else {
                             check_name(&cond, is_bytes, cond_start)?;
-                            if named.iter().find(|(nm, _)| *nm == cond).is_none() {
-                                return Err((
-                                    format!("unknown group name '{}'", cond),
-                                    None,
-                                ));
+                            match named.iter().find(|(nm, _)| *nm == cond) {
+                                None => {
+                                    return Err((
+                                        format!("unknown group name '{}'", cond),
+                                        None,
+                                    ));
+                                }
+                                Some((_, gnum)) => {
+                                    if let Some(lbg) = lookbehindgroups {
+                                        if is_open(*gnum, &open_captures) {
+                                            return Err((
+                                                "cannot refer to an open group".to_string(),
+                                                Some(cond_start as i64),
+                                            ));
+                                        }
+                                        if *gnum > lbg {
+                                            return Err((
+                                                "cannot refer to group defined in the same lookbehind subpattern".to_string(),
+                                                Some(cond_start as i64),
+                                            ));
+                                        }
+                                    }
+                                }
                             }
                         }
                         // More than two branches in the conditional body is an error
@@ -1833,13 +1930,13 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
                                 ));
                             }
                         }
-                        paren_stack.push(None);
+                        paren_stack.push((None, false));
                         i = j + 1; // past the condition's `)`; body follows.
                         continue;
                     }
                     _ => {
                         // Flags `(?i)` / `(?flags:` — treat as non-capturing.
-                        paren_stack.push(None);
+                        paren_stack.push((None, false));
                         i += 2;
                         continue;
                     }
@@ -1847,15 +1944,21 @@ fn validate_group_syntax(pattern: &str, is_bytes: bool) -> Result<(), (String, O
             }
             // Plain capturing group.
             next_group += 1;
-            paren_stack.push(Some(next_group));
+            paren_stack.push((Some(next_group), false));
             open_captures.push(next_group);
             i += 1;
             continue;
         }
         if c == ')' {
-            if let Some(gnum) = paren_stack.pop() {
+            if let Some((gnum, is_lb)) = paren_stack.pop() {
                 if let Some(g) = gnum {
                     open_captures.retain(|&x| x != g);
+                }
+                if is_lb {
+                    lb_depth = lb_depth.saturating_sub(1);
+                    if lb_depth == 0 {
+                        lookbehindgroups = None;
+                    }
                 }
             }
             i += 1;
@@ -1927,6 +2030,442 @@ fn find_octal_range_error(pattern: &str) -> Option<(usize, String)> {
     None
 }
 
+/// Rewrite character-class interiors so the underlying engine (which
+/// implements `--`/`&&`/`~~` class set operations and nested classes)
+/// reproduces CPython 3.14's CURRENT literal/range semantics (CPython only
+/// emits `FutureWarning` for the set forms; the old behavior still applies).
+/// Runs AFTER `escape_leading_bracket_in_class` (so `[`/`]` boundaries are
+/// unambiguous: raw `[` opens, raw `]` closes, `\[`/`\]` are literals) and
+/// parses each class with the old sre algorithm (atom, optional
+/// `-`-range when the char after `-` is not `]`), re-emitting raw `-`/`&`/`~`
+/// literals escaped so they can never form an operator. `||` needs no
+/// rewrite (the engine has no union operator; `|` stays literal).
+fn translate_class_set_ops(pattern: &str) -> String {
+    let chars: Vec<char> = pattern.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(pattern.len() + 8);
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        if c == '\\' {
+            out.push(c);
+            if i + 1 < n {
+                out.push(chars[i + 1]);
+            }
+            i += 2;
+            continue;
+        }
+        if c == '[' {
+            let (ni, cls) = reemit_class(&chars, i);
+            out.push_str(&cls);
+            i = ni;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// Re-emit the class starting at `chars[start] == '['` with old-sre range
+/// semantics and engine-safe escaping. Returns (next_index, text). If the
+/// class is unterminated the original slice is returned untouched.
+fn reemit_class(chars: &[char], start: usize) -> (usize, String) {
+    let n = chars.len();
+    let mut out = String::from("[");
+    let mut i = start + 1;
+    if i < n && chars[i] == '^' {
+        out.push('^');
+        i += 1;
+    }
+    let mut closed = false;
+    while i < n {
+        if chars[i] == ']' {
+            out.push(']');
+            i += 1;
+            closed = true;
+            break;
+        }
+        let (a1_end, a1_text) = parse_class_atom(chars, i);
+        // Old-sre range: atom, `-`, atom — but not when `-` is last before `]`.
+        if a1_end < n && chars[a1_end] == '-' && a1_end + 1 < n && chars[a1_end + 1] != ']' {
+            let (a2_end, a2_text) = parse_class_atom(chars, a1_end + 1);
+            out.push_str(&a1_text);
+            out.push('-');
+            out.push_str(&a2_text);
+            i = a2_end;
+        } else {
+            out.push_str(&a1_text);
+            i = a1_end;
+        }
+    }
+    if !closed {
+        // Unterminated: leave untouched, downstream reports the error.
+        return (n, chars[start..].iter().collect());
+    }
+    (i, out)
+}
+
+/// Parse one class atom at `i`, returning (end_index, engine-safe text).
+/// Raw `-`/`&`/`~`/`[`/`^` literals are escaped so they cannot form set
+/// operators or nested classes; other raw chars pass through; escapes
+/// (`\\d`, `\\x41`, `\\u0041`, `\\N{...}`, `\\x{...}`) are copied
+/// verbatim (they start with `\\`, so they never form raw operators).
+fn parse_class_atom(chars: &[char], i: usize) -> (usize, String) {
+    let n = chars.len();
+    if i >= n {
+        return (i, String::new());
+    }
+    let c = chars[i];
+    if c != '\\' {
+        let t = match c {
+            '-' => "\\-".to_string(),
+            '&' => "\\&".to_string(),
+            '~' => "\\~".to_string(),
+            '[' => "\\[".to_string(),
+            '^' => "\\^".to_string(),
+            _ => c.to_string(),
+        };
+        return (i + 1, t);
+    }
+    if i + 1 >= n {
+        return (n, "\\".to_string());
+    }
+    let e = chars[i + 1];
+    // Multi-char escapes: \xHH / \x{...} / \uHHHH / \UHHHHHHHH / \N{...}
+    if e == 'x' {
+        if i + 2 < n && chars[i + 2] == '{' {
+            let mut j = i + 3;
+            while j < n && chars[j] != '}' {
+                j += 1;
+            }
+            if j < n {
+                j += 1;
+            }
+            return (j.min(n), chars[i..j.min(n)].iter().collect());
+        }
+        let mut j = i + 2;
+        let mut k = 0;
+        while j < n && k < 2 && chars[j].is_ascii_hexdigit() {
+            j += 1;
+            k += 1;
+        }
+        return (j, chars[i..j].iter().collect());
+    }
+    if e == 'u' || e == 'U' {
+        let want = if e == 'u' { 4 } else { 8 };
+        let mut j = i + 2;
+        let mut k = 0;
+        while j < n && k < want && chars[j].is_ascii_hexdigit() {
+            j += 1;
+            k += 1;
+        }
+        return (j, chars[i..j].iter().collect());
+    }
+    if e == 'N' && i + 2 < n && chars[i + 2] == '{' {
+        let mut j = i + 3;
+        while j < n && chars[j] != '}' {
+            j += 1;
+        }
+        if j < n {
+            j += 1;
+        }
+        return (j.min(n), chars[i..j.min(n)].iter().collect());
+    }
+    // Single-char escape: copy verbatim (starts with backslash, safe).
+    (i + 2, chars[i..i + 2].iter().collect())
+}
+
+/// Expand ASCII letters for ASCII-only IGNORECASE (CPython: `re.ASCII`
+/// + `re.IGNORECASE`, or bytes patterns with `IGNORECASE`, fold ASCII
+/// letters only — the engine's `(?i)` always folds Unicode and offers no
+/// ASCII restrictor, so callers omit `(?i)` and run this instead).
+/// Every raw/escaped ASCII letter gains its opposite case (`a` → `[aA]`
+/// outside classes, `a` → `aA` inside); non-ASCII chars stay literal.
+/// Ranges gain the opposite case of each ASCII letter they contain
+/// (`[a-z]` → `[a-zA-Z]`, `[9-A]` → `[9-Aa]`) — endpoints are NEVER
+/// flipped (`[9-A]` → `[9-a]` would wrongly admit `_`). `(?...)`
+/// openers, group/backref/conditional/`\\N{...}` names and `(?#...)`
+/// comments are copied verbatim (never expanded).
+fn ascii_case_expand(pattern: &str) -> String {
+    let chars: Vec<char> = pattern.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(pattern.len() + 16);
+    let mut i = 0;
+    let mut in_class = false;
+    while i < n {
+        let c = chars[i];
+        // `(?...)` constructs: copy openers verbatim (flag letters and
+        // names must not expand); scoped/lookaround bodies still expand
+        // as the walk continues past the opener.
+        if !in_class && c == '(' && i + 1 < n && chars[i + 1] == '?' {
+            // `(?P<name>` / `(?P=name)`: copy through `>` / `)`.
+            if i + 3 < n && chars[i + 2] == 'P' && (chars[i + 3] == '<' || chars[i + 3] == '=') {
+                let closer = if chars[i + 3] == '<' { '>' } else { ')' };
+                let mut j = i + 4;
+                while j < n && chars[j] != closer {
+                    j += 1;
+                }
+                if j < n {
+                    j += 1;
+                }
+                let j = j.min(n);
+                out.push_str(&chars[i..j].iter().collect::<String>());
+                i = j;
+                continue;
+            }
+            // `(?#...)` comment / `(?(` conditional: copy through `)`.
+            if i + 2 < n && (chars[i + 2] == '#' || chars[i + 2] == '(') {
+                let mut j = i + 3;
+                while j < n && chars[j] != ')' {
+                    j += 1;
+                }
+                if j < n {
+                    j += 1;
+                }
+                let j = j.min(n);
+                out.push_str(&chars[i..j].iter().collect::<String>());
+                i = j;
+                continue;
+            }
+            // Lookarounds / non-capturing / flags: copy `(?`, lookbehind
+            // markers, single-char sigils, then flag letters verbatim
+            // until `:` or `)` (bodies after expand normally).
+            out.push('(');
+            out.push('?');
+            i += 2;
+            if i + 1 < n && chars[i] == '<' && (chars[i + 1] == '=' || chars[i + 1] == '!') {
+                out.push('<');
+                out.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if i < n && (chars[i] == '=' || chars[i] == '!' || chars[i] == ':') {
+                out.push(chars[i]);
+                i += 1;
+                continue;
+            }
+            while i < n && chars[i] != ':' && chars[i] != ')' {
+                out.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
+        if c == '\\' || (!in_class && c.is_ascii_alphabetic()) || (in_class && c != ']' && c != '[')
+        {
+            // Parse one atom (raw char or full escape) with optional value.
+            let (end, text, val) = parse_expand_atom(&chars, i);
+            // Range? `-` followed by non-`]` (in class only; outside, `-`
+            // is always literal).
+            if in_class && end < n && chars[end] == '-' && end + 1 < n && chars[end + 1] != ']' {
+                let (end2, text2, val2) = parse_expand_atom(&chars, end + 1);
+                out.push_str(&text);
+                out.push('-');
+                out.push_str(&text2);
+                if let (Some(a), Some(b)) = (val, val2) {
+                    let (lo, hi) = (a as u32, b as u32);
+                    if lo <= hi {
+                        append_opposite_letters(&mut out, lo, hi);
+                    }
+                }
+                i = end2;
+                continue;
+            }
+            if !in_class {
+                if let Some(ch) = val {
+                    if ch.is_ascii_alphabetic() {
+                        out.push('[');
+                        out.push_str(&text);
+                        out.push(opposite_case(ch));
+                        out.push(']');
+                        i = end;
+                        continue;
+                    }
+                }
+                out.push_str(&text);
+                i = end;
+                continue;
+            } else {
+                out.push_str(&text);
+                if let Some(ch) = val {
+                    if ch.is_ascii_alphabetic() {
+                        out.push(opposite_case(ch));
+                    }
+                }
+                i = end;
+                continue;
+            }
+        }
+        if !in_class && c == '[' {
+            in_class = true;
+            out.push(c);
+            i += 1;
+            if i < n && chars[i] == '^' {
+                out.push('^');
+                i += 1;
+            }
+            continue;
+        }
+        if in_class && c == ']' {
+            in_class = false;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+fn opposite_case(c: char) -> char {
+    if c.is_ascii_lowercase() {
+        (c as u8 - 32) as char
+    } else if c.is_ascii_uppercase() {
+        (c as u8 + 32) as char
+    } else {
+        c
+    }
+}
+
+/// Append the opposite case of each ASCII letter in `[lo, hi]` (as
+/// literals/ranges; letters only, so raw emit is always safe).
+fn append_opposite_letters(out: &mut String, lo: u32, hi: u32) {
+    let (u_lo, u_hi) = (lo.max(0x41), hi.min(0x5A));
+    if u_lo <= u_hi {
+        emit_char_or_range(out, u_lo + 32, u_hi + 32);
+    }
+    let (l_lo, l_hi) = (lo.max(0x61), hi.min(0x7A));
+    if l_lo <= l_hi {
+        emit_char_or_range(out, l_lo - 32, l_hi - 32);
+    }
+}
+
+fn emit_char_or_range(out: &mut String, lo: u32, hi: u32) {
+    if lo == hi {
+        out.push(char::from_u32(lo).unwrap_or('?'));
+    } else {
+        out.push(char::from_u32(lo).unwrap_or('?'));
+        out.push('-');
+        out.push(char::from_u32(hi).unwrap_or('?'));
+    }
+}
+
+/// Parse one atom at `i` (raw char or complete escape) for case
+/// expansion: returns (end_index, verbatim_text, Option<char_value>).
+/// Values resolve only for single chars (`\\xHH`, `\\uHHHH`,
+/// punctuation escapes); sets/boundaries/names (`\\d`, `\\N{...}`,
+/// `\\g<...>`) yield `None` and copy through untouched.
+fn parse_expand_atom(chars: &[char], i: usize) -> (usize, String, Option<char>) {
+    let n = chars.len();
+    if i >= n {
+        return (i, String::new(), None);
+    }
+    if chars[i] != '\\' {
+        return (i + 1, chars[i].to_string(), Some(chars[i]));
+    }
+    if i + 1 >= n {
+        return (n, "\\".to_string(), None);
+    }
+    let e = chars[i + 1];
+    if e == 'x' {
+        if i + 2 < n && chars[i + 2] == '{' {
+            let mut j = i + 3;
+            while j < n && chars[j] != '}' {
+                j += 1;
+            }
+            if j < n {
+                j += 1;
+            }
+            let j = j.min(n);
+            let hex: String = chars[i + 3..j.saturating_sub(1).min(n)].iter().collect();
+            let val = u32::from_str_radix(hex.trim(), 16)
+                .ok()
+                .and_then(char::from_u32);
+            return (j, chars[i..j].iter().collect(), val);
+        }
+        let mut j = i + 2;
+        let mut k = 0;
+        while j < n && k < 2 && chars[j].is_ascii_hexdigit() {
+            j += 1;
+            k += 1;
+        }
+        let val = if k == 2 {
+            u32::from_str_radix(&chars[i + 2..j].iter().collect::<String>(), 16)
+                .ok()
+                .and_then(char::from_u32)
+        } else {
+            None
+        };
+        return (j, chars[i..j].iter().collect(), val);
+    }
+    if e == 'u' || e == 'U' {
+        let want = if e == 'u' { 4 } else { 8 };
+        let mut j = i + 2;
+        let mut k = 0;
+        while j < n && k < want && chars[j].is_ascii_hexdigit() {
+            j += 1;
+            k += 1;
+        }
+        let val = if k == want {
+            u32::from_str_radix(&chars[i + 2..j].iter().collect::<String>(), 16)
+                .ok()
+                .and_then(char::from_u32)
+        } else {
+            None
+        };
+        return (j, chars[i..j].iter().collect(), val);
+    }
+    // `\\N{...}`, `\\p{...}`/`\\P{...}`, `\\g<...>`/`\\g'...'`: full unit, never a letter.
+    if (e == 'N' || e == 'p' || e == 'P') && i + 2 < n && chars[i + 2] == '{' {
+        let mut j = i + 3;
+        while j < n && chars[j] != '}' {
+            j += 1;
+        }
+        if j < n {
+            j += 1;
+        }
+        let j = j.min(n);
+        return (j, chars[i..j].iter().collect(), None);
+    }
+    if e == 'g' && i + 2 < n && (chars[i + 2] == '<' || chars[i + 2] == '\'') {
+        let closer = if chars[i + 2] == '<' { '>' } else { '\'' };
+        let mut j = i + 3;
+        while j < n && chars[j] != closer {
+            j += 1;
+        }
+        if j < n {
+            j += 1;
+        }
+        let j = j.min(n);
+        return (j, chars[i..j].iter().collect(), None);
+    }
+    if e.is_ascii_digit() {
+        let mut j = i + 1;
+        while j < n && chars[j].is_ascii_digit() {
+            j += 1;
+        }
+        return (j, chars[i..j].iter().collect(), None);
+    }
+    let text: String = chars[i..i + 2].iter().collect();
+    match e {
+        'd' | 'D' | 'w' | 'W' | 's' | 'S' | 'b' | 'B' | 'A' | 'Z' => (i + 2, text, None),
+        'n' => (i + 2, text, Some('\n')),
+        't' => (i + 2, text, Some('\t')),
+        'r' => (i + 2, text, Some('\r')),
+        'f' => (i + 2, text, Some('\x0C')),
+        'v' => (i + 2, text, Some('\x0B')),
+        'a' => (i + 2, text, Some('\x07')),
+        _ => {
+            if e.is_ascii_punctuation() {
+                (i + 2, text, Some(e))
+            } else {
+                (i + 2, text, None)
+            }
+        }
+    }
+}
+
 pub fn compile_python_regex_flags(
     pattern: &str,
     flags: i32,
@@ -1966,6 +2505,9 @@ pub fn compile_python_regex_flags(
     }
     let pattern = escape_loose_braces(pattern);
     let pattern = escape_leading_bracket_in_class(&pattern);
+    // Neutralize engine set operators (`--`/`&&`/`~~`) inside classes so
+    // they keep CPython's current literal/range semantics (see above).
+    let pattern = translate_class_set_ops(&pattern);
     let pattern = translate_pattern_backrefs_and_octal(&pattern);
     // CPython: a non-multiline `$` matches at end-of-string *and* just
     // before a single trailing newline. The engine's `$` only matches
@@ -1986,10 +2528,20 @@ pub fn compile_python_regex_flags(
     } else {
         pattern
     };
+    // ASCII-only IGNORECASE: `re.ASCII` (or bytes patterns, which are
+    // ASCII-folded) with `re.IGNORECASE` folds ASCII letters only — the
+    // engine's `(?i)` always folds Unicode, so expand textually and omit
+    // `(?i)` (see `ascii_case_expand`).
+    let ascii_fold = flags & 2 != 0 && ((flags & 256 != 0 && flags & 32 == 0) || is_bytes);
+    let pattern = if ascii_fold {
+        ascii_case_expand(&pattern)
+    } else {
+        pattern
+    };
     let mut inline = String::new();
-    if flags & 2 != 0 {
+    if flags & 2 != 0 && !ascii_fold {
         inline.push('i');
-    } // IGNORECASE
+    } // IGNORECASE (Unicode fold; ASCII fold expanded above)
     if flags & 16 != 0 {
         inline.push('s');
     } // DOTALL

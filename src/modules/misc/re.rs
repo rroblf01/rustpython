@@ -1130,58 +1130,41 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         }
     });
 
-    // Regex compile flags
-    d.insert_str("IGNORECASE", py_int(2));
-    d.insert_str("ASCII", py_int(256));
-    d.insert_str("DOTALL", py_int(16));
-    d.insert_str("MULTILINE", py_int(8));
-    d.insert_str("VERBOSE", py_int(64));
-    d.insert_str("LOCALE", py_int(4));
-    d.insert_str("UNICODE", py_int(32));
-    d.insert_str("TEMPLATE", py_int(1));
-    d.insert_str("DEBUG", py_int(128));
-    d.insert_str("NOFLAG", py_int(0));
-    d.insert_str("I", py_int(2));
-    d.insert_str("A", py_int(256));
-    d.insert_str("S", py_int(16));
-    d.insert_str("M", py_int(8));
-    d.insert_str("X", py_int(64));
-    d.insert_str("L", py_int(4));
-    d.insert_str("U", py_int(32));
-    d.insert_str("T", py_int(1));
-
-    // RegexFlag — IntFlag-like type with same members as module-level flags
+    // Regex compile flags — `re.RegexFlag` IntFlag instances (CPython
+    // 3.14: no TEMPLATE/T; NOFLAG=0 exists as a member).
     {
-        let mut rf_dict = HashMap::new();
-        rf_dict.insert("NOFLAG".to_string(), py_int(0));
-        rf_dict.insert("ASCII".to_string(), py_int(256));
-        rf_dict.insert("A".to_string(), py_int(256));
-        rf_dict.insert("IGNORECASE".to_string(), py_int(2));
-        rf_dict.insert("I".to_string(), py_int(2));
-        rf_dict.insert("LOCALE".to_string(), py_int(4));
-        rf_dict.insert("L".to_string(), py_int(4));
-        rf_dict.insert("UNICODE".to_string(), py_int(32));
-        rf_dict.insert("U".to_string(), py_int(32));
-        rf_dict.insert("MULTILINE".to_string(), py_int(8));
-        rf_dict.insert("M".to_string(), py_int(8));
-        rf_dict.insert("DOTALL".to_string(), py_int(16));
-        rf_dict.insert("S".to_string(), py_int(16));
-        rf_dict.insert("VERBOSE".to_string(), py_int(64));
-        rf_dict.insert("X".to_string(), py_int(64));
-        rf_dict.insert("TEMPLATE".to_string(), py_int(1));
-        rf_dict.insert("T".to_string(), py_int(1));
-        rf_dict.insert("DEBUG".to_string(), py_int(128));
-        let rf_type = PyObjectRef::new(PyObject::Type {
-            name: "RegexFlag".to_string(),
-            dict: Box::new(str_map_to_typedict(rf_dict)),
-            bases: vec![],
-            mro: vec![],
-        });
-        if let PyObject::Type { mro, .. } = &mut *rf_type.borrow_mut() {
-            *mro = vec![rf_type.clone()];
-        }
-        d.insert_str("RegexFlag", rf_type);
+        use crate::object::regexflag_new;
+        d.insert_str("IGNORECASE", regexflag_new(2));
+        d.insert_str("ASCII", regexflag_new(256));
+        d.insert_str("DOTALL", regexflag_new(16));
+        d.insert_str("MULTILINE", regexflag_new(8));
+        d.insert_str("VERBOSE", regexflag_new(64));
+        d.insert_str("LOCALE", regexflag_new(4));
+        d.insert_str("UNICODE", regexflag_new(32));
+        d.insert_str("DEBUG", regexflag_new(128));
+        d.insert_str("NOFLAG", regexflag_new(0));
+        d.insert_str("I", regexflag_new(2));
+        d.insert_str("A", regexflag_new(256));
+        d.insert_str("S", regexflag_new(16));
+        d.insert_str("M", regexflag_new(8));
+        d.insert_str("X", regexflag_new(64));
+        d.insert_str("L", regexflag_new(4));
+        d.insert_str("U", regexflag_new(32));
     }
+
+    // re.RegexFlag — constructor (`RegexFlag(int)`; KEEP-wrapped like CPython).
+    d.insert_str(
+        "RegexFlag",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "RegexFlag".to_string(),
+            func: |args| {
+                let v = args.first().and_then(|a| a.as_i64()).ok_or_else(|| {
+                    PyError::type_error("RegexFlag() argument must be an integer")
+                })?;
+                Ok(crate::object::regexflag_new(v))
+            },
+        }),
+    );
 
     // re.error / re.PatternError — alias, same object
     {

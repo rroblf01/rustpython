@@ -103,6 +103,8 @@ impl PyObject {
             PyObject::None => "None".to_string(),
             PyObject::Bool(b) => if *b { "True" } else { "False" }.to_string(),
             PyObject::Int(i) => i.to_string(),
+            // IntFlag repr (`re.IGNORECASE`, `re.A|re.B|0xNN`, ...).
+            PyObject::RegexFlag(v) => super::super::regexflag_repr(*v),
             PyObject::Float(f) => format_py_float(*f),
             PyObject::Complex(re, im) => {
                 // Real CPython: a zero real part reprs as just `<imag>j`;
