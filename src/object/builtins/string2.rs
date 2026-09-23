@@ -16,7 +16,11 @@ fn parse_complex_str(s: &str) -> PyResult<(f64, f64)> {
         for (i, &c) in chars.iter().enumerate() {
             if c == '_' {
                 let prev = if i > 0 { chars[i - 1] } else { '\0' };
-                let next = if i + 1 < chars.len() { chars[i + 1] } else { '\0' };
+                let next = if i + 1 < chars.len() {
+                    chars[i + 1]
+                } else {
+                    '\0'
+                };
                 if !prev.is_ascii_digit() || !next.is_ascii_digit() {
                     return Err(());
                 }
@@ -184,9 +188,7 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                                 }
                             },
                             None => {
-                                return Err(PyError::type_error(
-                                    "__complex__ returned non-complex",
-                                ))
+                                return Err(PyError::type_error("__complex__ returned non-complex"))
                             }
                         }
                     }
@@ -204,9 +206,9 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     Some(native) => match &*native.borrow() {
                         PyObject::Complex(re, im) => (*re, *im, true),
                         _ => {
-                            return Err(PyError::type_error(arg0_err(
-                                &get_type_name_for_instance(typ),
-                            )))
+                            return Err(PyError::type_error(arg0_err(&get_type_name_for_instance(
+                                typ,
+                            ))))
                         }
                     },
                     None => {
@@ -256,9 +258,7 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     }
                 },
             },
-            _ => {
-                return Err(PyError::type_error(arg0_err(&obj.type_name())))
-            }
+            _ => return Err(PyError::type_error(arg0_err(&obj.type_name()))),
         }
     };
     // DeprecationWarning when the `real` (first) argument is complex — fires
@@ -390,7 +390,7 @@ pub fn builtin_complex(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                             }
                         }
                     }
-                },
+                }
                 _ => {
                     return Err(PyError::type_error(format!(
                         "argument 'imag' must be a real number, not {}",

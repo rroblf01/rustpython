@@ -66,6 +66,18 @@ impl VirtualMachine {
             if is_getattr && (args.len() == 2 || args.len() == 3) {
                 let obj = args[0].clone();
                 let attr_name = args[1].str();
+                // `re.Pattern.__copy__`/`__deepcopy__` return self
+                // (identity for `copy.copy`/`copy.deepcopy`; test_re:
+                // test_copying). Native methods don't bind, so capture
+                // the instance ref in a closure here.
+                if (attr_name == "__copy__" || attr_name == "__deepcopy__")
+                    && matches!(&*obj.borrow(), PyObject::CompiledRegex { .. })
+                {
+                    let self_clone = obj.clone();
+                    return Ok(Some(PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(
+                        move |_| Ok(self_clone.clone()),
+                    )))));
+                }
                 if std::env::var("RPY_DEBUG_GETATTR").is_ok() {
                     let type_name = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
                         if let PyObject::Type { name, .. } = &*typ.borrow() {
@@ -1216,7 +1228,30 @@ impl VirtualMachine {
                     }
                 }
                 return match result {
-                    Ok(val) => Ok(Some(if is_exec { py_none() } else { val })),
+                    Ok(val) => {
+                        // Coroutine/generator-producing eval/exec: the
+                        // returned object resumes later via send/next, so
+                        // stamp its stored frame with the live user-dict
+                        // link now — each resume then mirrors writes back
+                        // (CPython: the namespace IS that dict). Without
+                        // this, `eval(coro_code, ns)` + driving leaves
+                        // `ns` stale (test_builtin's await-eval half of
+                        // test_compile_top_level_await).
+                        if let PyObject::Coroutine { frame } | PyObject::Generator { frame } =
+                            &*val.borrow()
+                        {
+                            if let Ok(mut guard) = frame.try_borrow_mut() {
+                                if let Some(f) = guard.as_mut() {
+                                    if f.globals_dict.is_none() {
+                                        if let Some(g) = globals_dict {
+                                            f.globals_dict = Some(g.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Ok(Some(if is_exec { py_none() } else { val }))
+                    }
                     Err(e) => Err(e),
                 };
             }

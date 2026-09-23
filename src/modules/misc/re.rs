@@ -68,9 +68,7 @@ pub(crate) fn make_readonly_mapping(inner: PyObjectRef) -> PyObjectRef {
                                 .ok_or_else(|| PyError::type_error("missing key argument"))?;
                             if let PyObject::Dict(d) = &*inner.borrow() {
                                 match field.as_str() {
-                                    "contains" => {
-                                        Ok(py_bool(d.contains(&k).unwrap_or(false)))
-                                    }
+                                    "contains" => Ok(py_bool(d.contains(&k).unwrap_or(false))),
                                     "get" => match d.get(&k).ok().flatten() {
                                         Some(v) => Ok(v),
                                         None => Ok(args
@@ -92,8 +90,14 @@ pub(crate) fn make_readonly_mapping(inner: PyObjectRef) -> PyObjectRef {
                 );
             }
             for (name, message) in [
-                ("__setitem__", "mappingproxy object does not support item assignment"),
-                ("__delitem__", "mappingproxy object does not support item deletion"),
+                (
+                    "__setitem__",
+                    "mappingproxy object does not support item assignment",
+                ),
+                (
+                    "__delitem__",
+                    "mappingproxy object does not support item deletion",
+                ),
             ] {
                 let message = message.to_string();
                 td.insert_str(
@@ -121,8 +125,11 @@ pub(crate) fn make_readonly_mapping(inner: PyObjectRef) -> PyObjectRef {
 /// carrying one of those native backings). Used to reject `re.compile(0)` etc.
 pub(crate) fn re_is_text_like(arg: &PyObjectRef) -> bool {
     match &*arg.borrow() {
-        PyObject::Str(_) | PyObject::Bytes(_) | PyObject::ByteArray(_)
-        | PyObject::MemoryView { .. } | PyObject::Array(_) => true,
+        PyObject::Str(_)
+        | PyObject::Bytes(_)
+        | PyObject::ByteArray(_)
+        | PyObject::MemoryView { .. }
+        | PyObject::Array(_) => true,
         PyObject::Instance { .. } => crate::object::native_backing_of(arg).is_some(),
         _ => false,
     }
@@ -174,9 +181,10 @@ pub(crate) fn re_bytes_obj(s: &str) -> PyObjectRef {
 /// callable replacement function.
 pub(crate) fn re_is_template_repl(repl: &PyObjectRef) -> bool {
     match &*repl.borrow() {
-        PyObject::Str(_) | PyObject::Bytes(_) | PyObject::ByteArray(_) | PyObject::MemoryView { .. } => {
-            true
-        }
+        PyObject::Str(_)
+        | PyObject::Bytes(_)
+        | PyObject::ByteArray(_)
+        | PyObject::MemoryView { .. } => true,
         PyObject::Instance { .. } => match crate::object::native_backing_of(repl) {
             Some(backing) => matches!(
                 &*backing.borrow(),
@@ -269,7 +277,12 @@ fn extract_regex_flags(
                 match compile::preprocess_inline_flags(&pattern, is_bytes, flags) {
                     Ok((p, a, g)) => (p, a, g),
                     Err((msg, pos)) => {
-                        return Err(re_pattern_error(msg, Some(pattern), Some(pos as i64), is_bytes));
+                        return Err(re_pattern_error(
+                            msg,
+                            Some(pattern),
+                            Some(pos as i64),
+                            is_bytes,
+                        ));
                     }
                 };
             // Inline globals participate in combination validation
@@ -290,7 +303,6 @@ fn extract_regex_flags(
         }
     }
 }
-
 
 /// Convert a byte index (as reported by the regex engine) into a
 /// char index (as CPython reports positions). ASCII-fast: byte and
@@ -342,7 +354,8 @@ pub(crate) fn re_resolve_count_flags(
         )));
     }
     let kw_get = |k: &str| -> Option<PyObjectRef> {
-        kw.as_ref().and_then(|d| d.get(&py_str(k)).ok().flatten().map(|v| v.clone()))
+        kw.as_ref()
+            .and_then(|d| d.get(&py_str(k)).ok().flatten().map(|v| v.clone()))
     };
     if npos >= min_pos + 1 && kw_get(count_kw).is_some() {
         return Err(PyError::type_error(format!(
@@ -365,16 +378,12 @@ pub(crate) fn re_resolve_count_flags(
     let count = if npos >= min_pos + 1 {
         args[min_pos].as_i64().unwrap_or(0)
     } else {
-        kw_get(count_kw)
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0)
+        kw_get(count_kw).and_then(|v| v.as_i64()).unwrap_or(0)
     };
     let flags = if npos >= min_pos + 2 {
         args[min_pos + 1].as_i64().unwrap_or(0)
     } else {
-        kw_get("flags")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0)
+        kw_get("flags").and_then(|v| v.as_i64()).unwrap_or(0)
     };
     Ok((count, flags))
 }
@@ -414,7 +423,9 @@ pub(crate) fn findall_groups(
     if n_groups == 1 {
         return piece(caps.get(1).as_ref());
     }
-    let items: Vec<PyObjectRef> = (1..=n_groups).map(|i| piece(caps.get(i).as_ref())).collect();
+    let items: Vec<PyObjectRef> = (1..=n_groups)
+        .map(|i| piece(caps.get(i).as_ref()))
+        .collect();
     py_tuple(items)
 }
 
@@ -495,6 +506,316 @@ pub(crate) fn re_pos_endpos(args: &[PyObjectRef], full_len: usize) -> (usize, us
     (pos_c, endpos_c)
 }
 
+/// CPython `must_advance` emulation for multi-match loops (split, sub,
+/// findall, finditer). After an EMPTY match, CPython does NOT skip a
+/// char blindly: it retries at the same position with `must_advance`
+/// set, which rejects a zero-width match at the search start
+/// (`SRE_OP_SUCCESS` fails when `ptr == start`) but ACCEPTS a
+/// non-empty one there — backtracking then yields e.g. `:+` = `(1,3)`
+/// after `\b` = `(1,1)`. The engine can't express that, so the retry
+/// tries each top-level `|` branch anchored at `pos` and takes the
+/// first non-empty (assertion-only branches can only match empty, so
+/// they're naturally skipped). Test_re: test_zerowidth.
+pub(crate) enum MaStep<'t> {
+    Found(fancy_regex::Captures<'t>),
+    /// Rejected empty-at-pos (caller: step one char, clear flag, retry).
+    Advance,
+    /// No match at all from `pos` (caller: stop).
+    Stop,
+}
+
+/// Split a pattern into top-level `|` branch sources (depth-, class-,
+/// escape- and `(?#)`-comment-aware). VERBOSE `#` comments need the
+/// flags gate (same approximation as the validators). If the whole
+/// pattern holds no top-level `|` but IS a single group wrapping
+/// alternatives (`(\b|:+)`, `(?:a|b)`, `(?P<n>a|b)`), split INSIDE it,
+/// re-wrapping each part with the same opener (capturing-ness and
+/// names preserved) — backtracking explores those alternatives at the
+/// same position, which is exactly what a must_advance retry needs.
+/// Anything else yields one branch (= retry disabled).
+fn split_top_branches(pattern: &str, flags: i32) -> Vec<String> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let n = chars.len();
+    let verbose = flags & 64 != 0;
+    // Scan `chars[range]` for depth-0 `|` (relative to `base_depth`),
+    // class/`(?#)`-comment aware. Returns the part boundaries.
+    let split_at_depth = |from: usize, to: usize, base_depth: usize| -> Vec<(usize, usize)> {
+        let mut parts = Vec::new();
+        let mut depth = base_depth;
+        let mut in_class = false;
+        let mut class_first = false;
+        let mut start = from;
+        let mut i = from;
+        while i < to {
+            let c = chars[i];
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            if in_class {
+                if c == ']' && !class_first {
+                    in_class = false;
+                }
+                class_first = false;
+                i += 1;
+                continue;
+            }
+            if c == '(' && i + 2 < to && chars[i + 1] == '?' && chars[i + 2] == '#' {
+                let mut j = i + 3;
+                while j < to && chars[j] != ')' {
+                    j += 1;
+                }
+                i = (j + 1).min(to);
+                continue;
+            }
+            if c == '#' && verbose {
+                while i < to && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            match c {
+                '[' => {
+                    in_class = true;
+                    class_first = true;
+                }
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                '|' if depth == base_depth => {
+                    parts.push((start, i));
+                    start = i + 1;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        parts.push((start, to));
+        parts
+    };
+    let top = split_at_depth(0, n, 0);
+    if top.len() > 1 {
+        return top
+            .into_iter()
+            .map(|(a, b)| format!("(?:{})", chars[a..b].iter().collect::<String>()))
+            .collect();
+    }
+    // Whole pattern is one group? Parse its opener to find the content
+    // range; bail (single branch) on anything else (conditionals,
+    // lookbehind, backrefs, global flags, ...).
+    if n >= 2 && chars[0] == '(' {
+        // Returns (content_start, close_index) or None.
+        let group_body: Option<(usize, usize)> = (|| {
+            // Opener end (first content char).
+            let mut cs = 1usize;
+            if chars.get(1) == Some(&'?') {
+                let c2 = chars.get(2).copied();
+                match c2 {
+                    Some(':') | Some('=') | Some('!') | Some('>') => {
+                        if matches!(c2, Some('=') | Some('!')) {
+                            return None; // lookahead, not a group
+                        }
+                        cs = 3;
+                    }
+                    Some('<') => {
+                        let c3 = chars.get(3).copied();
+                        if matches!(c3, Some('=') | Some('!')) {
+                            return None; // lookbehind
+                        }
+                        // `(?<name>`: scan to `>`.
+                        let mut j = 3;
+                        while j < n && chars[j] != '>' {
+                            j += 1;
+                        }
+                        if j >= n {
+                            return None;
+                        }
+                        cs = j + 1;
+                    }
+                    Some('P') => {
+                        // `(?P<name>` only (backrefs/conditionals bail).
+                        if chars.get(3).copied() != Some('<') {
+                            return None;
+                        }
+                        let mut j = 4;
+                        while j < n && chars[j] != '>' {
+                            j += 1;
+                        }
+                        if j >= n {
+                            return None;
+                        }
+                        cs = j + 1;
+                    }
+                    Some('\'') | Some('"') => {
+                        // `(?P'name')`: scan to closing quote.
+                        let q = c2.unwrap();
+                        let mut j = 3;
+                        while j < n && chars[j] != q {
+                            j += 1;
+                        }
+                        if j >= n {
+                            return None;
+                        }
+                        cs = j + 1;
+                    }
+                    Some('#') => return None, // comment
+                    _ => {
+                        // Flag letters / `-`: scoped `(?flags:...)` has
+                        // content; global `(?flags)` does not.
+                        let mut j = 2;
+                        while j < n && chars[j] != ':' && chars[j] != ')' {
+                            j += 1;
+                        }
+                        if j >= n || chars[j] != ':' {
+                            return None;
+                        }
+                        cs = j + 1;
+                    }
+                }
+            }
+            // Matching close of the group opened at 0 must be the end.
+            let mut depth = 0usize;
+            let mut in_class = false;
+            let mut class_first = false;
+            let mut i = 0usize;
+            let mut close = None;
+            while i < n {
+                let c = chars[i];
+                if c == '\\' {
+                    i += 2;
+                    continue;
+                }
+                if in_class {
+                    if c == ']' && !class_first {
+                        in_class = false;
+                    }
+                    class_first = false;
+                    i += 1;
+                    continue;
+                }
+                match c {
+                    '[' => {
+                        in_class = true;
+                        class_first = true;
+                    }
+                    '(' => depth += 1,
+                    ')' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            close = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            match close {
+                Some(c) if c == n - 1 => Some((cs, c)),
+                _ => None,
+            }
+        })();
+        if let Some((cs, close)) = group_body {
+            let opener: String = chars[0..cs].iter().collect();
+            let inner = split_at_depth(cs, close, 1);
+            if inner.len() > 1 {
+                return inner
+                    .into_iter()
+                    .map(|(a, b)| format!("{}{})", opener, chars[a..b].iter().collect::<String>()))
+                    .collect();
+            }
+        }
+    }
+    // Single branch: wrap whole pattern (uniform retry path; a retry
+    // just re-finds the same empty and advances).
+    vec![format!("(?:{})", pattern)]
+}
+
+/// Lazily compiled per-branch matchers for must_advance retries.
+/// Compiles on first actual retry (empty-capable patterns only);
+/// results never borrow the cache (fancy `Captures` borrows just the
+/// subject), so callers can hold matches while retrying further.
+pub(crate) struct MaBranchCache {
+    branches: Vec<String>,
+    flags: i32,
+    is_bytes: bool,
+    compiled: std::cell::OnceCell<Vec<Option<fancy_regex::Regex>>>,
+}
+
+impl MaBranchCache {
+    pub(crate) fn new(pattern: &str, flags: i32, is_bytes: bool) -> Self {
+        let branches = split_top_branches(pattern, flags);
+        // A lone whole-pattern branch retries identically — nothing to
+        // gain (skip compiling entirely).
+        let branches = if branches.len() == 1 && branches[0] == format!("(?:{})", pattern) {
+            Vec::new()
+        } else {
+            branches
+        };
+        MaBranchCache {
+            branches,
+            flags,
+            is_bytes,
+            compiled: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// First non-empty match starting exactly at byte `pos`, trying
+    /// branches in pattern order. `None` = all branches empty/miss
+    /// (caller advances one char).
+    pub(crate) fn retry_nonempty<'t>(
+        &self,
+        s: &'t str,
+        pos: usize,
+    ) -> Option<fancy_regex::Captures<'t>> {
+        if self.branches.is_empty() {
+            return None;
+        }
+        let compiled = self.compiled.get_or_init(|| {
+            self.branches
+                .iter()
+                .map(|b| {
+                    crate::modules::misc::compile_python_regex_flags(b, self.flags, self.is_bytes)
+                        .ok()
+                })
+                .collect()
+        });
+        for re in compiled.iter().flatten() {
+            if let Ok(Some(caps)) = re.captures_from_pos(s, pos) {
+                if let Some(m) = caps.get(0) {
+                    if m.start() == pos && m.start() != m.end() {
+                        return Some(caps);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+/// One must_advance-aware search step at byte `pos` (`ma` = previous
+/// match was empty). Mirrors `SRE_OP_SUCCESS`'s
+/// `must_advance && ptr == start` rejection.
+pub(crate) fn search_step_ma<'t>(
+    re: &fancy_regex::Regex,
+    cache: &MaBranchCache,
+    s: &'t str,
+    pos: usize,
+    ma: bool,
+) -> MaStep<'t> {
+    let caps = match re.captures_from_pos(s, pos.min(s.len())) {
+        Ok(Some(c)) => c,
+        _ => return MaStep::Stop,
+    };
+    let m = caps.get(0).unwrap();
+    if ma && m.start() == pos && m.start() == m.end() {
+        if let Some(rcaps) = cache.retry_nonempty(s, pos) {
+            return MaStep::Found(rcaps);
+        }
+        return MaStep::Advance;
+    }
+    MaStep::Found(caps)
+}
+
 /// Left-to-right match scan over `s[pos_byte..endpos_byte]` in CPython
 /// order: adjacent empty matches are kept (probing the end of every
 /// non-empty match too) and empty matches advance one char. Match
@@ -505,79 +826,62 @@ pub(crate) fn scan_captures<'t>(
     s: &'t str,
     pos_byte: usize,
     endpos_byte: usize,
+    pattern: &str,
+    flags: i32,
+    is_bytes: bool,
 ) -> Vec<fancy_regex::Captures<'t>> {
     let start = pos_byte.min(s.len());
     let end = endpos_byte.min(s.len()).max(start);
     let sub: &'t str = &s[start..end];
-    let mut cur = 0usize;
+    let cache = MaBranchCache::new(pattern, flags, is_bytes);
     let mut out = Vec::new();
+    let mut cur = 0usize;
+    let mut ma = false;
     while cur <= sub.len() {
-        let caps = match re.captures_from_pos(sub, cur) {
-            Ok(Some(c)) => c,
-            _ => break,
-        };
-        let m = caps.get(0).unwrap();
-        let (ms, me) = (m.start(), m.end());
-        out.push(caps);
-        if ms == me {
-            if me >= sub.len() {
-                break;
+        match search_step_ma(re, &cache, sub, cur, ma) {
+            MaStep::Stop => break,
+            MaStep::Advance => {
+                // Rejected empty-at-pos (or nothing usable): step one
+                // char with a cleared flag (sre progress rule).
+                if cur >= sub.len() {
+                    break;
+                }
+                cur += sub[cur..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                ma = false;
             }
-            cur = me + sub[me..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-        } else {
-            cur = me;
+            MaStep::Found(caps) => {
+                let m = caps.get(0).unwrap();
+                let (ms, me) = (m.start(), m.end());
+                out.push(caps);
+                // After an empty match the next search restarts AT its
+                // end with must_advance set (no blind skip); a non-empty
+                // match clears the flag.
+                ma = ms == me;
+                if ms == me {
+                    if me >= sub.len() {
+                        break;
+                    }
+                    cur = me;
+                } else {
+                    cur = me;
+                }
+            }
         }
     }
     out
 }
 
 /// Match sequence for `split`, mirroring CPython's own matcher order:
-/// `fancy_regex`'s iterator skips empty matches adjacent to a previous
-/// match end, but CPython yields them (their `None` groups appear in
-/// the output, e.g. `re.split('(:)*', ...)`). After each non-empty
-/// match ending at `e`, probe `e` for an adjacent empty match.
-/// Empty matches advance one char (sre progress rule); iteration stops
-/// past the end of the string.
+/// adjacent empties included via the same must_advance scan as
+/// `scan_captures` (unbounded endpos).
 pub(crate) fn split_match_spans<'t>(
     re: &fancy_regex::Regex,
     s: &'t str,
+    pattern: &str,
+    flags: i32,
+    is_bytes: bool,
 ) -> Vec<fancy_regex::Captures<'t>> {
-    let mut out = Vec::new();
-    let mut pos = 0usize;
-    while pos <= s.len() {
-        let caps = match re.captures_from_pos(s, pos) {
-            Ok(Some(c)) => c,
-            _ => break,
-        };
-        let m = caps.get(0).unwrap();
-        let (ms, me) = (m.start(), m.end());
-        out.push(caps);
-        if ms == me {
-            if me >= s.len() {
-                break;
-            }
-            pos = me + s[me..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-        } else {
-            // Probe for an adjacent empty match at the end position
-            // (`captures_from_pos`, unlike the iterator, does not skip
-            // them). A consumed probe position must be advanced past,
-            // or the main loop re-finds the same empty match.
-            if me < s.len() {
-                if let Ok(Some(c2)) = re.captures_from_pos(s, me) {
-                    if let Some(m2) = c2.get(0) {
-                        if m2.start() == me && m2.end() == me {
-                            out.push(c2);
-                            pos = me
-                                + s[me..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-                            continue;
-                        }
-                    }
-                }
-            }
-            pos = me;
-        }
-    }
-    out
+    scan_captures(re, s, 0, s.len(), pattern, flags, is_bytes)
 }
 
 /// Read an optional `flags` argument: positional int at `idx`, or a
@@ -627,15 +931,29 @@ pub fn fullmatch_make(
     let pos_b = char_to_byte_idx(string, pos_c);
     let endpos_b = char_to_byte_idx(string, endpos_c);
     let anchored_src = format!("(?:{})\\z", pattern);
-    let anchored = match compile_python_regex_flags(&anchored_src, flags, is_bytes) {
+    // Validate the USER pattern first (surfaces user errors like `bad
+    // escape \z` with exact CPython messages/positions), then compile
+    // the internally-anchored wrapper WITHOUT re-validating (our own
+    // trailing `\z` is engine syntax, rejected for user patterns by
+    // `test_other_escapes`).
+    if let Err(e) = validate_pattern_for_compile(pattern, flags, is_bytes) {
+        return Err(fancy_error_to_pattern(&e, pattern, is_bytes));
+    }
+    let anchored = match compile_translated_pattern(&anchored_src, flags, is_bytes) {
         Ok(r) => r,
         Err(e) => {
+            // Repeat-count overflow sentinel (see `fancy_error_to_pattern`).
+            if e.to_string().contains("__RE_OVERFLOW__") {
+                return Err(PyError::overflow_error(
+                    "the repetition number is too large",
+                ));
+            }
             return Err(re_pattern_error(
                 map_regex_error(&e.to_string()),
                 Some(pattern.to_string()),
                 None,
                 is_bytes,
-            ))
+            ));
         }
     };
     // Truncate so `\z` lands on `endpos` (not the real string end).
@@ -645,14 +963,7 @@ pub fn fullmatch_make(
         .unwrap_or(None)
         .filter(|c| c.get(0).map(|m| m.start() == pos_b).unwrap_or(false));
     Ok(make_match_object_detailed(
-        &anchored,
-        caps,
-        string,
-        pattern,
-        flags,
-        pos_c,
-        endpos_c,
-        is_bytes,
+        &anchored, caps, string, pattern, flags, pos_c, endpos_c, is_bytes,
     ))
 }
 
@@ -690,7 +1001,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let (string, subj_bytes) = re_text_arg(&args[1]);
         let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
         let caps = re.captures(&string).unwrap_or(None);
-        Ok(make_match_object_detailed(
+        let m = make_match_object_detailed(
             &re,
             caps,
             &string,
@@ -699,7 +1010,10 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             0,
             string.chars().count(),
             is_bytes,
-        ))
+        );
+        // Live bytearray subjects re-slice on access (test_bug_29444).
+        crate::modules::misc::re::match_obj::maybe_attach_subject(&m, &args[1]);
+        Ok(m)
     });
 
     re_func!("match", |args| {
@@ -778,11 +1092,11 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                 "cannot process flags argument with a compiled pattern",
             ));
         }
-        let (re, _pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], call_flags)?;
+        let (re, pattern, pat_bytes, flags) = extract_regex_flags(&args[0], call_flags)?;
         let (string, subj_bytes) = re_text_arg(&args[1]);
         let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
         let groups = re.captures_len().saturating_sub(1);
-        let caps_list = scan_captures(&re, &string, 0, string.len());
+        let caps_list = scan_captures(&re, &string, 0, string.len(), &pattern, flags, is_bytes);
         let results: Vec<PyObjectRef> = caps_list
             .iter()
             .map(|caps| findall_groups(caps, groups, is_bytes))
@@ -806,7 +1120,8 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         // invoke a callback) — this also adds real `count` support (the
         // 4th positional arg), which the previous `replace_all`-based
         // version silently ignored entirely.
-        let (re, pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], re_call_flags(args, 4))?;
+        let (re, pattern, pat_bytes, rx_flags) =
+            extract_regex_flags(&args[0], re_call_flags(args, 4))?;
         let is_callable_repl = !re_is_template_repl(&args[1]);
         let (repl_text, repl_bytes) = re_text_arg(&args[1]);
         let (string, subj_bytes) = re_text_arg(&args[2]);
@@ -869,10 +1184,28 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let mut result = String::new();
         let mut last_end = 0usize;
         let mut n = 0i64;
-        for caps in re.captures_iter(&string) {
-            let caps = match caps {
-                Ok(c) => c,
-                Err(_) => break,
+        // must_advance-aware scan (see `search_step_ma`): after an empty
+        // match the next attempt restarts at its end instead of blindly
+        // stepping a char (test_re: test_zerowidth).
+        let ma_cache = MaBranchCache::new(&pattern, rx_flags, is_bytes);
+        let mut ma_pos = 0usize;
+        let mut ma_flag = false;
+        while ma_pos <= string.len() {
+            let caps = match search_step_ma(&re, &ma_cache, &string, ma_pos, ma_flag) {
+                MaStep::Stop => break,
+                MaStep::Advance => {
+                    if ma_pos >= string.len() {
+                        break;
+                    }
+                    ma_pos += string[ma_pos..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    ma_flag = false;
+                    continue;
+                }
+                MaStep::Found(c) => c,
             };
             if count > 0 && n >= count {
                 break;
@@ -912,6 +1245,11 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             }
             last_end = m_end;
             n += 1;
+            // CPython: `start = ptr` always (even empty); must_advance
+            // distinguishes the retry (same spot, rejects repeated
+            // empty) from a plain advance.
+            ma_flag = m_start == m_end;
+            ma_pos = m_end;
         }
         result.push_str(&string[last_end..]);
         if is_bytes {
@@ -926,41 +1264,47 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("split() takes at least 2 arguments"));
         }
         let (maxsplit_i, flags_i) = re_resolve_count_flags(args, "split", "maxsplit", 2, 4)?;
-        let (string, maxsplit, flags) = (re_text_arg(&args[1]), maxsplit_i as usize, flags_i as i32);
+        let (string, maxsplit, flags) =
+            (re_text_arg(&args[1]), maxsplit_i as usize, flags_i as i32);
         let ((string, subj_bytes), maxsplit, flags) = (string, maxsplit, flags);
-        let (re, pat_is_bytes): (fancy_regex::Regex, bool) = match &*args[0].borrow() {
-            PyObject::CompiledRegex {
-                regex, is_bytes, ..
-            } => ((**regex).clone(), *is_bytes),
-            _ => {
-                let (pattern, pb) = re_text_arg(&args[0]);
-                let (pattern, ascii_scope, global_bits) =
-                    match compile::preprocess_inline_flags(&pattern, pb, flags) {
-                        Ok((p, a, g)) => (p, a, g),
-                        Err((msg, pos)) => {
-                            return Err(re_pattern_error(
-                                msg,
-                                Some(pattern),
-                                Some(pos as i64),
-                                pb,
-                            ));
+        let (re, pat_is_bytes, split_pat, split_flags): (fancy_regex::Regex, bool, String, i32) =
+            match &*args[0].borrow() {
+                PyObject::CompiledRegex {
+                    regex,
+                    pattern,
+                    flags: stored_flags,
+                    is_bytes,
+                    ..
+                } => ((**regex).clone(), *is_bytes, pattern.clone(), *stored_flags),
+                _ => {
+                    let (pattern, pb) = re_text_arg(&args[0]);
+                    let (pattern, ascii_scope, global_bits) =
+                        match compile::preprocess_inline_flags(&pattern, pb, flags) {
+                            Ok((p, a, g)) => (p, a, g),
+                            Err((msg, pos)) => {
+                                return Err(re_pattern_error(
+                                    msg,
+                                    Some(pattern),
+                                    Some(pos as i64),
+                                    pb,
+                                ));
+                            }
+                        };
+                    re_check_flags(flags | global_bits, pb)?;
+                    // Bytes patterns use ASCII word semantics (see `compile`);
+                    // validation above ran on the original flags.
+                    let mut flags = flags | global_bits;
+                    if ascii_scope || pb {
+                        flags |= 256;
+                    }
+                    match compile_python_regex_flags(&pattern, flags, pb) {
+                        Ok(r) => (r, pb, pattern, flags),
+                        Err(e) => {
+                            return Err(fancy_error_to_pattern(&e, &pattern, pb));
                         }
-                    };
-                re_check_flags(flags | global_bits, pb)?;
-                // Bytes patterns use ASCII word semantics (see `compile`);
-                // validation above ran on the original flags.
-                let mut flags = flags | global_bits;
-                if ascii_scope || pb {
-                    flags |= 256;
-                }
-                match compile_python_regex_flags(&pattern, flags, pb) {
-                    Ok(r) => (r, pb),
-                    Err(e) => {
-                        return Err(fancy_error_to_pattern(&e, &pattern, pb));
                     }
                 }
-            }
-        };
+            };
         let is_bytes = re_check_compat(pat_is_bytes, subj_bytes)?;
         // Pieces and captured groups come back in the subject domain.
         let piece = |s: &str| -> PyObjectRef {
@@ -976,7 +1320,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let mut result: Vec<PyObjectRef> = Vec::new();
         let mut last_end = 0usize;
         let mut n = 0usize;
-        for caps in split_match_spans(&re, &string) {
+        for caps in split_match_spans(&re, &string, &split_pat, split_flags, is_bytes) {
             if maxsplit != 0 && n >= maxsplit {
                 break;
             }
@@ -1040,7 +1384,12 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             match compile::preprocess_inline_flags(&original_pattern, is_bytes, flags) {
                 Ok((p, a, g)) => (p, a, g),
                 Err((msg, pos)) => {
-                    return Err(re_pattern_error(msg, Some(original_pattern), Some(pos as i64), is_bytes));
+                    return Err(re_pattern_error(
+                        msg,
+                        Some(original_pattern),
+                        Some(pos as i64),
+                        is_bytes,
+                    ));
                 }
             };
         re_check_flags(flags | global_bits, is_bytes)?;
@@ -1072,33 +1421,37 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         }
     });
 
-    // finditer — returns a list of Match objects (not a lazy iterator, but sufficient for Django)
+    // finditer — lazy iterator of Match objects (holds a bytearray
+    // buffer export while alive, released on exhaustion).
     re_func!("finditer", |args| {
         if args.len() < 2 {
             return Err(PyError::type_error("finditer() takes at least 2 arguments"));
         }
-        let (re, pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], re_call_flags(args, 2))?;
+        let (re, pattern, pat_bytes, flags) =
+            extract_regex_flags(&args[0], re_call_flags(args, 2))?;
         let (string, subj_bytes) = re_text_arg(&args[1]);
         let is_bytes = re_check_compat(pat_bytes, subj_bytes)?;
-        let caps_list = scan_captures(&re, &string, 0, string.len());
-        let matches: Vec<PyObjectRef> = caps_list
-            .into_iter()
-            .map(|c| {
-                let start = c.get(0).map(|m| m.start()).unwrap_or(0);
-                make_match_object_prefixed(
-                    &re,
-                    Some(c),
-                    &string,
-                    &pattern,
-                    0,
-                    start,
-                    string.len(),
-                    is_bytes,
-                    0,
-                )
-            })
-            .collect();
-        Ok(py_list(matches))
+        // Hold a buffer export for bytearray subjects (blocks resize).
+        let subject = if matches!(&*args[1].borrow(), PyObject::ByteArray(_)) {
+            crate::object::increment_bytearray_export(&args[1]);
+            Some(args[1].clone())
+        } else {
+            None
+        };
+        Ok(PyObjectRef::new(PyObject::FindIter {
+            regex: Box::new(re),
+            string: string.clone(),
+            pattern: pattern.clone(),
+            flags,
+            is_bytes,
+            pos: 0,
+            endpos: string.len(),
+            mpos: 0,
+            mendpos: string.chars().count(),
+            subject,
+            exhausted: false,
+            ma: false,
+        }))
     });
 
     re_func!("escape", |args| {
@@ -1114,9 +1467,7 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let literals = "!\"%',/:;<=>@_`";
         let mut escaped = String::new();
         for c in s.chars() {
-            if (c.is_ascii_alphanumeric() || literals.contains(c))
-                && c.is_ascii()
-            {
+            if (c.is_ascii_alphanumeric() || literals.contains(c)) && c.is_ascii() {
                 escaped.push(c);
             } else if c.is_ascii() {
                 escaped.push('\\');
@@ -1203,7 +1554,8 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 3 {
             return Err(PyError::type_error("subn() takes at least 3 arguments"));
         }
-        let (re, pattern, pat_bytes, _flags) = extract_regex_flags(&args[0], re_call_flags(args, 4))?;
+        let (re, pattern, pat_bytes, rx_flags) =
+            extract_regex_flags(&args[0], re_call_flags(args, 4))?;
         let is_callable_repl = !re_is_template_repl(&args[1]);
         let (repl_text, repl_bytes) = re_text_arg(&args[1]);
         let (string, subj_bytes) = re_text_arg(&args[2]);
@@ -1261,10 +1613,28 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         let mut result = String::new();
         let mut last_end = 0usize;
         let mut n = 0i64;
-        for caps in re.captures_iter(&string) {
-            let caps = match caps {
-                Ok(c) => c,
-                Err(_) => break,
+        // must_advance-aware scan (see `search_step_ma`): after an empty
+        // match the next attempt restarts at its end instead of blindly
+        // stepping a char (test_re: test_zerowidth).
+        let ma_cache = MaBranchCache::new(&pattern, rx_flags, is_bytes);
+        let mut ma_pos = 0usize;
+        let mut ma_flag = false;
+        while ma_pos <= string.len() {
+            let caps = match search_step_ma(&re, &ma_cache, &string, ma_pos, ma_flag) {
+                MaStep::Stop => break,
+                MaStep::Advance => {
+                    if ma_pos >= string.len() {
+                        break;
+                    }
+                    ma_pos += string[ma_pos..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    ma_flag = false;
+                    continue;
+                }
+                MaStep::Found(c) => c,
             };
             if count > 0 && n >= count {
                 break;
@@ -1304,6 +1674,11 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
             }
             last_end = m_end;
             n += 1;
+            // CPython: `start = ptr` always (even empty); must_advance
+            // distinguishes the retry (same spot, rejects repeated
+            // empty) from a plain advance.
+            ma_flag = m_start == m_end;
+            ma_pos = m_end;
         }
         result.push_str(&string[last_end..]);
         if is_bytes {
@@ -1345,18 +1720,17 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
                             continue;
                         }
                         let pat = pair[0].str();
-                        let (pat, _) =
-                            match compile::preprocess_inline_flags(&pat, false, flags) {
-                                Ok((p, _, _)) => (p, false),
-                                Err((msg, pos)) => {
-                                    return Err(re_pattern_error(
-                                        msg,
-                                        Some(pat),
-                                        Some(pos as i64),
-                                        false,
-                                    ));
-                                }
-                            };
+                        let (pat, _) = match compile::preprocess_inline_flags(&pat, false, flags) {
+                            Ok((p, _, _)) => (p, false),
+                            Err((msg, pos)) => {
+                                return Err(re_pattern_error(
+                                    msg,
+                                    Some(pat),
+                                    Some(pos as i64),
+                                    false,
+                                ));
+                            }
+                        };
                         match compile_python_regex_flags(&pat, flags, false) {
                             Ok(r) => {
                                 compiled_list.push(PyObjectRef::new(PyObject::CompiledRegex {
@@ -1627,9 +2001,10 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
     // (`_generate_overlap_table`) assert on. Built natively here (not via
     // a file import) so attribute access needs no import-timing wiring.
     let mut compiler_dict = HashMap::new();
-    // Match CPython's `_sre` constants: MAXREPEAT = ~0 (u32), MAXGROUPS =
-    // INT32_MAX/2 (see `Modules/_sre/sre.h`).
-    compiler_dict.insert_str("MAXREPEAT", py_int(2147483647));
+    // Match CPython's `_sre` constants: MAXREPEAT = UINT32_MAX (verified
+    // against CPython 3.14's `from _sre import MAXREPEAT` = 4294967295),
+    // MAXGROUPS = INT32_MAX/2.
+    compiler_dict.insert_str("MAXREPEAT", py_int(4294967295i64));
     compiler_dict.insert_str("MAXGROUPS", py_int(1073741823));
     compiler_dict.insert_str(
         "_generate_overlap_table",
@@ -1666,6 +2041,103 @@ pub fn create_re_dict() -> HashMap<String, PyObjectRef> {
         }),
     );
     d.insert_str("_compiler", create_module("re._compiler", compiler_dict));
+    // `re._compile` — the internal compiler entry point CPython's own
+    // code (and its deprecation shims' comments) import. Same calling
+    // convention as `re.compile` (pattern, flags), so alias it directly
+    // (test_re: test_pickling does `from re import _compile`).
+    if let Some(compile_fn) = d.get("compile") {
+        d.insert_str("_compile", compile_fn.clone());
+    }
+    // `re._compiler` extras re-exported by the deprecated `sre_compile`
+    // shim (`from re import _compiler`; test_re: test_deprecated_modules).
+    // `compile`/`error` are the real objects; the rest are the real
+    // constant values (CPython `re._constants`: SUBPATTERN=25,
+    // SRE_FLAG_IGNORECASE=2). `_compile_info` is a stub (needs `_sre`
+    // codegen we don't have; nothing in-tree calls it).
+    if let Some(compiler_mod) = d.get("_compiler") {
+        if let PyObject::Module { dict, .. } = &mut *compiler_mod.borrow_mut() {
+            let key = |s: &str| crate::interner::intern(s);
+            if let Some(compile_fn) = d.get("compile") {
+                dict.insert(key("compile"), compile_fn.clone());
+            }
+            if let Some(error_cls) = d.get("error") {
+                dict.insert(key("error"), error_cls.clone());
+            }
+            dict.insert(key("SRE_FLAG_IGNORECASE"), py_int(2));
+            dict.insert(key("SUBPATTERN"), py_int(25));
+            dict.insert(
+                key("_compile_info"),
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "_compile_info".to_string(),
+                    func: |_| {
+                        Err(PyError::runtime_error(
+                            "re._compiler._compile_info is not implemented (requires _sre codegen)",
+                        ))
+                    },
+                }),
+            );
+        }
+    }
+    // `re._parser` submodule mirroring CPython's `re/_parser.py`, needed
+    // by the deprecated `sre_parse` shim (`from re import _parser`;
+    // test_re: test_deprecated_modules, which only checks attribute
+    // presence). Constants carry real values; `SubPattern` is a minimal
+    // type and `parse`/`_parse_sub` are stubs (a full pure-Python parser
+    // vendor belongs with an `_sre` codegen backend; nothing in-tree
+    // calls these).
+    {
+        let subpattern_type = PyObjectRef::new(PyObject::Type {
+            name: "SubPattern".to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+            bases: vec![],
+            mro: vec![],
+        });
+        if let PyObject::Type { mro, .. } = &mut *subpattern_type.borrow_mut() {
+            *mro = vec![subpattern_type.clone()];
+        }
+        let stub_parse = |name: &str| {
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: name.to_string(),
+                func: |_| {
+                    Err(PyError::runtime_error(
+                        "re._parser internals are not implemented (deprecated API)",
+                    ))
+                },
+            })
+        };
+        let mut parser_dict = HashMap::new();
+        parser_dict.insert("SubPattern".to_string(), subpattern_type);
+        parser_dict.insert("parse".to_string(), stub_parse("parse"));
+        parser_dict.insert("SRE_FLAG_IGNORECASE".to_string(), py_int(2));
+        parser_dict.insert("SUBPATTERN".to_string(), py_int(25));
+        parser_dict.insert("_parse_sub".to_string(), stub_parse("_parse_sub"));
+        d.insert_str("_parser", create_module("re._parser", parser_dict));
+    }
+
+    // `re._constants` submodule mirroring CPython's `re/_constants.py`,
+    // needed by the deprecated `sre_constants` shim (`from re import
+    // _constants`; test_re: test_deprecated_modules, which only checks
+    // attribute presence). Values are real (`_NamedIntConstant` is a
+    // minimal type; nothing in-tree instantiates it).
+    {
+        let named_int_type = PyObjectRef::new(PyObject::Type {
+            name: "_NamedIntConstant".to_string(),
+            dict: Box::new(str_map_to_typedict(HashMap::new())),
+            bases: vec![],
+            mro: vec![],
+        });
+        if let PyObject::Type { mro, .. } = &mut *named_int_type.borrow_mut() {
+            *mro = vec![named_int_type.clone()];
+        }
+        let mut constants_dict = HashMap::new();
+        if let Some(error_cls) = d.get("error") {
+            constants_dict.insert("error".to_string(), error_cls.clone());
+        }
+        constants_dict.insert("SRE_FLAG_IGNORECASE".to_string(), py_int(2));
+        constants_dict.insert("SUBPATTERN".to_string(), py_int(25));
+        constants_dict.insert("_NamedIntConstant".to_string(), named_int_type);
+        d.insert_str("_constants", create_module("re._constants", constants_dict));
+    }
 
     d
 }

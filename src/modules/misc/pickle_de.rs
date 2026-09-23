@@ -977,7 +977,66 @@ pub fn pickle_deserialize(
                 .trim_end_matches('L')
                 .parse::<BigInt>()
                 .unwrap_or_else(|_| BigInt::from(0));
-            Ok(PyObjectRef::new(PyObject::EnumerateIter { source, pos: pos_u, start }))
+            Ok(PyObjectRef::new(PyObject::EnumerateIter {
+                source,
+                pos: pos_u,
+                start,
+            }))
+        }
+        b'R' => {
+            // Compiled regex: <pattern:str> <stored_flags:int>
+            // <is_bytes:bool> — recompile mirroring `re.compile`
+            // (test_re: test_pickling). Base flags recover the
+            // pre-merge call flags by dropping an auto-added UNICODE
+            // bit (kept when ASCII was explicitly requested), then the
+            // standard preprocess+compile pipeline re-derives everything
+            // (inline `(?i)` groups etc.); stored fields are restored
+            // verbatim so equality holds.
+            let pat_v = pickle_deserialize(data, pos, memo)?;
+            let flags_v = pickle_deserialize(data, pos, memo)?;
+            let bytes_v = pickle_deserialize(data, pos, memo)?;
+            let original_pattern = pat_v.str();
+            let stored_flags = flags_v.as_i64().unwrap_or(0) as i32;
+            let is_bytes = bytes_v.truthy();
+            let mut base_flags = stored_flags;
+            if base_flags & 256 == 0 {
+                base_flags &= !32;
+            }
+            let (pattern, ascii_scope, global_bits) =
+                match crate::modules::misc::preprocess_inline_flags(
+                    &original_pattern,
+                    is_bytes,
+                    base_flags,
+                ) {
+                    Ok(t) => t,
+                    Err((msg, p)) => {
+                        return Err(crate::modules::misc::re_pattern_error(
+                            msg,
+                            Some(original_pattern.clone()),
+                            Some(p as i64),
+                            is_bytes,
+                        ))
+                    }
+                };
+            let mut compile_flags = base_flags | global_bits;
+            if ascii_scope {
+                compile_flags |= 256;
+            }
+            match crate::modules::misc::compile_python_regex_flags(
+                &pattern,
+                compile_flags,
+                is_bytes,
+            ) {
+                Ok(re) => Ok(PyObjectRef::new(PyObject::CompiledRegex {
+                    regex: Box::new(re),
+                    pattern: original_pattern,
+                    flags: stored_flags,
+                    is_bytes,
+                })),
+                Err(e) => Err(crate::modules::misc::fancy_error_to_pattern(
+                    &e, &pattern, is_bytes,
+                )),
+            }
         }
         b'{' => {
             let dict_ref = PyObjectRef::new(PyObject::Dict(Box::new(crate::object::PyDict::new())));

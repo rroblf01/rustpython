@@ -82,6 +82,13 @@ pub struct Frame {
     /// same effect generally, for every module, not just via IMPORT_FROM's
     /// narrower ancestor-frame fallback.
     pub live_module: Option<PyObjectRef>,
+    /// Live user globals dict for frames running a
+    /// `types.FunctionType(code, somedict)`-built function (`Some` only
+    /// then). After each execution slice (call return, generator/
+    /// coroutine send/next/throw) frame writes mirror back into it
+    /// (CPython: `__globals__` IS that dict). Cleared on pool
+    /// acquire/release like the other per-execution state.
+    pub globals_dict: Option<PyObjectRef>,
     /// Live `locals` mapping for `exec(code, globals, locals)` frames with
     /// a DISTINCT locals dict (`Some` only then; `None` for every other
     /// frame). Real CPython executes such bodies with f_locals BEING that
@@ -137,6 +144,7 @@ impl Frame {
             name_order: None,
             prepared_namespace: None,
             live_module: None,
+            globals_dict: None,
             exec_locals: None,
             yield_from_iter: None,
             back: None,

@@ -19,6 +19,7 @@ mod object;
 mod parser;
 mod superinstr;
 mod token;
+mod unicode_names;
 mod vm;
 
 use compiler::Compiler;

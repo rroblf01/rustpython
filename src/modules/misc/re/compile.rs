@@ -69,7 +69,10 @@ pub fn re_pattern_error(
                     colno += 1;
                 }
             }
-            format!("{} at position {} (line {}, column {})", msg, p, lineno, colno)
+            format!(
+                "{} at position {} (line {}, column {})",
+                msg, p, lineno, colno
+            )
         }
         (Some(p), _) => format!("{} at position {}", msg, p),
         (None, _) => msg.clone(),
@@ -110,6 +113,25 @@ pub fn escape_loose_braces(pattern: &str) -> String {
             while j < chars.len() && chars[j].is_ascii_digit() {
                 j += 1;
                 saw_digit = true;
+            }
+            // Leading-comma forms: `{,n}` ≡ `{0,n}`, `{,}` ≡ `{0,}`
+            // (CPython accepts them; without digits they would be
+            // escaped as literals below and misread by the engine).
+            if !saw_digit && j < chars.len() && chars[j] == ',' {
+                let mut k = j + 1;
+                while k < chars.len() && chars[k].is_ascii_digit() {
+                    k += 1;
+                }
+                if k < chars.len() && chars[k] == '}' {
+                    if k == j + 1 {
+                        result.push_str("{0,}");
+                    } else {
+                        result.push_str("{0,");
+                        result.extend(&chars[j + 1..=k]);
+                    }
+                    i = k + 1;
+                    continue;
+                }
             }
             if j < chars.len() && chars[j] == ',' {
                 j += 1;
@@ -485,7 +507,8 @@ pub fn translate_python_replacement(repl: &str) -> PyResult<String> {
                                         ),
                                         Some(repl.to_string()),
                                         Some(0),
-                                    false));
+                                        false,
+                                    ));
                                 }
                                 out.push(char::from_u32(v).unwrap_or('\u{FFFD}'));
                                 i += 4;
@@ -512,20 +535,42 @@ pub fn translate_python_replacement(repl: &str) -> PyResult<String> {
                         i += 2;
                     }
                 }
-                'a' => { out.push('\x07'); i += 2; }
-                'b' => { out.push('\x08'); i += 2; }
-                'f' => { out.push('\x0C'); i += 2; }
-                'n' => { out.push('\n'); i += 2; }
-                'r' => { out.push('\r'); i += 2; }
-                't' => { out.push('\t'); i += 2; }
-                'v' => { out.push('\x0B'); i += 2; }
+                'a' => {
+                    out.push('\x07');
+                    i += 2;
+                }
+                'b' => {
+                    out.push('\x08');
+                    i += 2;
+                }
+                'f' => {
+                    out.push('\x0C');
+                    i += 2;
+                }
+                'n' => {
+                    out.push('\n');
+                    i += 2;
+                }
+                'r' => {
+                    out.push('\r');
+                    i += 2;
+                }
+                't' => {
+                    out.push('\t');
+                    i += 2;
+                }
+                'v' => {
+                    out.push('\x0B');
+                    i += 2;
+                }
                 ch if ch.is_ascii_alphabetic() => {
                     // Bad escape — mirrors CPython's _parse_template.
                     return Err(re_pattern_error(
                         format!("bad escape \\{}", ch),
                         Some(repl.to_string()),
                         Some((i) as i64),
-                    false));
+                        false,
+                    ));
                 }
                 _ => {
                     // Unknown non-letter escape: keep verbatim
@@ -572,7 +617,8 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex, is_bytes: bool) 
                         "missing <".to_string(),
                         Some(repl.to_string()),
                         Some(2),
-                    false));
+                        false,
+                    ));
                 }
                 let mut j = i + 3;
                 while j < chars.len() && chars[j] != '>' {
@@ -584,14 +630,16 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex, is_bytes: bool) 
                         "missing >, unterminated name".to_string(),
                         Some(repl.to_string()),
                         Some(3),
-                    false));
+                        false,
+                    ));
                 }
                 if name.is_empty() {
                     return Err(re_pattern_error(
                         "missing group name".to_string(),
                         Some(repl.to_string()),
                         Some(3),
-                    false));
+                        false,
+                    ));
                 }
                 let mut bad = false;
                 for (idx, ch) in name.chars().enumerate() {
@@ -603,7 +651,8 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex, is_bytes: bool) 
                                     format!("invalid group reference {}", num),
                                     Some(repl.to_string()),
                                     Some(3),
-                                false));
+                                    false,
+                                ));
                             }
                         } else {
                             bad = true;
@@ -616,8 +665,7 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex, is_bytes: bool) 
                     let ok = if is_bytes {
                         ch.is_ascii_alphanumeric() || ch == '_'
                     } else if idx == 0 {
-                        crate::token::Lexer::is_identifier_start(ch)
-                            && !ch.is_ascii_digit()
+                        crate::token::Lexer::is_identifier_start(ch) && !ch.is_ascii_digit()
                     } else {
                         crate::token::Lexer::is_identifier_continue(ch)
                     };
@@ -634,7 +682,8 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex, is_bytes: bool) 
                         format!("bad character in group name '{}'", disp(&name)),
                         Some(repl.to_string()),
                         Some(3),
-                    false));
+                        false,
+                    ));
                 }
                 i = j + 1;
                 continue;
@@ -665,11 +714,14 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex, is_bytes: bool) 
                         return Err(re_pattern_error(
                             format!(
                                 "octal escape value \\{}{}{} outside of range 0-0o377",
-                                chars[i + 1], chars[i + 2], chars[i + 3]
+                                chars[i + 1],
+                                chars[i + 2],
+                                chars[i + 3]
                             ),
                             Some(repl.to_string()),
                             Some(0),
-                        false));
+                            false,
+                        ));
                     }
                     i += 4;
                     continue;
@@ -686,7 +738,8 @@ pub fn validate_g_template(repl: &str, re: &fancy_regex::Regex, is_bytes: bool) 
                             format!("invalid group reference {}", num),
                             Some(repl.to_string()),
                             Some((i + 1) as i64),
-                        false));
+                            false,
+                        ));
                     }
                 }
                 i = j + 1;
@@ -734,6 +787,56 @@ pub fn map_regex_error(msg: &str) -> String {
 pub fn fancy_error_to_pattern(e: &fancy_regex::Error, pattern: &str, is_bytes: bool) -> PyError {
     match e {
         fancy_regex::Error::ParseError(pos, kind) => {
+            // `\x`/`\u`/`\U` escape errors: CPython reports them at the
+            // BACKSLASH with "incomplete escape \xN..." (too few hex
+            // digits) or "bad escape \UNNNNNNNN" (8 digits but out of
+            // range, e.g. `\U00110000`). Fancy instead reports
+            // `InvalidHex`/`InvalidCodepointValue` at the byte offset
+            // AFTER the `\x`/`\u`/`\U` prefix with generic messages —
+            // remap here (test_re: test_sre_character_literals,
+            // test_sre_character_class_literals and byte variants).
+            if matches!(
+                kind,
+                fancy_regex::ParseError::InvalidHex
+                    | fancy_regex::ParseError::InvalidCodepointValue
+            ) {
+                let byte_pos = (*pos).min(pattern.len());
+                // Fancy's `ix` points just after `\x`/`\u`/`\U`, so the
+                // backslash is 2 bytes back (all-ASCII prefix, safe).
+                let esc = byte_pos.saturating_sub(2);
+                let bytes = pattern.as_bytes();
+                if esc + 1 < bytes.len()
+                    && bytes[esc] == b'\\'
+                    && matches!(bytes[esc + 1], b'x' | b'u' | b'U')
+                {
+                    let c = bytes[esc + 1] as char;
+                    let required = match c {
+                        'x' => 2,
+                        'u' => 4,
+                        _ => 8,
+                    };
+                    let mut end = byte_pos;
+                    while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+                        end += 1;
+                    }
+                    let digits = &pattern[byte_pos..end];
+                    let msg = if digits.len() < required {
+                        format!("incomplete escape \\{}{}", c, digits)
+                    } else {
+                        let take = required.min(digits.len());
+                        format!("bad escape \\{}{}", c, &digits[..take])
+                    };
+                    let char_pos = pattern[..esc].chars().count() as i64;
+                    return re_pattern_error(
+                        msg,
+                        Some(pattern.to_string()),
+                        Some(char_pos),
+                        is_bytes,
+                    );
+                }
+                // Fall through to the generic mapping if the prefix
+                // check fails (robust against fancy position changes).
+            }
             // fancy reports a BYTE offset into the pattern; CPython's
             // `PatternError.pos` is a CHAR index (differs once the pattern
             // holds any multi-byte char, e.g. `'(€))'` → pos 3, not 5).
@@ -745,6 +848,12 @@ pub fn fancy_error_to_pattern(e: &fancy_regex::Error, pattern: &str, is_bytes: b
             }
             let char_pos = pattern[..byte_pos].chars().count() as i64;
             let msg = map_parse_error(kind, pattern, char_pos as usize);
+            // Repeat-count overflow sentinel from `validate_group_syntax`
+            // (`{2**128}`): CPython raises plain `OverflowError`, not
+            // `PatternError` (test_re: test_repeat_minmax_overflow).
+            if msg == "__RE_OVERFLOW__" {
+                return PyError::overflow_error("the repetition number is too large");
+            }
             re_pattern_error(msg, Some(pattern.to_string()), Some(char_pos), is_bytes)
         }
         fancy_regex::Error::CompileError(ce) => {
@@ -798,7 +907,11 @@ fn map_parse_error(kind: &fancy_regex::ParseError, pattern: &str, pos: usize) ->
         // suffix (`*+?}`), the target was already quantified → multiple.
         ParseError::TargetNotRepeatable => {
             let chars: Vec<char> = pattern.chars().collect();
-            let prev = if pos > 0 { chars.get(pos - 1).copied() } else { None };
+            let prev = if pos > 0 {
+                chars.get(pos - 1).copied()
+            } else {
+                None
+            };
             if matches!(prev, Some('*') | Some('+') | Some('?') | Some('}')) {
                 "multiple repeat".to_string()
             } else {
@@ -847,7 +960,16 @@ fn map_general_parse_error(s: &str) -> String {
     }
     if lower.contains("unterminated") || lower.contains("unclosed") {
         if lower.contains("name") {
+            // Preserve exact delimiters: our own `\N` message uses `}`
+            // and `(?P<...>`/`(?<...>` group names use `>`, not `)`.
+            if s.contains('}') || s.contains('>') {
+                return s.to_string();
+            }
             return "missing ), unterminated name".to_string();
+        }
+        // Preserve `(?#...)` comment errors (not subpatterns).
+        if lower.contains("comment") {
+            return s.to_string();
         }
         return "missing ), unterminated subpattern".to_string();
     }
@@ -946,8 +1068,7 @@ fn parse_inline_flags(
             if is_bytes {
                 if ch == 'u' {
                     return Err((
-                        "bad inline flags: cannot use 'u' flag with a bytes pattern"
-                            .to_string(),
+                        "bad inline flags: cannot use 'u' flag with a bytes pattern".to_string(),
                         i + 1,
                     ));
                 }
@@ -1004,8 +1125,7 @@ fn parse_inline_flags(
                 let flag = inline_flag_bit(ch).unwrap();
                 if flag & RE_TYPE_FLAGS != 0 {
                     return Err((
-                        "bad inline flags: cannot turn off flags 'a', 'u' and 'L'"
-                            .to_string(),
+                        "bad inline flags: cannot turn off flags 'a', 'u' and 'L'".to_string(),
                         i + 1,
                     ));
                 }
@@ -1035,10 +1155,7 @@ fn parse_inline_flags(
     }
     .and_then(|(a, d, end, scoped)| {
         if scoped && (a & d) != 0 {
-            return Err((
-                "bad inline flags: flag turned on and off".to_string(),
-                end,
-            ));
+            return Err(("bad inline flags: flag turned on and off".to_string(), end));
         }
         Ok((a, d, end, scoped))
     })
@@ -1246,9 +1363,7 @@ pub(crate) fn preprocess_inline_flags(
                         // Remaining flags (if any) survive; dels travel.
                         let inner: String = chars[end + 1..close].iter().collect();
                         let mut head = String::from("(?");
-                        for (letter, bit) in
-                            [('i', 2), ('m', 8), ('s', 16), ('x', 64), ('u', 32)]
-                        {
+                        for (letter, bit) in [('i', 2), ('m', 8), ('s', 16), ('x', 64), ('u', 32)] {
                             if add & bit != 0 {
                                 head.push(letter);
                             }
@@ -1304,9 +1419,7 @@ pub(crate) fn preprocess_inline_flags(
         // (`' (?i) '` with `re.X` is valid). Only comments and
         // global flag groups are otherwise exempt (handled above).
         // (Also records a global `(?x...)` for verbose tracking.)
-        if depth == 0
-            && !(verbose_known && (c == ' ' || c == '\t' || c == '\n' || c == '\r'))
-        {
+        if depth == 0 && !(verbose_known && (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
             seen_content = true;
         }
         out.push(c);
@@ -1359,7 +1472,15 @@ fn validate_quantifiers(pattern: &str) -> Result<(), usize> {
             await_suffix = false;
         }
         if c == '\\' {
-            has_atom = true;
+            // Zero-width assertions are NOT repeatable atoms (`\b*`,
+            // `\A*` → "nothing to repeat"; CPython). Inside a class
+            // `\b` is a backspace literal (an atom), so the carve-out
+            // only applies outside classes.
+            if !in_class && i + 1 < n && matches!(chars[i + 1], 'b' | 'B' | 'A' | 'Z' | 'z') {
+                has_atom = false;
+            } else {
+                has_atom = true;
+            }
             after_quant = false;
             i += 2;
             continue;
@@ -1414,7 +1535,8 @@ fn validate_quantifiers(pattern: &str) -> Result<(), usize> {
                                         j += 1;
                                     }
                                     j += 1; // past '>'
-                                } else if j < n && (chars[j] == '=' || chars[j] == '\'' || chars[j] == '"')
+                                } else if j < n
+                                    && (chars[j] == '=' || chars[j] == '\'' || chars[j] == '"')
                                 {
                                     // Assertion / conditional — skip to close.
                                     let q = if chars[j] == '=' { ')' } else { chars[j] };
@@ -1513,6 +1635,16 @@ fn validate_quantifiers(pattern: &str) -> Result<(), usize> {
                 i += 1;
                 continue;
             }
+            // `^`/`$` are zero-width assertions, not repeatable atoms
+            // (`^*` → "nothing to repeat" at the `*`; CPython). (In
+            // classes they're literals, but those never reach here —
+            // the `in_class` branch above consumes them.)
+            '^' | '$' => {
+                has_atom = false;
+                after_quant = false;
+                i += 1;
+                continue;
+            }
             _ => {
                 has_atom = true;
                 after_quant = false;
@@ -1565,13 +1697,16 @@ fn validate_group_syntax(
 ) -> Result<(), (String, Option<i64>)> {
     fn bad_name_char(name: &str) -> Option<char> {
         // CPython group names: identifier chars, but NOT starting with a digit.
-        name.chars().enumerate().find(|(i, c)| {
-            if *i == 0 {
-                !(c.is_alphabetic() || *c == '_')
-            } else {
-                !(c.is_alphanumeric() || *c == '_')
-            }
-        }).map(|(_, c)| c)
+        name.chars()
+            .enumerate()
+            .find(|(i, c)| {
+                if *i == 0 {
+                    !(c.is_alphabetic() || *c == '_')
+                } else {
+                    !(c.is_alphanumeric() || *c == '_')
+                }
+            })
+            .map(|(_, c)| c)
     }
     // Bytes patterns: group names must be ASCII; a non-ASCII byte →
     // "bad character in group name '\xNN...'" (test_re: b'(?P<\xc2\xb5>x)').
@@ -1632,6 +1767,42 @@ fn validate_group_syntax(
     let is_open = |g: usize, open: &Vec<usize>| open.contains(&g);
     while i < n {
         let c = chars[i];
+        // `\N{name}` Unicode escapes (test_re: test_named_unicode_escapes).
+        if c == '\\' && i + 1 < n && chars[i + 1] == 'N' {
+            if is_bytes {
+                return Err(("bad escape \\N".to_string(), Some(i as i64)));
+            }
+            if i + 2 >= n || chars[i + 2] != '{' {
+                return Err(("missing {".to_string(), Some((i + 2) as i64)));
+            }
+            let mut j = i + 3;
+            while j < n && chars[j] != '}' {
+                j += 1;
+            }
+            if j >= n {
+                // No `}`: empty (`\N{` at end) → 'missing character
+                // name', else 'missing }, unterminated name'.
+                if j == i + 3 {
+                    return Err(("missing character name".to_string(), Some((i + 3) as i64)));
+                }
+                return Err((
+                    "missing }, unterminated name".to_string(),
+                    Some((i + 3) as i64),
+                ));
+            }
+            let name: String = chars[i + 3..j].iter().collect();
+            if name.is_empty() {
+                return Err(("missing character name".to_string(), Some((i + 3) as i64)));
+            }
+            if crate::unicode_names::unicode_name_lookup(&name).is_none() {
+                return Err((
+                    format!("undefined character name '{}'", name),
+                    Some(i as i64),
+                ));
+            }
+            i = j + 1;
+            continue;
+        }
         if c == '\\' && !in_class && i + 1 < n && chars[i + 1].is_ascii_digit() {
             // Backreference `\N` — reject if group N is still open.
             let mut j = i + 1;
@@ -1639,7 +1810,12 @@ fn validate_group_syntax(
                 j += 1;
             }
             let digits: String = chars[i + 1..j].iter().collect();
-            let gnum: usize = digits.chars().take(2).collect::<String>().parse().unwrap_or(0);
+            let gnum: usize = digits
+                .chars()
+                .take(2)
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0);
             if gnum >= 1 && is_open(gnum, &open_captures) {
                 return Err(("cannot refer to an open group".to_string(), Some(i as i64)));
             }
@@ -1651,8 +1827,29 @@ fn validate_group_syntax(
                         return Err(("cannot refer to an open group".to_string(), Some(i as i64)));
                     }
                     if gnum > lbg {
-                        return Err(("cannot refer to group defined in the same lookbehind subpattern".to_string(), Some(i as i64)));
+                        return Err((
+                            "cannot refer to group defined in the same lookbehind subpattern"
+                                .to_string(),
+                            Some(i as i64),
+                        ));
                     }
+                }
+            }
+            // Decimal group-reference validity (CPython): `\` + digits is
+            // a group ref taking at most TWO digits (`\911` → group 91 +
+            // literal `1`) unless it's an octal escape (leading `0`, or
+            // 3+ leading octal digits like `\100`). A ref to an undefined
+            // group errors at the FIRST digit (`\911` → pos 1, not 0).
+            // Forward refs are invalid (`\1(a)` errors — groups count is
+            // `next_group`, i.e. defined-so-far). Test_re: `\911`, `\12`.
+            {
+                let is_octal = digits.starts_with('0')
+                    || (digits.len() >= 3 && digits.chars().take(3).all(|d| d.is_digit(8)));
+                if !is_octal && (gnum < 1 || gnum > next_group) {
+                    return Err((
+                        format!("invalid group reference {}", gnum),
+                        Some((i + 1) as i64),
+                    ));
                 }
             }
             i = j;
@@ -1662,24 +1859,58 @@ fn validate_group_syntax(
             // An escape is class content: a following `]` is NOT first.
             if in_class {
                 class_first = false;
+                // Group refs aren't allowed in classes: `\8`/`\9` can
+                // never be octal, so they're always bad escapes here
+                // (CPython: `[\911]` → "bad escape \9" at the backslash;
+                // `[\18]` stays valid octal + literal). Test_re.
+                if i + 1 < n && (chars[i + 1] == '8' || chars[i + 1] == '9') {
+                    return Err((format!("bad escape \\{}", chars[i + 1]), Some(i as i64)));
+                }
+            }
+            // Unknown ASCII-letter escapes are rejected (CPython raises
+            // "bad escape \X"; the engine would otherwise accept PCRE-isms
+            // like `\h`, `\R`, `\K`, `\e`, `\G`, `\O`). Valid letters
+            // differ in/out of classes (`\A`, `\B`, `\Z` are anchors —
+            // meaningless in a class — while `\z` is a valid absolute-end
+            // anchor outside classes but rejected inside). `\x`/`\u`/`\U`
+            // pass through to the engine (incomplete/bad-value messages);
+            // `\N{...}` was handled above; `\g` is only valid as `\g<...>`
+            // outside classes. Test_re: test_other_escapes.
+            if i + 1 < n && chars[i + 1].is_ascii_alphabetic() {
+                let e = chars[i + 1];
+                let ok = match e {
+                    'x' | 'u' | 'U' => true,
+                    'g' if !in_class && i + 2 < n && chars[i + 2] == '<' => true,
+                    'A' | 'B' | 'Z' | 'z' if !in_class => true,
+                    'b' | 'd' | 'D' | 's' | 'S' | 'w' | 'W' | 'a' | 'f' | 'n' | 'r' | 't' | 'v' => {
+                        true
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    return Err((format!("bad escape \\{}", e), Some(i as i64)));
+                }
             }
             i += 2;
             continue;
         }
         if in_class {
-            if c == '-' && i + 1 < n && chars[i + 1] == '-' && (i as i64) > (class_start as i64) + 1 {
+            if c == '-' && i + 1 < n && chars[i + 1] == '-' && (i as i64) > (class_start as i64) + 1
+            {
                 crate::modules::warnings_emit(
                     "Possible set difference (and future set operations) in the character class",
                     "FutureWarning",
                 );
             }
-            if c == '&' && i + 1 < n && chars[i + 1] == '&' && (i as i64) > (class_start as i64) + 1 {
+            if c == '&' && i + 1 < n && chars[i + 1] == '&' && (i as i64) > (class_start as i64) + 1
+            {
                 crate::modules::warnings_emit(
                     "Possible set intersection (and future set operations) in the character class",
                     "FutureWarning",
                 );
             }
-            if c == '|' && i + 1 < n && chars[i + 1] == '|' && (i as i64) > (class_start as i64) + 1 {
+            if c == '|' && i + 1 < n && chars[i + 1] == '|' && (i as i64) > (class_start as i64) + 1
+            {
                 crate::modules::warnings_emit(
                     "Possible set union (and future set operations) in the character class",
                     "FutureWarning",
@@ -1732,19 +1963,13 @@ fn validate_group_syntax(
                 match c2 {
                     None => {
                         // Trailing `(?`: 'unexpected end of pattern'.
-                        return Err((
-                            "unexpected end of pattern".to_string(),
-                            Some(n as i64),
-                        ));
+                        return Err(("unexpected end of pattern".to_string(), Some(n as i64)));
                     }
                     Some('P') => {
                         let c3 = chars.get(i + 3).copied();
                         if c3.is_none() {
                             // Trailing `(?P`: 'unexpected end of pattern'.
-                            return Err((
-                                "unexpected end of pattern".to_string(),
-                                Some(n as i64),
-                            ));
+                            return Err(("unexpected end of pattern".to_string(), Some(n as i64)));
                         }
                         if c3 == Some('<') {
                             let name_start = i + 4;
@@ -1779,7 +2004,8 @@ fn validate_group_syntax(
                             }
                             next_group += 1;
                             named.push((name, next_group));
-                            open_pos.push(i); paren_stack.push((Some(next_group), false));
+                            open_pos.push(i);
+                            paren_stack.push((Some(next_group), false));
                             open_captures.push(next_group);
                             i = j + 1;
                             continue;
@@ -1808,7 +2034,7 @@ fn validate_group_syntax(
                                 None => {
                                     return Err((
                                         format!("unknown group name '{}'", name),
-                                        None,
+                                        Some(name_start as i64),
                                     ))
                                 }
                                 Some((_, gnum)) => {
@@ -1841,17 +2067,15 @@ fn validate_group_syntax(
                         let c3 = chars.get(i + 3).copied();
                         if c3.is_none() {
                             // Trailing `(?<`: 'unexpected end of pattern'.
-                            return Err((
-                                "unexpected end of pattern".to_string(),
-                                Some(n as i64),
-                            ));
+                            return Err(("unexpected end of pattern".to_string(), Some(n as i64)));
                         }
                         if c3 == Some('=') || c3 == Some('!') {
                             if lb_depth == 0 {
                                 lookbehindgroups = Some(next_group);
                             }
                             lb_depth += 1;
-                            open_pos.push(i); paren_stack.push((None, true));
+                            open_pos.push(i);
+                            paren_stack.push((None, true));
                             i += 4; // past (?<= / (?<!
                             continue;
                         }
@@ -1895,7 +2119,8 @@ fn validate_group_syntax(
                         }
                         next_group += 1;
                         named.push((name, next_group));
-                        open_pos.push(i); paren_stack.push((Some(next_group), false));
+                        open_pos.push(i);
+                        paren_stack.push((Some(next_group), false));
                         open_captures.push(next_group);
                         i = j + 1;
                         continue;
@@ -1918,7 +2143,8 @@ fn validate_group_syntax(
                         continue;
                     }
                     Some(':') | Some('=') | Some('!') => {
-                        open_pos.push(i); paren_stack.push((None, false));
+                        open_pos.push(i);
+                        paren_stack.push((None, false));
                         i += 3;
                         continue;
                     }
@@ -1979,7 +2205,7 @@ fn validate_group_syntax(
                                 None => {
                                     return Err((
                                         format!("unknown group name '{}'", cond),
-                                        None,
+                                        Some(cond_start as i64),
                                     ));
                                 }
                                 Some((_, gnum)) => {
@@ -2026,7 +2252,7 @@ fn validate_group_syntax(
                                     pipes += 1;
                                     if pipes >= 2 {
                                         return Err((
-                                        "conditional backref with more than two branches"
+                                            "conditional backref with more than two branches"
                                                 .to_string(),
                                             Some(k as i64),
                                         ));
@@ -2044,7 +2270,8 @@ fn validate_group_syntax(
                                 ));
                             }
                         }
-                        open_pos.push(i); paren_stack.push((None, false));
+                        open_pos.push(i);
+                        paren_stack.push((None, false));
                         i = j + 1; // past the condition's `)`; body follows.
                         continue;
                     }
@@ -2063,7 +2290,8 @@ fn validate_group_syntax(
                             }
                         }
                         // Flags `(?i)` / `(?flags:` — treat as non-capturing.
-                        open_pos.push(i); paren_stack.push((None, false));
+                        open_pos.push(i);
+                        paren_stack.push((None, false));
                         i += 2;
                         continue;
                     }
@@ -2071,14 +2299,14 @@ fn validate_group_syntax(
             }
             // Plain capturing group.
             next_group += 1;
-            open_pos.push(i); paren_stack.push((Some(next_group), false));
+            open_pos.push(i);
+            paren_stack.push((Some(next_group), false));
             open_captures.push(next_group);
             i += 1;
             continue;
         }
         if c == ')' {
             if paren_stack.is_empty() {
-
                 return Err(("unbalanced parenthesis".to_string(), Some(i as i64)));
             }
             if let Some((gnum, is_lb)) = paren_stack.pop() {
@@ -2096,7 +2324,93 @@ fn validate_group_syntax(
             i += 1;
             continue;
         }
+        // `{m,n}` with m > n is "min repeat greater than max repeat" at
+        // the min digits (CPython: `x{2,1}` pos 2; the engine instead
+        // fails with a generic parse error). A bound above u32::MAX
+        // (CPython `_sre.MAXREPEAT` = 4294967295) is `OverflowError: the
+        // repetition number is too large` — surfaced via a sentinel
+        // (mapped in `fancy_error_to_pattern`), checked BEFORE min>max
+        // (CPython: `.{2**129,2**128}` → OverflowError). Anything else
+        // stays literal and falls through. Test_re: test_repeat_minmax,
+        // test_repeat_minmax_overflow.
+        if c == '{' && !in_class {
+            let mut j = i + 1;
+            while j < n && chars[j].is_ascii_digit() {
+                j += 1;
+            }
+            // Leading-comma form `{,n}` (normalized to `{0,n}` later;
+            // `{,}` can't overflow). Only complete (`}`-closed) forms.
+            if j == i + 1 && j < n && chars[j] == ',' {
+                let mut k = j + 1;
+                while k < n && chars[k].is_ascii_digit() {
+                    k += 1;
+                }
+                if k > j + 1 && k < n && chars[k] == '}' {
+                    let max_str: String = chars[j + 1..k].iter().collect();
+                    let max_overflow = match max_str.parse::<u128>() {
+                        Ok(v) => v > u32::MAX as u128,
+                        Err(_) => true,
+                    };
+                    if max_overflow {
+                        return Err(("__RE_OVERFLOW__".to_string(), Some((i + 1) as i64)));
+                    }
+                }
+            }
+            if j > i + 1 {
+                let min_str: String = chars[i + 1..j].iter().collect();
+                // Overflow of either bound, but ONLY for complete repeat
+                // forms (`{m}`, `{m,}`, `{m,n}` — an unclosed `{m` is a
+                // literal in CPython and must not error).
+                let overflow = |s: &str| match s.parse::<u128>() {
+                    Ok(v) => v > u32::MAX as u128,
+                    Err(_) => true,
+                };
+                if j < n && chars[j] == '}' {
+                    // `{m}` complete.
+                    if overflow(&min_str) {
+                        return Err(("__RE_OVERFLOW__".to_string(), Some((i + 1) as i64)));
+                    }
+                } else if j < n && chars[j] == ',' {
+                    j += 1;
+                    let max_start = j;
+                    while j < n && chars[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    if j < n && chars[j] == '}' {
+                        // `{m,}` (empty max) or `{m,n}` complete.
+                        if overflow(&min_str) {
+                            return Err(("__RE_OVERFLOW__".to_string(), Some((i + 1) as i64)));
+                        }
+                        if j > max_start {
+                            let max_str: String = chars[max_start..j].iter().collect();
+                            if overflow(&max_str) {
+                                return Err(("__RE_OVERFLOW__".to_string(), Some((i + 1) as i64)));
+                            }
+                            if let (Ok(lo), Ok(hi)) =
+                                (min_str.parse::<u32>(), max_str.parse::<u32>())
+                            {
+                                if lo > hi {
+                                    return Err((
+                                        "min repeat greater than max repeat".to_string(),
+                                        Some((i + 1) as i64),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         i += 1;
+    }
+    // Unclosed class reports at the OPENING `[` (CPython: `[` → pos 0,
+    // not end-of-pattern; test_re: test_character_set_errors). Runs
+    // before the engine (which reports end-of-pattern instead).
+    if in_class {
+        return Err((
+            "unterminated character set".to_string(),
+            Some(class_start as i64),
+        ));
     }
     if !paren_stack.is_empty() {
         let pos = open_pos.first().copied().unwrap_or(0);
@@ -2327,6 +2641,44 @@ fn parse_class_atom(chars: &[char], i: usize) -> (usize, String) {
 /// flipped (`[9-A]` → `[9-a]` would wrongly admit `_`). `(?...)`
 /// openers, group/backref/conditional/`\\N{...}` names and `(?#...)`
 /// comments are copied verbatim (never expanded).
+/// Resolve `\N{name}` escapes to `\x{...}` (the engine has no name
+/// table; names were validated by `validate_group_syntax`, so undefined
+/// names never reach here — left verbatim defensively).
+fn translate_unicode_names(pattern: &str) -> String {
+    let chars: Vec<char> = pattern.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(pattern.len());
+    let mut i = 0;
+    while i < n {
+        if chars[i] == '\\' && i + 2 < n && chars[i + 1] == 'N' && chars[i + 2] == '{' {
+            let mut j = i + 3;
+            while j < n && chars[j] != '}' {
+                j += 1;
+            }
+            if j < n {
+                let name: String = chars[i + 3..j].iter().collect();
+                if let Some(ch) = crate::unicode_names::unicode_name_lookup(&name) {
+                    // Engine-safe escape: `\xHH` / `\uHHHH` / `\UHHHHHHHH`
+                    // (`\x{...}` braced form is rejected by the engine).
+                    let cp = ch as u32;
+                    if cp <= 0xFF {
+                        out.push_str(&format!("\\x{:02x}", cp));
+                    } else if cp <= 0xFFFF {
+                        out.push_str(&format!("\\u{:04x}", cp));
+                    } else {
+                        out.push_str(&format!("\\U{:08x}", cp));
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
 fn ascii_case_expand(pattern: &str) -> String {
     let chars: Vec<char> = pattern.chars().collect();
     let n = chars.len();
@@ -2611,7 +2963,20 @@ pub fn compile_python_regex_flags(
     flags: i32,
     is_bytes: bool,
 ) -> Result<fancy_regex::Regex, fancy_regex::Error> {
-    // CPython-specific quantifier validation (see `validate_quantifiers`).
+    validate_pattern_for_compile(pattern, flags, is_bytes)?;
+    compile_translated_pattern(pattern, flags, is_bytes)
+}
+
+/// CPython-specific pre-validation (quantifiers, group structure, octal
+/// range). Split out so `fullmatch` can validate the USER pattern but
+/// compile its internally-anchored `(?:pat)\z` wrapper without
+/// re-validating (our own trailing `\z` is engine syntax, not user
+/// syntax — `test_other_escapes` rejects user `\z`).
+pub(crate) fn validate_pattern_for_compile(
+    pattern: &str,
+    flags: i32,
+    is_bytes: bool,
+) -> Result<(), fancy_regex::Error> {
     if let Err(char_idx) = validate_quantifiers(pattern) {
         // validate works in CHAR indices; fancy's ParseError carries a BYTE
         // offset (which `fancy_error_to_pattern` converts back to a char
@@ -2634,10 +2999,17 @@ pub fn compile_python_regex_flags(
         let byte_pos = pos
             .and_then(|c| pattern.char_indices().nth(c as usize).map(|(b, _)| b))
             .unwrap_or(pattern.len());
-        return Err(fancy_regex::Error::ParseError(
-            byte_pos,
-            fancy_regex::ParseError::GeneralParseError(msg),
-        ));
+        // "unterminated character set" must travel as `InvalidClass`:
+        // routing it through `GeneralParseError` would hit
+        // `map_general_parse_error`'s "unterminated" fallthrough (which
+        // looks for a "class" substring the message doesn't contain) and
+        // come out as "missing ), unterminated subpattern".
+        let kind = if msg == "unterminated character set" {
+            fancy_regex::ParseError::InvalidClass
+        } else {
+            fancy_regex::ParseError::GeneralParseError(msg)
+        };
+        return Err(fancy_regex::Error::ParseError(byte_pos, kind));
     }
     // Octal-escape range check (CPython raises at parse time).
     if let Some((byte_pos, digits)) = find_octal_range_error(pattern) {
@@ -2649,7 +3021,252 @@ pub fn compile_python_regex_flags(
             )),
         ));
     }
-    let pattern = escape_loose_braces(pattern);
+    // Bad character ranges (`[b-a]`, `[\w-b]`, `[a-\w]` — CPython raises
+    // "bad character range X-Y" at the range start; the engine instead
+    // fails with a generic parse error). Test_re: test_character_set_errors.
+    if let Some((byte_pos, msg)) = find_bad_range_error(pattern, flags) {
+        return Err(fancy_regex::Error::ParseError(
+            byte_pos,
+            fancy_regex::ParseError::GeneralParseError(msg),
+        ));
+    }
+    Ok(())
+}
+
+/// Scan classes for bad ranges and return the byte position of the range
+/// START + message. A `-` between two atoms is a range operator (unless
+/// trailing or before `]`): it is bad when either side is a character
+/// class (`\w` etc.) or when start > end (`[b-a]`). Runs after
+/// `validate_group_syntax` (unclosed classes already reported) on the
+/// original pattern. Mirrors CPython (probed: `[a---b]` → "a--",
+/// `[--a]`/`[a-b-c]`/`[\--0]`/`[]-a]` OK, `[\n-\x20]` OK).
+fn find_bad_range_error(pattern: &str, flags: i32) -> Option<(usize, String)> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let n = chars.len();
+    let byte_of = |idx: usize| -> usize {
+        pattern
+            .char_indices()
+            .nth(idx)
+            .map(|(b, _)| b)
+            .unwrap_or(pattern.len())
+    };
+    // Resolve a class escape at `i` (chars[i] == '\\', i+1 < n) to
+    // (source text, value or None for character classes, end index).
+    // None (whole) = unresolvable here — skip the range check and let the
+    // main validation/engine report (preserves error precedence, e.g.
+    // `[a-\xZZ]` stays "incomplete escape").
+    let resolve_escape = |i: usize| -> Option<(String, Option<u32>, usize)> {
+        let e = chars[i + 1];
+        match e {
+            'N' => {
+                if i + 2 < n && chars[i + 2] == '{' {
+                    let mut j = i + 3;
+                    while j < n && chars[j] != '}' {
+                        j += 1;
+                    }
+                    if j >= n {
+                        return None;
+                    }
+                    let name: String = chars[i + 3..j].iter().collect();
+                    let text: String = chars[i..=j].iter().collect();
+                    return crate::unicode_names::unicode_name_lookup(&name)
+                        .map(|ch| (text, Some(ch as u32), j + 1));
+                }
+                None
+            }
+            'x' => {
+                if i + 3 < n && chars[i + 2].is_ascii_hexdigit() && chars[i + 3].is_ascii_hexdigit()
+                {
+                    let hex: String = chars[i + 2..i + 4].iter().collect();
+                    let text: String = chars[i..i + 4].iter().collect();
+                    return u32::from_str_radix(&hex, 16)
+                        .ok()
+                        .map(|v| (text, Some(v), i + 4));
+                }
+                None
+            }
+            'u' => {
+                if i + 5 < n && chars[i + 2..i + 6].iter().all(|c| c.is_ascii_hexdigit()) {
+                    let hex: String = chars[i + 2..i + 6].iter().collect();
+                    let text: String = chars[i..i + 6].iter().collect();
+                    return u32::from_str_radix(&hex, 16)
+                        .ok()
+                        .map(|v| (text, Some(v), i + 6));
+                }
+                None
+            }
+            'U' => {
+                if i + 9 < n && chars[i + 2..i + 10].iter().all(|c| c.is_ascii_hexdigit()) {
+                    let hex: String = chars[i + 2..i + 10].iter().collect();
+                    let text: String = chars[i..i + 10].iter().collect();
+                    return u32::from_str_radix(&hex, 16)
+                        .ok()
+                        .and_then(|v| char::from_u32(v).map(|_| (text, Some(v), i + 10)));
+                }
+                None
+            }
+            '0'..='7' => {
+                let mut k = i + 1;
+                let mut oct = String::new();
+                while k < n && oct.len() < 3 && chars[k].is_digit(8) {
+                    oct.push(chars[k]);
+                    k += 1;
+                }
+                let text: String = chars[i..k].iter().collect();
+                u32::from_str_radix(&oct, 8)
+                    .ok()
+                    .map(|v| (text, Some(v), k))
+            }
+            'd' | 'D' | 's' | 'S' | 'w' | 'W' | 'p' | 'P' => {
+                Some((format!("\\{}", e), None, i + 2))
+            }
+            'n' => Some(("\\n".to_string(), Some(0x0A), i + 2)),
+            't' => Some(("\\t".to_string(), Some(0x09), i + 2)),
+            'r' => Some(("\\r".to_string(), Some(0x0D), i + 2)),
+            'f' => Some(("\\f".to_string(), Some(0x0C), i + 2)),
+            'v' => Some(("\\v".to_string(), Some(0x0B), i + 2)),
+            'a' => Some(("\\a".to_string(), Some(0x07), i + 2)),
+            'b' => Some(("\\b".to_string(), Some(0x08), i + 2)),
+            _ => Some((chars[i..i + 2].iter().collect(), Some(e as u32), i + 2)),
+        }
+    };
+    let verbose_global = flags & 64 != 0;
+    let mut i = 0;
+    let mut in_class = false;
+    let mut class_first = false;
+    // Pending range-start atom: (byte start, source text, value).
+    let mut prev: Option<(usize, String, Option<u32>)> = None;
+    while i < n {
+        let c = chars[i];
+        if !in_class {
+            if c == '\\' {
+                i += 2;
+                continue;
+            }
+            // `(?#...)` comments may contain brackets — skip (mirrors the
+            // main validator).
+            if c == '(' && i + 3 < n && chars[i + 1] == '?' && chars[i + 2] == '#' {
+                let mut j = i + 3;
+                while j < n && chars[j] != ')' {
+                    j += 1;
+                }
+                i = (j + 1).min(n);
+                continue;
+            }
+            if c == '#' && verbose_global {
+                while i < n && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if c == '[' {
+                in_class = true;
+                class_first = true;
+                prev = None;
+                i += 1;
+                // `[^...]`: `^` is negation, not content.
+                if i < n && chars[i] == '^' {
+                    i += 1;
+                }
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        // In class.
+        if c == '\\' {
+            if i + 1 >= n {
+                break;
+            }
+            match resolve_escape(i) {
+                Some((text, val, end)) => {
+                    prev = Some((byte_of(i), text, val));
+                    i = end;
+                }
+                None => {
+                    prev = None;
+                    i += 2;
+                }
+            }
+            class_first = false;
+            continue;
+        }
+        if c == ']' {
+            if class_first {
+                // Leading `]` is a literal atom (e.g. `[]-a]` ranges it).
+                prev = Some((byte_of(i), "]".to_string(), Some(']' as u32)));
+            } else {
+                in_class = false;
+                prev = None;
+            }
+            class_first = false;
+            i += 1;
+            continue;
+        }
+        if c == '-' {
+            // A `-` between two atoms is a range operator (trailing `-`
+            // or `-` before `]` is literal and clears the pending atom,
+            // so `[--a]` stays `[--a]`-literals and `[a-b-c]` parses as
+            // range + literals).
+            if prev.is_some() && i + 1 < n && chars[i + 1] != ']' {
+                let (ps, pt, pv) = prev.clone().unwrap();
+                // Parse the range-end atom (literal or escape).
+                let next: Option<(String, Option<u32>, usize)> = if chars[i + 1] == '\\' {
+                    if i + 2 >= n {
+                        None
+                    } else {
+                        resolve_escape(i + 1)
+                    }
+                } else {
+                    Some((chars[i + 1].to_string(), Some(chars[i + 1] as u32), i + 2))
+                };
+                match next {
+                    Some((nt, nv, end)) => {
+                        if pv.is_none() || nv.is_none() || pv.unwrap() > nv.unwrap() {
+                            return Some((ps, format!("bad character range {}-{}", pt, nt)));
+                        }
+                        prev = None;
+                        i = end;
+                        class_first = false;
+                        continue;
+                    }
+                    None => {
+                        // Unresolvable end (e.g. `[a-\xZZ]`) — leave it
+                        // to the main validation/engine.
+                        prev = None;
+                        i += 1;
+                        class_first = false;
+                        continue;
+                    }
+                }
+            }
+            prev = None;
+            class_first = false;
+            i += 1;
+            continue;
+        }
+        // Literal atom (includes a bare `[` inside — literal per current
+        // semantics — and non-first `^`).
+        prev = Some((byte_of(i), c.to_string(), Some(c as u32)));
+        class_first = false;
+        i += 1;
+    }
+    None
+}
+
+/// Translate a validated pattern through every CPython→engine rewrite
+/// and build the fancy `Regex` (no validation — caller must have run
+/// `validate_pattern_for_compile` on the user pattern first, unless the
+/// input is internally generated like `fullmatch`'s `(?:pat)\z`).
+pub(crate) fn compile_translated_pattern(
+    pattern: &str,
+    flags: i32,
+    is_bytes: bool,
+) -> Result<fancy_regex::Regex, fancy_regex::Error> {
+    // `\N{name}` → `\xHH` FIRST (before brace-escaping splits it; engine
+    // lacks a name table). Bytes patterns never contain `\N`.
+    let pattern = translate_unicode_names(&pattern);
+    let pattern = escape_loose_braces(&pattern);
     let pattern = escape_leading_bracket_in_class(&pattern);
     // Neutralize engine set operators (`--`/`&&`/`~~`) inside classes so
     // they keep CPython's current literal/range semantics (see above).
@@ -2714,7 +3331,311 @@ pub fn compile_python_regex_flags(
         pattern
     };
     let pattern = translate_bare_name_conditionals(&pattern);
-    fancy_regex::Regex::new(&pattern)
+    // Huge counted repeats (`x{65535}`) unroll into tens of thousands of
+    // states whose lazy DFA build is quadratic (~74 s for 65535); split
+    // them into ≤1000-sized chunks of the same atom (semantically
+    // identical for exact/optional distributions). Test_re:
+    // test_repeat_minmax_overflow.
+    let pattern = split_large_repeats(&pattern);
+    // The `regex`-crate delegate defaults (10 MB) refuse big-but-valid
+    // counted repeats; raise the size cap (the DFA cap stays default —
+    // post-split chunks build small DFAs fast).
+    fancy_regex::RegexBuilder::new(&pattern)
+        .delegate_size_limit(512 << 20)
+        .build()
+}
+
+/// Split counted repeats with a bound above `CHUNK_THRESHOLD` into
+/// concatenated ≤1000-sized repeats of the same atom (`X{65535}` →
+/// `X{1000}…×65 + X{535}`; `X{m,n}` → `X{m}` + chunked `X{0,n-m}`).
+/// Only fires for simple fixed-width atoms (a lone char or a whole
+/// `[...]` class); anything else (groups, assertions, escapes needing
+/// multi-char parsing, brace-hex `\x{..}`, comments, in-class `{`)
+/// is left for the engine. Lazy/possessive suffixes (`?`/`+`) are
+/// propagated to every chunk. Runs last so it sees the fully
+/// translated pattern.
+fn split_large_repeats(pattern: &str) -> String {
+    const CHUNK_THRESHOLD: u32 = 2000;
+    const CHUNK: u32 = 1000;
+    let chars: Vec<char> = pattern.chars().collect();
+    let n = chars.len();
+    // Fast path: no digit-brace likely present.
+    if !pattern.contains('{') {
+        return pattern.to_string();
+    }
+    // Unescaped backslash immediately before `idx`?
+    let unescaped_backslash_before = |idx: usize| -> bool {
+        let mut k = idx;
+        let mut count = 0;
+        while k > 0 && chars[k - 1] == '\\' {
+            count += 1;
+            k -= 1;
+        }
+        count % 2 == 1
+    };
+    let mut out = String::with_capacity(pattern.len());
+    let mut i = 0;
+    let mut in_class = false;
+    let mut class_first = false;
+    let mut class_start = 0usize;
+    let mut last_class: Option<(usize, usize)> = None; // (start, end-exclusive of `]`)
+    while i < n {
+        let c = chars[i];
+        if c == '\\' {
+            out.push(c);
+            if i + 1 < n {
+                out.push(chars[i + 1]);
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if in_class {
+            out.push(c);
+            if c == ']' && !class_first {
+                in_class = false;
+                last_class = Some((class_start, i + 1));
+            }
+            class_first = false;
+            i += 1;
+            continue;
+        }
+        // `(?#...)` comments: copy verbatim (braces inside aren't repeats).
+        if c == '(' && i + 2 < n && chars[i + 1] == '?' && chars[i + 2] == '#' {
+            let mut j = i + 3;
+            while j < n && chars[j] != ')' {
+                j += 1;
+            }
+            j = (j + 1).min(n);
+            out.push_str(&chars[i..j].iter().collect::<String>());
+            i = j;
+            continue;
+        }
+        if c == '[' {
+            in_class = true;
+            class_first = true;
+            class_start = i;
+            out.push(c);
+            i += 1;
+            if i < n && chars[i] == '^' {
+                out.push('^');
+                i += 1;
+            }
+            continue;
+        }
+        if c == '{' {
+            // Try `{m}`, `{m,}`, `{m,n}` (`{,n}`/`{,}` were normalized
+            // to `{0,n}`/`{0}` upstream in `escape_loose_braces`).
+            let mut j = i + 1;
+            while j < n && chars[j].is_ascii_digit() {
+                j += 1;
+            }
+            let mut form: Option<(u32, Option<u32>)> = None; // (min, max or None)
+            if j > i + 1 {
+                if j < n && chars[j] == '}' {
+                    if let Ok(m) = chars[i + 1..j].iter().collect::<String>().parse::<u32>() {
+                        form = Some((m, Some(m)));
+                    }
+                    j += 1;
+                } else if j < n && chars[j] == ',' {
+                    let mut k = j + 1;
+                    while k < n && chars[k].is_ascii_digit() {
+                        k += 1;
+                    }
+                    if k < n && chars[k] == '}' {
+                        if let Ok(m) = chars[i + 1..j].iter().collect::<String>().parse::<u32>() {
+                            if k == j + 1 {
+                                form = Some((m, None)); // `{m,}`
+                            } else if let Ok(mx) =
+                                chars[j + 1..k].iter().collect::<String>().parse::<u32>()
+                            {
+                                form = Some((m, Some(mx)));
+                            }
+                        }
+                        j = k + 1;
+                    }
+                }
+            }
+            if let Some((lo, hi_opt)) = form {
+                let hi = hi_opt.unwrap_or(lo);
+                // Brace-hex/word-boundary forms (`\x{..}`, `\b{..}`, …):
+                // the char before `{` names the form — never a repeat.
+                // (Overflow bounds were already rejected at validation.)
+                let brace_form = i >= 2
+                    && matches!(chars[i - 1], 'x' | 'u' | 'U' | 'b' | 'p' | 'N')
+                    && chars[i - 2] == '\\'
+                    && !unescaped_backslash_before(i - 2);
+                // Lazy/possessive suffix right after `}`.
+                let mut suffix = "";
+                if j < n && (chars[j] == '?' || chars[j] == '+') {
+                    suffix = if chars[j] == '?' { "?" } else { "+" };
+                    j += 1;
+                }
+                // Find the repeated atom: whole class ending just before
+                // `{`, else one safe char.
+                let atom: Option<(usize, usize)> = if i > 0 && chars[i - 1] == ']' {
+                    match last_class {
+                        Some((s, e)) if e == i => Some((s, e)),
+                        _ => None,
+                    }
+                } else if i > 0 {
+                    let a = chars[i - 1];
+                    // `.` (any-char) is a fine splittable atom; other
+                    // metachars (group/quantifier/assertion syntax) are
+                    // left to the engine.
+                    let metachar = matches!(
+                        a,
+                        '{' | '}'
+                            | '('
+                            | ')'
+                            | '|'
+                            | '*'
+                            | '+'
+                            | '?'
+                            | '\\'
+                            | '['
+                            | ']'
+                            | '^'
+                            | '$'
+                            | '-'
+                            | '&'
+                            | '~'
+                            | '#'
+                            | ' '
+                            | '\t'
+                            | '\n'
+                            | '\r'
+                    );
+                    // Digits/hexdigits may extend a multi-char escape
+                    // (`\x41`, octal) — only trust them after a check.
+                    let risky = a.is_ascii_digit()
+                        || (a.is_ascii_hexdigit()
+                            && i >= 4
+                            && chars[i - 3] == '\\'
+                            && matches!(chars[i - 2], 'x' | 'u'));
+                    if !metachar && !risky && !brace_form {
+                        Some((i - 1, i))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if !brace_form {
+                    if let Some((a0, a1)) = atom {
+                        let atom_text: String = chars[a0..a1].iter().collect();
+                        // Remove the already-copied atom (`String::len`
+                        // is bytes, matching the pushed UTF-8); re-emit
+                        // chunked below.
+                        for _ in 0..atom_text.len() {
+                            out.pop();
+                        }
+                        // `{m,n}` ≡ `X{m}` + `X{0,n-m}`; `{m,}` ≡ `X{m}`
+                        // + `X*`; exact `{n}` ≡ `X{n}` — each piece ≤
+                        // CHUNK, wrapped (see below). (Atoms carry no
+                        // groups, so no capture numbering shifts.)
+                        let mut done = false;
+                        if hi > CHUNK_THRESHOLD {
+                            // Wrap pieces to segment the engine's delegate
+                            // (one 65k-state lazy DFA ≈ 74 s; chunked ≈
+                            // 0.1 s). Exact pieces use ATOMIC groups
+                            // (`(?>X{n})` — exact counts have no backtrack
+                            // variation, so possessive ≡ plain; suffix
+                            // dropped). Optional/star pieces use
+                            // transparent `(?:...)` with the lazy/possessive
+                            // suffix INSIDE (`(?:X{0,k}?)` — a suffix after
+                            // `)` would mean "optional group", not "lazy").
+                            // Backtrack order across pieces matches the
+                            // un-split form.
+                            let wrapped_exact = |inner: &str| {
+                                let mut s = String::from("(?");
+                                s.push('>');
+                                s.push_str(inner);
+                                s.push(')');
+                                s
+                            };
+                            let wrapped_var = |inner: &str| {
+                                let mut s = String::from("(?:");
+                                s.push_str(inner);
+                                s.push_str(suffix);
+                                s.push(')');
+                                s
+                            };
+                            // Emit exact `atom{total}` split into atomic
+                            // pieces (fixed counts: never suffixed).
+                            let emit_exact = |out: &mut String, mut total: u32| {
+                                while total > CHUNK {
+                                    out.push_str(&wrapped_exact(&format!(
+                                        "{}{{{}}}",
+                                        atom_text, CHUNK
+                                    )));
+                                    total -= CHUNK;
+                                }
+                                if total > 0 {
+                                    out.push_str(&wrapped_exact(&format!(
+                                        "{}{{{}}}",
+                                        atom_text, total
+                                    )));
+                                }
+                            };
+                            // Emit optional `atom{0,total}` split up
+                            // (variable: suffix goes inside).
+                            let emit_optional = |out: &mut String, mut total: u32| {
+                                while total > CHUNK {
+                                    out.push_str(&wrapped_var(&format!(
+                                        "{}{{0,{}}}",
+                                        atom_text, CHUNK
+                                    )));
+                                    total -= CHUNK;
+                                }
+                                if total > 0 {
+                                    out.push_str(&wrapped_var(&format!(
+                                        "{}{{0,{}}}",
+                                        atom_text, total
+                                    )));
+                                }
+                            };
+                            match hi_opt {
+                                Some(_) => {
+                                    if lo > 0 {
+                                        emit_exact(&mut out, lo);
+                                    }
+                                    emit_optional(&mut out, hi - lo);
+                                    done = true;
+                                }
+                                None => {
+                                    if lo > 0 {
+                                        emit_exact(&mut out, lo);
+                                    }
+                                    out.push_str(&wrapped_var(&format!("{}*", atom_text)));
+                                    done = true;
+                                }
+                            }
+                        }
+                        if !done {
+                            // Small: copy verbatim (atom + original).
+                            out.push_str(&atom_text);
+                            out.push_str(&chars[i..j].iter().collect::<String>());
+                        }
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+            // Not splittable: copy the `{` and move on (the rest parses
+            // as ordinary pattern text on later iterations).
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        if c == ']' {
+            last_class = None; // `]` outside a class: not an atom end
+        }
+        i += 1;
+    }
+    out
 }
 
 /// fancy-regex only treats a conditional's target as a group-existence
@@ -2902,21 +3823,15 @@ fn split_top_flag_groups(text: &str) -> Vec<(String, u8)> {
             continue;
         }
         if c == '(' {
-            if starts_with_at(i, "(?")
-                && depth == 0
-            {
+            if starts_with_at(i, "(?") && depth == 0 {
                 let mut j = i + 2;
                 let mut letters = String::new();
-                while j < chars.len()
-                    && (chars[j].is_ascii_alphabetic() || chars[j] == '-')
-                {
+                while j < chars.len() && (chars[j].is_ascii_alphabetic() || chars[j] == '-') {
                     letters.push(chars[j]);
                     j += 1;
                 }
                 if chars.get(j) == Some(&':')
-                    && (letters.contains('u')
-                        || letters.contains('a')
-                        || letters.contains('L'))
+                    && (letters.contains('u') || letters.contains('a') || letters.contains('L'))
                 {
                     if !cur.is_empty() {
                         out.push((std::mem::take(&mut cur), 0));

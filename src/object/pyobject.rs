@@ -431,6 +431,28 @@ pub enum PyObject {
     /// Behaves as its int value in flag contexts (`as_i64`), with
     /// IntFlag repr/str/operators (see `regexflag_*` helpers).
     RegexFlag(i64),
+    /// Lazy `re.finditer` iterator: holds the compiled regex, subject
+    /// snapshot (positions), pattern/flags, byte `pos`/`endpos`, and an
+    /// optional live bytearray `subject` (buffer export held while alive,
+    /// released on exhaustion; matches re-slice it live).
+    FindIter {
+        regex: Box<fancy_regex::Regex>,
+        string: String,
+        pattern: String,
+        flags: i32,
+        is_bytes: bool,
+        pos: usize,
+        endpos: usize,
+        /// Char indices for Match `.pos`/`.endpos` attributes.
+        mpos: usize,
+        mendpos: usize,
+        subject: Option<PyObjectRef>,
+        exhausted: bool,
+        /// must_advance flag (sre): previous yielded match was empty —
+        /// the next attempt restarts at `pos` and rejects a repeated
+        /// zero-width match there (test_re: test_zerowidth).
+        ma: bool,
+    },
     Closure(Rc<dyn Fn(&[PyObjectRef]) -> PyResult<PyObjectRef>>),
     /// Implements the await protocol for Futures.
     /// __await__ returns this, and SEND drives it: first yield the future,
@@ -481,6 +503,8 @@ impl PyObject {
             PyObject::Range { .. } => "range",
             PyObject::RangeIter { .. } => "range_iterator",
             PyObject::ListIter { .. } => "list_iterator",
+            // CPython `type(re.finditer(...))` is `callable_iterator`.
+            PyObject::FindIter { .. } => "callable_iterator",
             PyObject::DequeIter { .. } => "deque_iterator",
             PyObject::DequeRevIter { .. } => "deque_reverse_iterator",
             PyObject::GetItemIter { .. } => "iterator",

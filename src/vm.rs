@@ -972,6 +972,93 @@ impl VirtualMachine {
                 }
             }
         }
+        // `types.FunctionType(code, globals[, name[, argdefs[, closure]]])`
+        // constructs a real callable function from a code object (the
+        // `function` type doubles as isinstance-check target AND
+        // constructor in CPython). Generic instance construction instead
+        // produced a broken shell (no code/name → "not callable" on
+        // first call). Mirrors MAKE_FUNCTION's own field wiring
+        // (test_builtin: test_compile_top_level_await builds coroutines
+        // via `FunctionType(co, globals)`).
+        if let PyObject::Type { name, .. } = &*callable.borrow() {
+            if name == "function" {
+                if args.len() < 2 || args.len() > 5 {
+                    return Err(PyError::type_error(format!(
+                        "function expected 2 to 5 arguments, got {}",
+                        args.len()
+                    )));
+                }
+                let code_obj = match &*args[0].borrow() {
+                    PyObject::Code(c) => c.clone(),
+                    other => {
+                        return Err(PyError::type_error(format!(
+                            "function() argument 1 must be code, not {}",
+                            other.type_name()
+                        )))
+                    }
+                };
+                let globals_map =
+                    crate::object::str_map_to_strid_map(crate::object::dict_arg_to_hashmap(
+                        &args[1],
+                        "function() argument 2 must be a dict",
+                    )?);
+                let mut func = crate::object::PyFunction {
+                    code: code_obj.clone(),
+                    globals: std::rc::Rc::new(std::cell::RefCell::new(globals_map)),
+                    defaults: Vec::new(),
+                    closure: Vec::new(),
+                    dict: std::collections::HashMap::new(),
+                    // Live link: frame writes mirror back into the
+                    // caller's own dict after each call (see
+                    // `mirror_function_globals` at the `handle_py_function_call`
+                    // exit) — CPython's `__globals__` IS that dict.
+                    globals_dict: Some(args[1].clone()),
+                    jit_ptr: std::cell::Cell::new(0),
+                    jit_consts: std::cell::RefCell::new(Vec::new()),
+                    name_memo: std::cell::RefCell::new(None),
+                    qualname_memo: std::cell::RefCell::new(None),
+                };
+                // Optional name / argdefs / closure (CPython:
+                // `function(code, globals, name, argdefs, closure)`).
+                if let Some(nm) = args.get(2) {
+                    if !matches!(&*nm.borrow(), PyObject::None) {
+                        func.dict
+                            .insert("__name__".to_string(), crate::object::py_str(&nm.str()));
+                    }
+                }
+                if let Some(ad) = args.get(3) {
+                    if !matches!(&*ad.borrow(), PyObject::None) {
+                        if let PyObject::Tuple(items) = &*ad.borrow() {
+                            func.defaults = items.clone();
+                        } else {
+                            return Err(PyError::type_error(
+                                "function() argument 4 must be tuple or None",
+                            ));
+                        }
+                    }
+                }
+                if let Some(cl) = args.get(4) {
+                    if !matches!(&*cl.borrow(), PyObject::None) {
+                        if let PyObject::Tuple(items) = &*cl.borrow() {
+                            func.closure = items.clone();
+                        } else {
+                            return Err(PyError::type_error(
+                                "function() argument 5 must be tuple or None",
+                            ));
+                        }
+                    }
+                }
+                let func_ref = PyObjectRef::new(PyObject::Function(Box::new(func)));
+                if let PyObject::Function(ref mut inner_f) = &mut *func_ref.borrow_mut() {
+                    let dict = &mut inner_f.dict;
+                    dict.insert(
+                        "__code__".to_string(),
+                        PyObjectRef::new(PyObject::Code(code_obj)),
+                    );
+                }
+                return Ok(func_ref);
+            }
+        }
         // Placeholder iterator types (range_iterator, etc.) are not directly constructible
         if let PyObject::Type { name, .. } = &*callable.borrow() {
             if name.contains("iterator")

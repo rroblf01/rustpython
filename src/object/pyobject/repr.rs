@@ -200,6 +200,7 @@ impl PyObject {
             }
             PyObject::RangeIter { .. } => "<range_iterator object>".to_string(),
             PyObject::ListIter { .. } => "<list_iterator object>".to_string(),
+            PyObject::FindIter { .. } => "<callable_iterator object>".to_string(),
             PyObject::DequeIter { .. } => "<deque_iterator object>".to_string(),
             PyObject::DequeRevIter { .. } => "<deque_reverse_iterator object>".to_string(),
             PyObject::DictIter { .. } => "<dict_keyiterator object>".to_string(),
@@ -578,7 +579,12 @@ impl PyObject {
             PyObject::MemoryView { .. } => {
                 format!("<memory at 0x{:012x}>", self as *const PyObject as usize)
             }
-            PyObject::CompiledRegex { pattern, flags, is_bytes, .. } => {
+            PyObject::CompiledRegex {
+                pattern,
+                flags,
+                is_bytes,
+                ..
+            } => {
                 let pattern_repr = if *is_bytes {
                     format!("b'{}'", repr_bytes_inner(pattern.as_bytes()))
                 } else {
@@ -587,7 +593,11 @@ impl PyObject {
                 // CPython's `%.200R` — truncate the pattern repr at 200
                 // chars, appending `...`.
                 let pattern_repr: String = if pattern_repr.chars().count() > 200 {
-                    pattern_repr.chars().take(200).chain("...".chars()).collect()
+                    pattern_repr
+                        .chars()
+                        .take(200)
+                        .chain("...".chars())
+                        .collect()
                 } else {
                     pattern_repr
                 };

@@ -474,6 +474,7 @@ pub(crate) extern "C" fn jit_make_function(
                     defaults,
                     closure,
                     dict: std::collections::HashMap::new(),
+                    globals_dict: None,
                     jit_ptr: std::cell::Cell::new(0),
                     jit_consts: std::cell::RefCell::new(Vec::new()),
                     name_memo: std::cell::RefCell::new(None),

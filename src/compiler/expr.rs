@@ -1,4 +1,5 @@
 use super::scope::ScopeType;
+use super::utils::contains_yield_in_expr;
 use super::Compiler;
 use crate::ast::*;
 use crate::bytecode::*;
@@ -664,6 +665,30 @@ impl Compiler {
                 // won't be real for these — but is safe) until the
                 // freevar-wiring gap is actually closed as its own
                 // dedicated, carefully-verified effort.
+                //
+                // EXCEPTION: an `async for` clause anywhere makes it an
+                // async generator — the eager inline path builds a plain
+                // list (sync!), which no `__aiter__` consumer accepts.
+                // Same for `await` anywhere inside (an `await`-bearing
+                // genexp is async, so `all()`/`list()` on it must raise
+                // TypeError instead of silently sync-iterating;
+                // test_builtin's test_builtin_call_async_genexpr_no_crash).
+                // Route those through the function-based path (compiled
+                // async, yielding a real coroutine object with
+                // `__aiter__`/`__anext__`). Freevar caveat above applies,
+                // but globals (the common/tested shape) work.
+                // test_builtin::test_compile_top_level_await.
+                if generators.iter().any(|g| g.is_async)
+                    || contains_yield_in_expr(elt)
+                    || generators.iter().any(|g| {
+                        contains_yield_in_expr(&g.iter)
+                            || contains_yield_in_expr(&g.target)
+                            || g.ifs.iter().any(contains_yield_in_expr)
+                    })
+                {
+                    self.compile_genexp(elt, generators)?;
+                    return Ok(());
+                }
                 self.compile_comprehension(elt, generators, false)?;
                 self.emit(Opcode::GET_ITER, 0);
             }

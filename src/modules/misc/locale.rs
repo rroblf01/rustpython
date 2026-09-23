@@ -177,7 +177,10 @@ pub fn create_locale_dict() -> HashMap<String, PyObjectRef> {
             let actual = unsafe {
                 let ret = setlocale(category as std::os::raw::c_int, c_locale.as_ptr());
                 if ret.is_null() {
-                    return Err(locale_error(&format!("unsupported locale setting: {}", locale)));
+                    return Err(locale_error(&format!(
+                        "unsupported locale setting: {}",
+                        locale
+                    )));
                 }
                 std::ffi::CStr::from_ptr(ret).to_string_lossy().into_owned()
             };

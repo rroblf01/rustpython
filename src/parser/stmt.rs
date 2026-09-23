@@ -108,14 +108,14 @@ impl Parser {
             return self.parse_with(false);
         }
         if self.at(&Token::Async) && self.peek() == &Token::For {
-            if self.async_depth == 0 && !self.allow_top_level_await {
+            if self.async_depth == 0 && (self.fn_depth > 0 || !self.allow_top_level_await) {
                 return Err("'async for' outside async function".to_string());
             }
             self.next(); // consume async
             return self.parse_for(true);
         }
         if self.at(&Token::Async) && self.peek() == &Token::With {
-            if self.async_depth == 0 && !self.allow_top_level_await {
+            if self.async_depth == 0 && (self.fn_depth > 0 || !self.allow_top_level_await) {
                 return Err("'async with' outside async function".to_string());
             }
             self.next(); // consume async

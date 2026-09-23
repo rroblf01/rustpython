@@ -32,6 +32,11 @@ pub struct Parser {
     // `async with`/`await` (SyntaxError when used at top level, matching
     // CPython; see the emit sites in parse_stmt/parse_unary).
     async_depth: usize,
+    // >0 while parsing ANY function/lambda body (sync or async) — the
+    // PyCF_ALLOW_TOP_LEVEL_AWAIT flag relaxes top-level (module) `await`
+    // only, never inside a sync `def` (test_builtin's
+    // test_compile_top_level_await_invalid_cases).
+    fn_depth: usize,
     // >0 while parsing a generator-expression body (`(x for x in ...)`).
     // `await` inside a genexpr is legal even in a sync function (it becomes
     // an async generator) — test_asyncgen's `make_arange` relies on it.
@@ -165,6 +170,7 @@ impl Parser {
             suite_depth: 0,
             fstring_depth: 0,
             async_depth: 0,
+            fn_depth: 0,
             genexpr_depth: 0,
             allow_top_level_await: false,
             barry_as_bdfl: false,

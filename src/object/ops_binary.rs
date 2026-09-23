@@ -527,16 +527,32 @@ pub fn py_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
                             && br.is_finite()
                             && bi.is_finite()
                         {
-                            let x = if ar.is_infinite() { ar.signum() } else { 0.0_f64.copysign(ar) };
-                            let y = if ai.is_infinite() { ai.signum() } else { 0.0_f64.copysign(ai) };
+                            let x = if ar.is_infinite() {
+                                ar.signum()
+                            } else {
+                                0.0_f64.copysign(ar)
+                            };
+                            let y = if ai.is_infinite() {
+                                ai.signum()
+                            } else {
+                                0.0_f64.copysign(ai)
+                            };
                             re = f64::INFINITY * (x * br + y * bi);
                             im = f64::INFINITY * (y * br - x * bi);
                         } else if (br.is_infinite() || bi.is_infinite())
                             && ar.is_finite()
                             && ai.is_finite()
                         {
-                            let x = if br.is_infinite() { br.signum() } else { 0.0_f64.copysign(br) };
-                            let y = if bi.is_infinite() { bi.signum() } else { 0.0_f64.copysign(bi) };
+                            let x = if br.is_infinite() {
+                                br.signum()
+                            } else {
+                                0.0_f64.copysign(br)
+                            };
+                            let y = if bi.is_infinite() {
+                                bi.signum()
+                            } else {
+                                0.0_f64.copysign(bi)
+                            };
                             re = 0.0 * (ar * x + ai * y);
                             im = 0.0 * (ai * x - ar * y);
                         } else {

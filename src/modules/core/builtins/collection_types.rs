@@ -826,7 +826,9 @@ pub fn register_collection_types(
     });
     complex_dict.insert_str(
         "from_number",
-        PyObjectRef::new(PyObject::ClassMethod { func: from_number_fn }),
+        PyObjectRef::new(PyObject::ClassMethod {
+            func: from_number_fn,
+        }),
     );
     complex_dict.insert_str(
         "__init__",
@@ -855,9 +857,7 @@ pub fn register_collection_types(
                 PyObject::Complex(..) | PyObject::Int(_) | PyObject::Float(_)
             ) || matches!(
                 o,
-                PyObjectRef::SmallInt(_)
-                    | PyObjectRef::SmallFloat(_)
-                    | PyObjectRef::SmallBool(_)
+                PyObjectRef::SmallInt(_) | PyObjectRef::SmallFloat(_) | PyObjectRef::SmallBool(_)
             )
         }
         complex_dict.insert_str(
@@ -875,34 +875,34 @@ pub fn register_collection_types(
             }),
         );
 
-    // Complex parts for comparison: as_complex_parts, but a huge int (that
-    // can't convert to f64) becomes ±inf so `complex == 1<<10000` is False
-    // (not NotImplemented).
-    fn cx_parts_for_cmp(o: &PyObjectRef) -> Option<(f64, f64)> {
-        let borrowed = o.borrow();
-        // Check Int FIRST (with exact-representability round-trip) —
-        // `as_complex_parts` would round a huge int to f64, losing the
-        // precision distinction test_richcompare_boundaries needs.
-        if let PyObject::Int(n) = &*borrowed {
-            return match n.to_f64() {
-                Some(f) => {
-                    let exact = format!("{:.0}", f)
-                        .parse::<BigInt>()
-                        .map(|b| b == *n)
-                        .unwrap_or(false);
-                    if exact {
-                        Some((f, 0.0))
-                    } else {
-                        // Not exactly representable → sentinel that never
-                        // equals a finite complex real (so == is False).
-                        Some((f64::NAN, 0.0))
+        // Complex parts for comparison: as_complex_parts, but a huge int (that
+        // can't convert to f64) becomes ±inf so `complex == 1<<10000` is False
+        // (not NotImplemented).
+        fn cx_parts_for_cmp(o: &PyObjectRef) -> Option<(f64, f64)> {
+            let borrowed = o.borrow();
+            // Check Int FIRST (with exact-representability round-trip) —
+            // `as_complex_parts` would round a huge int to f64, losing the
+            // precision distinction test_richcompare_boundaries needs.
+            if let PyObject::Int(n) = &*borrowed {
+                return match n.to_f64() {
+                    Some(f) => {
+                        let exact = format!("{:.0}", f)
+                            .parse::<BigInt>()
+                            .map(|b| b == *n)
+                            .unwrap_or(false);
+                        if exact {
+                            Some((f, 0.0))
+                        } else {
+                            // Not exactly representable → sentinel that never
+                            // equals a finite complex real (so == is False).
+                            Some((f64::NAN, 0.0))
+                        }
                     }
-                }
-                None => Some((f64::INFINITY, 0.0)),
-            };
+                    None => Some((f64::INFINITY, 0.0)),
+                };
+            }
+            crate::object::as_complex_parts(&borrowed)
         }
-        crate::object::as_complex_parts(&borrowed)
-    }
 
         complex_dict.insert_str(
             "__eq__",

@@ -36,7 +36,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
             })),
             "__float__" => Err(PyError::type_error("can't convert complex to float")),
             "__int__" => Err(PyError::type_error("can't convert complex to int")),
-"__getnewargs__" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
+            "__getnewargs__" => Ok(PyObjectRef::new(PyObject::BuiltinMethod {
                 name: "__getnewargs__".to_string(),
                 func: |args| {
                     let obj = args[0].borrow();
@@ -44,12 +44,14 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         PyObject::Complex(re, im) => {
                             Ok(py_tuple(vec![py_float(*re), py_float(*im)]))
                         }
-                        _ => Err(PyError::type_error("__getnewargs__() requires a complex self")),
+                        _ => Err(PyError::type_error(
+                            "__getnewargs__() requires a complex self",
+                        )),
                     }
                 },
                 self_obj: PyObjectRef::imm(PyObject::Complex(*re, *im)),
             })),
-"__format__" => {
+            "__format__" => {
                 // format(complex, spec) / complex.__format__(spec) — native
                 // complex instance lookup doesn't fall back to the type dict
                 // (test_format: "'complex' object has no attribute
@@ -67,9 +69,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         // Invalid for complex: '=' align, integer types
                         // (b c d o x X), zero-padding ('0' as the width).
                         if spec.contains('=') {
-                            return Err(PyError::value_error(
-                                "Invalid format specifier '='",
-                            ));
+                            return Err(PyError::value_error("Invalid format specifier '='"));
                         }
                         if let Some(t) = spec.chars().last() {
                             if matches!(t, 'b' | 'c' | 'd' | 'o' | 'x' | 'X') {
@@ -88,18 +88,12 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             if idx < chars.len() && chars[idx] == '=' {
                                 // already handled above
                             }
-                            if idx + 1 < chars.len()
-                                && matches!(chars[idx + 1], '<' | '^' | '>')
-                            {
+                            if idx + 1 < chars.len() && matches!(chars[idx + 1], '<' | '^' | '>') {
                                 idx += 2; // fill + align
-                            } else if idx < chars.len()
-                                && matches!(chars[idx], '<' | '^' | '>')
-                            {
+                            } else if idx < chars.len() && matches!(chars[idx], '<' | '^' | '>') {
                                 idx += 1; // align
                             }
-                            if idx < chars.len()
-                                && matches!(chars[idx], '+' | '-' | ' ')
-                            {
+                            if idx < chars.len() && matches!(chars[idx], '+' | '-' | ' ') {
                                 idx += 1; // sign
                             }
                             if idx < chars.len()

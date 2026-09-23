@@ -476,7 +476,9 @@ pub fn format_with_spec(val: &PyObjectRef, spec_str: &str) -> PyResult<String> {
             // string default (left) — prepend '>' when no explicit align.
             if !pad_spec.contains(['<', '^', '>']) && !pad_spec.starts_with(['<', '^', '>']) {
                 let has_align = pad_spec.chars().any(|c| c == '<' || c == '^' || c == '>')
-                    || spec_clone.chars().take_while(|c| !c.is_ascii_digit() && *c != '.')
+                    || spec_clone
+                        .chars()
+                        .take_while(|c| !c.is_ascii_digit() && *c != '.')
                         .any(|c| c == '<' || c == '^' || c == '>');
                 if !has_align {
                     pad_spec.insert(0, '>');

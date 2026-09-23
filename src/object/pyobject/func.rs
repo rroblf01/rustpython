@@ -8,6 +8,12 @@ pub struct PyFunction {
     pub defaults: Vec<PyObjectRef>,
     pub closure: Vec<PyObjectRef>,
     pub dict: HashMap<String, PyObjectRef>,
+    /// Live user globals dict for functions built via
+    /// `types.FunctionType(code, dict)` (CPython: `__globals__` IS that
+    /// dict — writes stay visible). Plain `def` functions leave it
+    /// `None` (their globals are the shared module map). When set, the
+    /// call path mirrors frame writes back after each call.
+    pub globals_dict: Option<PyObjectRef>,
     pub jit_ptr: std::cell::Cell<usize>,
     pub jit_consts: std::cell::RefCell<Vec<PyObjectRef>>,
     /// Memoized `__name__` / `__qualname__` string objects. Attribute
@@ -30,6 +36,7 @@ impl Clone for PyFunction {
             defaults: self.defaults.clone(),
             closure: self.closure.clone(),
             dict: self.dict.clone(),
+            globals_dict: self.globals_dict.clone(),
             jit_ptr: std::cell::Cell::new(self.jit_ptr.get()),
             jit_consts: std::cell::RefCell::new(self.jit_consts.borrow().clone()),
             name_memo: std::cell::RefCell::new(None),

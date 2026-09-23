@@ -3,6 +3,49 @@ use crate::object::*;
 use crate::vm::VirtualMachine;
 use num_traits::ToPrimitive;
 
+/// Async-iteration exhaustion: `StopAsyncIteration`, or our native
+/// StopIteration-shaped errors (native `__anext__` signals exhaustion
+/// that way; see `is_stop_iteration_error`).
+fn is_async_exhaustion(e: &PyError) -> bool {
+    if crate::object::is_stop_iteration_error(e) {
+        return true;
+    }
+    matches!(e, PyError::Exception(t, _) if t == "StopAsyncIteration")
+}
+
+/// Drive an awaitable from a user-defined `async def __anext__` to
+/// completion inline, feeding `None` per step — exactly like the
+/// test-suite's own `run_yielding_async_fn` driver. Each `send(None)`
+/// advances; `StopIteration(value)` carries the next item. Terminates
+/// exactly when the coroutine would terminate under that driver.
+fn drive_awaitable_inline(val: &PyObjectRef) -> PyResult<PyObjectRef> {
+    let coro = val.clone();
+    let none = py_none();
+    let is_coro = matches!(&*coro.borrow(), PyObject::Coroutine { .. });
+    let is_gen = matches!(&*coro.borrow(), PyObject::Generator { .. });
+    if !is_coro && !is_gen {
+        return Ok(coro);
+    }
+    loop {
+        let step = if is_coro {
+            crate::object::generators::coroutine_send_fallback(&[coro.clone(), none.clone()])
+        } else {
+            crate::object::generators::generator_next_fallback(&[coro.clone(), none.clone()])
+        };
+        match step {
+            Ok(_) => continue,
+            Err(e) => {
+                if let PyError::Exception(t, obj) = &e {
+                    if t == "StopIteration" {
+                        return Ok(obj.clone());
+                    }
+                }
+                return Err(e);
+            }
+        }
+    }
+}
+
 impl VirtualMachine {
     pub(crate) fn handle_iter(&mut self, fi: usize, op: Opcode, arg: u32) -> PyResult<bool> {
         match op {
@@ -208,6 +251,7 @@ impl VirtualMachine {
                         // `for x in itertools.tee(y)[0]:` must work the same as
                         // iterating the original iterable directly.
                         PyObject::ListIter { .. }
+                        | PyObject::FindIter { .. }
                         | PyObject::RangeIter { .. }
                         | PyObject::MapIterator { .. }
                         | PyObject::FilterIterator { .. }
@@ -378,6 +422,49 @@ impl VirtualMachine {
 
             Opcode::FOR_ITER => {
                 let iter_val = self.frames[fi].peek(0)?;
+                // Async loop target: GET_ANEXT left the bound `__anext__`
+                // method on top (sync loops leave an iterator). Drive it
+                // synchronously — call per iteration, StopAsyncIteration
+                // (or our native StopIteration-shaped exhaustion) exits.
+                // No suspension happens (equivalent for non-concurrent
+                // code; test_builtin's async comprehensions/loops).
+                let is_anext = matches!(&*iter_val.borrow(), PyObject::BuiltinMethod { name, .. } if name == "__anext__");
+                if is_anext {
+                    let method = iter_val.clone();
+                    match self.call_function(method, vec![], vec![]) {
+                        Ok(val) => {
+                            // A user-defined `async def __anext__` yields
+                            // an un-awaited coroutine — drive it inline.
+                            let is_aw = matches!(
+                                &*val.borrow(),
+                                PyObject::Coroutine { .. } | PyObject::Generator { .. }
+                            );
+                            let val = if is_aw {
+                                match drive_awaitable_inline(&val) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        if is_async_exhaustion(&e) {
+                                            self.frames[fi].ip = arg as usize;
+                                            return Ok(true);
+                                        }
+                                        return Err(e);
+                                    }
+                                }
+                            } else {
+                                val
+                            };
+                            self.frames[fi].push(val);
+                        }
+                        Err(e) => {
+                            if is_async_exhaustion(&e) {
+                                self.frames[fi].ip = arg as usize;
+                            } else {
+                                return Err(e);
+                            }
+                        }
+                    }
+                    return Ok(true);
+                }
                 let is_generator = matches!(&*iter_val.borrow(), PyObject::Generator { .. });
                 if is_generator {
                     // Call __next__ on generator
@@ -462,6 +549,7 @@ impl VirtualMachine {
                             | PyObject::MapIterator { .. }
                             | PyObject::FilterIterator { .. }
                             | PyObject::CycleIter { .. }
+                            | PyObject::FindIter { .. }
                             | PyObject::EnumerateIter { .. }
                             | PyObject::GroupByIter { .. }
                             | PyObject::GetItemIter { .. }

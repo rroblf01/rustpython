@@ -836,9 +836,7 @@ pub fn builtin_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 };
                 let has_encoding = rest.first().is_some() || kw("encoding").is_some();
                 if !has_encoding {
-                    return Err(PyError::type_error(
-                        "string argument without an encoding",
-                    ));
+                    return Err(PyError::type_error("string argument without an encoding"));
                 }
                 let mut call = vec![args[0].clone()];
                 if let Some(e) = rest.first().cloned().or_else(|| kw("encoding")) {

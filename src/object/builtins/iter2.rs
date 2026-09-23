@@ -330,6 +330,21 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 Ok(v)
             }
         }
+        // Lazy `re.finditer` iterator (holds a bytearray export while
+        // alive; released on exhaustion).
+        PyObject::FindIter { .. } => {
+            drop(obj);
+            match crate::modules::finditer_next(&args[0])? {
+                Some(m) => Ok(m),
+                None => {
+                    if args.len() >= 2 {
+                        Ok(args[1].clone())
+                    } else {
+                        Err(PyError::stop_iteration())
+                    }
+                }
+            }
+        }
         PyObject::CycleIter { items, index } => {
             if items.is_empty() {
                 if args.len() >= 2 {

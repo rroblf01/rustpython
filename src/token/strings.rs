@@ -51,7 +51,13 @@ impl Lexer {
                 Some(c) => name.push(c),
             }
         }
-        Ok(unicode_name_to_char(&name).unwrap_or('\u{FFFD}'))
+        Ok(unicode_name_to_char(&name)
+            // Small lexer table misses most names (e.g. 'LATIN CAPITAL
+            // LETTER A WITH DIAERESIS' → U+FFFD, breaking `test_re.py`'s
+            // external cases) — fall back to the full Unicode 16.0 table
+            // (same one the `re` module uses).
+            .or_else(|| crate::unicode_names::unicode_name_lookup(&name))
+            .unwrap_or('\u{FFFD}'))
     }
 
     /// Error token for `\N` NOT followed by `{` (mirrors CPython's

@@ -63,6 +63,18 @@ impl VirtualMachine {
                                 self_obj: obj.clone(),
                             }))
                         }
+                        // `re.Pattern.__copy__`/`__deepcopy__` return self
+                        // (identity; test_re: test_copying). Native methods
+                        // don't bind, so capture the instance in a closure
+                        // (same shape as `builtin_getattr`'s intercept).
+                        PyObject::CompiledRegex { .. }
+                            if name == "__copy__" || name == "__deepcopy__" =>
+                        {
+                            let self_clone = obj.clone();
+                            Ok(PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(
+                                move |_| Ok(self_clone.clone()),
+                            ))))
+                        }
                         PyObject::Super {
                             cls: _,
                             obj: _super_obj,

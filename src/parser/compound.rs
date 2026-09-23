@@ -68,7 +68,9 @@ impl Parser {
         // `async def` body — CPython raises SyntaxError otherwise
         // (test_builtin::test_compile's async cases).
         self.async_depth += usize::from(async_token);
+        self.fn_depth += 1;
         let body = self.parse_block()?;
+        self.fn_depth -= 1;
         self.async_depth -= usize::from(async_token);
         self.fn_params_stack.pop();
         self.fn_scope_stack.pop();
@@ -286,8 +288,20 @@ impl Parser {
     /// is a hard keyword in this lexer (never a plain identifier), so
     /// seeing it here and NOT finding `for` right after is unambiguously
     /// invalid syntax — `expect` surfaces that as a normal parse error.
-    pub(crate) fn eat_comp_for(&mut self) -> Result<Option<bool>, String> {
+    pub(crate) fn eat_comp_for(&mut self, async_ok: bool) -> Result<Option<bool>, String> {
         if self.eat(&Token::Async) {
+            // `async for` in a list/set/dict comprehension outside an
+            // async function is a SyntaxError (generator expressions are
+            // exempt — `(x async for ...)` is legal; test_builtin's
+            // test_compile_top_level_await).
+            if !async_ok
+                && self.async_depth == 0
+                && (self.fn_depth > 0 || !self.allow_top_level_await)
+            {
+                return Err(
+                    "asynchronous comprehension outside of an asynchronous function".to_string(),
+                );
+            }
             self.expect(&Token::For)?;
             Ok(Some(true))
         } else if self.eat(&Token::For) {

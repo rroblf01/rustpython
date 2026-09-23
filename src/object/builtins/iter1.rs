@@ -522,6 +522,7 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // recognized variants) — `iter(it)` on an existing iterator
         // just returns it unchanged, matching real Python.
         PyObject::ListIter { .. }
+        | PyObject::FindIter { .. }
         | PyObject::RangeIter { .. }
         | PyObject::CycleIter { .. }
         | PyObject::EnumerateIter { .. }

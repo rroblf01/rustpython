@@ -153,10 +153,18 @@ pub fn py_compare(a: &PyObjectRef, b: &PyObjectRef, op: u32) -> PyResult<PyObjec
                     ) {
                         (Some(ap), Some(bp)) => {
                             let eq = ap == bp;
-                            if op == 2 { eq } else { !eq }
+                            if op == 2 {
+                                eq
+                            } else {
+                                !eq
+                            }
                         }
                         _ => {
-                            if op == 2 { a.is(b) } else { !a.is(b) }
+                            if op == 2 {
+                                a.is(b)
+                            } else {
+                                !a.is(b)
+                            }
                         }
                     }
                 }

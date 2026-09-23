@@ -8,6 +8,207 @@ use super::compile::translate_python_replacement;
 /// into `_starts`/`_ends`/`_groups_text` (0 = whole match). Returns `None`
 /// for a name that doesn't exist (caller raises `IndexError`, matching
 /// real CPython's `no such group`).
+/// Attach a live bytearray subject to a Match (for `test_bug_29444`:
+/// groups re-slice the CURRENT buffer content instead of snapshots).
+/// No-op unless `subject` is a bytearray.
+pub fn maybe_attach_subject(m: &PyObjectRef, subject: &PyObjectRef) {
+    if matches!(&*subject.borrow(), PyObject::ByteArray(_)) {
+        let _ = m.borrow_mut().set_attribute("_subject", subject.clone());
+    }
+}
+
+/// Live group bytes for bytearray subjects: re-slices the CURRENT buffer
+/// at the stored span (clamped). Returns `None` when there's no live
+/// subject or the group didn't participate (caller falls back to the
+/// snapshot, preserving `None`/default semantics).
+fn live_group_bytes(obj: &PyObjectRef, idx: usize) -> Option<PyObjectRef> {
+    let subj = obj.borrow().get_attribute("_subject").ok()?;
+    let subj_b = subj.borrow();
+    let bytes = match &*subj_b {
+        PyObject::ByteArray(b) => b,
+        _ => return None,
+    };
+    // Participated? (snapshot None → non-participating → None).
+    let texts = obj.borrow().get_attribute("_groups_text").ok()?;
+    let texts_b = texts.borrow();
+    let items = match &*texts_b {
+        PyObject::Tuple(items) => items,
+        _ => return None,
+    };
+    if matches!(&*items.get(idx)?.borrow(), PyObject::None) {
+        return None;
+    }
+    drop(texts_b);
+    let starts = obj.borrow().get_attribute("_starts").ok()?;
+    let ends = obj.borrow().get_attribute("_ends").ok()?;
+    let (starts_b, ends_b) = (starts.borrow(), ends.borrow());
+    let (s, e) = match (&*starts_b, &*ends_b) {
+        (PyObject::Tuple(s), PyObject::Tuple(e)) => (s.get(idx)?.as_i64()?, e.get(idx)?.as_i64()?),
+        _ => return None,
+    };
+    if s < 0 || e < 0 {
+        return None;
+    }
+    let len = bytes.len();
+    let s = (s as usize).min(len);
+    let e = (e as usize).min(len);
+    let e = e.max(s);
+    Some(PyObjectRef::imm(PyObject::Bytes(bytes[s..e].to_vec())))
+}
+
+/// Advance a lazy `FindIter`: next Match at/after `pos`, or `None` on
+/// exhaustion (releases a held bytearray export). Empty matches advance by
+/// one char to avoid stalling (mirrors CPython).
+pub fn finditer_next(it: &PyObjectRef) -> PyResult<Option<PyObjectRef>> {
+    // Extract state under a short borrow (no borrow held while matching).
+    struct St {
+        regex: fancy_regex::Regex,
+        string: String,
+        pattern: String,
+        flags: i32,
+        is_bytes: bool,
+        pos: usize,
+        endpos: usize,
+        mpos: usize,
+        mendpos: usize,
+        subject: Option<PyObjectRef>,
+        ma: bool,
+    }
+    let st_opt = {
+        let mut obj = it.borrow_mut();
+        if let PyObject::FindIter {
+            regex,
+            string,
+            pattern,
+            flags,
+            is_bytes,
+            pos,
+            endpos,
+            mpos,
+            mendpos,
+            subject,
+            exhausted,
+            ma,
+        } = &mut *obj
+        {
+            if *exhausted {
+                return Ok(None);
+            }
+            Some(St {
+                regex: (**regex).clone(),
+                string: string.clone(),
+                pattern: pattern.clone(),
+                flags: *flags,
+                is_bytes: *is_bytes,
+                pos: *pos,
+                endpos: *endpos,
+                mpos: *mpos,
+                mendpos: *mendpos,
+                subject: subject.clone(),
+                ma: *ma,
+            })
+        } else {
+            None
+        }
+    };
+    let mut st = match st_opt {
+        Some(s) => s,
+        None => return Err(PyError::type_error("not a finditer iterator")),
+    };
+    // Release helper (idempotent via `exhausted` flag set below).
+    let release = |subject: &Option<PyObjectRef>| {
+        if let Some(subj) = subject {
+            if matches!(&*subj.borrow(), PyObject::ByteArray(_)) {
+                crate::object::decrement_bytearray_export(subj);
+            }
+        }
+    };
+    let finish = |it: &PyObjectRef, subject: &Option<PyObjectRef>, pos: usize| {
+        let mut obj = it.borrow_mut();
+        if let PyObject::FindIter {
+            pos: p, exhausted, ..
+        } = &mut *obj
+        {
+            *p = pos;
+            *exhausted = true;
+        }
+        release(subject);
+    };
+    if st.pos > st.endpos || st.pos > st.string.len() {
+        finish(it, &st.subject, st.pos);
+        return Ok(None);
+    }
+    // Search the endpos-truncated view (CPython limits matches to
+    // `string[:endpos]`); spans stay absolute (truncation only at end).
+    // must_advance-aware: after an empty match the retry restarts at
+    // its end (see `search_step_ma`); only a repeated empty steps one
+    // char and the scan continues (test_re: test_zerowidth).
+    let search_str = &st.string[..st.endpos.min(st.string.len())];
+    let ma_cache = crate::modules::MaBranchCache::new(&st.pattern, st.flags, st.is_bytes);
+    let mut pos = st.pos;
+    let mut ma = st.ma;
+    let caps = loop {
+        if pos > st.endpos || pos > st.string.len() {
+            finish(it, &st.subject, pos);
+            return Ok(None);
+        }
+        match crate::modules::search_step_ma(
+            &st.regex,
+            &ma_cache,
+            search_str,
+            pos.min(search_str.len()),
+            ma,
+        ) {
+            crate::modules::MaStep::Stop => {
+                finish(it, &st.subject, pos);
+                return Ok(None);
+            }
+            crate::modules::MaStep::Advance => {
+                let rest = &st.string[pos.min(st.string.len())..];
+                pos += rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                ma = false;
+            }
+            crate::modules::MaStep::Found(c) => break c,
+        }
+    };
+    let m0 = caps.get(0).unwrap();
+    // Respect endpos (match must end within bounds).
+    if m0.end() > st.endpos {
+        finish(it, &st.subject, st.pos);
+        return Ok(None);
+    }
+    let (ms, me) = (m0.start(), m0.end());
+    // Commit new pos + must_advance (empty → retry same spot next call).
+    let next_ma = ms == me;
+    let next_pos = me;
+    let m = make_match_object_prefixed(
+        &st.regex,
+        Some(caps),
+        &st.string,
+        &st.pattern,
+        st.flags,
+        st.mpos,
+        st.mendpos,
+        st.is_bytes,
+        0,
+    );
+    if let Some(subj) = &st.subject {
+        maybe_attach_subject(&m, subj);
+    }
+    // Commit new pos (not exhausted yet; export stays held).
+    {
+        let mut obj = it.borrow_mut();
+        if let PyObject::FindIter {
+            pos: p, ma: mma, ..
+        } = &mut *obj
+        {
+            *p = next_pos;
+            *mma = next_ma;
+        }
+    }
+    Ok(Some(m))
+}
+
 pub fn resolve_group_arg(obj: &PyObjectRef, arg: Option<&PyObjectRef>) -> Option<usize> {
     match arg {
         None => Some(0),
@@ -65,11 +266,15 @@ fn to_group_index(arg: &PyObjectRef) -> Option<usize> {
 }
 
 fn match_no_setitem(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    Err(PyError::type_error("Match object does not support item assignment"))
+    Err(PyError::type_error(
+        "Match object does not support item assignment",
+    ))
 }
 
 fn match_no_delitem(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    Err(PyError::type_error("Match object does not support item deletion"))
+    Err(PyError::type_error(
+        "Match object does not support item deletion",
+    ))
 }
 
 /// Build a re.Match object with group(), groups(), groupdict(), start(),
@@ -152,13 +357,14 @@ pub fn make_match_object_prefixed(
                         } else {
                             groups_text.push(py_str(g.as_str()));
                         }
-                        starts.push(py_int(
-                            super::byte_to_char_idx(original_string, g.start() + byte_offset)
-                                as i64,
-                        ));
-                        ends.push(py_int(
-                            super::byte_to_char_idx(original_string, g.end() + byte_offset) as i64,
-                        ));
+                        starts.push(py_int(super::byte_to_char_idx(
+                            original_string,
+                            g.start() + byte_offset,
+                        ) as i64));
+                        ends.push(py_int(super::byte_to_char_idx(
+                            original_string,
+                            g.end() + byte_offset,
+                        ) as i64));
                     }
                     None => {
                         groups_text.push(py_none());
@@ -182,6 +388,23 @@ pub fn make_match_object_prefixed(
             // participate, matching real `re.Match.group`); with multiple
             // args, a tuple of each. Raises IndexError for an out-of-range
             // index or unknown name, matching real CPython.
+            // `__copy__`/`__deepcopy__` return self (CPython: matches are
+            // atomic for copy; `copy.copy(m) is m`). Bound via Instance
+            // machinery (like `group`), so `args[0]` is self.
+            type_dict.insert_str(
+                "__copy__",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__copy__".to_string(),
+                    func: |args| Ok(args[0].clone()),
+                }),
+            );
+            type_dict.insert_str(
+                "__deepcopy__",
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: "__deepcopy__".to_string(),
+                    func: |args| Ok(args[0].clone()),
+                }),
+            );
             type_dict.insert_str(
                 "group",
                 PyObjectRef::new(PyObject::BuiltinFunction {
@@ -195,6 +418,10 @@ pub fn make_match_object_prefixed(
                         let fetch_one = |arg: Option<&PyObjectRef>| -> PyResult<PyObjectRef> {
                             let idx = resolve_group_arg(self_obj, arg)
                                 .ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
+                            // Live bytearray subject? Re-slice current buffer.
+                            if let Some(live) = live_group_bytes(self_obj, idx) {
+                                return Ok(live);
+                            }
                             if let PyObject::Tuple(items) = &*group_texts.borrow() {
                                 items
                                     .get(idx)
@@ -233,8 +460,13 @@ pub fn make_match_object_prefixed(
                         let result = if let PyObject::Tuple(items) = &*group_texts.borrow() {
                             let rest: Vec<PyObjectRef> = items
                                 .iter()
+                                .enumerate()
                                 .skip(1)
-                                .map(|v| {
+                                .map(|(idx, v)| {
+                                    // Live bytearray subject? Re-slice.
+                                    if let Some(live) = live_group_bytes(&args[0], idx) {
+                                        return live;
+                                    }
                                     if matches!(&*v.borrow(), PyObject::None) {
                                         default.clone()
                                     } else {
@@ -276,6 +508,11 @@ pub fn make_match_object_prefixed(
                         {
                             for (k, v) in names_d.iter() {
                                 let idx = v.as_i64().unwrap_or(0) as usize;
+                                // Live bytearray subject? Re-slice.
+                                if let Some(live) = live_group_bytes(&args[0], idx) {
+                                    let _ = result.set(k.clone(), live);
+                                    continue;
+                                }
                                 let val = items.get(idx).cloned().unwrap_or_else(py_none);
                                 let val = if matches!(&*val.borrow(), PyObject::None) {
                                     default.clone()
@@ -392,6 +629,10 @@ pub fn make_match_object_prefixed(
                         let self_obj = &args[0];
                         let idx = resolve_group_arg(self_obj, Some(&args[1]))
                             .ok_or_else(|| PyError::IndexError("no such group".to_string()))?;
+                        // Live bytearray subject? Re-slice current buffer.
+                        if let Some(live) = live_group_bytes(self_obj, idx) {
+                            return Ok(live);
+                        }
                         let group_texts = self_obj
                             .borrow()
                             .get_attribute("_groups_text")
@@ -567,16 +808,26 @@ pub fn make_match_object_prefixed(
 
             let mut lastindex: Option<i64> = None;
             let mut lastgroup: Option<String> = None;
-            for idx in (1..groups_text.len()).rev() {
-                if !matches!(&*groups_text[idx].borrow(), PyObject::None) {
+            // CPython: lastindex is the last-CLOSED participating group.
+            // Approximate via max end position, ties to the smaller (outer)
+            // number (ascending scan + strictly-greater keeps the first).
+            let mut best_end: Option<i64> = None;
+            for idx in 1..groups_text.len() {
+                if matches!(&*groups_text[idx].borrow(), PyObject::None) {
+                    continue;
+                }
+                let end = ends.get(idx).and_then(|e| e.as_i64()).unwrap_or(-1);
+                if best_end.is_none_or(|be| end > be) {
+                    best_end = Some(end);
                     lastindex = Some(idx as i64);
-                    for (k, v) in name_to_index.iter() {
-                        if v.as_i64() == Some(idx as i64) {
-                            lastgroup = Some(k.str());
-                            break;
-                        }
+                }
+            }
+            if let Some(li) = lastindex {
+                for (k, v) in name_to_index.iter() {
+                    if v.as_i64() == Some(li) {
+                        lastgroup = Some(k.str());
+                        break;
                     }
-                    break;
                 }
             }
             let regs_items: Vec<PyObjectRef> = starts

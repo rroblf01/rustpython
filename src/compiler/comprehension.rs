@@ -43,7 +43,12 @@ impl Compiler {
 
         for (i, gen) in generators.iter().enumerate() {
             self.compile_expr(&gen.iter)?;
-            self.emit(Opcode::GET_ITER, 0);
+            if gen.is_async {
+                self.emit(Opcode::GET_AITER, 0);
+                self.emit(Opcode::GET_ANEXT, 0);
+            } else {
+                self.emit(Opcode::GET_ITER, 0);
+            }
             let start_label = self.new_label();
             start_labels.push(start_label);
             self.mark_label(start_label);
@@ -192,16 +197,35 @@ impl Compiler {
         // the one part of a genexp that really does run immediately, both
         // for early-binding semantics (`x=10; g=(i for i in range(x));
         // x=5; list(g)` sees 10) and for the immediate `TypeError` when the
-        // outermost expression isn't iterable at all.
+        // outermost expression isn't iterable at all. A genexp with any
+        // `async for` clause — or `await` anywhere inside — IS an async
+        // generator (its own async scope), so compile the inner function
+        // as async (test_builtin's `test_compile_top_level_await` nests
+        // them; `test_builtin_call_async_genexpr_no_crash` needs `await`
+        // genexps to be async so `all()` on them raises TypeError).
+        let gen_is_async = generators.iter().any(|g| g.is_async)
+            || super::utils::contains_yield_in_expr(elt)
+            || generators.iter().any(|g| {
+                super::utils::contains_yield_in_expr(&g.iter)
+                    || super::utils::contains_yield_in_expr(&g.target)
+                    || g.ifs.iter().any(super::utils::contains_yield_in_expr)
+            });
         self.compile_function(
             "<genexpr>".to_string(),
             std::slice::from_ref(&arg),
             &acc,
-            false,
+            gen_is_async,
             &None,
         )?;
         self.compile_expr(&generators[0].iter)?;
-        self.emit(Opcode::GET_ITER, 0);
+        if generators[0].is_async {
+            // Async genexp: pass the async ITERATOR itself as `.0` (the
+            // body loop is an async-for and performs its own GET_ANEXT
+            // per iteration) — not the bound method.
+            self.emit(Opcode::GET_AITER, 0);
+        } else {
+            self.emit(Opcode::GET_ITER, 0);
+        }
         self.emit(Opcode::CALL, 1);
         Ok(())
     }
@@ -241,7 +265,12 @@ impl Compiler {
 
         for (i, gen) in generators.iter().enumerate() {
             self.compile_expr(&gen.iter)?;
-            self.emit(Opcode::GET_ITER, 0);
+            if gen.is_async {
+                self.emit(Opcode::GET_AITER, 0);
+                self.emit(Opcode::GET_ANEXT, 0);
+            } else {
+                self.emit(Opcode::GET_ITER, 0);
+            }
             let start_label = self.new_label();
             start_labels.push(start_label);
             self.mark_label(start_label);

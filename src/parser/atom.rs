@@ -423,7 +423,7 @@ impl Parser {
                     }
                 } else {
                     let first = self.parse_expr()?;
-                    if let Some(is_async) = self.eat_comp_for()? {
+                    if let Some(is_async) = self.eat_comp_for(true)? {
                         // Generator expression: (expr for x in iter)
                         self.genexpr_depth += 1;
                         let target = self.parse_for_target()?;
@@ -435,7 +435,7 @@ impl Parser {
                             ifs: Vec::new(),
                             is_async,
                         }];
-                        while let Some(is_async) = self.eat_comp_for()? {
+                        while let Some(is_async) = self.eat_comp_for(true)? {
                             let t = self.parse_for_target()?;
                             self.expect(&Token::In)?;
                             let i = self.parse_or_expr()?;
@@ -454,7 +454,7 @@ impl Parser {
                                 }
                             }
                         }
-                        while let Some(is_async) = self.eat_comp_for()? {
+                        while let Some(is_async) = self.eat_comp_for(true)? {
                             let t = self.parse_for_target()?;
                             self.expect(&Token::In)?;
                             let i = self.parse_or_expr()?;
@@ -555,7 +555,7 @@ impl Parser {
                             "iterable unpacking cannot be used in comprehension".to_string()
                         );
                     }
-                    let is_async = self.eat_comp_for()?.unwrap();
+                    let is_async = self.eat_comp_for(false)?.unwrap();
                     let target = self.parse_for_target()?;
                     self.expect(&Token::In)?;
                     let iter = self.parse_or_expr()?;
@@ -565,7 +565,7 @@ impl Parser {
                         ifs: Vec::new(),
                         is_async,
                     }];
-                    while let Some(is_async) = self.eat_comp_for()? {
+                    while let Some(is_async) = self.eat_comp_for(false)? {
                         let t = self.parse_for_target()?;
                         self.expect(&Token::In)?;
                         let i = self.parse_or_expr()?;
@@ -584,7 +584,7 @@ impl Parser {
                             }
                         }
                     }
-                    while let Some(is_async) = self.eat_comp_for()? {
+                    while let Some(is_async) = self.eat_comp_for(false)? {
                         let t = self.parse_for_target()?;
                         self.expect(&Token::In)?;
                         let i = self.parse_or_expr()?;
@@ -643,7 +643,7 @@ impl Parser {
                         if self.eat(&Token::Colon) {
                             let value = self.parse_expr()?;
                             // Check for dict comprehension: {k: v for ...}
-                            if let Some(is_async) = self.eat_comp_for()? {
+                            if let Some(is_async) = self.eat_comp_for(false)? {
                                 let target = self.parse_for_target()?;
                                 self.expect(&Token::In)?;
                                 let iter = self.parse_or_expr()?;
@@ -653,7 +653,7 @@ impl Parser {
                                     ifs: Vec::new(),
                                     is_async,
                                 }];
-                                while let Some(is_async) = self.eat_comp_for()? {
+                                while let Some(is_async) = self.eat_comp_for(false)? {
                                     let t = self.parse_for_target()?;
                                     self.expect(&Token::In)?;
                                     let i = self.parse_or_expr()?;
@@ -672,7 +672,7 @@ impl Parser {
                                         }
                                     }
                                 }
-                                while let Some(is_async) = self.eat_comp_for()? {
+                                while let Some(is_async) = self.eat_comp_for(false)? {
                                     let t = self.parse_for_target()?;
                                     self.expect(&Token::In)?;
                                     let i = self.parse_or_expr()?;
@@ -703,7 +703,7 @@ impl Parser {
                             is_dict = true;
                         } else {
                             // Check for set comprehension: {expr for ...}
-                            if let Some(is_async) = self.eat_comp_for()? {
+                            if let Some(is_async) = self.eat_comp_for(false)? {
                                 // CPython's `invalid_comprehension` rule rejects
                                 // starred expressions in comprehensions.
                                 if let Some(last) = values.last() {
@@ -723,7 +723,7 @@ impl Parser {
                                     ifs: Vec::new(),
                                     is_async,
                                 }];
-                                while let Some(is_async) = self.eat_comp_for()? {
+                                while let Some(is_async) = self.eat_comp_for(false)? {
                                     let t = self.parse_for_target()?;
                                     self.expect(&Token::In)?;
                                     let i = self.parse_or_expr()?;
@@ -742,7 +742,7 @@ impl Parser {
                                         }
                                     }
                                 }
-                                while let Some(is_async) = self.eat_comp_for()? {
+                                while let Some(is_async) = self.eat_comp_for(false)? {
                                     let t = self.parse_for_target()?;
                                     self.expect(&Token::In)?;
                                     let i = self.parse_or_expr()?;
@@ -814,7 +814,10 @@ impl Parser {
                 // test_compile_top_level_await). Inside a generator
                 // expression it's always legal (async-generator semantics,
                 // test_asyncgen's make_arange).
-                if self.async_depth == 0 && !self.allow_top_level_await && self.genexpr_depth == 0 {
+                if self.async_depth == 0
+                    && (self.fn_depth > 0 || !self.allow_top_level_await)
+                    && self.genexpr_depth == 0
+                {
                     return Err("'await' outside async function".to_string());
                 }
                 self.next();
@@ -1218,7 +1221,9 @@ impl Parser {
             self.expect(&Token::Colon)?;
             args
         };
+        self.fn_depth += 1;
         let body = self.parse_expr()?;
+        self.fn_depth -= 1;
         Ok(Expr::Lambda {
             args,
             body: Box::new(body),

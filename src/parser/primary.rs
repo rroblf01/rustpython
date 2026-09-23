@@ -127,7 +127,7 @@ impl Parser {
                                 && keywords.is_empty()
                             {
                                 self.genexpr_depth += 1;
-                                let is_async = self.eat_comp_for()?.unwrap();
+                                let is_async = self.eat_comp_for(true)?.unwrap();
                                 let target = self.parse_for_target()?;
                                 self.expect(&Token::In)?;
                                 let iter = self.parse_or_expr()?;
@@ -137,7 +137,7 @@ impl Parser {
                                     ifs: Vec::new(),
                                     is_async,
                                 }];
-                                while let Some(is_async) = self.eat_comp_for()? {
+                                while let Some(is_async) = self.eat_comp_for(true)? {
                                     let t = self.parse_for_target()?;
                                     self.expect(&Token::In)?;
                                     let i = self.parse_or_expr()?;
@@ -156,7 +156,7 @@ impl Parser {
                                         }
                                     }
                                 }
-                                while let Some(is_async) = self.eat_comp_for()? {
+                                while let Some(is_async) = self.eat_comp_for(true)? {
                                     let t = self.parse_for_target()?;
                                     self.expect(&Token::In)?;
                                     let i = self.parse_or_expr()?;

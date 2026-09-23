@@ -30,6 +30,58 @@ fn persist_jit_ptr(callable: &PyObjectRef, val: usize) {
     }
 }
 
+/// Mirror a `types.FunctionType`-built function's frame writes back into
+/// the caller's own globals dict (see `PyFunction::globals_dict`).
+/// Full mirror for string keys (deleted names disappear too); non-string
+/// keys on the dict are preserved verbatim (same policy as exec()'s
+/// mirror-back). No-op for ordinary `def` functions (`None` link).
+/// Mirror a frame-globals map back into a live user dict (full mirror
+/// for string keys — deleted names disappear too; non-string keys on
+/// the dict are preserved verbatim, same policy as exec()'s own
+/// post-run mirror-back).
+pub(crate) fn mirror_globals_to_dict(
+    globals: &std::collections::HashMap<crate::interner::StrId, PyObjectRef>,
+    target: &PyObjectRef,
+) {
+    let mut guard = target.borrow_mut();
+    let live = match &mut *guard {
+        PyObject::Dict(d) => d,
+        _ => return,
+    };
+    // Preserve non-string keys (can't round-trip frame namespaces).
+    let saved: Vec<(PyObjectRef, PyObjectRef)> = live
+        .items()
+        .into_iter()
+        .filter(|(k, _)| !matches!(&*k.borrow(), PyObject::Str(_)))
+        .collect();
+    let shadowed: std::collections::HashSet<String> = saved.iter().map(|(k, _)| k.str()).collect();
+    live.clear();
+    for (k, v) in globals.iter() {
+        let s = crate::interner::lookup_str(*k);
+        if shadowed.contains(s) {
+            continue;
+        }
+        let _ = live.set(crate::object::py_str(s), v.clone());
+    }
+    for (k, v) in saved {
+        let _ = live.set(k, v);
+    }
+}
+
+/// Mirror a `types.FunctionType`-built function's frame writes back into
+/// the caller's own globals dict (see `PyFunction::globals_dict`).
+/// No-op for ordinary `def` functions (`None` link).
+fn mirror_function_globals(callable: &PyObjectRef) {
+    let (globals_rc, target) = match &*callable.borrow() {
+        PyObject::Function(f) => match &f.globals_dict {
+            Some(t) => (Rc::clone(&f.globals), t.clone()),
+            None => return,
+        },
+        _ => return,
+    };
+    mirror_globals_to_dict(&globals_rc.borrow(), &target);
+}
+
 impl VirtualMachine {
     pub(crate) fn handle_py_function_call(
         &mut self,
@@ -209,6 +261,12 @@ impl VirtualMachine {
             );
             if !closure.is_empty() {
                 new_frame.closure = Box::new(closure.clone());
+            }
+            // Live user-dict link for `types.FunctionType`-built
+            // functions (mirrored post-call and after every
+            // generator/coroutine resume; pooled frames reset it).
+            if let PyObject::Function(f) = &*callable.borrow() {
+                new_frame.globals_dict = f.globals_dict.clone();
             }
             let code = code;
 
@@ -700,6 +758,13 @@ impl VirtualMachine {
             }
             return result;
         })();
+        // `types.FunctionType(code, livedict)` functions execute against a
+        // snapshot but must publish writes into the caller's OWN dict
+        // (CPython: `__globals__` IS that dict) — on success AND error
+        // (partial writes stay visible), mirroring exec()'s own post-run
+        // mirror-back (test_builtin: test_compile_top_level_await reads
+        // `globals_['a']` after driving the coroutine).
+        mirror_function_globals(callable);
         Some(result)
     }
 

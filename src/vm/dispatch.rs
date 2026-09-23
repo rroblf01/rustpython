@@ -275,6 +275,29 @@ impl VirtualMachine {
                     .borrow()
                     .get_attribute("__aiter__")
                     .map_err(|_| PyError::type_error("object does not support async iteration"))?;
+                // Native dunder arms return `BuiltinMethod` with a `None`
+                // placeholder self (bound later by LOAD_ATTR/call paths);
+                // `call_function` below would prepend that `None` as
+                // `args[0]` (so `__aiter__` returned `None`, and the later
+                // `GET_ANEXT` failed with "has no __anext__"). Bind here.
+                let rebind = match &*aiter_method.borrow() {
+                    PyObject::BuiltinMethod {
+                        name,
+                        func,
+                        self_obj,
+                    } if matches!(&*self_obj.borrow(), PyObject::None) => {
+                        Some((name.clone(), *func))
+                    }
+                    _ => None,
+                };
+                let aiter_method = match rebind {
+                    Some((name, func)) => PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name,
+                        func,
+                        self_obj: obj.clone(),
+                    }),
+                    None => aiter_method,
+                };
                 let result = self.call_function(aiter_method, vec![], vec![])?;
                 let _ = self.frames[fi].pop();
                 self.frames[fi].push(result);
@@ -286,6 +309,26 @@ impl VirtualMachine {
                     .borrow()
                     .get_attribute("__anext__")
                     .map_err(|_| PyError::type_error("async iterator has no __anext__"))?;
+                // Same placeholder-self binding as GET_AITER above
+                // (FOR_ITER calls the pushed method with no args).
+                let rebind = match &*anext_method.borrow() {
+                    PyObject::BuiltinMethod {
+                        name,
+                        func,
+                        self_obj,
+                    } if matches!(&*self_obj.borrow(), PyObject::None) => {
+                        Some((name.clone(), *func))
+                    }
+                    _ => None,
+                };
+                let anext_method = match rebind {
+                    Some((name, func)) => PyObjectRef::imm(PyObject::BuiltinMethod {
+                        name,
+                        func,
+                        self_obj: obj.clone(),
+                    }),
+                    None => anext_method,
+                };
                 let _ = self.frames[fi].pop();
                 self.frames[fi].push(anext_method);
             }

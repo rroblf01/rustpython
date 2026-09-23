@@ -630,6 +630,20 @@ pub fn pickle_serialize(
             pickle_serialize(&py_int(*pos as i64), buf, memo, protocol)?;
             pickle_serialize(&py_str(&start.to_string()), buf, memo, protocol)?;
         }
+        PyObject::CompiledRegex {
+            pattern,
+            flags,
+            is_bytes,
+            ..
+        } => {
+            // Opcode 'R': <pattern:str> <stored_flags:int>
+            // <is_bytes:bool> — recompiled on load with faithfully
+            // recovered flags (test_re: test_pickling).
+            buf.push(b'R');
+            pickle_serialize(&py_str(pattern), buf, memo, protocol)?;
+            pickle_serialize(&py_int(*flags as i64), buf, memo, protocol)?;
+            pickle_serialize(&py_bool(*is_bytes), buf, memo, protocol)?;
+        }
         _ => {
             // Try set/frozenset/complex before failing
             let type_name = obj.borrow().type_name().to_string();

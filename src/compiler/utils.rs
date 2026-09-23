@@ -9,6 +9,43 @@ pub fn contains_yield_in_stmts(stmts: &[Stmt]) -> bool {
         | Stmt::Return(Some(expr))
         | Stmt::Assign { value: expr, .. }
         | Stmt::AugAssign { value: expr, .. } => contains_yield_in_expr(expr),
+        Stmt::AnnAssign {
+            annotation, value, ..
+        } => {
+            contains_yield_in_expr(annotation)
+                || value
+                    .as_ref()
+                    .map(|v| contains_yield_in_expr(v))
+                    .unwrap_or(false)
+        }
+        Stmt::Assert { test, msg } => {
+            contains_yield_in_expr(test)
+                || msg
+                    .as_ref()
+                    .map(|m| contains_yield_in_expr(m))
+                    .unwrap_or(false)
+        }
+        Stmt::Delete(exprs) => exprs.iter().any(contains_yield_in_expr),
+        Stmt::Raise { exc, cause } => {
+            exc.as_ref()
+                .map(|e| contains_yield_in_expr(e))
+                .unwrap_or(false)
+                || cause
+                    .as_ref()
+                    .map(|c| contains_yield_in_expr(c))
+                    .unwrap_or(false)
+        }
+        Stmt::Match { subject, cases } => {
+            contains_yield_in_expr(subject)
+                || cases.iter().any(|c| {
+                    c.guard
+                        .as_ref()
+                        .map(|g| contains_yield_in_expr(g))
+                        .unwrap_or(false)
+                        || contains_yield_in_stmts(&c.body)
+                })
+        }
+        Stmt::TypeAlias { value, .. } => contains_yield_in_expr(value),
         Stmt::If { test, body, orelse } => {
             contains_yield_in_expr(test)
                 || contains_yield_in_stmts(body)
@@ -20,16 +57,27 @@ pub fn contains_yield_in_stmts(stmts: &[Stmt]) -> bool {
                 || contains_yield_in_stmts(orelse)
         }
         Stmt::For {
-            iter, body, orelse, ..
+            target: _,
+            iter,
+            body,
+            orelse,
+            is_async,
         } => {
-            contains_yield_in_expr(iter)
+            *is_async
+                || contains_yield_in_expr(iter)
                 || contains_yield_in_stmts(body)
                 || contains_yield_in_stmts(orelse)
         }
-        Stmt::With { items, body, .. } => {
-            items
-                .iter()
-                .any(|i| contains_yield_in_expr(&i.context_expr))
+        Stmt::With {
+            items,
+            body,
+            is_async,
+            ..
+        } => {
+            *is_async
+                || items
+                    .iter()
+                    .any(|i| contains_yield_in_expr(&i.context_expr))
                 || contains_yield_in_stmts(body)
         }
         Stmt::Try {
@@ -150,7 +198,8 @@ pub fn contains_yield_in_expr(expr: &Expr) -> bool {
         Expr::ListComp { elt, generators } | Expr::SetComp { elt, generators } => {
             contains_yield_in_expr(elt)
                 || generators.iter().any(|g| {
-                    contains_yield_in_expr(&g.iter)
+                    g.is_async
+                        || contains_yield_in_expr(&g.iter)
                         || contains_yield_in_expr(&g.target)
                         || g.ifs.iter().any(|e| contains_yield_in_expr(e))
                 })
@@ -163,7 +212,8 @@ pub fn contains_yield_in_expr(expr: &Expr) -> bool {
             contains_yield_in_expr(key)
                 || contains_yield_in_expr(value)
                 || generators.iter().any(|g| {
-                    contains_yield_in_expr(&g.iter)
+                    g.is_async
+                        || contains_yield_in_expr(&g.iter)
                         || contains_yield_in_expr(&g.target)
                         || g.ifs.iter().any(|e| contains_yield_in_expr(e))
                 })

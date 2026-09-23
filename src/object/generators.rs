@@ -110,6 +110,7 @@ pub(crate) fn generator_next_fallback(args: &[PyObjectRef]) -> PyResult<PyObject
             match vm.execute() {
                 Ok(val) => {
                     let modified = vm.frames.pop().unwrap();
+                    mirror_frame_back(&modified);
                     if modified.ip > 0
                         && matches!(
                             &modified.code.instructions[modified.ip - 1].op,
@@ -187,6 +188,16 @@ fn wrap_stopiteration_pep479(e: PyError) -> PyError {
     }
 }
 
+/// Mirror a resumed frame's writes into a live user globals dict when
+/// the frame runs a `types.FunctionType`-built function (see
+/// `PyFunction::globals_dict`; CPython: `__globals__` IS that dict).
+/// No-op for ordinary frames (`None` link).
+fn mirror_frame_back(f: &crate::vm::Frame) {
+    if let Some(t) = &f.globals_dict {
+        crate::vm::call_func::mirror_globals_to_dict(&f.globals.borrow(), t);
+    }
+}
+
 // ---- coroutine.send() / coroutine.throw() ----
 
 /// Body of `coroutine.send(value)` — deliberately uses a disposable VM, same
@@ -217,6 +228,7 @@ pub(crate) fn coroutine_send_fallback(args: &[PyObjectRef]) -> PyResult<PyObject
                 match vm.execute() {
                     Ok(val) => {
                         let modified = vm.frames.pop().unwrap();
+                        mirror_frame_back(&modified);
                         if modified.ip > 0
                             && matches!(
                                 &modified.code.instructions[modified.ip - 1].op,
@@ -294,6 +306,7 @@ pub(crate) fn coroutine_throw_fallback(args: &[PyObjectRef]) -> PyResult<PyObjec
             let result = match vm.throw_into_frame(err) {
                 Ok(val) => {
                     let modified = vm.frames.pop().unwrap();
+                    mirror_frame_back(&modified);
                     if modified.ip > 0
                         && matches!(
                             &modified.code.instructions[modified.ip - 1].op,
@@ -423,6 +436,7 @@ pub(crate) fn generator_throw_with_vm(
                         return match resumed {
                             Ok(val) => {
                                 let modified = vm.frames.pop().unwrap();
+                                mirror_frame_back(&modified);
                                 if modified.ip > 0
                                     && matches!(
                                         &modified.code.instructions[modified.ip - 1].op,
@@ -460,6 +474,7 @@ pub(crate) fn generator_throw_with_vm(
             match vm.throw_into_frame(err) {
                 Ok(val) => {
                     let modified = vm.frames.pop().unwrap();
+                    mirror_frame_back(&modified);
                     if modified.ip > 0
                         && matches!(
                             &modified.code.instructions[modified.ip - 1].op,
