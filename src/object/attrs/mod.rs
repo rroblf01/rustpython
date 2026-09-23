@@ -324,11 +324,11 @@ impl PyObject {
                     func: |args| Ok(args[0].clone()),
                     self_obj: PyObjectRef::new(PyObject::None),
                 })),
-                "__iter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
-                    name: "__iter__".to_string(),
-                    func: |args| Ok(args[0].clone()),
-                    self_obj: PyObjectRef::new(PyObject::None),
-                })),
+                // NOTE: no `__iter__` here on purpose — coroutines (and
+                // async generators, same object here) are NOT sync
+                // iterable in CPython (`all(asyncgen)` → TypeError, not
+                // silent sync iteration; test_builtin's
+                // test_builtin_call_async_genexpr_no_crash).
                 "__await__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                     name: "__await__".to_string(),
                     func: |args| Ok(args[0].clone()),
