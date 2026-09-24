@@ -70,6 +70,9 @@ impl Compiler {
                 };
                 for entry in cleanup.iter().rev() {
                     match entry {
+                        PendingCleanup::PopExceptStar => {
+                            self.emit(Opcode::POP_EXCEPT, 2);
+                        }
                         PendingCleanup::PopExcept => {
                             self.emit(Opcode::POP_EXCEPT, 0);
                         }
@@ -117,6 +120,9 @@ impl Compiler {
                 };
                 for entry in cleanup.iter().rev() {
                     match entry {
+                        PendingCleanup::PopExceptStar => {
+                            self.emit(Opcode::POP_EXCEPT, 2);
+                        }
                         PendingCleanup::PopExcept => {
                             self.emit(Opcode::POP_EXCEPT, 0);
                         }
@@ -190,6 +196,12 @@ impl Compiler {
                             // here (retval is safely parked below on the
                             // stack, untouched by these statements).
                             self.compile_stmts(finalbody)?;
+                        }
+                        PendingCleanup::PopExceptStar => {
+                            // No exception-info value on the stack for an
+                            // `except*` body — `retval` is the only thing
+                            // there, and the context cleanup leaves it alone.
+                            self.emit(Opcode::POP_EXCEPT, 2);
                         }
                         PendingCleanup::PopExcept => {
                             // Stack here is [..., exc_info, retval] — retval
@@ -361,8 +373,26 @@ impl Compiler {
                     // `compile_assign_target`'s OWN "cannot assign to X"
                     // error instead — the wrong message for this specific,
                     // syntactically-illegal-augmented-target case.
-                    _ => {
-                        return Err("illegal expression for augmented assignment".to_string());
+                    other => {
+                        // CPython names the offending expression KIND in the
+                        // message (`'generator expression' is an illegal
+                        // expression for augmented assignment` — asserted
+                        // verbatim by test_genexps' doctest).
+                        let kind = match other.unlocate() {
+                            Expr::GeneratorExp { .. } => "generator expression",
+                            Expr::ListComp { .. } => "list comprehension",
+                            Expr::SetComp { .. } => "set comprehension",
+                            Expr::DictComp { .. } => "dict comprehension",
+                            _ => "",
+                        };
+                        return Err(if kind.is_empty() {
+                            "illegal expression for augmented assignment".to_string()
+                        } else {
+                            format!(
+                                "'{}' is an illegal expression for augmented assignment",
+                                kind
+                            )
+                        });
                     }
                 }
             }

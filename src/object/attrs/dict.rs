@@ -583,6 +583,13 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                 "__getitem__() takes exactly one argument",
                             ));
                         }
+                        if std::env::var("RPY_DEBUG_DICTGET").is_ok() {
+                            eprintln!(
+                                "dict.__getitem__ self_type={} key={}",
+                                args[0].get_type_name(),
+                                args[1].str()
+                            );
+                        }
                         py_getitem(&args[0], &args[1])
                     },
                     self_obj: PyObjectRef::new(PyObject::None),

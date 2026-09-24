@@ -496,14 +496,32 @@ pub fn builtin_int_from_bytes(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         false
     };
 
-    let byte_data: Vec<u8> = match &*bytes_val.borrow() {
-        PyObject::Bytes(b) => b.clone(),
-        PyObject::ByteArray(b) => b.clone(),
-        PyObject::List(items) => items
-            .iter()
-            .map(|x| x.as_i64().unwrap_or(0) as u8)
-            .collect(),
-        _ => {
+    // The generic-iterable fallback MUST run with no outstanding borrow of
+    // `bytes_val`: iterating goes through `builtin_next`, which takes its
+    // own `borrow_mut()` on the very same object, so doing it inside a
+    // `match &*bytes_val.borrow()` arm double-borrows and panics
+    // ("RefCell already borrowed") — which took down every `import` that
+    // reaches `int.from_bytes(<non-bytes iterable>)`, e.g. the real
+    // `ipaddress`/`urllib.parse`/`xmlrpc.server` (the object's `map`
+    // iterators). Probe the concrete shapes with a SCOPED borrow first, then
+    // iterate outside it.
+    let direct_bytes: Option<Vec<u8>> = {
+        let borrowed = bytes_val.borrow();
+        match &*borrowed {
+            PyObject::Bytes(b) => Some(b.clone()),
+            PyObject::ByteArray(b) => Some(b.clone()),
+            PyObject::List(items) => Some(
+                items
+                    .iter()
+                    .map(|x| x.as_i64().unwrap_or(0) as u8)
+                    .collect(),
+            ),
+            _ => None,
+        }
+    };
+    let byte_data: Vec<u8> = match direct_bytes {
+        Some(v) => v,
+        None => {
             let mut v = Vec::new();
             if let Ok(it) = builtin_iter(&[bytes_val.clone()]) {
                 loop {

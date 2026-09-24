@@ -61,26 +61,33 @@ impl VirtualMachine {
                         (typ, args, matched, unmatched)
                     };
                     if !matched.is_empty() {
-                        let matched_group = PyObjectRef::new(PyObject::ExceptionGroup {
-                            typ: typ.clone(),
-                            args: args.clone(),
-                            exceptions: matched,
-                        });
+                        let matched_group =
+                            crate::object::attrs::exception_group::derive_group_from_args(
+                                &typ, &args, matched,
+                            );
                         if !unmatched.is_empty() {
-                            let unmatched_group = PyObjectRef::new(PyObject::ExceptionGroup {
-                                typ: typ.clone(),
-                                args: vec![py_str(&typ)],
-                                exceptions: unmatched,
-                            });
+                            let unmatched_group =
+                                crate::object::attrs::exception_group::derive_group_from_args(
+                                    &typ, &args, unmatched,
+                                );
                             self.frames[fi].push(unmatched_group);
                         } else {
-                            let empty_group = PyObjectRef::new(PyObject::ExceptionGroup {
-                                typ: typ.clone(),
-                                args: vec![py_str(&typ)],
-                                exceptions: vec![],
-                            });
+                            let empty_group =
+                                crate::object::attrs::exception_group::derive_group_from_args(
+                                    &typ,
+                                    &args,
+                                    vec![],
+                                );
                             self.frames[fi].push(empty_group);
                         }
+                        // Inside the handler, `sys.exception()` is the MATCHED
+                        // subgroup (PEP 654), not the whole group that was raised —
+                        // but a bare `raise` still re-raises the WHOLE group
+                        // (see `Frame::star_original`).
+                        self.frames[fi].star_original = Some(exc_dup.clone());
+                        self.frames[fi].active_exception = Some(Box::new(matched_group.clone()));
+                        self.exc_type = Some(self.exception_class_of(&matched_group));
+                        self.exc_value = Some(matched_group.clone());
                         self.frames[fi].push(matched_group);
                         self.frames[fi].push(py_bool(true));
                     } else {
@@ -92,18 +99,38 @@ impl VirtualMachine {
                         PyObject::Exception { typ, .. } => Some(typ.clone()),
                         _ => None,
                     };
-                    let matched = match typ_name {
-                        Some(t) => crate::vm::util::exc_type_matches(&expected, &t)?,
+                    let matched = match &typ_name {
+                        Some(t) => crate::vm::util::exc_type_matches(&expected, t)?,
                         None => false,
                     };
                     if matched {
+                        // A BARE exception caught by `except*` is wrapped in
+                        // a group (PEP 654): `ExceptionGroup('', (ValueError(),))`
+                        // for an Exception subclass, BaseExceptionGroup for a
+                        // BaseException one — that wrapped form is what the
+                        // `as` target and `sys.exception()` see.
+                        let child_name = typ_name.clone().unwrap_or_default();
+                        let narrow =
+                            crate::vm::util::is_exception_subclass(&child_name, "Exception");
+                        let wrapped = PyObjectRef::new(PyObject::ExceptionGroup {
+                            typ: if narrow {
+                                "ExceptionGroup".to_string()
+                            } else {
+                                "BaseExceptionGroup".to_string()
+                            },
+                            args: vec![py_str("")],
+                            exceptions: vec![exc_dup.clone()],
+                        });
                         let empty_group = PyObjectRef::new(PyObject::ExceptionGroup {
                             typ: "ExceptionGroup".to_string(),
                             args: vec![py_str("")],
                             exceptions: vec![],
                         });
+                        self.frames[fi].active_exception = Some(Box::new(wrapped.clone()));
+                        self.exc_type = Some(self.exception_class_of(&wrapped));
+                        self.exc_value = Some(wrapped.clone());
                         self.frames[fi].push(empty_group);
-                        self.frames[fi].push(exc_dup);
+                        self.frames[fi].push(wrapped);
                         self.frames[fi].push(py_bool(true));
                     } else {
                         self.frames[fi].push(exc_orig);
@@ -134,6 +161,15 @@ impl VirtualMachine {
                     PyObject::ExceptionGroup { exceptions, .. } => exceptions.is_empty(),
                     _ => false,
                 };
+                if std::env::var("RPY_DEBUG_RERAISE2").is_ok() {
+                    let st: Vec<String> = self.frames[fi].stack.iter().map(|v| v.repr()).collect();
+                    eprintln!(
+                        "RERAISE2 pop={} active={} stack={:?}",
+                        reraise_exc.repr(),
+                        self.frames[fi].active_exception.is_some(),
+                        st
+                    );
+                }
                 if !is_empty_eg {
                     if std::env::var("RPY_DEBUG_RERAISE").is_ok() {
                         eprintln!(
@@ -150,8 +186,12 @@ impl VirtualMachine {
                 let nargs = arg;
                 match nargs {
                     0 => {
-                        let reraise_exc = if let Some(exc) = self.frames[fi].active_exception.take()
-                        {
+                        // `except*` + bare `raise`: re-raise the ORIGINAL group,
+                        // not the matched subgroup (PEP 654).
+                        let star_original = self.frames[fi].star_original.take();
+                        let reraise_exc = if let Some(exc) = star_original {
+                            Some(exc)
+                        } else if let Some(exc) = self.frames[fi].active_exception.take() {
                             Some(*exc)
                         } else if let Some(exc) = self.frames[fi].stack.pop() {
                             Some(exc)

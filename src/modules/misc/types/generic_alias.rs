@@ -254,6 +254,12 @@ fn build_generic_alias_type() -> PyObjectRef {
                 .ok_or_else(|| PyError::type_error("GenericAlias has no origin"))?;
                 let origin_repr = match &*origin.borrow() {
                     PyObject::Type { name, .. } => name.clone(),
+                    // The native exception CONSTRUCTORS (ExceptionGroup,
+                    // BaseExceptionGroup, ... are BuiltinFunctions) repr as
+                    // `<class 'X'>`; a GenericAlias names the origin
+                    // BARE: `ExceptionGroup[int]`, not
+                    // `<class 'ExceptionGroup'>[int]`.
+                    PyObject::BuiltinFunction { name, .. } => name.clone(),
                     // `origin.repr()` (the reentrancy-safe `PyObjectRef`
                     // method, which clones a container's elements and drops
                     // its own borrow before recursing) — NOT

@@ -515,12 +515,50 @@ pub fn call_bound_method(
     self_obj: PyObjectRef,
     args: Vec<PyObjectRef>,
 ) -> PyResult<PyObjectRef> {
-    match &*func.borrow() {
-        PyObject::BuiltinMethod {
-            func: f,
-            self_obj: s,
-            ..
-        } => {
+    // Classify the callable under a SHORT borrow and RELEASE it before
+    // dispatching. Holding `func.borrow()` for the duration of the call broke
+    // every callable that mutates ITSELF while running — the canonical case
+    // being `unittest.mock`: `mi * 3` finds `mi.__mul__` (itself a Mock) and
+    // calling it runs `Mock.__call__`, which records the call on that very
+    // Mock (`self.call_args = ...`). With the borrow still live that
+    // STORE_ATTR hit "RefCell already borrowed on Mock" and ABORTED the whole
+    // interpreter (`RefCell CONFLICT - borrow_mut while borrowed on type
+    // Mock`), taking test_functools' `test_hash_handling` and test_fileio
+    // down with it. Same class of bug the `builtin_call` doc comment
+    // describes for `func.some_attr = ...` during its own execution.
+    enum Target {
+        BuiltinMethod(crate::object::BuiltinFunc, PyObjectRef),
+        BuiltinFunction(crate::object::BuiltinFunc),
+        Closure(std::rc::Rc<dyn Fn(&[PyObjectRef]) -> PyResult<PyObjectRef>>),
+        Function,
+        BoundMethod(PyObjectRef),
+        ClassMethod(PyObjectRef),
+        TypeBuiltin,
+        TypeOther,
+        Instance(PyObjectRef),
+        Other,
+    }
+    let target = {
+        let borrowed = func.borrow();
+        match &*borrowed {
+            PyObject::BuiltinMethod {
+                func: f,
+                self_obj: s,
+                ..
+            } => Target::BuiltinMethod(*f, s.clone()),
+            PyObject::BuiltinFunction { func: f, .. } => Target::BuiltinFunction(*f),
+            PyObject::Closure(f) => Target::Closure(f.clone()),
+            PyObject::Function(_) => Target::Function,
+            PyObject::BoundMethod { func: inner, .. } => Target::BoundMethod(inner.clone()),
+            PyObject::ClassMethod { func: inner } => Target::ClassMethod(inner.clone()),
+            PyObject::Type { name, .. } if name == "type" => Target::TypeBuiltin,
+            PyObject::Type { .. } => Target::TypeOther,
+            PyObject::Instance { typ, .. } => Target::Instance(typ.clone()),
+            _ => Target::Other,
+        }
+    };
+    match target {
+        Target::BuiltinMethod(f, s) => {
             let mut all_args = if matches!(&*s.borrow(), PyObject::None) {
                 let mut v = vec![s.clone()];
                 v.push(self_obj);
@@ -531,17 +569,33 @@ pub fn call_bound_method(
             all_args.extend(args);
             f(&all_args)
         }
-        PyObject::BuiltinFunction { func: f, .. } => {
+        Target::BuiltinFunction(f) => {
             let mut all_args = vec![self_obj];
             all_args.extend(args);
             f(&all_args)
         }
-        PyObject::Closure(func) => {
+        Target::Closure(f) => {
             let mut all_args = vec![self_obj];
             all_args.extend(args);
-            func(&all_args)
+            f(&all_args)
         }
-        PyObject::Function(ref f) => {
+        Target::Function => {
+            // Extract the code/globals/closure under a short borrow (the
+            // borrow MUST be released before the body runs — see the note
+            // above).
+            let (code, g, defaults, closure, fname) = {
+                let borrowed = func.borrow();
+                match &*borrowed {
+                    PyObject::Function(f) => (
+                        f.code.clone(),
+                        f.globals.clone(),
+                        f.defaults.clone(),
+                        f.closure.clone(),
+                        f.code.name,
+                    ),
+                    _ => unreachable!(),
+                }
+            };
             // See `NativeDispatchRecursionGuard`'s own doc comment (`core.rs`)
             // — without this, recursion flowing through this disposable-VM
             // dispatch path (e.g. `A.__call__ = A(); A()()`) overflows the
@@ -549,11 +603,6 @@ pub fn call_bound_method(
             // `RecursionError`, since each nested call resets its own fresh
             // VM's frame counter to zero.
             let _guard = crate::object::NativeDispatchRecursionGuard::enter()?;
-            let code = &f.code;
-            let g = &f.globals;
-            let defaults = &f.defaults;
-            let fname = &f.code.name;
-            let closure = &f.closure;
             if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
                 eprintln!(
                     "CALL_BOUND_METHOD (disposable VM): fname={} code_name={} filename={}",
@@ -603,7 +652,7 @@ pub fn call_bound_method(
             // Django-free repro: a `dataclass`-generated `__repr__` closing
             // over its own field-name list worked fine called directly
             // (`obj.__repr__()`) but raised NameError through `repr(obj)`.
-            frame.closure = Box::new(closure.clone());
+            frame.closure = Box::new(closure);
             let code = code.clone();
             let defaults = defaults.clone();
             // Set self at index 0
@@ -723,62 +772,37 @@ pub fn call_bound_method(
             vm.push_frame(frame);
             vm.execute()
         }
-        PyObject::BoundMethod { func, .. } => {
+        Target::BoundMethod(inner) => {
             let mut all_args = vec![self_obj.clone()];
             all_args.extend(args);
-            call_bound_method(func.clone(), self_obj, all_args)
+            call_bound_method(inner, self_obj, all_args)
         }
         // `classmethod(some_callable)` reached through this disposable
         // dispatch path — e.g. PEP 560's `__class_getitem__ =
         // classmethod(GenericAlias)` (real `Lib/_collections_abc.py`:
         // every ABC there ends with that exact line), triggered by
         // `SomeClass[int]`'s subscript machinery calling `py_getitem` ->
-        // `call_bound_method` on the found `__class_getitem__` value. This
-        // arm used to be missing entirely, so ANY `classmethod`-wrapped
-        // value reached via `call_bound_method` (not just
-        // `__class_getitem__` — any instance attribute access on a
-        // classmethod that falls through this path) fell to the generic
-        // `_ => Err("object is not callable")` catch-all below — real
-        // trigger: `Mapping[str, str]`-style generic subscripting on ANY
-        // real `_collections_abc.py` ABC raised `TypeError: object is not
-        // callable` instead of building a `GenericAlias`, which in turn
-        // broke every module (`Lib/_colorize.py`'s `class ThemeSection
-        // (Mapping[str, str])`, `typing.py`, ...) that subscripts one at
-        // class-definition time. A classmethod descriptor's whole job is
-        // binding the CLASS (not an instance) as the first argument to the
-        // wrapped callable — resolve `self_obj` to its class if it's an
-        // instance (ordinary `obj.some_classmethod()` access), or use it
-        // directly if it's already a class (the `__class_getitem__` case,
-        // where `self_obj` here IS the class being subscripted), then
-        // dispatch exactly like the other "prepend self_obj, call `func`"
-        // arms above.
-        PyObject::ClassMethod { func } => {
+        // `call_bound_method` on the found `__class_getitem__` value. A
+        // classmethod descriptor's whole job is binding the CLASS (not an
+        // instance) as the first argument to the wrapped callable — resolve
+        // `self_obj` to its class if it's an instance (ordinary
+        // `obj.some_classmethod()` access), or use it directly if it's
+        // already a class (the `__class_getitem__` case, where `self_obj`
+        // here IS the class being subscripted).
+        Target::ClassMethod(inner) => {
             let cls = match &*self_obj.borrow() {
                 PyObject::Instance { typ, .. } => typ.clone(),
                 _ => self_obj.clone(),
             };
-            call_bound_method(func.clone(), cls, args)
+            call_bound_method(inner, cls, args)
         }
         // The single-argument form of the `type` builtin itself (`type(x)`
         // — get x's real type) reaching this path as a plain callable
         // value, e.g. passed as a `key=` function to a native higher-order
         // builtin (`itertools.groupby(data, type)` — real trigger:
-        // CPython's own `Lib/statistics.py`). `type` is represented as a
-        // real `PyObject::Type{name:"type",..}` here (not a
-        // `BuiltinFunction`, unlike most other native callables), so it
-        // fell through to the generic "object is not callable" error
-        // otherwise. Delegates to the same `builtin_type_of` helper the
-        // real CALL-opcode path and `.__class__` both already use — not a
-        // new implementation. Other `PyObject::Type` calls (constructing an
-        // actual instance, or `type(name, bases, dict)`) still aren't
-        // supported through THIS path — only real Python code going
-        // through the live VM's own `call_function` gets that; this is
-        // scoped to the one case that's actually reachable from a native
-        // higher-order builtin's disposable-VM-free call convention.
-        PyObject::Type { name, .. } if name == "type" && args.is_empty() => {
-            builtin_type_of(&[self_obj])
-        }
-        PyObject::Type { .. } => {
+        // CPython's own `Lib/statistics.py`).
+        Target::TypeBuiltin if args.is_empty() => builtin_type_of(&[self_obj]),
+        Target::TypeBuiltin | Target::TypeOther => {
             let mut all = vec![self_obj.clone()];
             all.extend(args);
             crate::object::call_function_disposable(&func, all, vec![])
@@ -786,26 +810,17 @@ pub fn call_bound_method(
         // A plain `Instance` used as a `key=`/callback value passed to a
         // native higher-order builtin through this same "prepend self_obj,
         // call" convention (real trigger: `operator.itemgetter`/
-        // `attrgetter`/`methodcaller` are real `Type`-backed `Instance`s,
-        // not `Closure`s, so they carry no arm here at all — `sorted(data,
-        // key=itemgetter(1, 0))`/`heapq.merge(..., key=itemgetter(...))`
-        // raised `TypeError: object is not callable` the moment the
-        // itemgetter/attrgetter rewrite gave them real `repr`/`pickle`
-        // support). Look up `__call__` via the type's MRO and dispatch
-        // through the same "prepend self, call" shape as the
-        // `BuiltinFunction`/`Closure`/`Function` arms above — `func` itself
-        // (the Instance) becomes the found `__call__`'s own `self`.
-        PyObject::Instance { typ, .. } => {
-            match crate::object::lookup_dunder_via_mro(typ, "__call__") {
-                Some(call_fn) => {
-                    let mut all = vec![self_obj];
-                    all.extend(args);
-                    call_bound_method(call_fn, func.clone(), all)
-                }
-                None => Err(PyError::type_error("object is not callable")),
+        // `attrgetter`/`methodcaller` are real `Type`-backed `Instance`s, so
+        // they carry no arm here at all).
+        Target::Instance(typ) => match crate::object::lookup_dunder_via_mro(&typ, "__call__") {
+            Some(call_fn) => {
+                let mut all = vec![self_obj];
+                all.extend(args);
+                call_bound_method(call_fn, func.clone(), all)
             }
-        }
-        _ => Err(PyError::type_error("object is not callable")),
+            None => Err(PyError::type_error("object is not callable")),
+        },
+        Target::Other => Err(PyError::type_error("object is not callable")),
     }
 }
 

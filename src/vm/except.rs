@@ -262,7 +262,8 @@ impl VirtualMachine {
         // share this same object as f_locals (CPython identity rule).
         let fg_obj = PyObjectRef::imm(PyObject::Globals(globals.clone()));
         let fl_obj_owned;
-        if !frame.code.varnames.is_empty() {
+        let frame_locals_is_globals = frame.code.varnames.is_empty();
+        if !frame_locals_is_globals {
             let mut fl = PyDict::new();
             for (i, name_id) in frame.code.varnames.iter().enumerate() {
                 if let Some(Some(v)) = frame.fast_locals.get(i) {
@@ -298,6 +299,37 @@ impl VirtualMachine {
         } else {
             attrs.insert_str("f_back", py_none());
         }
+        // `frame.clear()` (3.4+): empties the frame's locals, breaking the
+        // reference cycles a traceback would otherwise keep alive. Real
+        // `traceback.clear_frames()` — which CPython's own `unittest`
+        // calls after EVERY `assertRaises` context — does
+        // `tb.tb_frame.clear()` in a loop, so its absence made every test
+        // that triggers an exception die with
+        // `AttributeError: 'frame' object has no attribute 'clear'` (33 of
+        // test_list's 35 errors, and the same pattern corpus-wide).
+        //
+        // The locals dict the frame owns (`f_locals` for function frames) is
+        // cleared; a module/exec frame's `f_locals` IS its globals, which
+        // CPython deliberately leaves alone (`frame.clear()` on a module
+        // frame is legal and only drops the fast-locals, of which there are
+        // none).
+        let clear_locals = fl_obj.clone();
+        let is_module_frame = frame_locals_is_globals;
+        // A capturing `PyObject::Closure` (not a `BuiltinMethod`, whose
+        // `func` must be a bare fn pointer in this codebase).
+        attrs.insert_str(
+            "clear",
+            PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(
+                move |_args: &[PyObjectRef]| {
+                    if !is_module_frame {
+                        if let PyObject::Dict(ref mut d) = &mut *clear_locals.borrow_mut() {
+                            d.clear();
+                        }
+                    }
+                    Ok(crate::object::py_none())
+                },
+            ))),
+        );
         let frame_obj = PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "frame".to_string(),
@@ -366,6 +398,9 @@ impl VirtualMachine {
                 ..
             } => Some(tb.clone()),
             PyObject::Instance { dict, .. } => dict.get_str("__traceback__").cloned(),
+            // `ExceptionGroup` has no traceback field on the variant — the
+            // chain lives in the identity-keyed side table.
+            PyObject::ExceptionGroup { .. } => crate::object::eg_traceback::get(exc),
             _ => None,
         };
         if let Some(old) = old_tb {
@@ -377,12 +412,16 @@ impl VirtualMachine {
         };
         match &mut *guard {
             PyObject::Exception { traceback, .. } => {
-                *traceback = Some(new_node);
+                *traceback = Some(new_node.clone());
             }
             PyObject::Instance { dict, .. } => {
-                dict.insert_str("__traceback__", new_node);
+                dict.insert_str("__traceback__", new_node.clone());
             }
             _ => {}
+        }
+        drop(guard);
+        if matches!(&*exc.borrow(), PyObject::ExceptionGroup { .. }) {
+            crate::object::eg_traceback::set(exc, new_node);
         }
     }
 

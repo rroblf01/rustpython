@@ -692,8 +692,21 @@ pub fn correctly_rounded_int_div_f64(a: &BigInt, b: &BigInt) -> PyResult<f64> {
     Ok(if negate { -result } else { result })
 }
 
+/// True when `obj` is a real Python `int`/`bool` (NOT an instance whose
+/// `__index__`/`__int__` merely coerces). The `i64` fast paths in
+/// `py_floor_div`/`py_mod` must require this: `as_i64()` also succeeds for
+/// a `Decimal` instance, so `7 // Decimal(2)` took the integer path and
+/// answered `3` instead of deferring to `Decimal.__rfloordiv__`
+/// (`Decimal('3')`), and `7 % Decimal(2)` likewise.
+fn is_real_int_obj(obj: &PyObjectRef) -> bool {
+    matches!(&*obj.borrow(), PyObject::Int(_) | PyObject::Bool(_))
+}
+
 pub fn py_floor_div(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
-    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+    if let (Some(ai), Some(bi)) = (
+        is_real_int_obj(a).then(|| a.as_i64()).flatten(),
+        is_real_int_obj(b).then(|| b.as_i64()).flatten(),
+    ) {
         if bi == 0 {
             return Err(PyError::zero_division());
         }
@@ -777,7 +790,10 @@ fn type_display_name(o: &PyObject) -> String {
 }
 
 pub fn py_mod(a: &PyObjectRef, b: &PyObjectRef) -> PyResult<PyObjectRef> {
-    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+    if let (Some(ai), Some(bi)) = (
+        is_real_int_obj(a).then(|| a.as_i64()).flatten(),
+        is_real_int_obj(b).then(|| b.as_i64()).flatten(),
+    ) {
         if bi == 0 {
             return Err(PyError::zero_division());
         }

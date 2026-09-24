@@ -60,6 +60,38 @@ impl VirtualMachine {
         let mut vm = DISPOSABLE_VM_POOL
             .with(|p| p.borrow_mut().pop())
             .unwrap_or_else(VirtualMachine::new);
+        // Re-sync a STALE pooled snapshot — one that is MISSING modules the
+        // real VM imported since (the startup `encodings` import is the case
+        // that matters). Comparing the module COUNT is O(1) and strictly
+        // one-sided (`>` not `!=`): re-cloning the ~113-entry map on every
+        // take (as an unconditional refresh did) slowed every generator
+        // resume enough to turn test_decimal (14s -> 151s) and
+        // test_threading into 180s timeouts, and a VM that merely imported
+        // something EXTRA is not stale, so `!=` would have paid that cost
+        // again for the rest of the process.
+        let cached_len = crate::vm::cached_module_count();
+        if cached_len > vm.modules.len() {
+            crate::vm::refresh_modules_from_state_cache(&mut vm);
+        }
+        // NOTE: the module map is deliberately NOT re-synced here. A
+        // POOLED instance's `modules` is a snapshot frozen when it was first
+        // built, so anything imported into the real VM afterwards (notably
+        // the startup `encodings` import, whose `codecs.register(
+        // search_function)` is what makes `codecs.lookup()` find the real
+        // `encodings/*` codecs) was invisible to it — and its first
+        // `import encodings.<x>` RE-EXECUTED `Lib/encodings/__init__.py` and
+        // `Lib/codecs.py`, installing a SECOND `codecs` module object into
+        // the shared `sys.modules` dict. Everything bound to the first one
+        // then compared against a different `codecs.CodecInfo` class and
+        // every `getregentry()` result took the "not a CodecInfo" rebuild
+        // path, silently dropping each codec's `incrementalencoder` /
+        // `incrementaldecoder` (`codecs.getincrementaldecoder('utf-8-sig')`
+        // then raised `LookupError`). The fix lives in the IMPORT path
+        // instead — `import_module_from_file_inner` falls back to the
+        // process-wide module cache on a miss — because doing the sync here
+        // cost a ~113-entry `HashMap` clone on EVERY disposable VM
+        // (i.e. on every generator resume), which turned
+        // `test_decimal`/`test_threading` into 180s timeouts.
         vm.install_collections_abc_alias();
         vm.reset_disposable_state()
     }

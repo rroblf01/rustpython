@@ -70,12 +70,37 @@ impl VirtualMachine {
         // (`getattr()`'s own special case) could otherwise see a stale error
         // from an earlier, already-handled invocation and wrongly re-raise it.
         take_pending_descriptor_error();
-        let typ = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
-            typ.clone()
+        let is_class = matches!(&*obj.borrow(), PyObject::Type { .. });
+        let typ: Option<PyObjectRef> = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
+            Some(typ.clone())
+        } else if is_class {
+            // Attribute on the METACLASS: reading `SomeEnum.__members__`
+            // must find `EnumType.__members__` — a `property` whose getter
+            // takes the CLASS as self — and invoke it. Without this,
+            // `getattr(cls, name)`/`hasattr(cls, name)` reported every
+            // metaclass-provided attribute as missing while the dot form
+            // (`cls.__members__`, LOAD_ATTR's own metatype fallback) worked.
+            crate::object::metatype_of(obj).and_then(|mt| {
+                if let PyObject::Type { mro, .. } = &*mt.borrow() {
+                    for base in mro.iter() {
+                        if let PyObject::Type { dict, .. } = &*base.borrow() {
+                            if let Some(val) = dict.get_str(name) {
+                                return Some(val.clone());
+                            }
+                        }
+                    }
+                }
+                None
+            })
         } else {
             return None;
         };
-        let found = {
+        let typ = typ?;
+        let found = if is_class {
+            // Already resolved through the metaclass chain above; skip the
+            // instance-type dict/MRO walk.
+            Some(typ.clone())
+        } else {
             let typ_ref = typ.borrow();
             if let PyObject::Type {
                 dict: type_dict,
@@ -136,7 +161,7 @@ impl VirtualMachine {
                 self_obj: obj.clone(),
             })),
             PyObject::BuiltinFunction { name: n, .. }
-                if crate::object::is_builtin_exception_class_name(n) =>
+                if crate::object::is_builtin_exception_class_name(n.as_str()) =>
             {
                 Some(found.clone())
             }

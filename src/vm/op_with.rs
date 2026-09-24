@@ -121,6 +121,19 @@ impl VirtualMachine {
                             (typ_obj, exc.clone())
                         }
                         PyObject::Instance { typ, .. } => (typ.clone(), exc.clone()),
+                        // An `ExceptionGroup` reaching `__exit__` — its class
+                        // IS the exception's type (`type(eg)`), so pass that
+                        // (and the group itself as `exc_val`), never None:
+                        // `contextlib.suppress`'s PEP 654 branch keys off
+                        // `issubclass(exctype, BaseExceptionGroup)`.
+                        PyObject::ExceptionGroup { typ, .. } => {
+                            let typ_obj = self.frames[fi]
+                                .builtins
+                                .get(&interner::intern(typ))
+                                .cloned()
+                                .unwrap_or_else(|| py_str(typ));
+                            (typ_obj, exc.clone())
+                        }
                         _ => (py_none(), py_none()),
                     }
                 };

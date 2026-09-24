@@ -18,6 +18,8 @@ pub use statistics::*;
 
 mod decimal;
 pub use decimal::*;
+mod decimal_ctx;
+pub use decimal_ctx::*;
 mod decimal_types;
 pub use decimal_types::*;
 mod decimal_mod;

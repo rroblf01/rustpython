@@ -1412,6 +1412,116 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     };
     d.insert_str("prefix", py_str(&prefix));
     d.insert_str("exec_prefix", py_str(&exec_prefix));
+    // `sys.stdlib_module_names` (3.10+): a frozenset of the top-level
+    // stdlib module names. Real CPython builds it from the frozen/stdlib
+    // manifest; here the equivalent source of truth is this interpreter's
+    // own `Lib/` tree, so list its top-level `.py` modules and package
+    // directories, plus the names of the modules implemented natively
+    // (which have no file). Missing entirely meant any code reading it —
+    // including CPython's own `test_sys.py::test_module_names`, and
+    // `sysconfig`/`mimetypes`-style consumers — raised AttributeError.
+    {
+        let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let lib_dir = crate::vm::helpers::find_lib_dir();
+        if let Ok(entries) = std::fs::read_dir(&lib_dir) {
+            for entry in entries.flatten() {
+                let file_name = entry.file_name();
+                let raw = file_name.to_string_lossy().to_string();
+                if raw.starts_with('.') || raw.starts_with('_') && raw != "__future__" {
+                    continue;
+                }
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.join("__init__.py").exists() {
+                        names.insert(raw);
+                    }
+                } else if let Some(stem) = raw.strip_suffix(".py") {
+                    names.insert(stem.to_string());
+                }
+            }
+        }
+        // Native (Rust-implemented) stdlib modules with no `Lib/` file.
+        for name in [
+            "builtins",
+            "_thread",
+            "errno",
+            "faulthandler",
+            "gc",
+            "itertools",
+            "marshal",
+            "posix",
+            "pwd",
+            "sys",
+            "time",
+            "xxsubtype",
+            "zipimport",
+            "atexit",
+            "codecs",
+            "mmap",
+            "select",
+            "selectors",
+            "signal",
+            "socket",
+            "_socket",
+            "_sre",
+            "_stat",
+            "_string",
+            "_operator",
+            "_functools",
+            "_collections",
+            "math",
+            "_json",
+            "_struct",
+            "_random",
+            "binascii",
+            "_datetime",
+            "_decimal",
+            "_elementtree",
+            "_hashlib",
+            "_pickle",
+            "zlib",
+            "binascii",
+            "_heapq",
+            "_bisect",
+            "_queue",
+            "_ast",
+            "_abc",
+            "_io",
+            "unicodedata",
+            "_locale",
+            "grp",
+            "resource",
+            "fcntl",
+            "array",
+            "_posixsubprocess",
+            "_opcode",
+            "_tracemalloc",
+            "bdb",
+            "cmd",
+            "code",
+            "codeop",
+            "pdb",
+            "profile",
+            "cProfile",
+            "pyclbr",
+            "trace",
+            "fileinput",
+            "linecache",
+            "tokenize",
+        ] {
+            names.insert(name.to_string());
+        }
+        let mut sorted: Vec<String> = names.into_iter().collect();
+        sorted.sort();
+        let mut name_set = crate::object::PySet::new();
+        for name in sorted {
+            let _ = name_set.add(py_str(&name));
+        }
+        d.insert_str(
+            "stdlib_module_names",
+            PyObjectRef::new(PyObject::FrozenSet(name_set)),
+        );
+    }
     // `sys.base_prefix`/`base_exec_prefix` — real CPython's own venv-
     // detection idiom (`sys.prefix != sys.base_prefix`) needs these to be
     // the REAL, non-venv installation prefix regardless of whether a venv

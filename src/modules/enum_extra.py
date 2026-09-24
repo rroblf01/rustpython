@@ -217,6 +217,14 @@ class EnumType(type):
         cls._member_names_ = []
         cls._member_map_ = member_map
         cls._value2member_map_ = value2member
+        # `_member_type_` — the type of the members' values (CPython sets it
+        # from the first member, falling back to the mixin). 766 of
+        # test_enum's own assertions read it (`self.assertIs(MyEnum._member_type_,
+        # int)` and the `_missing_`/`_value2member_map_` machinery).
+        cls._member_type_ = None
+        for key in member_names:
+            cls._member_type_ = type(resolved_values[key])
+            break
         for key in member_names:
             value = resolved_values[key]
             existing = None
@@ -271,6 +279,20 @@ class EnumType(type):
         # Functional API: Color('NAME', 'A B', module=...). Detected by a
         # string name plus a names spec (str/list/tuple/dict) — real
         # trigger: plistlib's `enum.Enum('PlistFormat', ..., module=...)`.
+        # The `names=`/`type=`/`start=` keyword forms count too: CPython's
+        # `Enum('Empty', type=int)` builds a MEMBERLESS enum (test_enum's
+        # `TestMixedIntFunction` does exactly that), and a lone string with
+        # no names spec at all is a member lookup that CPython rejects with
+        # "has no members; specify `names=()` if you meant to create a new,
+        # empty, enum".
+        if isinstance(value, str) and (
+            'names' in kwargs or 'type' in kwargs or 'start' in kwargs
+        ):
+            names = kwargs.pop('names', None)
+            if args:
+                names = args[0]
+                args = args[1:]
+            return cls._create_functional(value, names, *args, **kwargs)
         if isinstance(value, str) and args and isinstance(
             args[0], (str, list, tuple, dict)
         ):
@@ -297,13 +319,35 @@ class EnumType(type):
 
     def _create_functional(cls, name, names, *args, module=None, qualname=None, type=None, **kwargs):
         # Parse names spec like CPython's _create_.
+        if names is None:
+            names = ()
         if isinstance(names, str):
             names = names.split()
         if isinstance(names, (list, tuple)):
-            # Auto-number from 1 (CPython behavior for bare name lists).
-            items = [(n, i + 1) for i, n in enumerate(names)]
-        else:
+            seq = list(names)
+            # A sequence of (name, value) PAIRS keeps its values
+            # (`Flag('Perm', (('R', 2), ('W', 8)))` — test_enum's
+            # `test_programatic_function_iterable`); a bare sequence of
+            # names is auto-numbered from 1.
+            if seq and all(
+                isinstance(n, (tuple, list)) and len(n) == 2 and isinstance(n[0], str)
+                for n in seq
+            ):
+                items = [(n[0], n[1]) for n in seq]
+            else:
+                items = [(n, i + 1) for i, n in enumerate(seq)]
+        elif hasattr(names, 'items'):
             items = list(names.items())
+        else:
+            # Any other iterable of pairs (`itertools`-style specs).
+            seq = list(names)
+            items = (
+                [(n[0], n[1]) for n in seq]
+                if all(
+                    isinstance(n, (tuple, list)) and len(n) == 2 for n in seq
+                )
+                else [(n, i + 1) for i, n in enumerate(seq)]
+            )
         ns = _EnumDict()
         ns["__module__"] = module if module is not None else cls.__module__
         if qualname is not None:
@@ -873,3 +917,113 @@ def global_enum(cls, update_str=False):
             setattr(mod, k, v)
     except Exception:
         pass
+
+
+# ── `verify` / `EnumCheck` (the `@verify(CONTINUOUS)` class decorator) ──
+# The module docstring above explains why this is NOT CPython's own
+# `class EnumCheck(StrEnum)` + `CONTINUOUS, NAMED_FLAGS, UNIQUE =
+# EnumCheck` (that shape needs a disposable VM while this very module is
+# still bootstrapping). The constants only ever participate in `is`
+# comparisons inside `verify.__call__` and are printed by nothing else, so a
+# plain `str` subclass carries the same observable behavior (str value,
+# equality with the string, repr) without touching the Enum machinery.
+class EnumCheck(str):
+    __str__ = str.__str__
+
+    def __new__(cls, value):
+        return str.__new__(cls, value)
+
+    def __repr__(self):
+        return f'<EnumCheck.{str(self).upper()}: {str(self)!r}>'
+
+
+CONTINUOUS = EnumCheck('continuous')
+NAMED_FLAGS = EnumCheck('named_flags')
+UNIQUE = EnumCheck('unique')
+
+
+class verify:
+    """
+    Check an enumeration for various constraints. (see EnumCheck)
+    """
+    def __init__(self, *checks):
+        self.checks = checks
+    def __call__(self, enumeration):
+        checks = self.checks
+        cls_name = enumeration.__name__
+        if Flag is not None and issubclass(enumeration, Flag):
+            enum_type = 'flag'
+        elif issubclass(enumeration, Enum):
+            enum_type = 'enum'
+        else:
+            raise TypeError("the 'verify' decorator only works with Enum and Flag")
+        for check in checks:
+            if check is UNIQUE:
+                # check for duplicate names
+                duplicates = []
+                for name, member in enumeration.__members__.items():
+                    if name != member.name:
+                        duplicates.append((name, member.name))
+                if duplicates:
+                    alias_details = ', '.join(
+                            ["%s -> %s" % (alias, name) for (alias, name) in duplicates])
+                    raise ValueError('aliases found in %r: %s' %
+                            (enumeration, alias_details))
+            elif check is CONTINUOUS:
+                values = set(e.value for e in enumeration)
+                if len(values) < 2:
+                    continue
+                low, high = min(values), max(values)
+                missing = []
+                if enum_type == 'flag':
+                    # check for powers of two
+                    for i in range(_high_bit(low)+1, _high_bit(high)):
+                        if 2**i not in values:
+                            missing.append(2**i)
+                elif enum_type == 'enum':
+                    # check for missing consecutive integers
+                    for i in range(low+1, high):
+                        if i not in values:
+                            missing.append(i)
+                else:
+                    raise Exception('verify: unknown type %r' % enum_type)
+                if missing:
+                    raise ValueError(('invalid %s %r: missing values %s' % (
+                            enum_type, cls_name, ', '.join((str(m) for m in missing)))
+                            )[:256])
+                            # limit max length to protect against DOS attacks
+            elif check is NAMED_FLAGS:
+                # examine each alias and check for unnamed flags
+                member_names = enumeration._member_names_
+                member_values = [m.value for m in enumeration]
+                missing_names = []
+                missing_value = 0
+                for name, alias in enumeration._member_map_.items():
+                    if name in member_names:
+                        # not an alias
+                        continue
+                    if alias.value < 0:
+                        # negative numbers are not checked
+                        continue
+                    values = list(_iter_bits_lsb(alias.value))
+                    missed = [v for v in values if v not in member_values]
+                    if missed:
+                        missing_names.append(name)
+                        for val in missed:
+                            missing_value |= val
+                if missing_names:
+                    if len(missing_names) == 1:
+                        alias = 'alias %s is missing' % missing_names[0]
+                    else:
+                        alias = 'aliases %s and %s are missing' % (
+                                ', '.join(missing_names[:-1]), missing_names[-1]
+                                )
+                    if _is_single_bit(missing_value):
+                        value = 'value 0x%x' % missing_value
+                    else:
+                        value = 'combined values of 0x%x' % missing_value
+                    raise ValueError(
+                            'invalid Flag %r: %s %s [use enum.show_flag_values(value) for details]'
+                            % (cls_name, alias, value)
+                            )
+        return enumeration

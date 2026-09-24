@@ -610,6 +610,10 @@ fn _codecs_charmap_encode(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// Create the `_codecs` module dictionary.
 pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
+    // CPython's `PyCodec_Init` registers the standard error handlers in its
+    // module init; do the same here, BEFORE the dict is handed out (the
+    // vendored `Lib/codecs.py` reads them back at import time).
+    register_standard_error_handlers();
     d.insert_str(
         "lookup_error",
         PyObjectRef::new(PyObject::BuiltinFunction {
@@ -740,6 +744,20 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
             );
         };
     }
+    insert_codec_fn!("utf_7_encode", helpers::utf_7_encode);
+    insert_codec_fn!("utf_7_decode", helpers::utf_7_decode);
+    insert_codec_fn!("unicode_escape_encode", helpers::unicode_escape_encode);
+    insert_codec_fn!("unicode_escape_decode", helpers::unicode_escape_decode);
+    insert_codec_fn!(
+        "raw_unicode_escape_encode",
+        helpers::raw_unicode_escape_encode
+    );
+    insert_codec_fn!(
+        "raw_unicode_escape_decode",
+        helpers::raw_unicode_escape_decode
+    );
+    insert_codec_fn!("escape_encode", helpers::escape_encode);
+    insert_codec_fn!("escape_decode", helpers::escape_decode);
     insert_codec_fn!("utf_8_encode", helpers::_codecs_encode);
     insert_codec_fn!("utf_8_decode", helpers::_codecs_decode);
     insert_codec_fn!("ascii_encode", helpers::_codecs_encode);
@@ -915,4 +933,165 @@ pub fn create_codecs_dict() -> HashMap<String, PyObjectRef> {
         }),
     );
     d
+}
+
+/// The standard codec error handlers, registered natively exactly like
+/// CPython's `PyCodec_Init` does (`Python/codecs.c`): the vendored
+/// `Lib/codecs.py` only *reads* them back
+/// (`strict_errors = lookup_error("strict")`), so without this registration
+/// at startup EVERY import that touches `codecs`' error-handler section
+/// raises `LookupError: unknown error handler: 'strict'` — which took down
+/// `traceback`, `tracemalloc`, `ftplib` and more the moment their real
+/// CPython sources were vendored in.
+///
+/// Each handler receives the `UnicodeEncodeError`/`UnicodeDecodeError`
+/// object and returns `(replacement, new_position)`, per PEP 383 /
+/// `codecs.register_error`'s contract.
+fn register_standard_error_handlers() {
+    for name in [
+        "strict",
+        "ignore",
+        "replace",
+        "xmlcharrefreplace",
+        "backslashreplace",
+        "namereplace",
+        "surrogateescape",
+        "surrogatepass",
+    ] {
+        let kind = name.to_string();
+        let handler: PyObjectRef = PyObjectRef::new(PyObject::Closure(Rc::new(
+            move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                codec_error_handler(&kind, args)
+            },
+        )));
+        helpers::_codecs_register_error(name, handler);
+    }
+}
+
+/// Read `(object, start, end)` out of a Unicode(Encode|Decode)Error instance
+/// (its `args` tuple is `(encoding, object, start, end, reason)`).
+fn codec_error_parts(exc: &PyObjectRef) -> (PyObjectRef, i64, i64) {
+    let args = match &*exc.borrow() {
+        PyObject::Exception { args, .. } => args.clone(),
+        PyObject::Tuple(items) => items.clone(),
+        _ => vec![],
+    };
+    let object = args.get(1).cloned().unwrap_or_else(|| py_str(""));
+    let start = args.get(2).and_then(|v| v.as_i64()).unwrap_or(0);
+    let end = args.get(3).and_then(|v| v.as_i64()).unwrap_or(start + 1);
+    (object, start, end)
+}
+
+fn codec_error_handler(kind: &str, args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if args.is_empty() {
+        return Err(PyError::type_error(
+            "codec error handler requires 1 argument",
+        ));
+    }
+    let exc = args[0].clone();
+    let (object, start, end) = codec_error_parts(&exc);
+    let exc_type = match &*exc.borrow() {
+        PyObject::Exception { typ, .. } => typ.clone(),
+        _ => "UnicodeDecodeError".to_string(),
+    };
+    let is_encode = exc_type == "UnicodeEncodeError";
+    let count = (end - start).max(0) as usize;
+    match kind {
+        // `strict` re-raises the very exception it was handed (CPython's
+        // `codec_error_strict`).
+        "strict" => Err(PyError::Exception(exc_type, exc)),
+        "ignore" => Ok(py_tuple(vec![py_str(""), py_int(end)])),
+        "replace" => {
+            let rep = if is_encode {
+                "?".repeat(count)
+            } else {
+                "\u{fffd}".to_string()
+            };
+            Ok(py_tuple(vec![py_str(&rep), py_int(end)]))
+        }
+        "xmlcharrefreplace" => {
+            let mut rep = String::new();
+            if is_encode {
+                for ch in object.str().chars().skip(start as usize).take(count) {
+                    rep.push_str(&format!("&#{};", ch as u32));
+                }
+            } else {
+                let bytes = match &*object.borrow() {
+                    PyObject::Bytes(b) => b.clone(),
+                    _ => Vec::new(),
+                };
+                for byte in bytes.iter().skip(start as usize).take(count) {
+                    rep.push_str(&format!("&#{};", byte));
+                }
+            }
+            Ok(py_tuple(vec![py_str(&rep), py_int(end)]))
+        }
+        "backslashreplace" => {
+            let mut rep = String::new();
+            if is_encode {
+                // Encoding direction: the failing characters become
+                // `\xNN` escapes of their UTF-8 bytes.
+                for ch in object.str().chars().skip(start as usize).take(count) {
+                    let mut buf = [0u8; 4];
+                    for byte in ch.encode_utf8(&mut buf).as_bytes() {
+                        rep.push_str(&format!("\\x{:02x}", byte));
+                    }
+                }
+            } else {
+                let bytes = match &*object.borrow() {
+                    PyObject::Bytes(b) => b.clone(),
+                    _ => Vec::new(),
+                };
+                for byte in bytes.iter().skip(start as usize).take(count) {
+                    match byte {
+                        0x0c => rep.push_str("\\f"),
+                        0x0a => rep.push_str("\\n"),
+                        0x0d => rep.push_str("\\r"),
+                        0x09 => rep.push_str("\\t"),
+                        0x0b => rep.push_str("\\v"),
+                        0x08 => rep.push_str("\\b"),
+                        0x07 => rep.push_str("\\a"),
+                        b if *b < 0x20 || *b >= 0x7f => rep.push_str(&format!("\\x{:02x}", b)),
+                        b => rep.push(*b as char),
+                    }
+                }
+            }
+            Ok(py_tuple(vec![py_str(&rep), py_int(end)]))
+        }
+        "namereplace" => {
+            let mut rep = String::new();
+            for ch in object.str().chars().skip(start as usize).take(count) {
+                match crate::unicode_names::unicode_name_of(ch) {
+                    Some(name) => rep.push_str(&format!("\\N{{{}}}", name)),
+                    None => rep.push_str(&format!("\\u{:04x}", ch as u32)),
+                }
+            }
+            Ok(py_tuple(vec![py_str(&rep), py_int(end)]))
+        }
+        // PEP 383: an undecodable byte 0x80-0xFF round-trips as U+DC80..U+DCFF
+        // (and back); other positions are left alone.
+        "surrogateescape" => {
+            let bytes = match &*object.borrow() {
+                PyObject::Bytes(b) => b.clone(),
+                _ => Vec::new(),
+            };
+            let mut rep = String::new();
+            for byte in bytes.iter().skip(start as usize).take(count) {
+                if (0x80..=0xff).contains(byte) {
+                    rep.push(char::from_u32(0xdc00 + (*byte as u32 - 0x80)).unwrap_or('\u{fffd}'));
+                } else {
+                    return Err(PyError::Exception(exc_type, exc));
+                }
+            }
+            Ok(py_tuple(vec![py_str(&rep), py_int(end)]))
+        }
+        "surrogatepass" => Ok(py_tuple(vec![
+            object.clone(),
+            py_int(object.borrow().str().chars().count() as i64),
+        ])),
+        other => Err(PyError::value_error(format!(
+            "unknown error handler: {}",
+            other
+        ))),
+    }
 }

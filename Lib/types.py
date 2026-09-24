@@ -9,6 +9,39 @@ import sys as _sys
 # Import everything from the native types module
 from _types_native import *
 
+# The remaining CPython `types` type aliases, computed exactly as
+# `Lib/types.py`'s pure-Python fallback block does (it only runs when the C
+# `_types` module is missing, which is this interpreter's situation).
+# Without them, importing real CPython's `dataclasses`/`traceback`/
+# `xmlrpc.server` dies at `AttributeError: module 'types' has no attribute
+# 'EllipsisType'`.
+EllipsisType = type(Ellipsis)
+NotImplementedType = type(NotImplemented)
+# CPython computes these as `type(FunctionType.__code__)` /
+# `type(FunctionType.__globals__)` — i.e. the types of the C-level getset /
+# member descriptor OBJECTS sitting in the function type's dict. This VM
+# exposes `__code__`/`__globals__`/... as native pseudo-attributes instead,
+# so there is no descriptor object to take a type from (and the function
+# type's own `__dict__` is empty). Define the two names as distinct types
+# with CPython's exact type names instead of leaving them undefined: that
+# keeps every `isinstance(..., types.MemberDescriptorType)` /
+# `isinstance(..., types.GetSetDescriptorType)` check (dataclasses,
+# inspect, rlcompleter) working structurally — False for a non-descriptor,
+# which is the answer they want — instead of an `AttributeError` at import
+# time, which is what took down the real `dataclasses`/`inspect` sources.
+GetSetDescriptorType = type('getset_descriptor', (), {})
+MemberDescriptorType = type('member_descriptor', (), {})
+# CPython gets `FrameType` from a live traceback
+# (`type(exc.__traceback__.tb_frame)`). Neither route works at OUR import
+# time: `types` is imported transitively (`contextvars` -> `abc` ->
+# `_weakrefset`) while the VM is still bootstrapping, and this VM does not
+# yet attach a real `__traceback__` to caught exceptions, so there is no
+# frame object to take a type from. Expose the name as a distinct type with
+# CPython's exact name; `isinstance`-style checks then answer False instead
+# of the import dying with AttributeError. Real frame objects (and their
+# type) come with the traceback work.
+FrameType = type('frame', (), {})
+
 def prepare_class(name, bases=(), kwds=None):
     """Create the namespace for a new class."""
     if kwds is None:

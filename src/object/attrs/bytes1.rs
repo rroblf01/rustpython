@@ -303,7 +303,8 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     return Ok(py_str(&s));
                                 }
                                 // Try generic codec lookup (e.g. testcodec)
-                                if let Some(codec_tuple) = crate::modules::lookup_codec(&encoding) {
+                                if let Some(codec_tuple) = crate::modules::lookup_codec(&encoding)?
+                                {
                                     let decode_fn = {
                                         let tup = codec_tuple.borrow();
                                         if let PyObject::Tuple(items) = &*tup {
@@ -343,9 +344,30 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                         }
                                     }
                                 }
-                                // fallback: latin1-like lossy
-                                let s = String::from_utf8_lossy(bytes).to_string();
-                                Ok(py_str(&s))
+                                // CPython raises `LookupError: unknown
+                                // encoding: ...` when no codec claims the
+                                // name. Falling back to a lossy UTF-8
+                                // decode here silently returned plausible
+                                // garbage (e.g. `b'x'.decode('nope_xyz')` ->
+                                // `'x'`) instead of the error callers (and
+                                // test_codecs) expect.
+                                Err(crate::object::PyError::Exception(
+                                    "LookupError".to_string(),
+                                    crate::object::PyObjectRef::new(
+                                        crate::object::PyObject::Exception {
+                                            typ: "LookupError".to_string(),
+                                            args: vec![crate::object::py_str(&format!(
+                                                "unknown encoding: {}",
+                                                encoding
+                                            ))],
+                                            cause: None,
+                                            suppress_context: false,
+                                            context: None,
+                                            traceback: None,
+                                            extra: None,
+                                        },
+                                    ),
+                                ))
                             }
                         } else {
                             Err(PyError::runtime_error("decode on non-bytes"))

@@ -451,7 +451,30 @@ pub fn create_importlib_resources_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Ok(py_none());
         }
-        Ok(py_str(&mod_name(&args[0])))
+        let path = mod_name(&args[0]);
+        // CPython's `importlib.resources.as_file()` yields a real
+        // `pathlib.Path` for filesystem-backed resources (stdlib callers
+        // read `.name`/`.exists()`/`.parent` off it — ensurepip's
+        // `_get_pip_whl_path_ctx()` does exactly `bundled_wheel_path.name`),
+        // not the raw string this stub used to hand back.
+        let as_path = with_vm_mut(|vm| -> PyResult<Option<PyObjectRef>> {
+            let pathlib = match vm.modules.get("pathlib") {
+                Some(m) => m.clone(),
+                None => return Ok(None),
+            };
+            let path_cls = match pathlib.borrow().get_attribute("Path") {
+                Ok(c) => c,
+                Err(_) => return Ok(None),
+            };
+            match vm.call_function(path_cls, vec![py_str(&path)], vec![]) {
+                Ok(p) => Ok(Some(p)),
+                Err(_) => Ok(None),
+            }
+        });
+        match as_path {
+            Ok(Ok(Some(p))) => Ok(p),
+            _ => Ok(py_str(&path)),
+        }
     }
 
     // __exit__ for context manager: no-op

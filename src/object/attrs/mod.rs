@@ -14,7 +14,7 @@ mod complex;
 mod deque;
 mod dict;
 mod exception;
-mod exception_group;
+pub(crate) mod exception_group;
 mod file;
 mod float;
 mod frozenset;
@@ -1404,6 +1404,18 @@ impl ObjectAccess for PyObject {
                     name,
                     self.type_name()
                 )))
+            }
+            // `file.name = x` — the underlying `FileIO`'s `name` IS a
+            // writable attribute in CPython 3.14 (only the buffered/text
+            // wrappers' own `name` is read-only), and real
+            // `tempfile.NamedTemporaryFile` relies on it:
+            // `raw = getattr(getattr(file, "buffer", file), "raw", …);
+            // raw.name = name`.
+            PyObject::File {
+                name: file_name, ..
+            } if name == "name" => {
+                *file_name = value.str();
+                Ok(())
             }
             PyObject::Exception {
                 cause,

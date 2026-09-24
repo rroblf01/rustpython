@@ -445,6 +445,42 @@ impl PyObjectRef {
     }
 
     fn repr_inner_guarded(&self) -> String {
+        // Generators/coroutines carry the code object CPython names in its
+        // repr: `<generator object <genexpr> at 0x7f...>` (test_genexps'
+        // doctest matches that shape with an ellipsis, and the synthetic
+        // `<genexpr>` name is what identifies a genexp in a traceback).
+        {
+            let obj = self.borrow();
+            let (kind, name): (&str, Option<String>) = match &*obj {
+                PyObject::Generator { frame } => (
+                    "generator",
+                    frame.borrow().as_ref().map(|f| {
+                        let q = crate::interner::lookup_str(f.code.qualname).to_string();
+                        if q.is_empty() {
+                            crate::interner::lookup_str(f.code.name).to_string()
+                        } else {
+                            q
+                        }
+                    }),
+                ),
+                PyObject::Coroutine { frame } => (
+                    "coroutine",
+                    frame.borrow().as_ref().map(|f| {
+                        let q = crate::interner::lookup_str(f.code.qualname).to_string();
+                        if q.is_empty() {
+                            crate::interner::lookup_str(f.code.name).to_string()
+                        } else {
+                            q
+                        }
+                    }),
+                ),
+                _ => ("", Option::<String>::None),
+            };
+            if !kind.is_empty() {
+                let name = name.unwrap_or_default();
+                return format!("<{} object {} at 0x{:016x}>", kind, name, self.get_id());
+            }
+        }
         // Check for __repr__ on Instance types (user-defined objects) —
         // self.borrow().repr() can't invoke a bound method (no PyObjectRef
         // handle from &PyObject), so it must be handled here instead.

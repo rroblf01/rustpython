@@ -29,6 +29,40 @@ pub fn try_native_backing(dict: &AttrMap, typ: &PyObjectRef, name: &str) -> Opti
             },
         ))));
     }
+    // A dict SUBCLASS's `__getitem__` must keep the INSTANCE as the
+    // receiver, not the native backing: rebinding `self` to the backing
+    // loses the subclass, so the `__missing__` hook (collections.Counter,
+    // urllib's `_Quoter`) became unreachable through `d.__getitem__(k)`
+    // even though the plain `d[k]` still worked. Route those names
+    // through the instance's own `__getitem__` (looked up on its type, so
+    // a user override still wins) so `py_getitem` sees the instance and
+    // can call `__missing__`.
+    if (name == "__getitem__" || name == "__missing__")
+        && matches!(&*native.borrow(), PyObject::Dict(_))
+    {
+        // A user-defined `__getitem__` on the subclass wins (it is found
+        // even with the native-dict "escape hatch" skipped, since it lives
+        // in the subclass's own dict).
+        if let Some(f) = crate::object::lookup_dunder_via_mro(typ, "__getitem__") {
+            return Some(f);
+        }
+        // Otherwise hand back a bound lookup that keeps the INSTANCE as the
+        // receiver, so `py_getitem` sees the subclass and can run its
+        // `__missing__` (collections.Counter, urllib's `_Quoter`, …).
+        // Returning the native dict's own method here bound `self` to the
+        // backing and raised a raw KeyError instead.
+        let owned_typ = typ.clone();
+        let owned_dict = dict.clone();
+        return Some(PyObjectRef::new(PyObject::Closure(Rc::new(
+            move |call_args: &[PyObjectRef]| {
+                let instance = PyObjectRef::new(PyObject::Instance {
+                    typ: owned_typ.clone(),
+                    dict: owned_dict.clone(),
+                });
+                crate::object::py_getitem(&instance, &call_args[0])
+            },
+        ))));
+    }
     let val = native.borrow().get_attribute(name).ok()?;
     let rebound = match &*val.borrow() {
         PyObject::BuiltinMethod { name: n, func, .. } => {

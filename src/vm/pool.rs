@@ -31,6 +31,7 @@ impl VirtualMachine {
             frame.exception_handlers.clear();
             frame.closure.clear();
             frame.active_exception = None;
+            frame.star_original = None;
             frame.attr_cache.clear();
             frame.attr_cache.resize(names_len, None);
             frame.global_cache.clear();
@@ -68,6 +69,7 @@ impl VirtualMachine {
             frame.closure.clear();
             frame.exception_handlers.clear();
             frame.active_exception = None;
+            frame.star_original = None;
             frame.attr_cache.clear();
             frame.global_cache.clear();
             frame.registers.clear();

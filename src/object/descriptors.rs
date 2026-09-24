@@ -545,7 +545,24 @@ pub(crate) fn lookup_dunder_via_mro(typ: &PyObjectRef, name: &str) -> Option<PyO
                 if (skip_object_default || skip_object_setdelattr) && base_name == "object" {
                     continue;
                 }
-                if skip_native_dunder_hatch && base_dict.contains_key_str(NATIVE_VALUE_CTOR_KEY) {
+                // Same "escape hatch" skip for native CONTAINER types
+                // (`NATIVE_BASE_MARKER`, e.g. dict/list): their own
+                // `__getitem__` must not preempt the call sites'
+                // native-backing fallback, which is what consults a dict
+                // subclass's `__missing__` — both for the subscript
+                // (`d[k]`) and, since the bound-method path binds `self`
+                // to the backing, for `d.__getitem__(k)` too.
+                if skip_native_dunder_hatch
+                    && (base_dict.contains_key_str(NATIVE_VALUE_CTOR_KEY)
+                        || base_dict.contains_key_str(NATIVE_BASE_MARKER)
+                        // The native container/value types are recognized by
+                        // NAME (see `is_recognized_native_base_name`) — not
+                        // every one of them carries a marker entry — so the
+                        // "escape hatch" skip has to consider that too, or a
+                        // dict subclass's own `__missing__` stays unreachable
+                        // through `d.__getitem__(k)`.
+                        || crate::object::is_recognized_native_base_name(base_name))
+                {
                     continue;
                 }
                 if let Some(v) = base_dict.get_str(name) {

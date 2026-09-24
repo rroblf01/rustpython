@@ -540,6 +540,30 @@ pub(crate) fn path_arg_to_string(obj: &PyObjectRef) -> String {
     }
 }
 
+/// The `os.O_*` flag set CPython passes to an `open(opener=...)` callable
+/// for a given mode string (CPython's `_Py_open`/`_io.FileIO` computes the
+/// same set before consulting the opener).
+fn opts_clone_flags(mode: &str) -> i64 {
+    let has_plus = mode.contains('+');
+    let has_x = mode.contains('x');
+    let mut flags = 0i64;
+    if mode.contains('r') || has_plus {
+        flags |= 0; // O_RDONLY
+    } else {
+        flags |= 1; // O_WRONLY
+    }
+    if mode.contains('a') {
+        flags |= 0o1000 | 0o2000; // O_APPEND | O_CREAT
+    }
+    if mode.contains('w') || has_x {
+        flags |= 0o100 | 0o1000; // O_TRUNC | O_CREAT
+    }
+    if has_x {
+        flags |= 0o200; // O_EXCL
+    }
+    flags
+}
+
 pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return Err(PyError::type_error(
@@ -618,6 +642,15 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // semantics (the original stays open after this file object is
         // closed/dropped).
         let raw_fd = fd as i32;
+        // A negative descriptor never reaches a real `File` — wrapping it
+        // trips std's `fd != -1` debug assertion and ABORTS the process
+        // (CPython raises OSError(EBADF) instead, which is what test_io's
+        // `test_open_fd` cases expect).
+        if raw_fd < 0 {
+            return Err(PyError::os_error_from_io(
+                &std::io::Error::from_raw_os_error(9),
+            ));
+        }
         let owned_fd = if closefd {
             raw_fd
         } else {
@@ -690,9 +723,52 @@ pub fn builtin_open(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if has_x {
         opts.create_new(true);
     }
-    let file = opts
-        .open(&filename)
-        .map_err(|e| PyError::os_error_from_io_path(&e, Some(&filename)))?;
+    // `opener=` (CPython's `open(file, ..., opener=callable)`): the
+    // callable is invoked as `opener(path, flags)` and must return an
+    // already-open file DESCRIPTOR, which `open()` then wraps. Real
+    // `tempfile.NamedTemporaryFile` passes an opener that calls
+    // `_mkstemp_inner`, and without honoring it `open()` ignored the
+    // keyword and opened the literal path it was handed — for
+    // `NamedTemporaryFile(dir="/tmp", ...)` that means trying to open the
+    // DIRECTORY `/tmp` as a file, so every such call died with
+    // `IsADirectoryError: [Errno 21]` (test_shlex, test_tempfile, and any
+    // other user of the standard tempfile idiom).
+    let file = match kwargs.and_then(|kw| {
+        if let PyObject::Dict(d) = &*kw.borrow() {
+            d.get(&py_str("opener")).ok().flatten()
+        } else {
+            None
+        }
+    }) {
+        Some(opener) if !matches!(&*opener.borrow(), PyObject::None) => {
+            let o_flags = opts_clone_flags(&mode);
+            let opened = crate::object::call_function_disposable(
+                &opener,
+                vec![py_str(&filename), py_int(o_flags)],
+                vec![],
+            )?;
+            let fd = opened
+                .as_i64()
+                .ok_or_else(|| PyError::type_error("opener() must return a file descriptor"))?
+                as i32;
+            // Same guard as the `open(fd)` path: an opener that returns a
+            // negative descriptor must produce OSError(EBADF), not abort.
+            if fd < 0 {
+                return Err(PyError::os_error_from_io(
+                    &std::io::Error::from_raw_os_error(9),
+                ));
+            }
+            // Safety: the fd came from the opener callable (CPython
+            // requires it to be a valid, open descriptor) — wrap it
+            // without taking ownership of the path.
+            use std::os::unix::io::FromRawFd;
+            let file = unsafe { std::fs::File::from_raw_fd(fd) };
+            file
+        }
+        _ => opts
+            .open(&filename)
+            .map_err(|e| PyError::os_error_from_io_path(&e, Some(&filename)))?,
+    };
     let binary = mode.contains('b');
     let encoding = kwargs.and_then(|kw| {
         if let PyObject::Dict(d) = &*kw.borrow() {

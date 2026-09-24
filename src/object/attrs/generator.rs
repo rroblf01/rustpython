@@ -6,6 +6,9 @@ use crate::object::*;
 pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
     match o {
         PyObject::Generator { frame: gen_frame } => match name {
+            // CPython's own docstrings on the generator slots (test_genexps'
+            // doctest prints `g.__next__.__doc__` and expects
+            // "Implement next(self).").
             "__next__" | "send" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                 name: name.to_string(),
                 func: generator_next_fallback,

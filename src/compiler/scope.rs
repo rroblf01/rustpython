@@ -20,6 +20,16 @@ pub enum PendingCleanup {
     // 'ImportError' object has no attribute '__exit__'` several statements
     // away from the actual bug.
     PopExcept,
+    // The `except*` twin of `PopExcept` (PEP 654). An `except*` handler
+    // does NOT keep the exception on the value stack: `CHECK_EXC_MATCH_STAR`
+    // consumed it and pushed the matched/rest GROUPS instead, and the
+    // handler's own `POP_TOP`/store dropped the matched one. So the
+    // epilogue cleanup must restore the exception context WITHOUT popping a
+    // value-stack item — the plain `POP_EXCEPT` did exactly that and ate the
+    // enclosing handler's REST group (a nested try inside an `except*` body
+    // then re-raised the outer handler's MATCHED group: the
+    // `test_except_star.py::test_nested_except_stars` escape).
+    PopExceptStar,
 }
 
 pub struct LoopInfo {

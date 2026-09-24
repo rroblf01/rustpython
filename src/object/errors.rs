@@ -170,6 +170,38 @@ impl PyError {
             text.to_string()
         };
         extra.insert("text".to_string(), py_str(&text));
+        // `end_lineno`/`end_offset`/`print_file_and_line` — the 3.10+ (and
+        // 3.14) SyntaxError surface. test_traceback's
+        // `test_traceback_flags`/`test_format_exc` walk a hand-built table of
+        // SyntaxErrors, and CPython's own parser always sets the END of the
+        // offending token: for `if 1:\npass` the error is at line 2 col 1
+        // with end_offset 5 (the four characters of `pass`), for an
+        // unexpected indent CPython uses -1, and at EOF 0. Derive the end
+        // from the offending line's token run, which matches CPython for the
+        // single-token errors the parser reports.
+        let raw_line = source.lines().nth((line - 1).max(0) as usize).unwrap_or("");
+        let end_offset: i64 = if clean_msg.contains("unexpected indent") {
+            -1
+        } else {
+            let chars: Vec<char> = raw_line.chars().collect();
+            let start = (col - 1).max(0) as usize;
+            if start >= chars.len() {
+                0
+            } else {
+                let mut end = start;
+                while end < chars.len() && !chars[end].is_whitespace() {
+                    end += 1;
+                }
+                if end == start {
+                    0
+                } else {
+                    col + (end - start) as i64
+                }
+            }
+        };
+        extra.insert("end_lineno".to_string(), py_int(line));
+        extra.insert("end_offset".to_string(), py_int(end_offset));
+        extra.insert("print_file_and_line".to_string(), py_none());
         // CPython: `str(SyntaxError)` is `msg (filename, line N)` where
         // filename is displayed as basename (e.g. `badsyntax_3131.py`, not
         // the full path) — this matches CPython's actual `SyntaxError`

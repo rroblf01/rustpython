@@ -11,6 +11,17 @@ impl VirtualMachine {
                 let name = crate::interner::lookup(self.frames[fi].code.names[name_idx]);
                 let obj = self.frames[fi].pop()?;
                 let obj = deref_proxy(&obj)?;
+                // `eg.__traceback__` — the group's per-instance traceback
+                // chain (identity-keyed, see `object::eg_traceback`), which
+                // the variant itself cannot carry.
+                if name == "__traceback__" {
+                    if matches!(&*obj.borrow(), PyObject::ExceptionGroup { .. }) {
+                        let result = crate::object::eg_traceback::get(&obj)
+                            .unwrap_or_else(crate::object::py_none);
+                        self.frames[fi].push(result);
+                        return Ok(true);
+                    }
+                }
                 let result = {
                     let obj_borrowed = obj.borrow();
                     match &*obj_borrowed {
@@ -276,12 +287,39 @@ impl VirtualMachine {
                                             type_dict.get_str(&name).cloned().or_else(|| {
                                                 for base in mro.iter().skip(1) {
                                                     if let PyObject::Type {
+                                                        name: base_name,
                                                         dict: base_dict, ..
                                                     } = &*base.borrow()
                                                     {
-                                                        if let Some(val) = base_dict.get_str(&name)
-                                                        {
-                                                            return Some(val.clone());
+                                                        // A native container base's
+                                                        // own `__getitem__`/
+                                                        // `__missing__` must not
+                                                        // win here: the method
+                                                        // binds `self` to the
+                                                        // native backing, which
+                                                        // loses the subclass and
+                                                        // makes a dict subclass's
+                                                        // `__missing__` unreachable
+                                                        // through
+                                                        // `d.__getitem__(k)`.
+                                                        // `try_native_backing`
+                                                        // below handles these
+                                                        // names correctly.
+                                                        let native_container_slot =
+                                                            (base_dict
+                                                                .contains_key_str(
+                                                                    crate::object::NATIVE_BASE_MARKER,
+                                                                )
+                                                                || crate::object::is_recognized_native_base_name(
+                                                                    base_name,
+                                                                ))
+                                                        && (name == "__getitem__"
+                                                            || name == "__missing__");
+                                                        if !native_container_slot {
+                                                            if let Some(val) = base_dict.get_str(&name)
+                                                            {
+                                                                return Some(val.clone());
+                                                            }
                                                         }
                                                     }
                                                 }

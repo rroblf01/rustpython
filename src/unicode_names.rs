@@ -55407,3 +55407,56 @@ pub fn unicode_name_lookup(name: &str) -> Option<char> {
         .ok()
         .map(|i| UNICODE_NAMES[i].1)
 }
+
+/// Reverse lookup: the Unicode NAME of a character (what
+/// `unicodedata.name()` and the `namereplace` codec error handler need).
+/// Built once from the same table `unicode_name_lookup` searches, keyed by
+/// character. The first (lowest-sorting) name wins, matching CPython's
+/// choice of the primary name.
+pub fn unicode_name_of(c: char) -> Option<&'static str> {
+    static INDEX: std::sync::OnceLock<std::collections::HashMap<char, &'static str>> =
+        std::sync::OnceLock::new();
+    let index = INDEX.get_or_init(|| {
+        let mut map = std::collections::HashMap::with_capacity(UNICODE_NAMES.len());
+        for (name, ch) in UNICODE_NAMES.iter() {
+            map.entry(*ch).or_insert(*name);
+        }
+        map
+    });
+    index.get(&c).copied()
+}
+
+/// Forward lookup: the character a Unicode NAME designates (what the
+/// `unicode_escape` codec's `\N{NAME}` escape needs). Accepts the name
+/// with or without the surrounding `U+`-style prefix spelling CPython
+/// allows, and matches the first (lowest-sorting) name, mirroring
+/// `unicode_name_of`.
+pub fn char_from_name(name: &str) -> Option<char> {
+    static INDEX: std::sync::OnceLock<std::collections::HashMap<&'static str, char>> =
+        std::sync::OnceLock::new();
+    let index = INDEX.get_or_init(|| {
+        let mut map = std::collections::HashMap::with_capacity(UNICODE_NAMES.len());
+        for (name, ch) in UNICODE_NAMES.iter() {
+            map.entry(*name).or_insert(*ch);
+        }
+        map
+    });
+    if let Some(found) = index.get(name) {
+        return Some(*found);
+    }
+    // Loose comparison, as CPython's `_PyUnicode_Name_CAPI`-driven
+    // `unicodedata.lookup` does: case- and underscore-insensitive.
+    let wanted: String = name.chars().filter(|c| *c != '_' && *c != ' ').collect();
+    let wanted = wanted.to_uppercase();
+    UNICODE_NAMES
+        .iter()
+        .find(|(candidate, _)| {
+            candidate
+                .chars()
+                .filter(|c| *c != '_' && *c != ' ')
+                .collect::<String>()
+                .to_uppercase()
+                == wanted
+        })
+        .map(|(_, ch)| *ch)
+}

@@ -40,7 +40,9 @@ assert "def" in result, f"re.split missing 'def': {result}"
 
 # pattern and flags
 assert c.pattern == r"\d+", f"re.pattern failed: {c.pattern}"
-assert c.flags == 0, f"re.flags failed: {c.flags}"
+# CPython 3.14: a str pattern always compiles with re.UNICODE implied, so
+# `re.compile(r"\d+").flags` is 32, not 0.
+assert c.flags == re.UNICODE, f"re.flags failed: {c.flags}"
 
 # re module functions
 m2 = re.match(r"hello", "hello world")

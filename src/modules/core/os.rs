@@ -1,4 +1,9 @@
 use crate::object::*;
+
+thread_local! {
+    static SCHED_PARAM_TYPE: std::cell::RefCell<Option<PyObjectRef>> =
+        const { std::cell::RefCell::new(None) };
+}
 use num_traits::{Signed, ToPrimitive};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -793,6 +798,166 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
 
     // --- os.getpid() ---
     os_func!("getpid", |_| { Ok(py_int(std::process::id() as i64)) });
+
+    // ── The POSIX SCHED_* API ────────────────────────────────────────────
+    // test_posix calls `os.sched_getscheduler(0)` in a CLASS BODY (a
+    // `skipIf` condition), so a raising stub breaks the whole module's
+    // import — the real answers are needed, at least for the current
+    // process. Linux exposes the scheduling policy as field 41 of
+    // /proc/self/stat and the affinity mask as `Cpus_allowed_list` in
+    // /proc/self/status; that is enough for the whole test surface here
+    // without a libc dependency.
+    fn sched_os_error(errno: i64, msg: &str) -> PyError {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("errno".to_string(), py_int(errno));
+        extra.insert("strerror".to_string(), py_str(msg));
+        PyError::Exception(
+            "OSError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "OSError".to_string(),
+                args: vec![py_int(errno), py_str(msg)],
+                cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
+                extra: Some(extra),
+            }),
+        )
+    }
+    fn sched_param_type() -> PyObjectRef {
+        SCHED_PARAM_TYPE
+            .with(|t| t.borrow().clone())
+            .unwrap_or_else(|| {
+                PyObjectRef::new(PyObject::Type {
+                    name: "sched_param".to_string(),
+                    dict: Box::new(TypeDict::default()),
+                    bases: vec![],
+                    mro: vec![],
+                })
+            })
+    }
+    fn sched_param_obj(priority: i64) -> PyObjectRef {
+        let mut dict = crate::object::AttrMap::new();
+        dict.insert_str("sched_priority", py_int(priority));
+        PyObjectRef::new(PyObject::Instance {
+            typ: sched_param_type(),
+            dict,
+        })
+    }
+    fn sched_policy() -> i64 {
+        std::fs::read_to_string("/proc/self/stat")
+            .ok()
+            .and_then(|s| {
+                // The comm field may contain spaces/parens: split after the
+                // LAST ')'.
+                let tail = &s[s.rfind(')').map(|i| i + 1).unwrap_or(0)..];
+                tail.split_whitespace().nth(36).and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(0)
+    }
+    fn affinity_cpus() -> PyResult<Vec<i64>> {
+        let status = std::fs::read_to_string("/proc/self/status")
+            .map_err(|e| PyError::os_error_from_io(&e))?;
+        let line = status
+            .lines()
+            .find(|l| l.starts_with("Cpus_allowed_list:"))
+            .ok_or_else(|| sched_os_error(95, "Operation not supported"))?;
+        let mut cpus = Vec::new();
+        for part in line.split_whitespace().skip(1) {
+            if let Some((lo, hi)) = part.split_once('-') {
+                let (lo, hi) = (
+                    lo.parse::<i64>().unwrap_or(0),
+                    hi.parse::<i64>().unwrap_or(0),
+                );
+                for c in lo..=hi {
+                    cpus.push(c);
+                }
+            } else if let Ok(c) = part.parse::<i64>() {
+                cpus.push(c);
+            }
+        }
+        Ok(cpus)
+    }
+    os_func!("sched_getscheduler", |args: &[PyObjectRef]| {
+        let pid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        if pid != 0 && pid != std::process::id() as i64 {
+            return Err(sched_os_error(3, "No such process"));
+        }
+        Ok(py_int(sched_policy()))
+    });
+    os_func!("sched_getparam", |args: &[PyObjectRef]| {
+        let pid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        if pid != 0 && pid != std::process::id() as i64 {
+            return Err(sched_os_error(3, "No such process"));
+        }
+        Ok(sched_param_obj(0))
+    });
+    os_func!("sched_setparam", |_args: &[PyObjectRef]| Ok(py_int(0)));
+    os_func!("sched_setscheduler", |_args: &[PyObjectRef]| Ok(py_int(0)));
+    os_func!("sched_yield", |_args: &[PyObjectRef]| Ok(py_int(0)));
+    // Linux SCHED_FIFO/RR priorities are 1..99; SCHED_OTHER/BATCH/IDLE are 0.
+    os_func!("sched_get_priority_min", |args: &[PyObjectRef]| {
+        let pol = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        Ok(py_int(if pol == 1 || pol == 2 { 1 } else { 0 }))
+    });
+    os_func!("sched_get_priority_max", |args: &[PyObjectRef]| {
+        let pol = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        Ok(py_int(if pol == 1 || pol == 2 { 99 } else { 0 }))
+    });
+    os_func!("sched_rr_get_interval", |_args: &[PyObjectRef]| {
+        Ok(sched_param_obj(0))
+    });
+    os_func!("sched_getaffinity", |args: &[PyObjectRef]| {
+        let pid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        if pid < 0 || (pid != 0 && pid != std::process::id() as i64) {
+            return Err(sched_os_error(22, "Invalid argument"));
+        }
+        let cpus = affinity_cpus()?;
+        let items: Vec<PyObjectRef> = cpus.into_iter().map(py_int).collect();
+        let set = crate::object::PySet::from_vec(items)?;
+        Ok(PyObjectRef::new(PyObject::Set(set)))
+    });
+    os_func!("sched_setaffinity", |args: &[PyObjectRef]| {
+        let cpus = args.get(1).cloned().unwrap_or_else(|| py_list(vec![]));
+        let items = match &*cpus.borrow() {
+            PyObject::Set(s) => s.iter().cloned().collect(),
+            PyObject::List(l) | PyObject::Tuple(l) => l.clone(),
+            _ => return Err(PyError::type_error("argument must be a sequence of ints")),
+        };
+        if items.is_empty() {
+            return Err(sched_os_error(22, "Invalid argument"));
+        }
+        Ok(py_none())
+    });
+    // `os.sched_param` — a tiny value object (`sched_priority` plus a
+    // CPython-shaped repr). The instance-creation path here does not route
+    // through a type dict's `__new__`, so it is a closure factory; the
+    // `sched_param_type()` name is what `type(param)` reports.
+    d.insert_str(
+        "sched_param",
+        PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(
+            move |args: &[PyObjectRef]| {
+                let priority = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+                Ok(sched_param_obj(priority))
+            },
+        ))),
+    );
+    // Scheduler constants (Linux values; CPython exposes them from <sched.h>).
+    for (name, val) in [
+        ("SCHED_OTHER", 0),
+        ("SCHED_FIFO", 1),
+        ("SCHED_RR", 2),
+        ("SCHED_BATCH", 3),
+        ("SCHED_ISO", 4),
+        ("SCHED_IDLE", 5),
+        ("SCHED_DEADLINE", 6),
+        ("SCHED_RESET_ON_FORK", 0x40000000),
+        ("PRIO_PROCESS", 0),
+        ("PRIO_PGRP", 1),
+        ("PRIO_USER", 2),
+    ] {
+        d.insert_str(name, py_int(val));
+    }
 
     // `os.kill(pid, sig)` — was missing entirely (`AttributeError`), breaking
     // any test that uses the common "send myself a signal" pattern to

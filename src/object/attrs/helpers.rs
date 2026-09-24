@@ -686,7 +686,7 @@ pub(crate) fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         _ => {
             // Try generic codec lookup (e.g. testcodec)
-            if let Some(codec_tuple) = crate::modules::lookup_codec(&encoding) {
+            if let Some(codec_tuple) = crate::modules::lookup_codec(&encoding)? {
                 let encode_fn = {
                     let tup = codec_tuple.borrow();
                     if let PyObject::Tuple(items) = &*tup {
@@ -734,8 +734,24 @@ pub(crate) fn str_encode_builtin(a: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                     }
                 }
             }
-            // fallback to utf-8
-            s.as_bytes().to_vec()
+            // CPython raises `LookupError: unknown encoding: ...` when no
+            // codec claims the name; silently encoding as UTF-8 instead
+            // (e.g. `'x'.encode('nope_xyz')` -> `b'x'`) hid real bugs.
+            return Err(crate::object::PyError::Exception(
+                "LookupError".to_string(),
+                crate::object::PyObjectRef::new(crate::object::PyObject::Exception {
+                    typ: "LookupError".to_string(),
+                    args: vec![crate::object::py_str(&format!(
+                        "unknown encoding: {}",
+                        encoding
+                    ))],
+                    cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
+                    extra: None,
+                }),
+            ));
         }
     };
     Ok(PyObjectRef::imm(PyObject::Bytes(bytes)))

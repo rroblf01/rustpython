@@ -77,6 +77,7 @@ impl Compiler {
             self.emit_jump(Opcode::SETUP_FINALLY, cleanup);
             let body_end = self.new_label();
             let handler_done = self.new_label();
+            let after_handlers = self.new_label();
             let after_orelse = self.new_label();
             // Tracked so a `return` compiled inside `body`, any
             // `handler.body`, or `orelse` knows to inline a copy of
@@ -150,14 +151,18 @@ impl Compiler {
                     } else {
                         self.emit(Opcode::POP_TOP, 0);
                     }
+                    self.pending_cleanup.push(PendingCleanup::PopExceptStar);
                     self.compile_stmts(&handler.body)?;
+                    self.pending_cleanup.pop();
                     // Fall through to next handler (no JUMP to handler_done!)
                     self.fix_label(next_handler);
                 } else {
                     if let Some(name) = &handler.name {
                         self.store_except_name(name);
                     }
+                    self.pending_cleanup.push(PendingCleanup::PopExceptStar);
                     self.compile_stmts(&handler.body)?;
+                    self.pending_cleanup.pop();
                 }
             }
             self.pending_cleanup.pop(); // PopExcept
@@ -167,8 +172,13 @@ impl Compiler {
                                         // original exception still held in active_exception.
             self.emit(Opcode::CLEAR_EXCEPTION_INFO, 0);
             self.emit(Opcode::RERAISE, 0);
+            // Fully handled (the rest was empty, so RERAISE fell through):
+            // restore the exception context WITHOUT popping a stack slot.
+            self.emit(Opcode::POP_EXCEPT, 2);
+            self.emit_jump(Opcode::JUMP, after_handlers);
             self.fix_label(handler_done);
             self.emit(Opcode::POP_EXCEPT, 0);
+            self.fix_label(after_handlers);
             // Skip `orelse` (only the no-exception path runs it —
             // see the sibling try/except-without-finally branch's
             // comment for the exact bug this avoids) but still fall
@@ -200,6 +210,7 @@ impl Compiler {
             self.emit_jump(Opcode::SETUP_FINALLY, cleanup);
             let body_end = self.new_label();
             let handler_done = self.new_label();
+            let after_handlers = self.new_label();
             self.compile_stmts(body)?;
             self.emit(Opcode::POP_BLOCK, 0);
             self.emit_jump(Opcode::JUMP, body_end);
@@ -264,14 +275,18 @@ impl Compiler {
                     } else {
                         self.emit(Opcode::POP_TOP, 0);
                     }
+                    self.pending_cleanup.push(PendingCleanup::PopExceptStar);
                     self.compile_stmts(&handler.body)?;
+                    self.pending_cleanup.pop();
                     // Fall through to next handler (no JUMP to handler_done!)
                     self.fix_label(next_handler);
                 } else {
                     if let Some(name) = &handler.name {
                         self.store_except_name(name);
                     }
+                    self.pending_cleanup.push(PendingCleanup::PopExceptStar);
                     self.compile_stmts(&handler.body)?;
+                    self.pending_cleanup.pop();
                 }
             }
             self.pending_cleanup.pop(); // PopExcept
@@ -279,8 +294,13 @@ impl Compiler {
                                         // the sibling except* block's comment).
             self.emit(Opcode::CLEAR_EXCEPTION_INFO, 0);
             self.emit(Opcode::RERAISE, 0);
+            // See the sibling except* block: the handled case must restore
+            // the exception context without touching the value stack.
+            self.emit(Opcode::POP_EXCEPT, 2);
+            self.emit_jump(Opcode::JUMP, after_handlers);
             self.fix_label(handler_done);
             self.emit(Opcode::POP_EXCEPT, 0);
+            self.fix_label(after_handlers);
             // A handled exception must NOT fall through into
             // `orelse` — real Python's `try/except/else` only runs
             // `else` when the `try` body completed with no

@@ -138,6 +138,58 @@ impl Compiler {
     /// — `compile_function` already does the right thing for any nested
     /// `def`, and this body is indistinguishable from one a user could have
     /// written by hand.
+    /// True when compiling `elt`/`generators` as a REAL lazy `<genexpr>`
+    /// function would need a closure cell from the enclosing scope.
+    ///
+    /// The lazy path is what CPython does (a genexp is a generator object
+    /// with `gi_frame`/`gi_running`, evaluated on `next()`), but routing
+    /// EVERY genexp through it regressed unittest discovery wholesale
+    /// (`Lib/unittest/loader.py`'s `any(fnmatchcase(fullName, pattern) for
+    /// pattern in ...)` — `fullName` is an enclosing-function local, and the
+    /// synthetic function's free-variable wiring for that case is not wired
+    /// up yet). So: take the lazy path only when every name the genexp body
+    /// touches is either its own loop target or a true global/builtin — i.e.
+    /// when no enclosing local is captured and no cell is needed.
+    pub(crate) fn genexp_captures_enclosing_local(
+        &self,
+        elt: &Expr,
+        generators: &[Comprehension],
+    ) -> bool {
+        let mut refs: HashSet<String> = HashSet::new();
+        for gen in generators {
+            Self::collect_names_expr(&gen.iter, &mut refs);
+            for cond in &gen.ifs {
+                Self::collect_names_expr(cond, &mut refs);
+            }
+        }
+        Self::collect_names_expr(elt, &mut refs);
+        let mut own: HashSet<String> = HashSet::new();
+        for gen in generators {
+            Self::collect_assign_target_names(&gen.target, &mut own);
+        }
+        refs.retain(|n| !own.contains(n));
+        if refs.is_empty() {
+            return false;
+        }
+        // Every local visible to the CURRENT scope (its own varnames plus
+        // the cells it already exposes) and to the nearest enclosing
+        // function: a reference to any of those needs a real closure.
+        let mut locals: HashSet<String> = HashSet::new();
+        for v in &self.code.varnames {
+            locals.insert(crate::interner::lookup_str(*v).to_string());
+        }
+        for v in self.code.cellvars.iter() {
+            locals.insert(v.clone());
+        }
+        for v in self.code.freevars.iter() {
+            locals.insert(v.clone());
+        }
+        for name in self.compute_enclosing_names() {
+            locals.insert(name);
+        }
+        refs.iter().any(|n| locals.contains(n))
+    }
+
     pub(crate) fn compile_genexp(
         &mut self,
         elt: &Expr,

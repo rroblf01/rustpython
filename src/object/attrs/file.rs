@@ -96,6 +96,11 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
     match o {
         PyObject::File { file: f_rc, .. } => {
             match name {
+                // `file.raw` — the unbuffered `FileIO` under this stream.
+                // Real `tempfile` walks `file.buffer.raw` to reach the
+                // object whose writable `name` it then sets; with a single
+                // native file object here, `raw` is the file itself.
+                "raw" => return Ok(PyObjectRef::new(o.clone())),
                 "buffer" => {
                     // `sys.stdin.buffer`/`sys.stdout.buffer`/`stderr.
                     // buffer` — the binary view of a text stream (real

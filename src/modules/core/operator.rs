@@ -27,6 +27,38 @@ use std::sync::atomic::AtomicI64;
 /// `.upper()` result `'HELLO'`).
 fn bound_attr(obj: &PyObjectRef, name: &str) -> PyResult<PyObjectRef> {
     if matches!(&*obj.borrow(), PyObject::Instance { .. }) {
+        // CPython's precedence: the INSTANCE dict wins for a plain
+        // (non-data-descriptor) value, descriptors on the type second.
+        // Consulting `resolve_descriptor_attr` FIRST handed back the CLASS
+        // attribute, so `attrgetter('y')` on a dataclass instance whose
+        // field also has a class-level default returned the default instead
+        // of the instance's value (`copy.replace(C(11, 22)).y` → 0, and
+        // test_copy.py's `TestReplace.test_dataclass` failed with
+        // `(11, 0) != (11, 22)`).
+        let instance_value = match &*obj.borrow() {
+            PyObject::Instance { dict, .. } => dict.get_str(name).cloned(),
+            _ => None,
+        };
+        if let Some(value) = instance_value {
+            // A DATA descriptor (one with `__set__`/`__delete__`, i.e. a
+            // `property`) still wins over the instance dict; anything else
+            // found on the type (a plain class attribute, a function, …)
+            // does not, which is exactly why the instance value is
+            // returned here.
+            let resolved = with_vm_mut(|vm| vm.resolve_descriptor_attr(obj, name))
+                .ok()
+                .flatten();
+            let is_data_descriptor = match resolved {
+                Some(found) => {
+                    matches!(found.borrow().get_attribute("__set__"), Ok(_))
+                        || matches!(found.borrow().get_attribute("__delete__"), Ok(_))
+                }
+                None => false,
+            };
+            if !is_data_descriptor {
+                return Ok(value);
+            }
+        }
         if let Ok(Some(bound)) = with_vm_mut(|vm| vm.resolve_descriptor_attr(obj, name)) {
             return Ok(bound);
         }

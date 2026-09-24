@@ -797,7 +797,12 @@ pub fn get_fraction_type() -> PyObjectRef {
 }
 
 pub fn current_decimal_context() -> (usize, String) {
-    DECIMAL_CURRENT_CONTEXT.with(|c| c.borrow().clone())
+    // The live current context object is authoritative; the tuple cache is
+    // only a fallback for the window before it exists.
+    let ctx = crate::modules::data::decimal_ctx::current_context();
+    let prec = crate::modules::data::decimal_ctx::ctx_prec(&ctx);
+    let rounding = crate::modules::data::decimal_ctx::ctx_rounding(&ctx);
+    (prec, rounding)
 }
 pub fn current_is_basic() -> bool {
     DECIMAL_IS_BASIC.with(|c| *c.borrow())
@@ -1059,6 +1064,14 @@ pub fn round_to_context(v: DecValue) -> DecValue {
     round_decvalue(&v, precision, &rounding)
 }
 
+/// Round `v` through the CURRENT context object, recording signals and
+/// honouring traps. Used by the operators (`+`, `-`, `*`, `/`, `//`, `%`,
+/// `**`) so `ctx.flags[Inexact]` and trapped signals behave like CPython's.
+pub fn round_to_current_context(v: DecValue) -> PyResult<DecValue> {
+    let ctx = crate::modules::data::decimal_ctx::current_context();
+    crate::modules::data::decimal_ctx::apply_context(&ctx, v)
+}
+
 pub fn decval_align(a: &DecValue, b: &DecValue) -> (num_bigint::BigInt, num_bigint::BigInt, i64) {
     let exp = a.exp.min(b.exp);
     let a_scaled = &a.coeff * ten_pow(a.exp - exp);
@@ -1114,11 +1127,33 @@ pub fn decimal_add(a: &DecValue, b: &DecValue) -> PyResult<DecValue> {
             && b.special == DecSpecial::Infinity
             && a.sign != b.sign
         {
-            if current_is_basic() {
-                return Err(decimal_invalid_op("(+Infinity) + (-Infinity)"));
-            } else {
-                return Ok(DecValue::nan());
+            // `(+Inf) + (-Inf)` signals InvalidOperation: the flag is always
+            // recorded, the exception is raised only when the current
+            // context TRAPS it (CPython). The old code keyed this off a
+            // `BasicContext` marker instead, so `ctx.traps[InvalidOperation]
+            // = True` had no effect.
+            let ctx = crate::modules::data::decimal_ctx::current_context();
+            if current_is_basic()
+                || crate::modules::data::decimal_ctx::signal_trapped(&ctx, "InvalidOperation")
+            {
+                crate::modules::data::decimal_ctx::write_signal(
+                    &ctx,
+                    "flags",
+                    "InvalidOperation",
+                    true,
+                );
+                return Err(crate::modules::data::decimal_ctx::decimal_signal_error(
+                    "InvalidOperation",
+                    "[<class 'decimal.Overflow'>]",
+                ));
             }
+            crate::modules::data::decimal_ctx::write_signal(
+                &ctx,
+                "flags",
+                "InvalidOperation",
+                true,
+            );
+            return Ok(DecValue::nan());
         }
         return Ok(DecValue::infinity(if a.special == DecSpecial::Infinity {
             a.sign
@@ -1135,7 +1170,7 @@ pub fn decimal_add(a: &DecValue, b: &DecValue) -> PyResult<DecValue> {
         coeff: num_traits::Signed::abs(&sum),
         exp,
     };
-    Ok(round_to_context(result))
+    round_to_current_context(result)
 }
 
 pub fn decimal_negate(v: &DecValue) -> DecValue {
@@ -1173,7 +1208,7 @@ pub fn decimal_mul(a: &DecValue, b: &DecValue) -> PyResult<DecValue> {
         coeff: &a.coeff * &b.coeff,
         exp: a.exp + b.exp,
     };
-    Ok(round_to_context(result))
+    round_to_current_context(result)
 }
 
 pub fn decimal_div(a: &DecValue, b: &DecValue) -> PyResult<DecValue> {
@@ -1208,12 +1243,12 @@ pub fn decimal_div(a: &DecValue, b: &DecValue) -> PyResult<DecValue> {
         return Err(decimal_division_by_zero("division by zero"));
     }
     if a.is_zero() {
-        return Ok(round_to_context(DecValue {
+        return round_to_current_context(DecValue {
             special: DecSpecial::Finite,
             sign,
             coeff: num_bigint::BigInt::from(0),
             exp: a.exp - b.exp,
-        }));
+        });
     }
     let (precision, rounding) = current_decimal_context();
     // Scale with enough guard digits (precision+10) so a single final

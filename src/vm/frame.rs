@@ -27,6 +27,13 @@ pub struct Frame {
     /// handler finishes re-raises the OUTER handler's exception (CPython's
     /// exc_info stack semantics) instead of the stale inner one.
     pub active_exception_stack: Vec<Option<Box<PyObjectRef>>>,
+    /// The WHOLE `ExceptionGroup` an `except*` (PEP 654) handler split, kept
+    /// so a bare `raise` inside that handler re-raises the original group
+    /// rather than just the matched subgroup: CPython's PEP 654 semantics are
+    /// that the unmatched sub-exceptions keep propagating to OUTER `except*`
+    /// handlers, which can only see them if the full group is what gets
+    /// re-raised. `sys.exception()` still reports the matched subgroup.
+    pub star_original: Option<PyObjectRef>,
     /// Cached Python `frame` object for this frame — created lazily and
     /// REUSED so that `sys._getframe()` and an exception traceback's
     /// `tb_frame` for the same live frame are the SAME object
@@ -148,6 +155,7 @@ impl Frame {
             closure: Box::new(Vec::new()),
             active_exception: None,
             active_exception_stack: Vec::new(),
+            star_original: None,
             frame_object: None,
             frame_locals_obj: None,
             attr_cache: Box::new(vec![None; names_len]),

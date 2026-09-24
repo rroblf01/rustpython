@@ -49,6 +49,18 @@ pub fn builtin_getattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         return Err(PyError::type_error("getattr() takes at least 2 arguments"));
     }
     let attr_name = args[1].str();
+    // `getattr(eg, "__traceback__")` — the group's traceback chain is keyed
+    // by object identity, which only the owning `PyObjectRef` can resolve
+    // (see `object::eg_traceback` and the LOAD_ATTR fast path in
+    // `vm/op_attr.rs`).
+    if attr_name == "__traceback__"
+        && matches!(
+            &*args[0].borrow(),
+            crate::object::PyObject::ExceptionGroup { .. }
+        )
+    {
+        return Ok(crate::object::eg_traceback::get(&args[0]).unwrap_or_else(py_none));
+    }
     match args[0].borrow().get_attribute(&attr_name) {
         Ok(val) => {
             // `get_attribute`'s own `PyObject::Type` handling unwraps
@@ -94,6 +106,27 @@ pub fn builtin_setattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             return Err(PyError::reference_error(
                 "weakly-referenced object no longer exists",
             ));
+        }
+    }
+    // `f.name = f.name` (a real idiom in CPython's own test_fileio) assigns
+    // the object to ITSELF: the `PyObject::File` arm of `set_attribute` then
+    // calls `value.str()`, which re-borrows the very RefCell that is already
+    // mutably borrowed -> "RefCell already mutably borrowed" panic that
+    // aborted the whole file. Read the name under a short borrow and assign
+    // it in a second one.
+    if args[0].is(&args[2]) && args[1].str() == "name" {
+        let current = {
+            let borrowed = args[0].borrow();
+            match &*borrowed {
+                PyObject::File { name, .. } => Some(name.clone()),
+                _ => None,
+            }
+        };
+        if let Some(current) = current {
+            if let PyObject::File { name, .. } = &mut *args[0].borrow_mut() {
+                *name = current;
+            }
+            return Ok(py_none());
         }
     }
     let attr_name = args[1].str();

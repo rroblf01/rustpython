@@ -439,48 +439,92 @@ make_exception_func!(builtin_make_exception_indentationerror, "IndentationError"
 make_exception_func!(builtin_make_exception_taberror, "TabError");
 
 // ExceptionGroup and BaseExceptionGroup factory functions (PEP 654)
-pub fn builtin_make_exception_exceptiongroup(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let _message = if !args.is_empty() {
-        args[0].str()
-    } else {
-        "".to_string()
-    };
-    let exceptions = if args.len() > 1 {
-        match &*args[1].borrow() {
-            PyObject::List(items) => items.clone(),
-            PyObject::Tuple(items) => items.clone(),
-            _ => vec![],
+/// CPython validates `(message, exceptions)` the same way for both classes
+/// (both share `BaseExceptionGroup.__new__`, hence the identical error
+/// texts), and `ExceptionGroup` additionally refuses BaseException-only
+/// children. Returns the validated child list.
+fn build_exception_group(args: &[PyObjectRef], typ: &str) -> PyResult<PyObjectRef> {
+    if args.len() != 2 {
+        return Err(PyError::type_error(format!(
+            "BaseExceptionGroup.__new__() takes exactly 2 arguments ({} given)",
+            args.len()
+        )));
+    }
+    if !matches!(&*args[0].borrow(), PyObject::Str(_)) {
+        return Err(PyError::type_error(format!(
+            "BaseExceptionGroup.__new__() argument 1 must be str, not {}",
+            args[0].borrow().type_name()
+        )));
+    }
+    let exceptions = match &*args[1].borrow() {
+        PyObject::List(items) => items.clone(),
+        PyObject::Tuple(items) => items.clone(),
+        _ => {
+            return Err(PyError::type_error(
+                "second argument (exceptions) must be a sequence",
+            ))
         }
-    } else {
-        vec![]
     };
+    if exceptions.is_empty() {
+        return Err(PyError::value_error(
+            "second argument (exceptions) must be a non-empty sequence",
+        ));
+    }
+    // CPython validates the TOP-LEVEL children only (Objects/exceptions.c
+    // `_PyExc_CreateExceptionGroup` loops over the tuple, never recursing
+    // into a nested group), so a 150k-deep chain builds in O(depth) total —
+    // and the "Cannot nest BaseExceptions" rule is then a type check on the
+    // child: a `BaseExceptionGroup` is not an `Exception`, so putting one
+    // inside an `ExceptionGroup` is the error CPython reports.
+    if typ == "ExceptionGroup" {
+        for item in &exceptions {
+            let is_exception = match &*item.borrow() {
+                PyObject::Exception { typ: child, .. } => {
+                    crate::vm::util::is_exception_subclass(child, "Exception")
+                }
+                PyObject::ExceptionGroup { typ: child, .. } => child == "ExceptionGroup",
+                _ => crate::object::builtin_isinstance(&[
+                    item.clone(),
+                    crate::modules::get_builtin_class("Exception").unwrap_or_else(|| py_none()),
+                ])?
+                .truthy(),
+            };
+            if !is_exception {
+                return Err(PyError::type_error(
+                    "Cannot nest BaseExceptions in an ExceptionGroup",
+                ));
+            }
+        }
+    }
+    for (idx, item) in exceptions.iter().enumerate() {
+        let is_exception = match &*item.borrow() {
+            PyObject::Exception { .. } | PyObject::ExceptionGroup { .. } => true,
+            _ => crate::object::builtin_isinstance(&[
+                item.clone(),
+                crate::modules::get_builtin_class("BaseException").unwrap_or_else(|| py_none()),
+            ])?
+            .truthy(),
+        };
+        if !is_exception {
+            return Err(PyError::value_error(format!(
+                "Item {} of second argument (exceptions) is not an exception",
+                idx
+            )));
+        }
+    }
     Ok(PyObjectRef::new(PyObject::ExceptionGroup {
-        typ: "ExceptionGroup".to_string(),
+        typ: typ.to_string(),
         args: args.to_vec(),
         exceptions,
     }))
 }
 
+pub fn builtin_make_exception_exceptiongroup(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    build_exception_group(args, "ExceptionGroup")
+}
+
 pub fn builtin_make_exception_baseexceptiongroup(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    let _message = if !args.is_empty() {
-        args[0].str()
-    } else {
-        "".to_string()
-    };
-    let exceptions = if args.len() > 1 {
-        match &*args[1].borrow() {
-            PyObject::List(items) => items.clone(),
-            PyObject::Tuple(items) => items.clone(),
-            _ => vec![],
-        }
-    } else {
-        vec![]
-    };
-    Ok(PyObjectRef::new(PyObject::ExceptionGroup {
-        typ: "BaseExceptionGroup".to_string(),
-        args: args.to_vec(),
-        exceptions,
-    }))
+    build_exception_group(args, "BaseExceptionGroup")
 }
 
 fn json_escape_string(s: &str) -> String {

@@ -696,6 +696,11 @@ impl Compiler {
                 // `__aiter__`/`__anext__`). Freevar caveat above applies,
                 // but globals (the common/tested shape) work.
                 // test_builtin::test_compile_top_level_await.
+                // A genexp that captures NO enclosing local compiles to a
+                // real lazy `<genexp>` function (CPython semantics: a
+                // generator object, evaluated on `next()`); one that does
+                // capture stays on the eager path below until the closure
+                // wiring exists — see `genexp_captures_enclosing_local`.
                 if generators.iter().any(|g| g.is_async)
                     || contains_yield_in_expr(elt)
                     || generators.iter().any(|g| {
@@ -703,6 +708,7 @@ impl Compiler {
                             || contains_yield_in_expr(&g.target)
                             || g.ifs.iter().any(contains_yield_in_expr)
                     })
+                    || !self.genexp_captures_enclosing_local(elt, generators)
                 {
                     self.compile_genexp(elt, generators)?;
                     return Ok(());

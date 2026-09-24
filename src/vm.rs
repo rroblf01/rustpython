@@ -73,6 +73,33 @@ thread_local! {
     pub(crate) static SYS_MODULES_PRIORITY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+thread_local! {
+    /// Process-wide `(builtins, modules)` snapshot shared by the real VM and
+    /// every disposable/pooled VM (see `VirtualMachine::new`'s doc comment).
+    pub(crate) static VM_STATE_CACHE: RefCell<Option<(Rc<HashMap<StrId, PyObjectRef>>, HashMap<String, PyObjectRef>)>> = RefCell::new(None);
+}
+
+/// Number of modules in the process-wide cache (0 when unset) — used to
+/// detect a stale disposable-VM snapshot in O(1).
+pub(crate) fn cached_module_count() -> usize {
+    VM_STATE_CACHE.with(|c| c.borrow().as_ref().map(|(_, m)| m.len()).unwrap_or(0))
+}
+
+/// Re-point `vm.modules` at the process-wide state cache's map.
+pub(crate) fn refresh_modules_from_state_cache(vm: &mut VirtualMachine) {
+    if let Some((_, cached_modules)) = VM_STATE_CACHE.with(|c| c.borrow().clone()) {
+        vm.modules = cached_modules;
+    }
+}
+
+/// The process-wide module instance for `name`, if any. Used by the import
+/// path so a disposable/pooled VM adopts modules the real VM imported after
+/// that VM's snapshot was taken, instead of executing (and re-installing into
+/// the shared `sys.modules`) a second copy of the same module.
+pub(crate) fn cached_module(name: &str) -> Option<PyObjectRef> {
+    VM_STATE_CACHE.with(|c| c.borrow().as_ref().and_then(|(_, m)| m.get(name).cloned()))
+}
+
 impl VirtualMachine {
     pub fn new() -> Self {
         if std::env::var("RPY_DEBUG_VM_NEW").is_ok() {
@@ -115,9 +142,6 @@ impl VirtualMachine {
         // `sys.argv` in `main.rs`) always runs first and populates this
         // cache; every later disposable VM goes through `new()`, which
         // passes that same real `std::env::args()` anyway.
-        thread_local! {
-            static VM_STATE_CACHE: RefCell<Option<(Rc<HashMap<StrId, PyObjectRef>>, HashMap<String, PyObjectRef>)>> = RefCell::new(None);
-        }
         if let Some((cached_builtins, cached_modules)) = VM_STATE_CACHE.with(|c| c.borrow().clone())
         {
             let globals_map: HashMap<StrId, PyObjectRef> = HashMap::from([
@@ -641,7 +665,71 @@ impl VirtualMachine {
             crate::modules::THREAD_LOCAL_SOURCE,
             &["_local"],
         );
+        // Now that every native module is registered, COMPLETE
+        // `sys.stdlib_module_names` (3.10+): the sys module seeds it from
+        // the `Lib/` tree at construction time (it can't know about the
+        // native modules yet), so add every module name this VM actually
+        // provides — otherwise a native stdlib module (`json`,
+        // `collections`, `_socket`, …) is missing from the frozenset that
+        // CPython's `test_sys.py::test_module_names` and real
+        // `sysconfig`/`mimetypes` consumers read.
+        {
+            let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+            if let Some(sys_mod) = vm.modules.get("sys") {
+                if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                    if let Some(existing) = dict.get_str("stdlib_module_names") {
+                        if let PyObject::FrozenSet(set) = &*existing.borrow() {
+                            for item in set.to_vec() {
+                                names.insert(item.str());
+                            }
+                        }
+                    }
+                }
+            }
+            for name in vm.modules.keys() {
+                // Only the TOP level: `urllib.parse` implies `urllib`, and
+                // CPython's set is top-level names only.
+                let top = name.split('.').next().unwrap_or(name.as_str());
+                names.insert(top.to_string());
+            }
+            let mut sorted: Vec<String> = names.into_iter().collect();
+            sorted.sort();
+            let mut set = crate::object::PySet::new();
+            for name in sorted {
+                let _ = set.add(crate::object::py_str(&name));
+            }
+            let frozen = PyObjectRef::new(PyObject::FrozenSet(set));
+            if let Some(sys_mod) = vm.modules.get("sys") {
+                if let PyObject::Module { dict, .. } = &mut *sys_mod.borrow_mut() {
+                    dict.insert_str("stdlib_module_names", frozen);
+                }
+            }
+        }
+        // CPython's interpreter startup imports the `encodings` package
+        // (its `codecs.register(search_function)` call is what makes
+        // `codecs.lookup()` find the real `encodings/*` codecs at all).
+        // Ours only pulled it in on demand, so in a fresh process
+        // `b'x'.decode('base64_codec')`, `codecs.lookup('utf-16')`,
+        // `open(..., encoding='idna')` and friends raised
+        // `LookupError: unknown encoding` until something happened to
+        // import `encodings` first. Best-effort: a failure here just leaves
+        // the native fast path in charge.
+        let _ = vm.import_module_from_file("encodings");
+        // ...and publish the freshly-imported modules to the disposable-VM
+        // state cache, so VMs built (or reused) from that snapshot after
+        // this point see `encodings` too. See `take_disposable`'s own
+        // comment for what went wrong when they did not.
+        VirtualMachine::refresh_state_cache_modules(&vm);
         vm
+    }
+
+    /// Replace `VM_STATE_CACHE`'s module map with `vm`'s (same builtins).
+    pub(crate) fn refresh_state_cache_modules(vm: &VirtualMachine) {
+        if let Some((cached_builtins, _)) = VM_STATE_CACHE.with(|c| c.borrow().clone()) {
+            VM_STATE_CACHE.with(|c| {
+                *c.borrow_mut() = Some((cached_builtins, vm.modules.clone()));
+            });
+        }
     }
 
     pub(crate) fn call_function(

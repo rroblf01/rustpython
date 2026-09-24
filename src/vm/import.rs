@@ -59,6 +59,22 @@ impl VirtualMachine {
     }
 
     fn import_module_from_file_inner(&mut self, name: &str) -> PyResult<PyObjectRef> {
+        // A pooled/disposable VM's `modules` map is a snapshot frozen when
+        // that instance was built, so modules imported into the real VM
+        // afterwards are missing from it (the startup `encodings` import is
+        // the case that matters: without it a disposable VM re-executed
+        // `Lib/encodings/__init__.py` AND `Lib/codecs.py`, installing a
+        // second `codecs` module object into the shared `sys.modules` dict,
+        // which broke every `codecs.getincrementaldecoder(...)` call with
+        // `LookupError`). Adopt the cached instance on a miss instead of
+        // re-executing the module: one `Rc` bump per import, versus a
+        // full module-map clone on every disposable VM.
+        if !self.modules.contains_key(name) {
+            let cached = crate::vm::cached_module(name);
+            if let Some(module) = cached {
+                self.modules.insert(name.to_string(), module);
+            }
+        }
         if cfg!(feature = "profile") {
             if let Ok(status) =
                 std::fs::read_to_string(format!("/proc/{}/status", std::process::id()))
@@ -1037,23 +1053,28 @@ impl VirtualMachine {
         }
         let module_globals = Rc::new(RefCell::new(globals_map));
         crate::object::register_module_globals(name, Rc::clone(&module_globals));
-        // Register module in sys.modules BEFORE executing (needed for sys.modules[__name__] checks)
-        if let Some(sys_mod) = self.modules.get("sys") {
-            if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
-                if let Some(sm) = dict.get_str("modules").cloned() {
-                    match &sm {
-                        PyObjectRef::Mut(rc) => {
+        // Register the REAL module object in `sys.modules` BEFORE executing
+        // its body. CPython does exactly this, and code legitimately reads
+        // `sys.modules[__name__]` from inside the module being imported —
+        // CPython's own `dataclasses._process_class` does
+        // `sys.modules[cls.__module__].__dict__` (and real `dataclasses.py`
+        // is what our vendored copy now runs). The previous placeholder
+        // `py_str("<module 'x' (loaded)>")` made that lookup return a
+        // STRING, so `import _colorize` (and anything else whose module
+        // body introspects `sys.modules[...]`) died with
+        // `AttributeError: 'str' object has no attribute '__dict__'`.
+        let live_module = self.modules.get(name).cloned();
+        if let Some(module_obj) = live_module.clone() {
+            if let Some(sys_mod) = self.modules.get("sys") {
+                if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                    if let Some(sm) = dict.get_str("modules").cloned() {
+                        if let PyObjectRef::Mut(rc) = &sm {
                             if let Ok(mut guard) = rc.try_borrow_mut() {
                                 if let PyObject::Dict(ref mut d) = &mut *guard {
-                                    d.set(
-                                        py_str(name),
-                                        py_str(&format!("<module '{}' (loaded)>", name)),
-                                    )
-                                    .ok();
+                                    d.set(py_str(name), module_obj).ok();
                                 }
                             }
                         }
-                        _ => {}
                     }
                 }
             }
@@ -1067,7 +1088,6 @@ impl VirtualMachine {
         // even while it's still mid-execution — matching real CPython,
         // where `module.__dict__` IS the executing frame's globals, not a
         // separate snapshot.
-        let live_module = self.modules.get(name).cloned();
         if let Some(lm) = &live_module {
             if let PyObject::Module { dict, .. } = &mut *lm.borrow_mut() {
                 for (k, v) in module_globals.borrow().iter() {

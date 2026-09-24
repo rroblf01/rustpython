@@ -33,7 +33,9 @@ mod descriptors;
 pub use descriptors::*;
 mod native_base;
 pub use native_base::*;
-mod attrs;
+pub(crate) mod attrs;
+
+pub(crate) mod eg_traceback;
 pub use attrs::*;
 pub(crate) mod subscript;
 pub use subscript::*;

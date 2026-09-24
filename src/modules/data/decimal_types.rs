@@ -217,22 +217,13 @@ pub fn build_decimal_type() -> PyObjectRef {
                         .ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
                     let b = match decval_from_pyobject(&args[1]) {
                         Ok(v) => v,
-                        // An unconvertible operand (complex, ...) must produce
-                        // the standard "not supported between instances"
-                        // TypeError, matching real CPython — not the internal
-                        // conversion message.
-                        Err(_) => {
-                            return Err(PyError::type_error(format!(
-                                "'{}' not supported between instances of '{}' and '{}'",
-                                match $name {
-                                    "__lt__" => "<",
-                                    "__gt__" => ">",
-                                    _ => "?",
-                                },
-                                args[0].get_type_name(),
-                                args[1].get_type_name()
-                            )))
-                        }
+                        // An operand that is neither a Decimal nor something
+                        // Decimal can compare with (complex, Fraction, a
+                        // user class, ...) must return NotImplemented so the
+                        // interpreter itself raises the standard "'<' not
+                        // supported between instances of 'Decimal' and
+                        // 'complex'" TypeError.
+                        Err(_) => return Ok(py_not_implemented()),
                     };
                     match decimal_compare(&a, &b) {
                         Some($ord) => Ok(py_bool(true)),
@@ -305,10 +296,12 @@ pub fn build_decimal_type() -> PyObjectRef {
                     // defers to the other operand's reflected method, which
                     // ultimately raises TypeError (CPython: "Decimal refuses
                     // mixed arithmetic (but not mixed comparisons)").
-                    let b_ok = matches!(
-                        &*args[1].borrow(),
-                        PyObject::Int(_) | PyObject::Bool(_) | PyObject::Float(_)
-                    ) || instance_to_decval(&args[1]).is_some();
+                    // CPython refuses to mix Decimal and float in
+                    // arithmetic ("unsupported operand type(s) for +:
+                    // 'decimal.Decimal' and 'float'"); comparisons and the
+                    // constructor still accept floats.
+                    let b_ok = matches!(&*args[1].borrow(), PyObject::Int(_) | PyObject::Bool(_))
+                        || instance_to_decval(&args[1]).is_some();
                     if !b_ok {
                         return Ok(py_not_implemented());
                     }
@@ -372,6 +365,119 @@ pub fn build_decimal_type() -> PyObjectRef {
             };
             let prod = decimal_mul(&trunc_dec, &b)?;
             Ok(decval_to_instance(&decimal_sub(&a, &prod)?))
+        }),
+    );
+    // Truncating division shared by `__floordiv__`/`__rfloordiv__` and
+    // `__divmod__`/`__rdivmod__`: `a // b` in CPython's Decimal semantics
+    // truncates toward zero (it is NOT Python's floor division).
+    fn dec_trunc_quotient(a: &DecValue, b: &DecValue) -> PyResult<DecValue> {
+        let q = decimal_div(a, b)?;
+        if q.special != DecSpecial::Finite {
+            return Ok(q);
+        }
+        let truncated = if q.exp >= 0 {
+            &q.coeff * ten_pow(q.exp)
+        } else {
+            &q.coeff / ten_pow(-q.exp)
+        };
+        Ok(DecValue {
+            special: DecSpecial::Finite,
+            sign: q.sign,
+            coeff: truncated,
+            exp: 0,
+        })
+    }
+    // `a % b` for Decimals: the remainder that pairs with `dec_trunc_quotient`
+    // (sign follows the dividend, unlike Python's `%`).
+    fn dec_remainder(a: &DecValue, b: &DecValue) -> PyResult<DecValue> {
+        if b.is_zero() {
+            return Err(decimal_invalid_op("0 modulo"));
+        }
+        let q = decimal_div(a, b)?;
+        let trunc_dec = if q.special != DecSpecial::Finite {
+            q.clone()
+        } else {
+            let truncated_q = if q.exp >= 0 {
+                &q.coeff * ten_pow(q.exp)
+            } else {
+                &q.coeff / ten_pow(-q.exp)
+            };
+            DecValue {
+                special: DecSpecial::Finite,
+                sign: q.sign,
+                coeff: truncated_q,
+                exp: 0,
+            }
+        };
+        let prod = decimal_mul(&trunc_dec, b)?;
+        decimal_sub(a, &prod)
+    }
+    // Accept only Decimal/int/bool/float operands, like the other binary
+    // operators; anything else defers to the other operand's reflected
+    // method.
+    fn dec_operand_ok(obj: &PyObjectRef) -> bool {
+        matches!(&*obj.borrow(), PyObject::Int(_) | PyObject::Bool(_))
+            || instance_to_decval(obj).is_some()
+    }
+    macro_rules! dec_reflected {
+        ($name:expr, $op:expr) => {
+            type_dict.insert_str(
+                $name,
+                bf!($name, |args| {
+                    let a = instance_to_decval(&args[0])
+                        .ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+                    if !dec_operand_ok(&args[1]) {
+                        return Ok(py_not_implemented());
+                    }
+                    let b = decval_from_pyobject(&args[1])?;
+                    Ok(decval_to_instance(&$op(&a, &b)?))
+                }),
+            );
+        };
+    }
+    // `int // Decimal` and friends: `int.__floordiv__` returns
+    // NotImplemented for a Decimal, so without these reflected forms every
+    // `7 // Decimal(2)`, `7 % Decimal(2)` and `divmod(7, Decimal(2))` raised
+    // "unsupported operand type(s)" (269 failures in test_decimal alone).
+    dec_reflected!("__rfloordiv__", |a: &DecValue, b: &DecValue| {
+        dec_trunc_quotient(b, a)
+    });
+    dec_reflected!("__rmod__", |a: &DecValue, b: &DecValue| dec_remainder(b, a));
+    type_dict.insert_str(
+        "__rdivmod__",
+        bf!("__rdivmod__", |args| {
+            let a = instance_to_decval(&args[0])
+                .ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+            if !dec_operand_ok(&args[1]) {
+                return Ok(py_not_implemented());
+            }
+            let b = decval_from_pyobject(&args[1])?;
+            let q = dec_trunc_quotient(&b, &a)?;
+            let r = dec_remainder(&b, &a)?;
+            Ok(PyObjectRef::new(PyObject::Tuple(vec![
+                decval_to_instance(&q),
+                decval_to_instance(&r),
+            ])))
+        }),
+    );
+    dec_reflected!("__rtruediv__", |a: &DecValue, b: &DecValue| decimal_div(
+        b, a
+    ));
+    type_dict.insert_str(
+        "__divmod__",
+        bf!("__divmod__", |args| {
+            let a = instance_to_decval(&args[0])
+                .ok_or_else(|| PyError::runtime_error("not a Decimal"))?;
+            if !dec_operand_ok(&args[1]) {
+                return Ok(py_not_implemented());
+            }
+            let b = decval_from_pyobject(&args[1])?;
+            let q = dec_trunc_quotient(&a, &b)?;
+            let r = dec_remainder(&a, &b)?;
+            Ok(PyObjectRef::new(PyObject::Tuple(vec![
+                decval_to_instance(&q),
+                decval_to_instance(&r),
+            ])))
         }),
     );
     type_dict.insert_str(
@@ -770,6 +876,525 @@ pub fn build_decimal_type() -> PyObjectRef {
     // `test_statistics.py`'s `_sum`/`pvariance` doctests, which literally
     // assert the module-qualified repr in their expected output.
     type_dict.insert_str("__module__", py_str("decimal"));
+    // ------------------------------------------------------------------
+    // The rest of CPython 3.14's `Decimal` surface. The shared numeric
+    // bodies live in `decimal_ctx.rs` (they are the same ones the `Context`
+    // methods use, with the current context supplying precision/rounding).
+    // ------------------------------------------------------------------
+    use crate::modules::data::decimal_ctx as dctx;
+    use dctx::make_decimal_tuple;
+    macro_rules! dec_self {
+        ($name:expr, $f:expr) => {
+            type_dict.insert_str(
+                $name,
+                PyObjectRef::new(PyObject::BuiltinFunction {
+                    name: $name.to_string(),
+                    func: $f,
+                }),
+            );
+        };
+    }
+    /// `(self)` for the no-argument Decimal methods.
+    fn self_value(args: &[PyObjectRef]) -> PyResult<DecValue> {
+        args.first()
+            .and_then(instance_to_decval)
+            .ok_or_else(|| PyError::runtime_error("not a Decimal"))
+    }
+    /// `(self, other)` for the one-argument methods. Operands go through the
+    /// STRICT conversion (Decimal/int/bool/float only): CPython's
+    /// `Decimal('Infinity').fma(Decimal(0), "not a decimal")` is a TypeError,
+    /// not an InvalidOperation from parsing the string.
+    fn self_other(args: &[PyObjectRef]) -> PyResult<(DecValue, DecValue)> {
+        if args.len() < 2 {
+            return Err(PyError::type_error("method missing argument"));
+        }
+        let me = self_value(args)?;
+        let other = dctx::ctx_decimal_arg(&args[1])?;
+        Ok((me, other))
+    }
+    // Decimals are immutable, so `copy`/`deepcopy`/`pickle` all hand back
+    // the same object (CPython's `Decimal.__deepcopy__` returns self). The
+    // `copy` module reaches for `__copy__`/`__deepcopy__` on the TYPE and
+    // calls them with `self`, so these need the usual `[self]` shape.
+    dec_self!("__copy__", |args: &[PyObjectRef]| {
+        args.first()
+            .cloned()
+            .ok_or_else(|| PyError::type_error("__copy__() missing argument"))
+    });
+    dec_self!("__deepcopy__", |args: &[PyObjectRef]| {
+        args.first()
+            .cloned()
+            .ok_or_else(|| PyError::type_error("__deepcopy__() missing argument"))
+    });
+    dec_self!("__reduce__", |args: &[PyObjectRef]| {
+        let me = args
+            .first()
+            .and_then(instance_to_decval)
+            .ok_or_else(|| PyError::type_error("__reduce__() missing argument"))?;
+        // `(str(decimal), (text,))` — rebuild through the Decimal
+        // constructor, like CPython.
+        let text = format_decvalue(&me);
+        Ok(PyObjectRef::new(PyObject::Tuple(vec![
+            py_str("Decimal"),
+            PyObjectRef::new(PyObject::Tuple(vec![py_str(&text)])),
+        ])))
+    });
+    dec_self!("adjusted", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        Ok(py_int(dctx::decimal_adjusted(&me)?))
+    });
+    dec_self!("as_tuple", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        let (sign, digits, exponent) = match me.special {
+            DecSpecial::Infinity => {
+                return Ok(make_decimal_tuple(
+                    if me.sign { 1 } else { 0 },
+                    py_str("Infinity"),
+                    py_str("F"),
+                ))
+            }
+            DecSpecial::QNaN | DecSpecial::SNaN => {
+                let text = match me.special {
+                    DecSpecial::SNaN => "sNaN",
+                    _ => "NaN",
+                };
+                return Ok(make_decimal_tuple(
+                    if me.sign { 1 } else { 0 },
+                    py_str(text),
+                    py_str(special_to_str(&me.special)),
+                ));
+            }
+            DecSpecial::Finite => {
+                let digits: Vec<PyObjectRef> = format!("{}", me.coeff)
+                    .bytes()
+                    .map(|b| py_int((b - b'0') as i64))
+                    .collect();
+                (
+                    if me.sign { 1 } else { 0 },
+                    PyObjectRef::new(PyObject::Tuple(digits)),
+                    py_int(me.exp),
+                )
+            }
+        };
+        Ok(make_decimal_tuple(sign, digits, exponent))
+    });
+    dec_self!("canonical", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        Ok(decval_to_instance(&me))
+    });
+    dec_self!("compare", |args: &[PyObjectRef]| {
+        let (me, other) = self_other(args)?;
+        let ordering = decimal_compare(&me, &other).ok_or_else(|| decimal_invalid_op("compare"))?;
+        use std::cmp::Ordering;
+        Ok(py_int(match ordering {
+            Ordering::Less => -1,
+            Ordering::Equal => 0,
+            Ordering::Greater => 1,
+        }))
+    });
+    dec_self!("compare_signal", |args: &[PyObjectRef]| {
+        let (me, other) = self_other(args)?;
+        let ordering =
+            decimal_compare(&me, &other).ok_or_else(|| decimal_invalid_op("compare_signal"))?;
+        use std::cmp::Ordering;
+        Ok(py_int(match ordering {
+            Ordering::Less => -1,
+            Ordering::Equal => 0,
+            Ordering::Greater => 1,
+        }))
+    });
+    dec_self!("compare_total", |args: &[PyObjectRef]| {
+        let (me, other) = self_other(args)?;
+        Ok(py_int(dctx::decimal_compare_total(&me, &other)))
+    });
+    dec_self!("compare_total_mag", |args: &[PyObjectRef]| {
+        let (me, other) = self_other(args)?;
+        Ok(py_int(dctx::decimal_compare_total_mag(&me, &other)))
+    });
+    dec_self!("conjugate", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        Ok(decval_to_instance(&me))
+    });
+    dec_self!("copy_abs", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        Ok(decval_to_instance(&dctx::decimal_copy_abs(&me)))
+    });
+    dec_self!("copy_negate", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        Ok(decval_to_instance(&decimal_negate(&me)))
+    });
+    dec_self!("copy_sign", |args: &[PyObjectRef]| {
+        let (me, other) = self_other(args)?;
+        Ok(decval_to_instance(&dctx::decimal_copy_sign(&me, &other)))
+    });
+    dec_self!("exp", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let me = self_value(args)?;
+        Ok(decval_to_instance(&dctx::decimal_exp(&ctx, &me)?))
+    });
+    dec_self!("fma", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        if args.len() < 3 {
+            return Err(PyError::type_error("fma() takes 3 arguments"));
+        }
+        let a = dctx::ctx_decimal_arg(&args[0])?;
+        let b = dctx::ctx_decimal_arg(&args[1])?;
+        let c = dctx::ctx_decimal_arg(&args[2])?;
+        Ok(decval_to_instance(&dctx::decimal_fma(&ctx, &a, &b, &c)?))
+    });
+    dec_self!("from_number", |args: &[PyObjectRef]| {
+        // `Decimal.from_number(x)` (3.14): like `Decimal(x)` but signals
+        // FloatOperation for a float when the trap is armed. Callable both as
+        // `Decimal.from_number(x)` and `x.from_number()`, so the value is the
+        // LAST argument.
+        let value_obj = args.last().cloned().unwrap_or_else(py_none);
+        let ctx = dctx::current_context();
+        if matches!(&*value_obj.borrow(), PyObject::Float(_))
+            && dctx::signal_trapped(&ctx, "FloatOperation")
+        {
+            return Err(dctx::decimal_signal_error(
+                "FloatOperation",
+                "[<class 'float'>] either does not support arithmetic operations or the operation is invalid",
+            ));
+        }
+        let value = dctx::ctx_decimal_arg(&value_obj)?;
+        Ok(decval_to_instance(&dctx::apply_context(&ctx, value)?))
+    });
+    dec_self!("imag", |args: &[PyObjectRef]| {
+        let _ = self_value(args)?;
+        Ok(decval_to_instance(&DecValue::zero()))
+    });
+    dec_self!("real", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        Ok(decval_to_instance(&me))
+    });
+    dec_self!("is_canonical", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        Ok(py_bool(dctx::decimal_is_canonical(&me)))
+    });
+    dec_self!("is_normal", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let me = self_value(args)?;
+        Ok(py_bool(dctx::decimal_is_normal(&ctx, &me)))
+    });
+    dec_self!("is_qnan", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        Ok(py_bool(me.special == DecSpecial::QNaN))
+    });
+    dec_self!("is_snan", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        Ok(py_bool(me.special == DecSpecial::SNaN))
+    });
+    dec_self!("is_subnormal", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let me = self_value(args)?;
+        Ok(py_bool(dctx::decimal_is_subnormal(&ctx, &me)))
+    });
+    dec_self!("ln", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let me = self_value(args)?;
+        Ok(decval_to_instance(&dctx::decimal_ln(&ctx, &me)?))
+    });
+    dec_self!("log10", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let me = self_value(args)?;
+        Ok(decval_to_instance(&dctx::decimal_log10(&ctx, &me)?))
+    });
+    dec_self!("logb", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let me = self_value(args)?;
+        Ok(decval_to_instance(&dctx::decimal_logb(&ctx, &me)?))
+    });
+    dec_self!("logical_and", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let (me, other) = self_other(args)?;
+        Ok(decval_to_instance(&dctx::decimal_logical(
+            &ctx,
+            &me,
+            Some(&other),
+            "and",
+        )?))
+    });
+    dec_self!("logical_or", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let (me, other) = self_other(args)?;
+        Ok(decval_to_instance(&dctx::decimal_logical(
+            &ctx,
+            &me,
+            Some(&other),
+            "or",
+        )?))
+    });
+    dec_self!("logical_xor", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let (me, other) = self_other(args)?;
+        Ok(decval_to_instance(&dctx::decimal_logical(
+            &ctx,
+            &me,
+            Some(&other),
+            "xor",
+        )?))
+    });
+    dec_self!("logical_invert", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let me = self_value(args)?;
+        Ok(decval_to_instance(&dctx::decimal_logical(
+            &ctx, &me, None, "invert",
+        )?))
+    });
+    dec_self!("max", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let (me, other) = self_other(args)?;
+        use std::cmp::Ordering;
+        let out = if decimal_compare(&me, &other) == Some(Ordering::Less) {
+            other
+        } else {
+            me
+        };
+        Ok(decval_to_instance(&dctx::apply_context(&ctx, out)?))
+    });
+    dec_self!("min", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let (me, other) = self_other(args)?;
+        use std::cmp::Ordering;
+        let out = if decimal_compare(&me, &other) == Some(Ordering::Greater) {
+            other
+        } else {
+            me
+        };
+        Ok(decval_to_instance(&dctx::apply_context(&ctx, out)?))
+    });
+    dec_self!("max_mag", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let (me, other) = self_other(args)?;
+        let out = if dctx::decimal_compare_total_mag(&me, &other) < 0 {
+            other
+        } else {
+            me
+        };
+        Ok(decval_to_instance(&dctx::apply_context(&ctx, out)?))
+    });
+    dec_self!("min_mag", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let (me, other) = self_other(args)?;
+        let out = if dctx::decimal_compare_total_mag(&me, &other) > 0 {
+            other
+        } else {
+            me
+        };
+        Ok(decval_to_instance(&dctx::apply_context(&ctx, out)?))
+    });
+    dec_self!("next_minus", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let me = self_value(args)?;
+        Ok(decval_to_instance(&dctx::decimal_next(&ctx, &me, -1)?))
+    });
+    dec_self!("next_plus", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let me = self_value(args)?;
+        Ok(decval_to_instance(&dctx::decimal_next(&ctx, &me, 1)?))
+    });
+    dec_self!("next_toward", |args: &[PyObjectRef]| {
+        let (me, other) = self_other(args)?;
+        use std::cmp::Ordering;
+        let ordering =
+            decimal_compare(&me, &other).ok_or_else(|| decimal_invalid_op("next_toward"))?;
+        let ctx = dctx::current_context();
+        if ordering == Ordering::Equal {
+            return Ok(decval_to_instance(&me));
+        }
+        let away = match (me.sign, other.sign, ordering) {
+            (false, false, Ordering::Less) | (true, true, Ordering::Greater) => true,
+            _ => false,
+        };
+        let step = BigInt::from(1);
+        let coeff = if away {
+            if me.sign {
+                &me.coeff - 1
+            } else {
+                &me.coeff + 1
+            }
+        } else if me.sign {
+            &me.coeff + 1
+        } else {
+            &me.coeff - 1
+        };
+        let _ = step;
+        let _ = ctx;
+        Ok(decval_to_instance(&DecValue {
+            special: DecSpecial::Finite,
+            sign: me.sign,
+            coeff: if coeff < BigInt::from(0) {
+                BigInt::from(0)
+            } else {
+                coeff
+            },
+            exp: me.exp,
+        }))
+    });
+    dec_self!("number_class", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        Ok(py_str(dctx::decimal_number_class(&me)))
+    });
+    dec_self!("radix", |_args: &[PyObjectRef]| Ok(py_int(10)));
+    dec_self!("remainder_near", |args: &[PyObjectRef]| {
+        let (me, other) = self_other(args)?;
+        Ok(decval_to_instance(&dctx::decimal_remainder_near(
+            &me, &other,
+        )?))
+    });
+    dec_self!("rotate", |args: &[PyObjectRef]| {
+        let (me, other) = self_other(args)?;
+        Ok(decval_to_instance(&dctx::decimal_rotate(&me, &other)?))
+    });
+    dec_self!("same_quantum", |args: &[PyObjectRef]| {
+        let (me, other) = self_other(args)?;
+        Ok(py_bool(dctx::decimal_same_quantum(&me, &other)))
+    });
+    dec_self!("scaleb", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let me = self_value(args)?;
+        let n = args
+            .get(1)
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| decimal_invalid_op("scaleb"))?;
+        Ok(decval_to_instance(&dctx::decimal_scaleb(&ctx, &me, n)?))
+    });
+    dec_self!("shift", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let (me, other) = self_other(args)?;
+        Ok(decval_to_instance(&dctx::decimal_shift(&ctx, &me, &other)?))
+    });
+    dec_self!("sqrt", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let me = self_value(args)?;
+        Ok(decval_to_instance(&dctx::decimal_sqrt_ctx(&ctx, &me)?))
+    });
+    dec_self!("to_eng_string", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        Ok(py_str(&dctx::decimal_to_eng_string(&me)))
+    });
+    dec_self!("to_sci_string", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        Ok(py_str(&dctx::decimal_to_sci_string(&me)))
+    });
+    dec_self!("to_integral", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let me = self_value(args)?;
+        let rounding = args.get(1).map(|v| v.str());
+        Ok(decval_to_instance(&dctx::decimal_to_integral_exact(
+            &ctx,
+            &me,
+            rounding.as_deref(),
+        )?))
+    });
+    dec_self!("to_integral_exact", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        let me = self_value(args)?;
+        let rounding = args.get(1).map(|v| v.str());
+        Ok(decval_to_instance(&dctx::decimal_to_integral_exact(
+            &ctx,
+            &me,
+            rounding.as_deref(),
+        )?))
+    });
+    dec_self!("quantize", |args: &[PyObjectRef]| {
+        let ctx = dctx::current_context();
+        if args.len() < 2 {
+            return Err(PyError::type_error("quantize() takes 2 arguments"));
+        }
+        let me = dctx::ctx_decimal_arg(&args[0])?;
+        let exp_obj = dctx::ctx_decimal_arg(&args[1])?;
+        let rounding = args.get(2).map(|v| v.str());
+        // The exponent comes from the argument's own exponent when it is a
+        // Decimal (`quantize(Decimal('0.01'))` -> -2) and from the value
+        // itself when it is an int.
+        // An int exponent argument is `Decimal(int)`, whose exponent is 0.
+        let exp = if args[1].as_i64().is_some() {
+            0
+        } else {
+            exp_obj.exp
+        };
+        Ok(decval_to_instance(&dctx::decimal_quantize(
+            &ctx,
+            &me,
+            exp,
+            rounding.as_deref(),
+        )?))
+    });
+    dec_self!("__round__", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        let ndigits = args.get(1).and_then(|v| v.as_i64());
+        let rounding = args.get(2).map(|v| v.str());
+        match ndigits {
+            Some(n) => Ok(decval_to_instance(&dctx::decimal_round(
+                &me,
+                Some(n),
+                rounding.as_deref(),
+            )?)),
+            None => {
+                // `round(Decimal)` returns an int, like CPython.
+                let rounded = dctx::round_to_exponent(
+                    &me,
+                    0,
+                    rounding.as_deref().unwrap_or("ROUND_HALF_EVEN"),
+                );
+                let int = rounded
+                    .coeff
+                    .to_i64()
+                    .ok_or_else(|| PyError::overflow_error("integer division result too large"))?;
+                Ok(py_int(if rounded.sign { -int } else { int }))
+            }
+        }
+    });
+    dec_self!("__trunc__", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        let rounded = dctx::round_to_exponent(&me, 0, "ROUND_DOWN");
+        let int = rounded
+            .coeff
+            .to_i64()
+            .ok_or_else(|| PyError::overflow_error("integer division result too large"))?;
+        Ok(py_int(if rounded.sign { -int } else { int }))
+    });
+    dec_self!("__floor__", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        let rounding = if me.sign { "ROUND_FLOOR" } else { "ROUND_DOWN" };
+        let rounded = dctx::round_to_exponent(&me, 0, rounding);
+        let int = rounded
+            .coeff
+            .to_i64()
+            .ok_or_else(|| PyError::overflow_error("integer division result too large"))?;
+        Ok(py_int(if rounded.sign { -int } else { int }))
+    });
+    dec_self!("__ceil__", |args: &[PyObjectRef]| {
+        let me = self_value(args)?;
+        let rounding = if me.sign {
+            "ROUND_DOWN"
+        } else {
+            "ROUND_CEILING"
+        };
+        let rounded = dctx::round_to_exponent(&me, 0, rounding);
+        let int = rounded
+            .coeff
+            .to_i64()
+            .ok_or_else(|| PyError::overflow_error("integer division result too large"))?;
+        Ok(py_int(if rounded.sign { -int } else { int }))
+    });
+    dec_self!("__rpow__", |args: &[PyObjectRef]| {
+        // `2 ** Decimal(3)` dispatches here with [base, exponent]; a direct
+        // call has [self, base, exponent].
+        let (base_obj, exponent_obj) = match args.len() {
+            2 => (args[0].clone(), args[1].clone()),
+            _ => (args[1].clone(), args[2].clone()),
+        };
+        let base = dctx::ctx_decimal_arg(&base_obj)?;
+        let exponent = dctx::ctx_decimal_arg(&exponent_obj)?;
+        let ctx = dctx::current_context();
+        Ok(decval_to_instance(&dctx::apply_context(
+            &ctx,
+            dctx::decimal_pow(&base, &exponent)?,
+        )?))
+    });
     PyObjectRef::new(PyObject::Type {
         name: "Decimal".to_string(),
         dict: Box::new(str_map_to_typedict(type_dict)),
@@ -778,194 +1403,30 @@ pub fn build_decimal_type() -> PyObjectRef {
     })
 }
 
-pub fn build_context_type() -> PyObjectRef {
-    let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
-    macro_rules! bf {
-        ($name:expr, $f:expr) => {
-            PyObjectRef::new(PyObject::BuiltinFunction {
-                name: $name.to_string(),
-                func: $f,
-            })
-        };
-    }
-    type_dict.insert_str(
-        "__init__",
-        bf!("__init__", |args| {
-            let ctor_args = args[1..].to_vec();
-            let kw: Option<PyDict> = ctor_args.last().and_then(|a| {
-                if let PyObject::Dict(d) = &*a.borrow() {
-                    Some((**d).clone())
-                } else {
-                    None
-                }
-            });
-            let get_kw = |name: &str| {
-                kw.as_ref()
-                    .and_then(|d| d.get(&py_str(name)).ok().flatten())
-            };
-            let precision = get_kw("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize;
-            let rounding = get_kw("rounding")
-                .map(|v| v.str())
-                .unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
-            if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
-                dict.insert_str("prec", py_int(precision as i64));
-                dict.insert_str("rounding", py_str(&rounding));
-            }
-            Ok(py_none())
-        }),
-    );
-    type_dict.insert_str(
-        "__repr__",
-        bf!("__repr__", |args| {
-            let prec = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                dict.get_str("prec").and_then(|v| v.as_i64()).unwrap_or(28)
-            } else {
-                28
-            };
-            Ok(py_str(&format!("Context(prec={})", prec)))
-        }),
-    );
-    type_dict.insert_str(
-        "copy",
-        bf!("copy", |args| {
-            // Context.copy() creates a shallow copy of the context
-            let prec = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                dict.get_str("prec").and_then(|v| v.as_i64()).unwrap_or(28)
-            } else {
-                28
-            };
-            let rounding = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                dict.get_str("rounding")
-                    .map(|v| v.str())
-                    .unwrap_or_else(|| "ROUND_HALF_EVEN".to_string())
-            } else {
-                "ROUND_HALF_EVEN".to_string()
-            };
-            Ok(make_context_instance(prec as usize, &rounding))
-        }),
-    );
-    type_dict.insert_str(
-        "traps",
-        PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
-            getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "traps".to_string(),
-                func: |args| {
-                    if args.is_empty() {
-                        return Err(PyError::type_error("traps requires self"));
-                    }
-                    // Return existing traps dict or create one
-                    let obj = &args[0];
-                    let existing = if let PyObject::Instance { dict, .. } = &*obj.borrow() {
-                        dict.get_str("traps").cloned()
-                    } else {
-                        None
-                    };
-                    if let Some(v) = existing {
-                        return Ok(v);
-                    }
-                    let d = crate::object::PyDict::new();
-                    let result = PyObjectRef::new(PyObject::Dict(Box::new(d)));
-                    if let PyObject::Instance { dict, .. } = &mut *obj.borrow_mut() {
-                        dict.insert_str("traps", result.clone());
-                    }
-                    Ok(result)
-                },
-            })),
-            setter: None,
-            deleter: None,
-            doc: None,
-        }))),
-    );
-    type_dict.insert_str(
-        "flags",
-        PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
-            getter: Some(PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "flags".to_string(),
-                func: |args| {
-                    if args.is_empty() {
-                        return Err(PyError::type_error("flags requires self"));
-                    }
-                    // Lazily-created per-instance flags dict (signal->bool).
-                    // Starts empty; real signal keys are filled by operations
-                    // that set them. Empty is enough for module-level
-                    // `tuple(ctx.flags.keys())` at test_decimal import.
-                    let obj = &args[0];
-                    let existing = if let PyObject::Instance { dict, .. } = &*obj.borrow() {
-                        dict.get_str("flags").cloned()
-                    } else {
-                        None
-                    };
-                    if let Some(v) = existing {
-                        return Ok(v);
-                    }
-                    let d = crate::object::PyDict::new();
-                    let result = PyObjectRef::new(PyObject::Dict(Box::new(d)));
-                    if let PyObject::Instance { dict, .. } = &mut *obj.borrow_mut() {
-                        dict.insert_str("flags", result.clone());
-                    }
-                    Ok(result)
-                },
-            })),
-            setter: None,
-            deleter: None,
-            doc: None,
-        }))),
-    );
-    type_dict.insert_str(
-        "clear_flags",
-        bf!("clear_flags", |args| {
-            if args.is_empty() {
-                return Err(PyError::type_error("clear_flags requires self"));
-            }
-            // Reset all flags to False (CPython semantics); no-op when
-            // no flags have been set yet.
-            let flags_opt = if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                dict.get_str("flags").cloned()
-            } else {
-                None
-            };
-            if let Some(flags) = flags_opt {
-                let keys: Vec<PyObjectRef> = if let PyObject::Dict(d) = &*flags.borrow() {
-                    d.keys()
-                } else {
-                    vec![]
-                };
-                if let PyObject::Dict(d) = &mut *flags.borrow_mut() {
-                    for k in keys {
-                        let _ = d.set(k, py_bool(false));
-                    }
-                }
-            }
-            Ok(py_none())
-        }),
-    );
-    PyObjectRef::new(PyObject::Type {
-        name: "Context".to_string(),
-        dict: Box::new(str_map_to_typedict(type_dict)),
-        bases: vec![],
-        mro: vec![],
-    })
-}
-
+/// The `Context` type — the full implementation (methods, signals,
+/// flags/traps, properties) lives in `decimal_ctx.rs`.
 pub fn get_context_type() -> PyObjectRef {
     let existing = DECIMAL_CONTEXT_TYPE.with(|c| c.borrow().clone());
     if let Some(t) = existing {
         return t;
     }
-    let typ = build_context_type();
+    let typ = crate::modules::data::decimal_ctx::build_context_type();
     DECIMAL_CONTEXT_TYPE.with(|c| {
         *c.borrow_mut() = Some(typ.clone());
     });
     typ
 }
 
+/// Backwards-compatible helper: a `Context` with the given precision and
+/// rounding mode (all other fields at CPython's `DefaultContext` values).
 pub fn make_context_instance(precision: usize, rounding: &str) -> PyObjectRef {
-    let typ = get_context_type();
-    let mut dict = AttrMap::new();
-    dict.insert_str("prec", py_int(precision as i64));
-    dict.insert_str("rounding", py_str(rounding));
-    dict.insert_str("Emax", py_int(999999999999999999i64));
-    dict.insert_str("Emin", py_int(-999999999999999999i64));
-    dict.insert_str("_is_basic", py_bool(false));
-    PyObjectRef::new(PyObject::Instance { typ, dict })
+    crate::modules::data::decimal_ctx::new_context(
+        precision as i64,
+        rounding,
+        -999999,
+        999999,
+        true,
+        false,
+        &crate::modules::data::decimal_ctx::DEFAULT_TRAPS,
+    )
 }

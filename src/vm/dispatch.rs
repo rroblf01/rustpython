@@ -224,7 +224,16 @@ impl VirtualMachine {
             }
 
             Opcode::POP_EXCEPT => {
-                self.frames[fi].stack.pop();
+                // arg 2: the `except*` (PEP 654) cleanup — the exception
+                // value was already consumed by `CHECK_EXC_MATCH_STAR` (only
+                // the matched/rest GROUPS went through the value stack, and
+                // the handler dropped the matched one), so there is nothing
+                // here to pop: popping would eat whatever the ENCLOSING
+                // handler left on the stack. Only the exception CONTEXT is
+                // restored.
+                if arg != 2 {
+                    self.frames[fi].stack.pop();
+                }
                 if arg != 1 {
                     if std::env::var("RPY_DEBUG_CTX").is_ok() {
                         eprintln!("POP_EXC: (stack was {})", self.exc_context_stack.len());

@@ -347,6 +347,17 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
         ] {
             tv_dict.insert(name.to_string(), py_int(val));
         }
+        // `__members__` — CPython's real IntEnum exposes it, and
+        // `Lib/ssl.py` itself iterates `_SSLMethod.__members__.items()`;
+        // test_ssl asserts on `TLSVersion.__members__` too.
+        let mut tv_members = PyDict::new();
+        for (name, val) in &tv_dict {
+            let _ = tv_members.set(py_str(name), val.clone());
+        }
+        tv_dict.insert(
+            "__members__".to_string(),
+            PyObjectRef::new(PyObject::Dict(Box::new(tv_members))),
+        );
         d.insert_str(
             "TLSVersion",
             PyObjectRef::new(PyObject::Type {
@@ -372,6 +383,15 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
         ($name:expr, [$(($member:expr, $val:expr)),* $(,)?]) => {{
             let mut m = HashMap::new();
             $(m.insert($member.to_string(), py_int($val));)*
+            // `__members__` (see the TLSVersion note above).
+            let mut members = PyDict::new();
+            for (k, v) in &m {
+                let _ = members.set(py_str(k), v.clone());
+            }
+            m.insert(
+                "__members__".to_string(),
+                PyObjectRef::new(PyObject::Dict(Box::new(members))),
+            );
             d.insert_str(
                 $name,
                 PyObjectRef::new(PyObject::Type {

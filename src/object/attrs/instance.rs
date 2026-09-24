@@ -613,9 +613,30 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     if let PyObject::Type { dict: type_dict, mro, .. } = &*typ_ref {
                         type_dict.get_str(&name).cloned().or_else(|| {
                             for base in mro.iter().skip(1) {
-                                if let PyObject::Type { dict: base_dict, .. } = &*base.borrow() {
-                                    if let Some(val) = base_dict.get_str(&name) {
-                                        return Some(val.clone());
+                                if let PyObject::Type { name: base_name, dict: base_dict, .. } = &*base.borrow() {
+                                    // A native CONTAINER base's own method
+                                    // (dict's `__getitem__`, list's `append`,
+                                    // …) must not be returned raw here: the
+                                    // bound-method path would bind `self` to
+                                    // the native backing and lose the
+                                    // subclass — which is what made
+                                    // `Counter()['missing']` /
+                                    // `d.__missing__(k)` unreachable (the
+                                    // `__missing__` fallback lives in
+                                    // `py_getitem`, which needs the INSTANCE).
+                                    // The native-backing delegation below
+                                    // handles these names properly.
+                                    let is_native_container_method =
+                                        (base_dict.contains_key_str(NATIVE_BASE_MARKER)
+                                            || crate::object::is_recognized_native_base_name(
+                                                base_name,
+                                            ))
+                                            && (name == "__getitem__"
+                                                || name == "__missing__");
+                                    if !is_native_container_method {
+                                        if let Some(val) = base_dict.get_str(&name) {
+                                            return Some(val.clone());
+                                        }
                                     }
                                 }
                             }
@@ -653,6 +674,25 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                         new_dict.insert(NATIVE_BACKING_KEY.to_string(), new_native.clone());
                                         Ok(PyObjectRef::new(PyObject::Instance { typ: typ_clone.clone(), dict: new_dict }))
                                     }))));
+                                }
+                                // `d.__getitem__(k)` on a dict SUBCLASS must
+                                // keep the INSTANCE as the receiver, not the
+                                // native backing: the backing has no way to
+                                // reach the subclass's `__missing__`, so
+                                // rebinding made `Counter()['missing']` and
+                                // urllib's `_Quoter.__getitem__` raise KeyError
+                                // through this path (while the plain
+                                // subscript worked). Route it through
+                                // `py_getitem` with the instance intact.
+                                if (name == "__getitem__" || name == "__missing__")
+                                    && matches!(&*native.borrow(), PyObject::Dict(_))
+                                {
+                                    if let Some(f) = lookup_dunder_via_mro(
+                                        &typ,
+                                        "__getitem__",
+                                    ) {
+                                        return Some(f);
+                                    }
                                 }
                                 if name == "__buffer__" || name == "__release_buffer__" {
                                     // Skip delegation for buffer protocol - let VM handle it

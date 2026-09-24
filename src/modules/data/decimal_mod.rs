@@ -1,9 +1,15 @@
 use crate::modules::data::decimal::*;
+use crate::modules::data::decimal_ctx::*;
 use crate::modules::data::decimal_types::*;
 use crate::object::*;
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use std::collections::HashMap;
+
+/// `decimal` module contents. The heavy lifting lives in `decimal.rs`
+/// (values/arithmetic), `decimal_types.rs` (the `Decimal` type) and
+/// `decimal_ctx.rs` (the `Context` type, signals, flags/traps and the
+/// current-context thread-local); this file is the wiring.
 pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! dec_func {
@@ -19,226 +25,81 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
     }
     d.insert_str("Decimal", get_decimal_type());
     d.insert_str("Context", get_context_type());
-    // CPython's decimal module exposes three pre-built contexts as module
-    // attributes: DefaultContext (prec 28), BasicContext and ExtendedContext
-    // (both prec 9 but with different trap/flag settings). Tests access
-    // them via `decimal.BasicContext` etc. for `localcontext` usage. Our
-    // earlier stub lacked them entirely (AttributeError). Create them now;
-    // BasicContext traps InvalidOperation (so mismatched infs raise), while
-    // Extended/Default do not (they return NaN) – the trap flag is consulted
-    // by `decimal_add` for the (+Inf)+(-Inf) case.
-    {
-        let default_ctx = make_context_instance(28, "ROUND_HALF_EVEN");
-        let basic_ctx = make_context_instance(9, "ROUND_HALF_UP");
-        let extended_ctx = make_context_instance(9, "ROUND_HALF_EVEN");
-        // Mark BasicContext as trapping InvalidOperation for test
-        // `test_decimal_basiccontext_mismatched_infs_to_nan`.
-        if let PyObject::Instance { dict, .. } = &mut *basic_ctx.borrow_mut() {
-            let mut traps = crate::object::PyDict::new();
-            let _ = traps.set(py_str("InvalidOperation"), py_int(1));
-            dict.insert_str("traps", PyObjectRef::new(PyObject::Dict(Box::new(traps))));
-            dict.insert_str("_is_basic", py_bool(true));
-        }
-        if let PyObject::Instance { dict, .. } = &mut *extended_ctx.borrow_mut() {
-            dict.insert_str("_is_basic", py_bool(false));
-        }
-        if let PyObject::Instance { dict, .. } = &mut *default_ctx.borrow_mut() {
-            dict.insert_str("_is_basic", py_bool(false));
-        }
-        d.insert_str("DefaultContext", default_ctx);
-        d.insert_str("BasicContext", basic_ctx);
-        d.insert_str("ExtendedContext", extended_ctx);
+    d.insert_str("DefaultContext", default_context());
+    d.insert_str("BasicContext", basic_context());
+    d.insert_str("ExtendedContext", extended_context());
+    d.insert_str("DecimalException", decimal_exception_type());
+    // Each signal is a real exception class that doubles as the key type
+    // for `ctx.flags[...]` / `ctx.traps[...]` (CPython exposes one object
+    // for both roles).
+    for name in SIGNALS {
+        d.insert_str(name, signal_object(name));
     }
-    dec_func!("getcontext", |_args| {
-        let (precision, rounding) = current_decimal_context();
-        let is_basic = current_is_basic();
-        let ctx = make_context_instance(precision, &rounding);
-        if let PyObject::Instance { dict, .. } = &mut *ctx.borrow_mut() {
-            dict.insert_str("_is_basic", py_bool(is_basic));
-        }
-        Ok(ctx)
-    });
+    // CPython 3.14 exposes `IEEEContext` as a FACTORY, not a context object.
+    d.insert_str(
+        "IEEEContext",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "IEEEContext".to_string(),
+            func: |_args: &[PyObjectRef]| Ok(ieee_context()),
+        }),
+    );
+    dec_func!("getcontext", |_args| Ok(current_context()));
     dec_func!("setcontext", |args| {
         if args.is_empty() {
             return Err(PyError::type_error("setcontext() missing context argument"));
         }
-        if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-            let precision = dict.get_str("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize;
-            let rounding = dict
-                .get_str("rounding")
-                .map(|v| v.str())
-                .unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
-            let is_basic = dict
-                .get_str("_is_basic")
-                .map(|v| v.truthy())
-                .unwrap_or(false);
-            DECIMAL_CURRENT_CONTEXT.with(|c| {
-                *c.borrow_mut() = (precision, rounding);
-            });
-            DECIMAL_IS_BASIC.with(|c| {
-                *c.borrow_mut() = is_basic;
-            });
+        if !matches!(&*args[0].borrow(), PyObject::Instance { .. }) {
+            return Err(PyError::type_error(
+                "setcontext() argument must be a context",
+            ));
         }
+        set_current_context(&args[0]);
         Ok(py_none())
     });
-    // localcontext(ctx=None) — a minimal context-manager-like object; full
-    // save/restore-on-exit semantics aren't implemented, only prec/rounding
-    // application, which covers the common `with localcontext() as ctx:
-    // ctx.prec = N` pattern used for one-off precision changes.
+    // `localcontext(ctx=None, **kwargs)` — a context manager whose
+    // `__enter__` installs a copy of the new context and whose `__exit__`
+    // restores the previous one, so `with localcontext() as ctx: ctx.prec = 3`
+    // affects only the block.
     dec_func!("localcontext", |args| {
-        let (precision, rounding, is_basic) = if !args.is_empty() {
-            if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                (
-                    dict.get_str("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize,
-                    dict.get_str("rounding")
-                        .map(|v| v.str())
-                        .unwrap_or_else(|| "ROUND_HALF_EVEN".to_string()),
-                    dict.get_str("_is_basic")
-                        .map(|v| v.truthy())
-                        .unwrap_or(false),
-                )
-            } else {
-                let (p, r) = current_decimal_context();
-                (p, r, current_is_basic())
+        let mut kw: HashMap<String, PyObjectRef> = HashMap::new();
+        for arg in args {
+            if let PyObject::Dict(d) = &*arg.borrow() {
+                for (k, v) in d.iter() {
+                    kw.insert(k.str(), v.clone());
+                }
             }
-        } else {
-            let (p, r) = current_decimal_context();
-            (p, r, current_is_basic())
-        };
-        let ctx = make_context_instance(precision, &rounding);
-        if let PyObject::Instance { dict, .. } = &mut *ctx.borrow_mut() {
-            dict.insert_str("_is_basic", py_bool(is_basic));
         }
-        let mut cm_dict = HashMap::new();
-        cm_dict.insert_str(
-            "__enter__",
-            PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "__enter__".to_string(),
-                func: |args| {
-                    if let PyObject::Instance { dict, .. } = &*args[0].borrow() {
-                        let precision =
-                            dict.get_str("prec").and_then(|v| v.as_i64()).unwrap_or(28) as usize;
-                        let rounding = dict
-                            .get_str("rounding")
-                            .map(|v| v.str())
-                            .unwrap_or_else(|| "ROUND_HALF_EVEN".to_string());
-                        let is_basic = dict
-                            .get_str("_is_basic")
-                            .map(|v| v.truthy())
-                            .unwrap_or(false);
-                        DECIMAL_CURRENT_CONTEXT.with(|c| {
-                            *c.borrow_mut() = (precision, rounding);
-                        });
-                        DECIMAL_IS_BASIC.with(|c| {
-                            *c.borrow_mut() = is_basic;
-                        });
-                    }
-                    Ok(args[0].clone())
-                },
-            }),
-        );
-        cm_dict.insert_str(
-            "__exit__",
-            PyObjectRef::new(PyObject::BuiltinFunction {
-                name: "__exit__".to_string(),
-                func: |_args| {
-                    DECIMAL_CURRENT_CONTEXT.with(|c| {
-                        *c.borrow_mut() = (28, "ROUND_HALF_EVEN".to_string());
-                    });
-                    DECIMAL_IS_BASIC.with(|c| {
-                        *c.borrow_mut() = false;
-                    });
-                    Ok(py_bool(false))
-                },
-            }),
-        );
-        let cm_typ = PyObjectRef::new(PyObject::Type {
-            name: "_ContextManager".to_string(),
-            dict: Box::new(str_map_to_typedict(cm_dict)),
-            bases: vec![],
-            mro: vec![],
-        });
-        let mut inst_dict = AttrMap::new();
-        inst_dict.insert_str("prec", py_int(precision as i64));
-        inst_dict.insert_str("rounding", py_str(&rounding));
-        inst_dict.insert_str("_is_basic", py_bool(is_basic));
-        let _ = ctx;
-        Ok(PyObjectRef::new(PyObject::Instance {
-            typ: cm_typ,
-            dict: inst_dict,
-        }))
+        let base = match args
+            .iter()
+            .find(|a| matches!(&*a.borrow(), PyObject::Instance { .. }))
+        {
+            Some(ctx) => ctx.clone(),
+            None => current_context(),
+        };
+        // `copy` is fetched as a plain function, so `base` must be passed
+        // explicitly (calling it with no arguments raised
+        // "TypeError: copy() missing context").
+        let copy = base
+            .borrow()
+            .get_attribute("copy")
+            .map_err(|_| PyError::runtime_error("no copy"))?;
+        let new_ctx = crate::object::builtin_call(&copy, &[base])?;
+        if !kw.is_empty() {
+            let mut dict = PyDict::new();
+            for (k, v) in kw.iter() {
+                let _ = dict.set(py_str(k), v.clone());
+            }
+            let init = new_ctx
+                .borrow()
+                .get_attribute("__init__")
+                .map_err(|_| PyError::runtime_error("no context initializer"))?;
+            crate::object::builtin_call(
+                &init,
+                &[PyObjectRef::new(PyObject::Dict(Box::new(dict)))],
+            )?;
+        }
+        Ok(make_context_manager(new_ctx))
     });
-    // Exception types
-    d.insert_str(
-        "DecimalException",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "DecimalException".to_string(),
-            func: crate::object::builtin_make_exception_decimalexception,
-        }),
-    );
-    d.insert_str(
-        "InvalidOperation",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "InvalidOperation".to_string(),
-            func: crate::object::builtin_make_exception_invalidoperation,
-        }),
-    );
-    d.insert_str(
-        "DivisionByZero",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "DivisionByZero".to_string(),
-            func: crate::object::builtin_make_exception_decimaldivisionbyzero,
-        }),
-    );
-    d.insert_str(
-        "Inexact",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "Inexact".to_string(),
-            func: crate::object::builtin_make_exception_inexact,
-        }),
-    );
-    d.insert_str(
-        "Rounded",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "Rounded".to_string(),
-            func: crate::object::builtin_make_exception_rounded,
-        }),
-    );
-    d.insert_str(
-        "Clamped",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "Clamped".to_string(),
-            func: crate::object::builtin_make_exception_clamped,
-        }),
-    );
-    d.insert_str(
-        "Overflow",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "Overflow".to_string(),
-            func: crate::object::builtin_make_exception_decimaloverflow,
-        }),
-    );
-    d.insert_str(
-        "Underflow",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "Underflow".to_string(),
-            func: crate::object::builtin_make_exception_decimalunderflow,
-        }),
-    );
-    d.insert_str(
-        "Subnormal",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "Subnormal".to_string(),
-            func: crate::object::builtin_make_exception_subnormal,
-        }),
-    );
-    d.insert_str(
-        "FloatOperation",
-        PyObjectRef::new(PyObject::BuiltinFunction {
-            name: "FloatOperation".to_string(),
-            func: crate::object::builtin_make_exception_floatoperation,
-        }),
-    );
     // Rounding mode constants — their real string values (that's what
     // CPython's decimal.ROUND_* constants actually are), so equality checks
     // and passing them to quantize()-style calls behave as real code expects.
@@ -254,8 +115,16 @@ pub fn create_decimal_dict() -> HashMap<String, PyObjectRef> {
     ] {
         d.insert(name.to_string(), py_str(name));
     }
+    // Real CPython 3.14 limits (the C `_decimal` values, not the old
+    // all-9s placeholders).
     d.insert_str("MAX_PREC", py_int(999999999999999999i64));
-    d.insert_str("MAX_EMAX", py_int(999999999999999999i64));
-    d.insert_str("MIN_EMIN", py_int(-999999999999999999i64));
+    d.insert_str("MAX_EMAX", py_int(425000000i64));
+    d.insert_str("MIN_EMIN", py_int(-425000000i64));
+    d.insert_str("MIN_ETINY", py_int(-849999999999999999i64));
+    d.insert_str("IEEE_CONTEXT_MAX_BITS", py_int(34));
+    d.insert_str("HAVE_CONTEXTVAR", py_bool(true));
+    d.insert_str("HAVE_THREADS", py_bool(true));
+    // `DecimalTuple` — a named tuple type for `Decimal.as_tuple()`.
+    d.insert_str("DecimalTuple", decimal_tuple_type());
     d
 }

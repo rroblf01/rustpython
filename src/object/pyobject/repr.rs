@@ -463,9 +463,22 @@ impl PyObject {
                 args,
                 exceptions,
             } => {
+                // CPython's constructor-shaped repr:
+                // `ExceptionGroup('m', [ValueError('a'), TypeError('b')])` —
+                // the message plus the children as a LIST. `args` already
+                // holds `(message, [children])` (both the ctor and
+                // `derive`/`split` maintain that shape), so print it
+                // directly; the previous version appended `exceptions` a
+                // SECOND time, duplicating every child.
                 let args_str: Vec<String> = args.iter().map(|a| a.repr()).collect();
-                let exc_str: Vec<String> = exceptions.iter().map(|e| e.repr()).collect();
-                format!("{}({}, {})", typ, args_str.join(", "), exc_str.join(", "))
+                if args.len() >= 2 {
+                    format!("{}({})", typ, args_str.join(", "))
+                } else {
+                    // Defensive: a hand-built group with no children list in
+                    // `args` still reprs its children rather than nothing.
+                    let exc_str: Vec<String> = exceptions.iter().map(|e| e.repr()).collect();
+                    format!("{}({}, [{}])", typ, args_str.join(", "), exc_str.join(", "))
+                }
             }
             PyObject::BuildClass => "<builtin function __build_class__>".to_string(),
             PyObject::BoundMethod { func, self_obj } => {

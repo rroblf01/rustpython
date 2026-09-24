@@ -264,6 +264,35 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     }
                     Ok(PyObjectRef::new(PyObject::Dict(Box::new(pd))))
                 }
+                // `f.__call__` — CPython exposes a method-wrapper here, so
+                // `hasattr(f, "__call__")` is True and the old
+                // `hasattr(x, "__call__")` callable-test idiom keeps
+                // working. Without it that idiom silently reported every
+                // function as NON-callable, which is exactly what broke the
+                // real (vendored) `urllib.parse`:
+                // `_byte_quoter_factory` is `@functools.lru_cache`d and its
+                // bare-decorator detection is
+                // `hasattr(maxsize, "__call__")` — False here, so
+                // `@lru_cache` without parentheses never wrapped at all.
+                // Return a callable that forwards to the function; a
+                // `Closure` (not `BuiltinMethod`) because the target is
+                // captured.
+                "__call__" => {
+                    // `o: &PyObject` here (the get() arm's receiver), so
+                    // rebuild the owned `PyObjectRef` for the captured
+                    // callable — `PyObjectRef::new` gives an equivalent
+                    // (owned, Imm) handle to the same function.
+                    let target = PyObjectRef::imm(o.clone());
+                    Ok(PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(
+                        move |call_args: &[PyObjectRef]| {
+                            crate::object::call_function_disposable(
+                                &target,
+                                call_args.to_vec(),
+                                vec![],
+                            )
+                        },
+                    ))))
+                }
                 _ => dict.get_str(&name).cloned().ok_or_else(|| {
                     PyError::attribute_error(format!(
                         "'function' object has no attribute '{}'",
@@ -782,6 +811,49 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     }))
                 }
                 "co_qualname" => Ok(py_str(crate::interner::lookup_str(c.qualname))),
+                // `co_positions()` — PEP 657's fine-grained position
+                // iterator, yielding one
+                // `(lineno, end_lineno, col_offset, end_col_offset)` per
+                // instruction. Real `traceback` uses it for the
+                // `~~~^^^` expression markers, and real `inspect`/`dis`
+                // read it too, so its absence made the real (vendored)
+                // `traceback.py` fail at import with
+                // `AttributeError: 'code' object has no attribute
+                // 'co_positions'`. Line numbers come from the same
+                // per-instruction table `co_lines()` uses; COLUMN offsets
+                // are `None` for now (CPython itself yields `None` for
+                // every column-less instruction, e.g. jumps and
+                // `RESUME`).
+                "co_positions" => {
+                    let lines = c.line_numbers.clone();
+                    let entries: Vec<PyObjectRef> = lines
+                        .iter()
+                        .map(|line| {
+                            let line_value = if *line == 0 {
+                                py_none()
+                            } else {
+                                py_int(*line as i64)
+                            };
+                            // Columns are 0 rather than None: real
+                            // `traceback` does column arithmetic on the
+                            // tuple it gets back (`end_col_offset -
+                            // col_offset`) when building its PEP 657
+                            // carets, and `None` made that raise
+                            // `TypeError: unsupported operand type(s) for
+                            // -: 'NoneType' and 'int'`. A zero-width span
+                            // simply renders no marker.
+                            py_tuple(vec![line_value.clone(), line_value, py_int(0), py_int(0)])
+                        })
+                        .collect();
+                    // A `BuiltinMethod`'s `func` must be a plain fn
+                    // pointer (this codebase's convention), so the entries
+                    // travel in a `PyObject::Closure` built here instead.
+                    let captured = std::rc::Rc::new(entries);
+                    let method = PyObjectRef::imm(PyObject::Closure(std::rc::Rc::new(
+                        move |_args: &[PyObjectRef]| Ok(py_list((*captured).clone())),
+                    )));
+                    Ok(method)
+                }
                 // `co_lines()` — a *method* (not a plain attribute)
                 // since CPython 3.10 replacing the old `co_lnotab`
                 // bytes blob: returns an iterator of
@@ -888,7 +960,19 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
             "__name__" => Ok(py_str(bm_name)),
             "__qualname__" => Ok(py_str(bm_name)),
             "__module__" => Ok(py_str("builtins")),
-            "__doc__" => Ok(py_none()),
+            // CPython gives the well-known C slots real docstrings; the
+            // generator ones are asserted verbatim by test_genexps' doctest
+            // (`print(g.__next__.__doc__)` -> "Implement next(self).").
+            "__doc__" => Ok(match bm_name.as_str() {
+                "__next__" | "next" => py_str("Implement next(self)."),
+                "send" => py_str(
+                    "Send a value into the generator.\n\nReturn next yielded value or raise StopIteration.",
+                ),
+                "throw" => py_str(
+                    "Raise an exception in the generator.\n\nIf the generator is suspended, the exception is raised at the\ngenerator's current yield point.",
+                ),
+                _ => py_none(),
+            }),
             // Same gap, same fix, as `BuiltinFunction`'s own
             // `__reduce_ex__`/`__reduce__` fallback above (a bound
             // native method, e.g. `[].append`, needs the same "reduce

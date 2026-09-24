@@ -23,6 +23,19 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
             ));
         }
     }
+    // `ExceptionGroup[int]` / `BaseExceptionGroup[str]` — the PEP 654
+    // exception-group classes are the native exception CONSTRUCTORS
+    // (BuiltinFunctions), not `Type` objects, so the `Type` arm below never
+    // sees them; they are subscriptable through `__class_getitem__`, which
+    // returns a `types.GenericAlias`.
+    if let PyObject::BuiltinFunction { name, .. } = &*obj.borrow() {
+        if name == "ExceptionGroup" || name == "BaseExceptionGroup" {
+            return Ok(crate::modules::make_generic_alias(
+                obj.clone(),
+                vec![index.clone()],
+            ));
+        }
+    }
     // Check for __getitem__ on custom classes and __class_getitem__ on types (PEP 560)
     let f = {
         let o = obj.borrow();
@@ -98,11 +111,30 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                                 type_dict.contains_key_str(NATIVE_BASE_MARKER);
                             for base in mro.iter().skip(1) {
                                 if let PyObject::Type {
-                                    dict: base_dict, ..
+                                    name: base_name,
+                                    dict: base_dict,
+                                    ..
                                 } = &*base.borrow()
                                 {
+                                    // Skip a native base's OWN `__getitem__`
+                                    // in BOTH directions: a value type
+                                    // (`NATIVE_VALUE_CTOR_KEY`) and a
+                                    // container type (`NATIVE_BASE_MARKER`,
+                                    // i.e. dict/list/str). Calling the
+                                    // native one would bind `self` to the
+                                    // backing and bypass the fallback
+                                    // below — which is what makes a dict
+                                    // subclass's `__missing__` (Counter,
+                                    // urllib's `_Quoter`, …) unreachable
+                                    // through the bound-method path
+                                    // (`d.__getitem__(k)`), even though the
+                                    // plain subscript `d[k]` honored it.
                                     if skip_native_dunder_hatch
-                                        && base_dict.contains_key_str(NATIVE_VALUE_CTOR_KEY)
+                                        && (base_dict.contains_key_str(NATIVE_VALUE_CTOR_KEY)
+                                            || base_dict.contains_key_str(NATIVE_BASE_MARKER)
+                                            || crate::object::is_recognized_native_base_name(
+                                                base_name,
+                                            ))
                                     {
                                         continue;
                                     }
