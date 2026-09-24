@@ -41,6 +41,7 @@ impl VirtualMachine {
             frame.live_module = None;
             frame.globals_dict = None;
             frame.exec_locals = None;
+            frame.exec_globals = None;
             frame.yield_from_iter = None;
             frame.frame_object = None;
             frame.frame_locals_obj = None;
@@ -75,6 +76,7 @@ impl VirtualMachine {
             frame.live_module = None;
             frame.globals_dict = None;
             frame.exec_locals = None;
+            frame.exec_globals = None;
             frame.yield_from_iter = None;
             frame.frame_object = None;
             frame.frame_locals_obj = None;

@@ -681,6 +681,14 @@ pub fn py_setitem(obj: &PyObjectRef, index: &PyObjectRef, value: PyObjectRef) ->
     // gh-97591, gh-140551 — which would re-enter `borrow_mut()` on the same
     // RefCell and panic if such a borrow were held at the time).
     if matches!(&*obj.borrow(), PyObject::Dict(_)) {
+        // `os.environ[k] = v` is not just a dict write in CPython: the
+        // mapping is an `os._Environ`, whose `__setitem__` calls
+        // `os.putenv` and only then updates the snapshot — so the REAL
+        // process environment (what `$PYTHONBREAKPOINT`/`getenv(3)` at the
+        // C level, `execve`, and every child process see) tracks the
+        // assignment. Our `os.environ` is a plain dict, so the `is_environ`
+        // flag set at construction restores that side effect here.
+        crate::modules::environ_setitem_side_effect(obj, index, &value)?;
         return pydict_safe_set(obj, index.clone(), value);
     }
     if let PyObject::Globals(g) = &*obj.borrow() {
@@ -923,6 +931,9 @@ pub fn py_delitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<()> {
         return py_delitem(&native, index);
     }
     if matches!(&*obj.borrow(), PyObject::Dict(_)) {
+        // `del os.environ[k]` → `os.unsetenv`, same reasoning (and the same
+        // `is_environ` marker) as the `__setitem__` side effect above.
+        crate::modules::environ_delitem_side_effect(obj, index)?;
         crate::object::pydict_safe_remove(obj, index)?;
         return Ok(());
     }

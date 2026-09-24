@@ -88,11 +88,26 @@ impl VirtualMachine {
                                     crate::modules::tiw_delegate_marker as crate::object::BuiltinFunc,
                                 )
                         );
+                        // `list_iterator.__reduce__` resolves its `iter`
+                        // callable through the CURRENT FRAME's builtins
+                        // (`_PyEval_GetBuiltin`), so it must reach
+                        // `call_function`'s pointer-identified intercept
+                        // rather than be called bare here (see
+                        // `list_iter_reduce`'s doc comment).
+                        let is_list_iter_reduce = matches!(
+                            &*callable.borrow(),
+                            PyObject::BuiltinMethod { func, .. }
+                                if std::ptr::fn_addr_eq(
+                                    *func,
+                                    crate::object::list_iter_reduce as crate::object::BuiltinFunc,
+                                )
+                        );
                         if !is_special_throw
                             && !is_context_run
                             && !is_iobase_exit
                             && !is_zipimporter_method
                             && !is_tiw_delegate
+                            && !is_list_iter_reduce
                         {
                             if let PyObject::BuiltinMethod {
                                 name,

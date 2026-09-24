@@ -96,6 +96,59 @@ impl VirtualMachine {
                         name.clone()
                     }
                 };
+                // `IMPORT_NAME` calls the frame's `__import__` builtin, and
+                // for a frame with an explicit `exec`/`eval` globals mapping
+                // that builtin comes from the mapping's `__builtins__` —
+                // so `exec("import foo.bar", {"__builtins__":
+                // mappingproxy({})})` raises `ImportError("__import__ not
+                // found")` and a custom `__import__` receives the real
+                // five arguments (`name`, `globals`, `locals`, `fromlist`,
+                // `level`; test_builtin's `test_exec_builtins_mapping_import`).
+                if self.frames[fi].exec_globals.is_some() {
+                    let builtins = crate::vm::helpers::frame_exec_builtins(&self.frames[fi])?;
+                    if let Some(bm) = builtins {
+                        let hook = crate::vm::helpers::mapping_builtin_get(&bm, "__import__")?;
+                        let hook = match hook {
+                            Some(h) => h,
+                            None => {
+                                return Err(PyError::ImportError(
+                                    "__import__ not found".to_string(),
+                                ));
+                            }
+                        };
+                        let globals_obj =
+                            self.frames[fi].exec_globals.clone().unwrap_or_else(py_none);
+                        let locals_obj = self.frames[fi]
+                            .exec_locals
+                            .clone()
+                            .unwrap_or_else(|| globals_obj.clone());
+                        let level = {
+                            let obj = level_val.borrow();
+                            match &*obj {
+                                PyObject::Int(i) => i.to_i64().unwrap_or(0),
+                                _ => 0,
+                            }
+                        };
+                        let fromlist_obj = if matches!(&*_fromlist.borrow(), PyObject::None) {
+                            py_none()
+                        } else {
+                            _fromlist.clone()
+                        };
+                        let result = self.call_function(
+                            hook,
+                            vec![
+                                py_str(&resolved),
+                                globals_obj,
+                                locals_obj,
+                                fromlist_obj,
+                                py_int(level),
+                            ],
+                            vec![],
+                        )?;
+                        self.frames[fi].push(result);
+                        return Ok(true);
+                    }
+                }
                 if std::env::var("RPY_DEBUG_IMPORT").is_ok() {
                     eprintln!(
                         "IMPORT_NAME: resolved={} cached={}",
@@ -513,6 +566,27 @@ impl VirtualMachine {
             }
 
             Opcode::LOAD_BUILD_CLASS => {
+                // With an explicit `exec`/`eval` globals MAPPING, the
+                // builtin comes from that mapping's `__builtins__` — so
+                // `exec("class A: pass", {'__builtins__': {}})` raises
+                // `NameError: __build_class__ not found` (CPython loads
+                // `__build_class__` as a normal global, and the frame's
+                // builtins ARE the mapping), and a custom one is honored.
+                if self.frames[fi].exec_globals.is_some() {
+                    let frame = &self.frames[fi];
+                    let builtins = crate::vm::helpers::frame_exec_builtins(frame)?;
+                    let found = match &builtins {
+                        Some(bm) => crate::vm::helpers::mapping_builtin_get(bm, "__build_class__")?,
+                        None => None,
+                    };
+                    match found {
+                        Some(v) => {
+                            self.frames[fi].push(v);
+                            return Ok(true);
+                        }
+                        None => return Err(PyError::name_error("__build_class__ not found")),
+                    }
+                }
                 self.frames[fi].push(PyObjectRef::imm(PyObject::BuildClass));
             }
 

@@ -22,7 +22,15 @@ impl Compiler {
                 // mangled storage key any later bare-name READ of it will
                 // look up.
                 let name = &self.mangle_name(name);
-                if self.scope == ScopeType::Module
+                // Same exec-mode rule as the read side: an explicit
+                // `global x` in module-level code writes the GLOBAL slot
+                // (`STORE_GLOBAL`), everything else writes f_locals
+                // (`STORE_NAME`) — CPython's exact split, and what
+                // `exec('global a; a = 1; b = 2', g, l)` relies on.
+                if self.scope == ScopeType::Module && self.global_names.contains(name) {
+                    let idx = self.get_name_index(name) as u32;
+                    self.emit(Opcode::STORE_GLOBAL, idx);
+                } else if self.scope == ScopeType::Module
                     || self.scope == ScopeType::ClassBody
                     || self.global_names.contains(name)
                 {
@@ -104,14 +112,19 @@ impl Compiler {
                 }
             }
             Expr::List(elts) | Expr::Tuple(elts) => {
-                // Check if any element is a Starred target — use UNPACK_EX if so
-                let star_pos = elts.iter().position(|e| matches!(e, Expr::Starred(_)));
+                // Check if any element is a Starred target — use UNPACK_EX
+                // if so. The elements are `Located` wrappers in practice
+                // (every source element carries a position), so the test
+                // must peel them: without `unlocate()` a starred target
+                // like `for optval, *expected in values:` was misread as a
+                // plain 2-way unpack and raised `ValueError: too many
+                // values to unpack (expected 2, got 5)`
+                // (test_builtin's `test_compile`).
+                let is_starred = |e: &Expr| matches!(e.unlocate(), Expr::Starred(_));
+                let star_pos = elts.iter().position(is_starred);
                 if let Some(pos) = star_pos {
                     // Check for multiple starred targets
-                    let second_star = elts
-                        .iter()
-                        .skip(pos + 1)
-                        .any(|e| matches!(e, Expr::Starred(_)));
+                    let second_star = elts.iter().skip(pos + 1).any(is_starred);
                     if second_star {
                         return Err("multiple starred expressions in assignment".to_string());
                     }

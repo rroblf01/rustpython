@@ -194,6 +194,15 @@ pub fn create_builtins() -> HashMap<String, PyObjectRef> {
     add_func!("eval", builtin_eval);
     add_func!("exec", builtin_exec);
     add_func!("__import__", builtin_import);
+    // `__build_class__` is a REAL entry in CPython's `builtins.__dict__`
+    // (the class-statement helper that `LOAD_BUILD_CLASS` fetches), so it
+    // must be here too: `exec("class A: pass", {"__builtins__":
+    // frozendict(__builtins__.__dict__)})` has to find it in that copied
+    // mapping (test_builtin's `test_exec_globals_frozen`), and
+    // `__build_class__ not found` must only happen for a mapping that
+    // genuinely lacks it. The sentinel object drives the normal class
+    // build path (`call_function`'s `PyObject::BuildClass` arm).
+    builtins.insert_str("__build_class__", PyObjectRef::imm(PyObject::BuildClass));
     add_func!("compile", builtin_compile);
     add_func!("super", builtin_super);
     // Internal helper the compiler emits IN PLACE OF a normal `super()` call

@@ -52,6 +52,75 @@ pub trait ObjectAccess {
     fn del_attribute(&mut self, name: &str) -> PyResult<()>;
 }
 
+/// `T.__name__ = v` / `T.__qualname__ = v` — CPython's
+/// `type_set_name`/`type_set_qualname` require a real `str` and report
+/// anything else as `can only assign string to <T>.__name__, not
+/// '<type>'` (`Objects/typeobject.c`).
+fn type_slot_str(value: &PyObjectRef, type_name: &str, slot: &str) -> PyResult<String> {
+    // `PyUnicode_Check` accepts SUBCLASSES too (test_descr's
+    // `test_evil_type_name` assigns a `str` subclass to `C.__name__`), and
+    // a str subclass is an Instance carrying a native str backing.
+    let is_str = matches!(&*value.borrow(), PyObject::Str(_))
+        || crate::object::native_backing_of(value)
+            .map(|b| matches!(&*b.borrow(), PyObject::Str(_)))
+            .unwrap_or(false);
+    if is_str {
+        return Ok(value.str());
+    }
+    let got = value.get_type_name();
+    Err(PyError::type_error(format!(
+        "can only assign string to {}.{}, not '{}'",
+        type_name, slot, got
+    )))
+}
+
+/// A type's name/qualname/doc must survive a UTF-8 round-trip (CPython
+/// stores them as UTF-8 in `tp_name`): an embedded NUL is
+/// `ValueError: type name must not contain null characters`, and a lone
+/// surrogate is the standard `UnicodeEncodeError`.
+pub(crate) fn check_type_name_text(s: &str) -> PyResult<()> {
+    if s.contains('\0') {
+        return Err(PyError::value_error(
+            "type name must not contain null characters",
+        ));
+    }
+    check_type_text_encodable(s)
+}
+
+/// Same UTF-8 round-trip requirement as the name/qualname check, but a NUL
+/// is fine: `type('A', (), {'__doc__': 'x\x00y'})` is legal (test_builtin's
+/// `TestType.test_type_doc`), while a lone surrogate in a docstring is still
+/// a `UnicodeEncodeError` (CPython stores `tp_doc` as UTF-8 too).
+pub(crate) fn check_type_doc_text(s: &str) -> PyResult<()> {
+    check_type_text_encodable(s)
+}
+
+fn check_type_text_encodable(s: &str) -> PyResult<()> {
+    for (idx, ch) in s.chars().enumerate() {
+        if (0xD800..0xE000).contains(&(ch as u32)) {
+            return Err(PyError::Exception(
+                "UnicodeEncodeError".to_string(),
+                PyObjectRef::new(PyObject::Exception {
+                    typ: "UnicodeEncodeError".to_string(),
+                    args: vec![
+                        py_str("utf-8"),
+                        py_str(s),
+                        py_int(idx as i64),
+                        py_int((idx + 1) as i64),
+                        py_str("surrogates not allowed"),
+                    ],
+                    cause: None,
+                    suppress_context: false,
+                    context: None,
+                    traceback: None,
+                    extra: None,
+                }),
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl PyObject {
     /// Every real Python object has `__doc__` (defaulting to `None` if not
     /// otherwise set — `bool`/`int`/etc. all inherit it from `object`).
@@ -1279,8 +1348,41 @@ impl ObjectAccess for PyObject {
                 crate::object::pydict::update_module_globals(mod_name, name, value.clone());
                 Ok(())
             }
-            PyObject::Type { dict, .. } => {
-                dict.insert_str(&name, value);
+            PyObject::Type {
+                name: type_name,
+                dict,
+                ..
+            } => {
+                // The three type identity slots are validated exactly like
+                // CPython's `type_set_name`/`type_set_qualname`/
+                // `type_set_module`/`type_set_doc` (Objects/typeobject.c):
+                // a non-`str` is a TypeError, an embedded NUL is a
+                // ValueError, and a lone surrogate is a UnicodeEncodeError
+                // (the name must survive a UTF-8 round-trip). Assigning
+                // `__name__` rewrites `tp_name` itself, and assigning
+                // `__module__` DROPS `__firstlineno__` from the type dict —
+                // both observable behaviors real code relies on
+                // (test_builtin.py's `TestType.test_type_name` /
+                // `test_type_qualname` / `BuiltinTest.test_type_firstlineno`).
+                match name {
+                    "__name__" => {
+                        let s = type_slot_str(&value, type_name, "__name__")?;
+                        check_type_name_text(&s)?;
+                        *type_name = s;
+                    }
+                    "__qualname__" => {
+                        let s = type_slot_str(&value, type_name, "__qualname__")?;
+                        check_type_name_text(&s)?;
+                        dict.insert_str("__qualname__", value);
+                    }
+                    "__module__" => {
+                        dict.insert_str("__module__", value);
+                        dict.remove(&interner::intern("__firstlineno__"));
+                    }
+                    _ => {
+                        dict.insert_str(&name, value);
+                    }
+                }
                 Ok(())
             }
             PyObject::Function(ref mut f) => {

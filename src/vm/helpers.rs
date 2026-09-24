@@ -533,3 +533,117 @@ pub(crate) fn frame_exec_local_keys(frame: &Frame) -> Option<Vec<String>> {
         None
     }
 }
+
+/// Live-`globals` accessors for `exec`/`eval` frames given an explicit
+/// globals mapping (`Frame::exec_globals`). Unlike the fast path's direct
+/// `HashMap` probe, these go through the mapping's real `__getitem__` /
+/// `__setitem__` / `__delitem__` — that is the whole point: CPython's
+/// `f_globals` IS the object the caller passed, so a dict subclass that
+/// raises on item access must make the name operation raise (and a
+/// read-only mapping must reject the store), while a `mappingproxy`
+/// rejects both.
+pub(crate) fn frame_exec_global_get(frame: &Frame, name: &str) -> PyResult<Option<PyObjectRef>> {
+    let g = match &frame.exec_globals {
+        Some(g) => g.clone(),
+        None => return Ok(None),
+    };
+    match crate::object::py_getitem(&g, &py_str(name)) {
+        Ok(v) => Ok(Some(v)),
+        // A missing key is a normal miss (fall through to the next scope /
+        // raise the usual NameError); anything else the mapping raises —
+        // `setonlydict` in test_builtin's `test_exec_globals_error_on_get` —
+        // propagates.
+        Err(e) if is_missing_key(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Store `name` into the live exec-globals mapping. `Ok(true)` when a
+/// mapping handled the store, `Ok(false)` when there is none.
+pub(crate) fn frame_exec_global_set(frame: &Frame, name: &str, val: PyObjectRef) -> PyResult<bool> {
+    let g = match &frame.exec_globals {
+        Some(g) => g.clone(),
+        None => return Ok(false),
+    };
+    crate::object::py_setitem(&g, &py_str(name), val)?;
+    Ok(true)
+}
+
+/// Delete `name` from the live exec-globals mapping: `Ok(Some(true))`
+/// deleted, `Ok(Some(false))` the mapping exists but has no such name
+/// (the real NameError), `Ok(None)` no mapping installed.
+pub(crate) fn frame_exec_global_del(frame: &Frame, name: &str) -> PyResult<Option<bool>> {
+    let g = match &frame.exec_globals {
+        Some(g) => g.clone(),
+        None => return Ok(None),
+    };
+    if frame_exec_global_get(frame, name)?.is_none() {
+        return Ok(Some(false));
+    }
+    crate::object::py_delitem(&g, &py_str(name))?;
+    Ok(Some(true))
+}
+
+/// The live exec-globals mapping's `__builtins__` entry, if it has one.
+/// `Err` when the entry is not a mapping (CPython: `exec(code,
+/// {'__builtins__': 123})` raises `TypeError: 'int' object is not
+/// subscriptable` from the very first name lookup).
+pub(crate) fn frame_exec_builtins(frame: &Frame) -> PyResult<Option<PyObjectRef>> {
+    let g = match &frame.exec_globals {
+        Some(g) => g.clone(),
+        None => return Ok(None),
+    };
+    let found = match crate::object::py_getitem(&g, &py_str("__builtins__")) {
+        Ok(v) => v,
+        Err(e) if is_missing_key(&e) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if matches!(&*found.borrow(), PyObject::None) {
+        return Ok(None);
+    }
+    Ok(Some(found))
+}
+
+/// Look `name` up in a `__builtins__` MAPPING (module, dict, dict
+/// subclass, mappingproxy) with real `__getitem__` semantics.
+pub(crate) fn mapping_builtin_get(
+    builtins: &PyObjectRef,
+    name: &str,
+) -> PyResult<Option<PyObjectRef>> {
+    // The ordinary `__builtins__` entry is the builtins MODULE, which is
+    // not subscriptable — read its dict directly. Everything else (a plain
+    // dict, a dict subclass, a `mappingproxy`) goes through real
+    // `__getitem__`, which is the whole point of consulting the mapping.
+    if let PyObject::Module { dict, .. } = &*builtins.borrow() {
+        return Ok(dict.get(&crate::interner::intern(name)).cloned());
+    }
+    let obj = match crate::object::native_backing_of(builtins) {
+        Some(native) => {
+            if matches!(&*builtins.borrow(), PyObject::Instance { .. }) {
+                // dict SUBCLASS: keep the instance so its custom
+                // `__getitem__` runs.
+                builtins.clone()
+            } else {
+                native
+            }
+        }
+        None => builtins.clone(),
+    };
+    match crate::object::py_getitem(&obj, &py_str(name)) {
+        Ok(v) => Ok(Some(v)),
+        Err(e) if is_missing_key(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Is this error just "the mapping has no such key"? Both the internal
+/// `PyError` variants and a real raised `KeyError`/`IndexError` object
+/// (what a Python-level `mappingproxy`/`__getitem__` override produces)
+/// count as a miss, so name resolution can fall through to the next scope.
+fn is_missing_key(e: &PyError) -> bool {
+    match e {
+        PyError::KeyError(_) | PyError::IndexError(_) => true,
+        PyError::Exception(name, _) => name == "KeyError" || name == "IndexError",
+        _ => false,
+    }
+}

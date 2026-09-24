@@ -872,15 +872,45 @@ impl VirtualMachine {
                 // no VM already active, but we're already inside one here
                 // and a second aliasing `&mut VirtualMachine` from within
                 // this same call chain reliably segfaulted in testing).
-                let bases_vec = match &*args[1].borrow() {
+                let mut bases_vec = match &*args[1].borrow() {
                     PyObject::Tuple(t) => t.clone(),
                     PyObject::None => vec![],
                     _ => vec![args[1].clone()],
                 };
-                let namespace_dict = crate::object::dict_arg_to_hashmap(
+                // `type('A', (), {})` gets `object` as its implicit base
+                // (CPython's `type_new`/`type_new_set_bases`), so
+                // `A.__bases__ == (object,)` — without this the class had
+                // an empty `__bases__` even though `object` was in its MRO
+                // (test_builtin.py's `TestType.test_new_type`).
+                if bases_vec.is_empty() {
+                    if let Some(object_type) = self.builtins.get(&interner::intern("object")) {
+                        bases_vec.push(object_type.clone());
+                    }
+                }
+                let mut namespace_dict = crate::object::dict_arg_to_hashmap(
                     &args[2],
                     "type() third argument must be a dict",
                 )?;
+                // `type.__new__` fills in `__module__` from the CALLER's
+                // globals when the namespace doesn't supply one
+                // (`type_new_set_module`, `Objects/typeobject.c`):
+                // `type('X', (object,), {})` in `__main__` reports
+                // `__module__ == '__main__'`, and that value is a real
+                // entry in the class `__dict__`, not a type slot. The
+                // `class` STATEMENT path already gets this from the
+                // compiler (which emits `__module__ = ...` into the class
+                // body), so only this dynamic path needs it.
+                if !namespace_dict.contains_key("__module__") {
+                    let caller_module = self.frames.last().and_then(|f| {
+                        f.globals
+                            .borrow()
+                            .get(&interner::intern("__name__"))
+                            .cloned()
+                    });
+                    if let Some(module_name) = caller_module {
+                        namespace_dict.insert("__module__".to_string(), module_name);
+                    }
+                }
                 return self.default_build_class(
                     args[0].str(),
                     bases_vec,

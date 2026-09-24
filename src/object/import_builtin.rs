@@ -301,11 +301,65 @@ fn try_unparse_ast_arg(obj: &PyObjectRef) -> Option<PyResult<String>> {
 }
 
 pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
-    if args.len() < 3 {
+    // All three of `source`/`filename`/`mode` are keyword-capable in real
+    // CPython (`compile(source='pass', filename='?', mode='exec')` and
+    // `compile(dont_inherit=False, filename='tmp', source='0',
+    // mode='eval')` are both in test_builtin's `test_compile`), and under
+    // this project's convention keywords arrive as a trailing dict — so an
+    // ALL-keyword call looks like a single positional dict. Normalize both
+    // shapes into (positional, keywords) before anything else.
+    let mut positional: Vec<PyObjectRef> = Vec::new();
+    let mut keywords: Vec<(String, PyObjectRef)> = Vec::new();
+    if args.len() == 1 {
+        if let PyObject::Dict(d) = &*args[0].borrow() {
+            keywords = d.items().into_iter().map(|(k, v)| (k.str(), v)).collect();
+        } else {
+            positional.push(args[0].clone());
+        }
+    } else {
+        for (i, a) in args.iter().enumerate() {
+            // A dict at index 1+ is the packed kwargs dict (a dict can
+            // never be a valid `filename`/`mode`); index 0 is always the
+            // positional `source` — including when that source IS a dict
+            // (`compile({'a': 1}, 'f', 'eval')`, or a `memoryview`).
+            if i >= 1 {
+                if let PyObject::Dict(d) = &*a.borrow() {
+                    keywords.extend(d.items().into_iter().map(|(k, v)| (k.str(), v)));
+                    continue;
+                }
+            }
+            positional.push(a.clone());
+        }
+    }
+    let kw_arg = |name: &str| -> Option<PyObjectRef> {
+        keywords
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    };
+    // An argument given BOTH positionally and by keyword is CPython's
+    // `TypeError: argument for compile() given by name ('source') and
+    // position (1)` (test_builtin's `test_compile`).
+    for (idx, name) in ["source", "filename", "mode"].iter().enumerate() {
+        if positional.len() > idx && kw_arg(name).is_some() {
+            return Err(PyError::type_error(format!(
+                "argument for compile() given by name ('{name}') and position ({})",
+                idx + 1
+            )));
+        }
+    }
+    if positional.is_empty() && kw_arg("source").is_none() {
         return Err(PyError::type_error(
             "compile() requires 3 arguments (source, filename, mode)",
         ));
     }
+    let source_obj = positional
+        .first()
+        .cloned()
+        .or_else(|| kw_arg("source"))
+        .unwrap();
+    let filename_obj = positional.get(1).cloned().or_else(|| kw_arg("filename"));
+    let mode_obj = positional.get(2).cloned().or_else(|| kw_arg("mode"));
     // `bytes`/`bytearray` source must be decoded using its OWN encoding
     // (PEP 263 coding cookie, defaulting to UTF-8) — `.str()` on a `bytes`
     // object is its Python REPR (`"b'...'"`, quotes and escapes included),
@@ -313,46 +367,116 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // parser instead of the real characters (confirmed via
     // `test_utf8source.py::test_latin1`: `compile()` on Latin-1-encoded
     // source containing `Ç` never even defined the variable it assigned).
-    let source = match &*args[0].borrow() {
+    let source = match &*source_obj.borrow() {
         PyObject::Bytes(b) | PyObject::ByteArray(b) => decode_source_bytes(b)?,
-        _ => args[0].str(),
+        // A `memoryview` is a legal `compile()` source in CPython (it is
+        // read as a buffer, same as bytes —
+        // `compile(memoryview(b"text"), "name", "exec")` in test_builtin's
+        // `test_compile`); `.str()` would give its repr instead.
+        PyObject::MemoryView { .. } => {
+            let bytes = crate::object::mv_tobytes(&source_obj)?;
+            decode_source_bytes(&bytes)?
+        }
+        _ => source_obj.str(),
     };
     // `compile(tree, ...)` where tree is an `ast.*` node: unparse back to
     // source first (CPython compiles straight from the tree; we go through
     // our own parser — same language, same result). Detected via isinstance
     // against `ast.AST` (not mere `_fields` presence — namedtuples have
     // `_fields` too and must NOT take this path).
-    let source = match try_unparse_ast_arg(&args[0]) {
+    let source = match try_unparse_ast_arg(&source_obj) {
         Some(r) => r?,
         None => source,
     };
-    let filename = args[1].str();
-    let mode = args[2].str();
+    // `filename` and `mode` are REQUIRED by CPython; an all-keyword call
+    // supplies them by name.
+    let filename = match filename_obj {
+        Some(f) => f.str(),
+        None => {
+            return Err(PyError::type_error(
+                "compile() missing required argument 'filename'",
+            ))
+        }
+    };
+    // `mode` must be a real `str` (C clinic's `s` converter: a non-str is a
+    // TypeError naming the argument, and only a *string* that isn't one of
+    // the three modes is a ValueError — test_compile.py's
+    // `test_compile_filename_refleak` checks the former).
+    let mode = match mode_obj {
+        Some(m) => {
+            if !matches!(&*m.borrow(), PyObject::Str(_))
+                && !crate::object::native_backing_of(&m)
+                    .map(|b| matches!(&*b.borrow(), PyObject::Str(_)))
+                    .unwrap_or(false)
+            {
+                return Err(PyError::type_error(format!(
+                    "compile() argument 'mode' must be str, not {}",
+                    m.get_type_name()
+                )));
+            }
+            m.str()
+        }
+        None => {
+            return Err(PyError::type_error(
+                "compile() missing required argument 'mode'",
+            ))
+        }
+    };
     // Warnings raised while parsing/compiling (invalid escapes,
     // `is`-with-literal) render with this filename (mirrors CPython:
     // `codeop.compile_command` records `<input>`, not `<string>`).
     crate::modules::set_warn_filename(&filename);
+    // `mode` is validated by CPython before anything else happens:
+    // `compile(src, file, 'badmode')` is a ValueError naming the bad
+    // mode (test_builtin's `test_compile`), and the int-valued
+    // `mode` legacy form (`compile(src, file, 0xff)`) is a ValueError
+    // too.
+    match mode.as_str() {
+        "exec" | "eval" | "single" => {}
+        other => {
+            return Err(PyError::value_error(format!(
+                "compile() mode must be 'exec', 'eval' or 'single', got {other:?}"
+            )))
+        }
+    }
     // `flags=ast.PyCF_ONLY_AST` (0x400) returns the AST tree instead of
     // compiling to bytecode — checked up front so it applies to every
     // mode (exec/eval/single). Test_ast's test_pickling roundtrips
     // `compile(code, "?", kind, 0x400)` through pickle for all three.
     {
         let mut flags: i64 = 0;
-        if args.len() >= 4 {
-            flags |= args[3].as_i64().unwrap_or(0);
+        if positional.len() >= 4 {
+            flags |= positional[3].as_i64().unwrap_or(0);
         }
-        for a in args {
-            if let PyObject::Dict(kw) = &*a.borrow() {
-                flags |= kw
-                    .get(&py_str("flags"))
-                    .ok()
-                    .flatten()
-                    .and_then(|f| f.as_i64())
-                    .unwrap_or(0);
+        for (k, v) in &keywords {
+            if k == "flags" {
+                flags |= v.as_i64().unwrap_or(0);
             }
         }
+        // CPython rejects flag bits outside
+        // `PyCF_MASK | PyCF_MASK_OBSOLETE | PyCF_COMPILE_MASK` with
+        // `ValueError: compile(): unrecognised flags`
+        // (`compile(src, file, 'single', 0xff)` — test_builtin's
+        // `test_compile`; checked in `builtin_compile_impl`,
+        // `Python/bltinmodule.c`). That union is 0x01fef610: the
+        // `CO_FUTURE_*` bits (0x20000..0x1000000), `CO_NESTED` (0x10),
+        // and `PyCF_SOURCE_IS_UTF8`/`DONT_IMPLY_DEDENT`/`ONLY_AST`/
+        // `IGNORE_COOKIE`/`TYPE_COMMENTS`/`ALLOW_TOP_LEVEL_AWAIT`/
+        // `ALLOW_INCOMPLETE_INPUT`/`OPTIMIZED_AST`.
+        const KNOWN_COMPILE_FLAGS: i64 = 0x01fe_f610;
+        if flags & !KNOWN_COMPILE_FLAGS != 0 {
+            return Err(PyError::value_error("compile(): unrecognised flags"));
+        }
         if flags & 0x400 != 0 {
-            return crate::modules::misc::ast_bridge::parse_tree(&source, &filename, &mode);
+            // `PyCF_OPTIMIZED_AST` (0x8400) additionally asks for the
+            // optimizer's rewrites (`__debug__` folded to a Constant) —
+            // test_builtin's `test_compile_ast`.
+            return crate::modules::misc::ast_bridge::parse_tree_with_optimize(
+                &source,
+                &filename,
+                &mode,
+                flags & 0x8000 != 0,
+            );
         }
     }
     // The `mode` argument was previously READ but never actually consulted
@@ -597,8 +721,8 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 // Check incomplete flag even for eval mode
                 let compile_flags = |args: &[PyObjectRef]| -> i64 {
                     let mut flags = 0;
-                    if args.len() >= 4 {
-                        flags |= args[3].as_i64().unwrap_or(0);
+                    if positional.len() >= 4 {
+                        flags |= positional[3].as_i64().unwrap_or(0);
                     }
                     for a in args {
                         if let PyObject::Dict(kw) = &*a.borrow() {
@@ -654,7 +778,13 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             flags
         };
         let flags = compile_flags(args);
-        let allow_top_level_await = flags & 0x8000 != 0;
+        // `PyCF_ALLOW_TOP_LEVEL_AWAIT` is 0x2000 in CPython 3.14
+        // (Include/cpython/compile.h) — 0x8000 is the high bit of
+        // `PyCF_OPTIMIZED_AST` (0x8400), not this flag. Reading the wrong
+        // bit made every `compile(src, f, mode,
+        // flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)` call silently lose the
+        // permission (and `ast.PyCF_OPTIMIZED_AST` wrongly enable it).
+        let allow_top_level_await = flags & 0x2000 != 0;
         // `flags=__future__.CO_FUTURE_BARRY_AS_BDFL` (0x400000) switches the
         // `<>`/`!=` comparison operators (barry_as_FLUFL, test_flufl).
         let barry_as_bdfl = flags & 0x400000 != 0;
@@ -708,6 +838,68 @@ pub fn builtin_compile(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let mut compiler = crate::compiler::Compiler::new();
     if mode == "single" {
         compiler.single_mode = true;
+    }
+    // `optimize=1 << 1000` cannot be a C int: CPython's AC conversion
+    // raises `OverflowError` (test_compile.py's
+    // `test_compile_filename_refleak`). Same for a `dont_inherit` object
+    // whose `__bool__` raises.
+    if let Some(v) = kw_arg("optimize").or_else(|| positional.get(5).cloned()) {
+        if matches!(&*v.borrow(), PyObject::Int(_)) {
+            let too_big = match v.as_i64() {
+                Some(n) => n > i32::MAX as i64 || n < i32::MIN as i64,
+                None => true,
+            };
+            if too_big {
+                return Err(PyError::Exception(
+                    "OverflowError".to_string(),
+                    PyObjectRef::new(PyObject::Exception {
+                        typ: "OverflowError".to_string(),
+                        args: vec![py_str("Python int too large to convert to C int")],
+                        cause: None,
+                        suppress_context: false,
+                        context: None,
+                        traceback: None,
+                        extra: None,
+                    }),
+                ));
+            }
+        }
+    }
+    if let Some(v) = kw_arg("dont_inherit").or_else(|| positional.get(4).cloned()) {
+        if !matches!(&*v.borrow(), PyObject::Bool(_) | PyObject::Int(_)) {
+            // A non-bool `dont_inherit` is truth-tested by CPython's AC
+            // conversion, so an object whose `__bool__` raises must
+            // surface that error here (test_compile.py's
+            // `test_compile_filename_refleak`). `truthy()` is infallible and
+            // records the failure as a pending descriptor error — pick it
+            // up and propagate.
+            let typ_opt = match &*v.borrow() {
+                crate::object::PyObject::Instance { typ, .. } => Some(typ.clone()),
+                _ => None,
+            };
+            if let Some(typ) = typ_opt {
+                // `truthy()` itself is infallible (it drops the error from a
+                // raising `__bool__`), so drive the dunder directly and
+                // propagate the real exception.
+                for dunder in ["__bool__", "__len__"] {
+                    if let Some(f) = crate::object::lookup_dunder_via_mro(&typ, dunder) {
+                        crate::object::call_bound_method(f, v.clone(), vec![])?;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    // `optimize` is the 6th positional parameter of CPython's `compile`
+    // (and a keyword in practice): `>= 1` strips docstrings, drops
+    // `assert`s and makes `__debug__` False, exactly like `python -O`
+    // (test_builtin's `test_compile` checks all three effects).
+    compiler.optimize = kw_arg("optimize")
+        .and_then(|v| v.as_i64())
+        .or_else(|| positional.get(5).and_then(|v| v.as_i64()))
+        .unwrap_or(-1);
+    if compiler.optimize < 0 {
+        compiler.optimize = 0;
     }
     let code = compiler
         .compile(&program, &filename)

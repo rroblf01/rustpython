@@ -56,6 +56,17 @@ pub struct PyDict {
     /// recomputed because a reentrant callback (e.g. a key's `__eq__`
     /// calling `d.clear()`) mutated the dict in the meantime.
     version: u64,
+    /// This dict IS the native `os.environ` mapping. CPython's
+    /// `os.environ` is an `os._Environ` (a `MutableMapping`), whose
+    /// `__setitem__`/`__delitem__` call `os.putenv`/`os.unsetenv` and then
+    /// update the backing dict. This native environ is a plain dict, so
+    /// without this flag `os.environ['X'] = 'v'` would only touch the
+    /// snapshot and the REAL process environment (which C-level readers
+    /// like `Py_GETENV` — e.g. `sys.breakpointhook`'s
+    /// `$PYTHONBREAKPOINT` resolution — and every `execve`/`fork` see)
+    /// would never learn about it. Marked at construction in
+    /// `modules::core::os`; honoured by `py_setitem`/`py_delitem`.
+    pub is_environ: bool,
 }
 
 impl PyDict {
@@ -66,6 +77,7 @@ impl PyDict {
             size: 0,
             instance_ref: None,
             version: 0,
+            is_environ: false,
         }
     }
 

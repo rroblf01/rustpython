@@ -5,11 +5,15 @@ pub fn create_ast_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     // compile() flags (CPython's ast.PyCF_* constants) — test_builtin's
     // test_compile_top_level_await references PyCF_ALLOW_TOP_LEVEL_AWAIT.
+    // The four constants CPython 3.14's `ast` module actually exposes,
+    // with their real values from Include/cpython/compile.h. The old
+    // values here (ALLOW_TOP_LEVEL_AWAIT 0x8000) collided with
+    // `PyCF_OPTIMIZED_AST`'s high bit and meant
+    // `compile(..., flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)` did nothing.
     d.insert("PyCF_ONLY_AST".to_string(), py_int(0x400));
-    d.insert("PyCF_ALLOW_TOP_LEVEL_AWAIT".to_string(), py_int(0x8000));
+    d.insert("PyCF_ALLOW_TOP_LEVEL_AWAIT".to_string(), py_int(0x2000));
     d.insert("PyCF_TYPE_COMMENTS".to_string(), py_int(0x1000));
-    d.insert("PyCF_DONT_IMPLY_DEDENT".to_string(), py_int(0x200));
-    d.insert("PyCF_ACCEPT_NULL_BYTES".to_string(), py_int(0x10000000));
+    d.insert("PyCF_OPTIMIZED_AST".to_string(), py_int(0x8400));
     macro_rules! ast_func {
         ($name:expr, $func:expr) => {
             d.insert(

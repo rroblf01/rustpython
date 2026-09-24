@@ -75,6 +75,8 @@ pub struct Compiler {
     /// (CPython emits UNPACK_SEQUENCE for it); everywhere else a bare
     /// starred keeps legacy evaluate-inner behavior.
     pub(crate) in_annotation: bool,
+    /// `compile(..., optimize=N)` level; see `Compiler::new`. 0 = off.
+    pub optimize: i64,
 }
 
 impl Compiler {
@@ -94,6 +96,10 @@ impl Compiler {
             class_name_stack: Vec::new(),
             qual_stack: Vec::new(),
             current_line: 1,
+            /// `compile()`'s `optimize` level: >= 1 strips docstrings and
+            /// makes `__debug__` False (and drops `assert` statements), as
+            /// CPython's optimizer does (test_builtin's `test_compile`).
+            optimize: 0,
             annotations_initialized: false,
             comprehension_depth: 0,
             single_mode: false,

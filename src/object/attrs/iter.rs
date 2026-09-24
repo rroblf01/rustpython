@@ -61,18 +61,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
             })),
             "__reduce__" | "__reduce_ex__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                 name: name.to_string(),
-                func: |args| {
-                    if let PyObject::ListIter { list, index } = &*args[0].borrow() {
-                        let iter_obj = args[0].clone();
-                        let state = py_int(*index as i64);
-                        Ok(py_tuple(vec![
-                            py_str("list_iterator"),
-                            py_tuple(vec![iter_obj, state]),
-                        ]))
-                    } else {
-                        Err(PyError::runtime_error("__reduce__ on non-list_iterator"))
-                    }
-                },
+                func: crate::object::builtins::list_iter_reduce,
                 self_obj: PyObjectRef::new(o.clone()),
             })),
             _ => Err(PyError::attribute_error(format!(

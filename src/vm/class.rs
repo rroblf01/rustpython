@@ -112,7 +112,7 @@ impl VirtualMachine {
             PyObject::None => vec![],
             _ => vec![args[2].clone()],
         };
-        let namespace_dict = crate::object::dict_arg_to_hashmap(
+        let mut namespace_dict = crate::object::dict_arg_to_hashmap(
             &args[3],
             "type.__new__(): namespace must be a dict",
         )?;
@@ -132,6 +132,27 @@ impl VirtualMachine {
             return Err(PyError::type_error(
                 "type.__new__() takes no keyword arguments",
             ));
+        }
+        // `type.__new__` fills in `__module__` from the CALLER's globals
+        // when the namespace doesn't provide one (`type_new_set_module` in
+        // CPython's `Objects/typeobject.c`) — `type('X', (object,), {})`
+        // built in `__main__` reports `__module__ == '__main__'`, and the
+        // value is a real entry in the class `__dict__`, not a slot. The
+        // `class` STATEMENT path already gets this from the compiler
+        // (which emits `__module__ = ...` into the class body), so only the
+        // dynamic `type()`/`type.__new__()` construction path needs it
+        // here. No `__name__` in the caller's globals (e.g. `exec` with a
+        // bare dict) leaves the namespace untouched, exactly as CPython.
+        if !namespace_dict.contains_key("__module__") {
+            let caller_module = self.frames.last().and_then(|f| {
+                f.globals
+                    .borrow()
+                    .get(&interner::intern("__name__"))
+                    .cloned()
+            });
+            if let Some(module_name) = caller_module {
+                namespace_dict.insert("__module__".to_string(), module_name);
+            }
         }
         // Real CPython's `type.__new__` always adds `object` as the
         // implicit base when no explicit bases are given (empty tuple
@@ -164,6 +185,31 @@ impl VirtualMachine {
         metatype: Option<PyObjectRef>,
     ) -> PyResult<PyObjectRef> {
         namespace_dict.remove("__annotation_tmp__");
+        // `type.__new__` validates the name and the `__qualname__`/`__doc__`
+        // namespace entries exactly as CPython's `type_new_impl` does
+        // (Objects/typeobject.c): a non-`str` `__qualname__` is
+        // `type __qualname__ must be a str, not bytes`, an embedded NUL is
+        // a ValueError, and a lone surrogate in any of the three (they must
+        // round-trip through UTF-8) is a UnicodeEncodeError.
+        // `default_build_class` is the single funnel every class goes
+        // through (the `class` statement, the 3-argument `type()`, and a
+        // custom metaclass's `super().__new__(...)`), so validating here
+        // covers all of them.
+        crate::object::check_type_name_text(&name_str)?;
+        if let Some(qn) = namespace_dict.get("__qualname__") {
+            if !matches!(&*qn.borrow(), crate::object::PyObject::Str(_)) {
+                return Err(PyError::type_error(format!(
+                    "type __qualname__ must be a str, not {}",
+                    qn.get_type_name()
+                )));
+            }
+            crate::object::check_type_name_text(&qn.str())?;
+        }
+        if let Some(doc) = namespace_dict.get("__doc__") {
+            if matches!(&*doc.borrow(), crate::object::PyObject::Str(_)) {
+                crate::object::check_type_doc_text(&doc.str())?;
+            }
+        }
         // Real `type.__new__` consumes `__qualname__` from the namespace
         // (it becomes the type's qualname slot, NOT a `__dict__` entry) —
         // real CPython class `__dict__`s never contain it (verified: plain

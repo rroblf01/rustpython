@@ -35,6 +35,13 @@ impl Compiler {
                     self.emit(Opcode::LOAD_CONST, idx);
                 }
             }
+            Expr::Name(name) if name == "__debug__" && self.optimize >= 1 => {
+                // `compile(src, f, 'exec', optimize=1)` makes `__debug__`
+                // False, exactly like `python -O` (CPython's optimizer
+                // replaces the name; test_builtin's `test_compile`).
+                let idx = self.get_const_index(ConstValue::Bool(false)) as u32;
+                self.emit(Opcode::LOAD_CONST, idx);
+            }
             Expr::Name(name) => {
                 // Private-name mangling (`mangle_name`) applies to EVERY
                 // identifier that textually occurs within a class
@@ -63,7 +70,18 @@ impl Compiler {
                 {
                     eprintln!("NAME_RESOLVE: name={} scope={:?} in_global_names={} freevars={:?} cellvars={:?}", name, self.scope, self.global_names.contains(name), self.code.freevars, self.code.cellvars);
                 }
-                if self.scope == ScopeType::Module
+                // In EXEC-mode (module/class) code an explicit `global x`
+                // declaration makes BOTH the read and the write of `x` use
+                // the GLOBAL slot, not the f_locals one — exactly what CPython
+                // compiles (`compile('global a\nb = a\n', '', 'exec')` →
+                // `LOAD_GLOBAL a`), and what makes
+                // `exec('global a; a = 1', g, l)` put `a` in the GLOBALS dict
+                // while plain `b = 2` lands in the LOCALS dict
+                // (test_builtin's `test_exec`).
+                if self.scope == ScopeType::Module && self.global_names.contains(name) {
+                    let name_idx = self.get_name_index(name) as u32;
+                    self.emit(Opcode::LOAD_GLOBAL, name_idx);
+                } else if self.scope == ScopeType::Module
                     || self.scope == ScopeType::ClassBody
                     || self.global_names.contains(name)
                 {

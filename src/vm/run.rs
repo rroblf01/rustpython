@@ -93,9 +93,27 @@ impl VirtualMachine {
         globals: Option<Rc<RefCell<HashMap<StrId, PyObjectRef>>>>,
         locals: PyObjectRef,
     ) -> PyResult<PyObjectRef> {
+        self.exec_code_with_mappings(code, globals, Some(locals), None)
+    }
+
+    /// `exec`/`eval` with BOTH live mappings installed: `locals` becomes
+    /// `Frame::exec_locals` and `globals` becomes `Frame::exec_globals`
+    /// (see both fields' doc comments). CPython's frame holds the very
+    /// objects the caller passed, which is observable through dict
+    /// subclasses, read-only mappings and `mappingproxy` builtins.
+    pub fn exec_code_with_mappings(
+        &mut self,
+        code: CodeObject,
+        globals: Option<Rc<RefCell<HashMap<StrId, PyObjectRef>>>>,
+        locals: Option<PyObjectRef>,
+        globals_mapping: Option<PyObjectRef>,
+    ) -> PyResult<PyObjectRef> {
         let g = globals.unwrap_or_else(|| self.globals.clone());
         let mut frame = self.acquire_frame(Rc::new(code), g, Rc::clone(&self.builtins), None);
-        frame.exec_locals = Some(locals);
+        if let Some(l) = locals {
+            frame.exec_locals = Some(l);
+        }
+        frame.exec_globals = globals_mapping;
         self.push_frame(frame);
         let result = self.execute();
         if let Some(frame) = self.frames.pop() {

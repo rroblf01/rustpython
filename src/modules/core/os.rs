@@ -15,6 +15,65 @@ pub(crate) use helpers::{
 };
 pub use path::create_os_path_dict;
 
+/// Shared validation for the `os.putenv`/`os.unsetenv` builtins above and
+/// for the `os.environ` mapping side effects below: `std::env::set_var`
+/// PANICS (rather than returning a `Result`) on an empty key, a key
+/// containing `=` or a NUL byte, or a value containing a NUL byte, while
+/// real CPython raises `ValueError`.
+fn check_env_name(name: &str) -> PyResult<()> {
+    if name.is_empty() || name.contains('=') || name.contains('\0') {
+        return Err(PyError::value_error("illegal environment variable name"));
+    }
+    Ok(())
+}
+
+fn check_env_value(value: &str) -> PyResult<()> {
+    if value.contains('\0') {
+        return Err(PyError::value_error(
+            "embedded null byte in environment variable value",
+        ));
+    }
+    Ok(())
+}
+
+/// `os.environ[key] = value` side effect: CPython's `os._Environ.__setitem__`
+/// calls `os.putenv` before updating its snapshot dict, so the real process
+/// environment follows every assignment. Only the native `os.environ` dict
+/// (flagged `is_environ` at construction) is affected; non-`str` keys or
+/// values are left to the dict itself, since `std::env` cannot carry them.
+pub(crate) fn environ_setitem_side_effect(
+    target: &PyObjectRef,
+    key: &PyObjectRef,
+    value: &PyObjectRef,
+) -> PyResult<()> {
+    if !matches!(&*target.borrow(), PyObject::Dict(d) if d.is_environ) {
+        return Ok(());
+    }
+    let (name, val) = match (&*key.borrow(), &*value.borrow()) {
+        (PyObject::Str(_), PyObject::Str(_)) => (key.str(), value.str()),
+        _ => return Ok(()),
+    };
+    check_env_name(&name)?;
+    check_env_value(&val)?;
+    std::env::set_var(name, val);
+    Ok(())
+}
+
+/// `del os.environ[key]` side effect: `os._Environ.__delitem__` calls
+/// `os.unsetenv` first.
+pub(crate) fn environ_delitem_side_effect(target: &PyObjectRef, key: &PyObjectRef) -> PyResult<()> {
+    if !matches!(&*target.borrow(), PyObject::Dict(d) if d.is_environ) {
+        return Ok(());
+    }
+    if !matches!(&*key.borrow(), PyObject::Str(_)) {
+        return Ok(());
+    }
+    let name = key.str();
+    check_env_name(&name)?;
+    std::env::remove_var(name);
+    Ok(())
+}
+
 pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! os_func {
@@ -455,14 +514,8 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         // "illegal environment variable name"). Guard before the call so a
         // Python-level edge case (real CPython test: `test_posix.py`) raises
         // a normal exception instead of crashing the process.
-        if name.is_empty() || name.contains('=') || name.contains('\0') {
-            return Err(PyError::value_error("illegal environment variable name"));
-        }
-        if value.contains('\0') {
-            return Err(PyError::value_error(
-                "embedded null byte in environment variable value",
-            ));
-        }
+        check_env_name(&name)?;
+        check_env_value(&value)?;
         std::env::set_var(name, value);
         Ok(py_none())
     });
@@ -474,9 +527,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         let name = args[0].str();
         // Same panic-vs-Result mismatch as `putenv` above, for
         // `std::env::remove_var`.
-        if name.is_empty() || name.contains('=') || name.contains('\0') {
-            return Err(PyError::value_error("illegal environment variable name"));
-        }
+        check_env_name(&name)?;
         std::env::remove_var(name);
         Ok(py_none())
     });
@@ -734,6 +785,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     for (key, val) in std::env::vars() {
         environ_pydict.set(py_str(&key), py_str(&val)).ok();
     }
+    environ_pydict.is_environ = true;
     d.insert_str(
         "environ",
         PyObjectRef::new(PyObject::Dict(Box::new(environ_pydict))),

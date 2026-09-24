@@ -4,10 +4,32 @@
 // (`ord`, `chr`, `hex`, `oct`, `bin`, `ascii`, `input`, `exit`).
 use super::*;
 
+/// `getattr`/`setattr`/`hasattr`/`delattr` all require a `str` (or str
+/// subclass) name: CPython raises `TypeError: attribute name must be
+/// string, not 'int'` BEFORE touching the object at all, rather than
+/// stringifying the name and reporting an AttributeError about it
+/// (test_builtin's `test_getattr`/`test_setattr`/`test_hasattr`/
+/// `test_delattr`).
+pub(crate) fn check_attr_name_is_str(name: &PyObjectRef) -> PyResult<()> {
+    let is_str = matches!(&*name.borrow(), PyObject::Str(_))
+        || crate::object::native_backing_of(name)
+            .map(|b| matches!(&*b.borrow(), PyObject::Str(_)))
+            .unwrap_or(false);
+    if is_str {
+        Ok(())
+    } else {
+        Err(PyError::type_error(format!(
+            "attribute name must be string, not '{}'",
+            name.get_type_name()
+        )))
+    }
+}
+
 pub fn builtin_hasattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 2 {
         return Err(PyError::type_error("hasattr() takes exactly 2 arguments"));
     }
+    check_attr_name_is_str(&args[1])?;
     let attr_name = args[1].str();
     if std::env::var("RPY_DEBUG_GETATTR").is_ok() {
         eprintln!(
@@ -62,6 +84,7 @@ pub fn builtin_setattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 3 {
         return Err(PyError::type_error("setattr() takes exactly 3 arguments"));
     }
+    check_attr_name_is_str(&args[1])?;
     if let PyObject::WeakProxy { target, .. } = &*args[0].borrow() {
         eprintln!("builtin_setattr WeakProxy");
         if let Some(rc) = target.upgrade() {
@@ -163,6 +186,10 @@ pub fn builtin_delattr(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.len() != 2 {
         return Err(PyError::type_error("delattr() takes exactly 2 arguments"));
     }
+    // Same name-type check as the `getattr` intercept in `vm/call.rs`: a
+    // non-string name is a TypeError, not an AttributeError about its
+    // stringified form (test_builtin's `test_delattr`).
+    check_attr_name_is_str(&args[1])?;
     let attr_name = args[1].str();
     // Check for __delete__ descriptor protocol first (data descriptors
     // like property/DynamicClassAttribute must intercept deletion before

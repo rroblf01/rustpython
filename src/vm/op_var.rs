@@ -170,7 +170,30 @@ impl VirtualMachine {
                         // locals)` with distinct locals) shadows frame
                         // globals, like CPython's f_locals.
                         .or_else(|| crate::vm::helpers::frame_exec_local_get(f, name))
-                        .or_else(|| f.globals.borrow().get(&interner::intern(name)).cloned())
+                };
+                // `exec`/`eval` with an explicit globals MAPPING: the
+                // mapping IS f_globals, so read through its real
+                // `__getitem__` (a raising dict subclass must propagate)
+                // and let its `__builtins__` entry serve the builtin
+                // fallback below.
+                let val = match val {
+                    Some(v) => Some(v),
+                    None => {
+                        let f = &self.frames[self.frames.len() - 1];
+                        let val = crate::vm::helpers::frame_exec_global_get(f, name)?;
+                        match val {
+                            Some(v) => Some(v),
+                            // With no live mapping installed this stays the
+                            // ordinary frame-globals probe.
+                            None if f.exec_globals.is_none() => {
+                                f.globals.borrow().get(&interner::intern(name)).cloned()
+                            }
+                            None => match crate::vm::helpers::frame_exec_builtins(f)? {
+                                Some(bm) => crate::vm::helpers::mapping_builtin_get(&bm, name)?,
+                                None => f.globals.borrow().get(&interner::intern(name)).cloned(),
+                            },
+                        }
+                    }
                 };
                 // A custom `__prepare__` namespace IS the class body's
                 // locals: names it pre-populated (before any body store)
@@ -191,10 +214,29 @@ impl VirtualMachine {
                     Some(v) => Some(v),
                     None => {
                         let f = &self.frames[self.frames.len() - 1];
-                        f.module_globals
+                        let module_hit = f
+                            .module_globals
                             .as_ref()
-                            .and_then(|mg| mg.borrow().get(&interner::intern(name)).cloned())
-                            .or_else(|| f.builtins.get(&interner::intern(name)).cloned())
+                            .and_then(|mg| mg.borrow().get(&interner::intern(name)).cloned());
+                        match module_hit {
+                            Some(v) => Some(v),
+                            // A frame with an explicit globals mapping uses
+                            // that mapping's `__builtins__` INSTEAD of the
+                            // interpreter's real builtins (already consulted
+                            // above, including the missing-key case) — that's
+                            // what makes `exec(code, {'__builtins__': {}})`
+                            // raise `NameError: name 'print' is not defined`
+                            // instead of silently finding the real `print`.
+                            None => {
+                                if f.exec_globals.is_some()
+                                    && crate::vm::helpers::frame_exec_builtins(f)?.is_some()
+                                {
+                                    None
+                                } else {
+                                    f.builtins.get(&interner::intern(name)).cloned()
+                                }
+                            }
+                        }
                     }
                 };
                 match val {
@@ -213,6 +255,25 @@ impl VirtualMachine {
                 // module/class mirroring below, which is meaningless (and
                 // leaky) for a throwaway exec namespace.
                 if crate::vm::helpers::frame_exec_local_set(&self.frames[fi], &name, val.clone()) {
+                    if self.frames[fi].frame_locals_obj.is_some() {
+                        self.sync_frame_locals(fi);
+                    }
+                    return Ok(true);
+                }
+                // Same for an explicit `exec`/`eval` globals MAPPING: the
+                // store goes through its real `__setitem__` (a read-only
+                // mapping raises here, as CPython does) and mirrors into
+                // the frame's HashMap for the fast read path.
+                if self.frames[fi].exec_globals.is_some() {
+                    crate::vm::helpers::frame_exec_global_set(
+                        &self.frames[fi],
+                        &name,
+                        val.clone(),
+                    )?;
+                    self.frames[fi]
+                        .globals
+                        .borrow_mut()
+                        .insert(interner::intern(&name), val);
                     if self.frames[fi].frame_locals_obj.is_some() {
                         self.sync_frame_locals(fi);
                     }
@@ -334,6 +395,33 @@ impl VirtualMachine {
             Opcode::LOAD_GLOBAL => {
                 let instr_ip = self.frames[fi].ip - 1;
                 let mut cached_from_builtins = false;
+                // `exec`/`eval` with an explicit globals MAPPING: the
+                // mapping is f_globals, so it (and its `__builtins__`)
+                // replaces both the frame-globals HashMap probe and the
+                // interpreter's real builtins for this frame. Handled
+                // entirely here and never cached, since the mapping is
+                // user code that can change between reads.
+                if self.frames[fi].exec_globals.is_some() {
+                    let name =
+                        crate::interner::lookup_str(self.frames[fi].code.names[arg as usize]);
+                    let frame = &self.frames[fi];
+                    if let Some(v) = crate::vm::helpers::frame_exec_global_get(frame, name)? {
+                        self.frames[fi].push(v);
+                        return Ok(true);
+                    }
+                    let builtins = crate::vm::helpers::frame_exec_builtins(frame)?;
+                    let hit = match &builtins {
+                        Some(bm) => crate::vm::helpers::mapping_builtin_get(bm, name)?,
+                        None => None,
+                    };
+                    match hit {
+                        Some(v) => {
+                            self.frames[fi].push(v);
+                            return Ok(true);
+                        }
+                        None => return Err(PyError::name_error_for(name)),
+                    }
+                }
                 if let Some(cached) = self.frames[fi]
                     .global_cache
                     .get(instr_ip)
@@ -408,6 +496,16 @@ impl VirtualMachine {
                 let name_idx = arg as usize;
                 let sid = self.frames[fi].code.names[name_idx];
                 let val = self.frames[fi].pop()?;
+                if self.frames[fi].exec_globals.is_some() {
+                    let name = crate::interner::lookup_str(sid);
+                    crate::vm::helpers::frame_exec_global_set(
+                        &self.frames[fi],
+                        &name,
+                        val.clone(),
+                    )?;
+                    self.frames[fi].globals.borrow_mut().insert(sid, val);
+                    return Ok(true);
+                }
                 self.frames[fi]
                     .globals
                     .borrow_mut()
@@ -564,6 +662,24 @@ impl VirtualMachine {
                             self.frames[fi].code.names[name_idx],
                         )));
                     }
+                    if self.frames[fi].frame_locals_obj.is_some() {
+                        self.sync_frame_locals(fi);
+                    }
+                    return Ok(true);
+                }
+                // Live exec-globals mapping: delete through its real
+                // `__delitem__`, and report the real NameError when the
+                // mapping has no such name.
+                if let Some(deleted) =
+                    crate::vm::helpers::frame_exec_global_del(&self.frames[fi], &name)?
+                {
+                    if !deleted {
+                        return Err(PyError::name_error_for(&name));
+                    }
+                    self.frames[fi]
+                        .globals
+                        .borrow_mut()
+                        .remove(&interner::intern(&name));
                     if self.frames[fi].frame_locals_obj.is_some() {
                         self.sync_frame_locals(fi);
                     }

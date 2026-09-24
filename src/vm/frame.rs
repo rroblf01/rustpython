@@ -97,6 +97,19 @@ pub struct Frame {
     /// lists its keys. Set alongside the frame by the exec() call path;
     /// cleared on pool acquire/release like the other per-execution state.
     pub exec_locals: Option<PyObjectRef>,
+    /// Live `globals` mapping for `exec`/`eval` frames given an explicit
+    /// globals argument (`Some` only then). CPython's frame f_globals IS
+    /// that object, so every global read goes through its `__getitem__`,
+    /// every global write through its `__setitem__`, and its
+    /// `__builtins__` entry (if any) REPLACES the interpreter's real
+    /// builtins for name resolution — all of which is observable with a
+    /// dict subclass or a `types.MappingProxyType` (test_builtin's
+    /// `test_exec_globals`/`test_exec_globals_frozen`/
+    /// `test_exec_globals_error_on_get`/`test_eval_builtins_mapping`/
+    /// `test_exec_globals_dict_subclass`). The frame's own `globals`
+    /// HashMap stays populated as a fast mirror of the string keys, so
+    /// code paths that read it directly still see the names.
+    pub exec_globals: Option<PyObjectRef>,
     /// While resuming a generator whose body contains `yield from`, the
     /// currently-active sub-iterator. `generator.throw()` delegates to this
     /// iterator's own `.throw()` instead of injecting the exception into the
@@ -146,6 +159,7 @@ impl Frame {
             live_module: None,
             globals_dict: None,
             exec_locals: None,
+            exec_globals: None,
             yield_from_iter: None,
             back: None,
         }

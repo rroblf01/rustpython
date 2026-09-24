@@ -13,14 +13,19 @@ by hand-built and parsed trees.
 
 from _ast_native import literal_eval, _parse_tree
 
-# compile() flag constants (same values as CPython's ast module).
+# compile() flag constants — EXACTLY the four CPython 3.14's `ast` module
+# exposes, with their real values (Include/cpython/compile.h):
+# `PyCF_TYPE_COMMENTS 0x1000`, `PyCF_ONLY_AST 0x0400`,
+# `PyCF_ALLOW_TOP_LEVEL_AWAIT 0x2000`, and
+# `PyCF_OPTIMIZED_AST (0x8000 | PyCF_ONLY_AST)` = 0x8400. The previous
+# hand-written values here were wrong (0x8000 / 0x1), which made
+# `compile(src, f, 'exec', flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)` mean
+# something else entirely and `ast.PyCF_OPTIMIZED_AST` collide with
+# `PyCF_DONT_IMPLY_DEDENT` (test_builtin's `test_compile_ast`).
 PyCF_ONLY_AST = 0x400
-PyCF_ALLOW_TOP_LEVEL_AWAIT = 0x8000
+PyCF_ALLOW_TOP_LEVEL_AWAIT = 0x2000
 PyCF_TYPE_COMMENTS = 0x1000
-PyCF_DONT_IMPLY_DEDENT = 0x200
-PyCF_ACCEPT_NULL_BYTES = 0x10000000
-PyCF_OPTIMIZED_AST = 0x1
-PyCF_ASYNC_HINTS = 0x4000
+PyCF_OPTIMIZED_AST = 0x8400
 
 __all__ = [
     "AST", "NodeVisitor", "NodeTransformer", "literal_eval", "parse",

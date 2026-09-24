@@ -231,6 +231,103 @@ pub fn sys_excepthook_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     Ok(py_none())
 }
 
+/// `sys.breakpointhook` / `sys.__breakpointhook__` — CPython stores the
+/// SAME builtin function object under both names (see
+/// `COPY_SYS_ATTR("__breakpointhook__", "breakpointhook")` in
+/// `_PySys_InitCore`, `Python/sysmodule.c`), and `breakpoint()` calls
+/// whatever `sys.breakpointhook` currently holds. That function
+/// (`sys_breakpointhook` in CPython) re-resolves `$PYTHONBREAKPOINT` on
+/// EVERY call and then calls the resolved hook with `breakpoint()`'s own
+/// arguments — an import plus a real call, both of which need a live
+/// `&mut VirtualMachine`. So the real body lives in
+/// `breakpointhook_resolve_and_call`, invoked from `call_function`'s
+/// pointer-identified intercept in `vm/call.rs`; this plain-function form
+/// is only the identity/marker that interception matches on.
+pub fn sys_breakpointhook_builtin(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    Err(PyError::runtime_error(
+        "sys.breakpointhook() requires interpreter access",
+    ))
+}
+
+/// `sys_breakpointhook` (CPython `Python/sysmodule.c`) with a live VM:
+/// resolve `$PYTHONBREAKPOINT` (empty/unset → `pdb.set_trace`, `"0"` →
+/// no-op), import the named module, fetch the attribute, and call it with
+/// the caller's own args/kwargs. A failed import or a missing attribute is
+/// warned about and ignored (`RuntimeWarning: Ignoring unimportable
+/// $PYTHONBREAKPOINT: "..."`), matching CPython's `warn:` label; any
+/// OTHER error from the import propagates.
+pub(crate) fn breakpointhook_resolve_and_call(
+    vm: &mut crate::vm::VirtualMachine,
+    args: &[PyObjectRef],
+    keywords: &[(String, PyObjectRef)],
+) -> PyResult<PyObjectRef> {
+    let raw = std::env::var("PYTHONBREAKPOINT").unwrap_or_default();
+    let envar = if raw.is_empty() {
+        "pdb.set_trace".to_string()
+    } else {
+        raw
+    };
+    if envar == "0" {
+        return Ok(py_none());
+    }
+    let (modulepath, attrname) = match envar.rfind('.') {
+        None => ("builtins".to_string(), envar.clone()),
+        // Leading or trailing dot is malformed ("." / "..foo" / "int.") —
+        // CPython jumps straight to the warning branch.
+        Some(0) => return breakpointhook_warn(&envar),
+        Some(i) => (envar[..i].to_string(), envar[i + 1..].to_string()),
+    };
+    if attrname.is_empty() {
+        return breakpointhook_warn(&envar);
+    }
+    let module = match crate::object::import_impl(vm, &modulepath, modulepath.contains('.'), false)
+    {
+        Ok(m) => m,
+        Err(e) if is_import_error(&e) => return breakpointhook_warn(&envar),
+        Err(e) => return Err(e),
+    };
+    let hook = match module.borrow().get_attribute(&attrname) {
+        Ok(h) => h,
+        // `_PyErr_ExceptionMatches(tstate, PyExc_AttributeError)` — which
+        // also covers a real raised `AttributeError` object, the shape a
+        // module's own `__getattr__` produces.
+        Err(e) if is_attribute_error(&e) => return breakpointhook_warn(&envar),
+        Err(e) => return Err(e),
+    };
+    vm.call_function(hook, args.to_vec(), keywords.to_vec())
+}
+
+/// The `AttributeError` test counterpart of `is_import_error` — a
+/// module-level `__getattr__` raising a real `AttributeError` arrives as
+/// `PyError::Exception`, not the enum variant.
+fn is_attribute_error(e: &PyError) -> bool {
+    match e {
+        PyError::AttributeError(_) => true,
+        PyError::Exception(name, _) => name == "AttributeError",
+        _ => false,
+    }
+}
+
+/// CPython tests with `_PyErr_ExceptionMatches(tstate, PyExc_ImportError)`,
+/// which also matches `ModuleNotFoundError` — this interpreter's
+/// `ImportError` is an enum variant AND (for module-not-found) an
+/// `Exception` carrying the subclass name.
+fn is_import_error(e: &PyError) -> bool {
+    match e {
+        PyError::ImportError(_) => true,
+        PyError::Exception(name, _) => name == "ImportError" || name == "ModuleNotFoundError",
+        _ => false,
+    }
+}
+
+fn breakpointhook_warn(envar: &str) -> PyResult<PyObjectRef> {
+    crate::modules::dev::warnings_emit(
+        &format!("Ignoring unimportable $PYTHONBREAKPOINT: \"{envar}\""),
+        "RuntimeWarning",
+    );
+    Ok(py_none())
+}
+
 /// Build the CPython-style traceback report string for `(exc_type,
 /// exc_value, exc_tb)` (no VM access needed).
 pub(crate) fn build_excepthook_report(args: &[PyObjectRef]) -> PyResult<String> {
@@ -478,6 +575,16 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     // and asserting on the report.
     sys_func!("excepthook", sys_excepthook_builtin);
     sys_func!("__excepthook__", sys_excepthook_builtin);
+    // `sys.breakpointhook`/`sys.__breakpointhook__` — the SAME function
+    // object in both names (CPython copies it during `_PySys_InitCore`);
+    // `breakpoint()` calls `sys.breakpointhook(*args, **kwargs)`, which
+    // resolves `$PYTHONBREAKPOINT` per call (real body needs the live VM —
+    // see `breakpointhook_resolve_and_call` and its intercept in
+    // `vm/call.rs`). Without these attributes, `breakpoint()` itself,
+    // `sys.__breakpointhook__` reads, and test_builtin's whole
+    // `TestBreakpoint` class (12 tests) fail with AttributeError.
+    sys_func!("breakpointhook", sys_breakpointhook_builtin);
+    sys_func!("__breakpointhook__", sys_breakpointhook_builtin);
     // `sys.unraisablehook` (3.8+) — called by the interpreter when an
     // weakref callback, ...) and would otherwise just be silently dropped.
     // This interpreter has no internal machinery that actually detects and

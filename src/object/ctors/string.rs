@@ -346,10 +346,19 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                             )
                         }
                         'd' | 'i' | 'u' => {
+                            // An instance of a class with a NATIVE numeric
+                            // base (`class MyInt(int)`, or the equivalent
+                            // `type('C', (B, int), {})`) IS a real number in
+                            // CPython — its inherited int storage is what
+                            // `%d` formats — so resolve that backing before
+                            // the type check. The error message still names
+                            // the ORIGINAL object's type, as CPython does.
+                            let numeric = crate::object::native_backing_of(&raw)
+                                .unwrap_or_else(|| raw.clone());
                             // A non-numeric arg must raise ("%d format: a
                             // real number is required, not str").
                             if !matches!(
-                                &*raw.borrow(),
+                                &*numeric.borrow(),
                                 PyObject::Int(_) | PyObject::Bool(_) | PyObject::Float(_)
                             ) {
                                 return Err(format!(
@@ -361,7 +370,7 @@ pub(crate) fn string_interpolate(fmt: &str, arg: &PyObjectRef) -> Result<String,
                             // Handle big ints that overflow i64, and float
                             // whole numbers ('%d' % -1.2e29) — stringify via
                             // BigInt (test_common_format).
-                            let mut s = bigint_of(&raw).to_string();
+                            let mut s = bigint_of(&numeric).to_string();
                             if !s.starts_with('-') {
                                 if flags.contains('+') {
                                     s = format!("+{}", s);

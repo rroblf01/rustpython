@@ -10,13 +10,31 @@ mod try_block;
 mod with_block;
 impl Compiler {
     pub(crate) fn compile_stmts(&mut self, stmts: &[Stmt]) -> Result<(), String> {
-        for stmt in stmts {
+        for (i, stmt) in stmts.iter().enumerate() {
             let stmt = if let Stmt::Located(line, inner) = stmt {
                 self.set_line(*line);
                 inner.as_ref()
             } else {
                 stmt
             };
+            // `optimize >= 1` (`python -O`): the first statement of a
+            // module/class/function body, when it is a bare string
+            // constant, IS the docstring and gets dropped — along with
+            // `assert` statements, whose whole purpose is the
+            // `__debug__`-gated check. Same as CPython's optimizer
+            // (`test_builtin's test_compile` exercises both through
+            // `compile(codestr, "<test>", "exec", optimize=N)`).
+            if self.optimize >= 1 && matches!(stmt, Stmt::Assert { .. }) {
+                continue;
+            }
+            // Docstrings survive level 1 (`-O`) and are dropped only at
+            // level 2 (`-OO`): `compile(..., optimize=1)` keeps
+            // `f.__doc__ == 'doc'` while `optimize=2` makes it None — the
+            // two levels differ in exactly that (test_builtin's
+            // `test_compile` checks both).
+            if self.optimize >= 2 && i == 0 && is_docstring_stmt(stmt) {
+                continue;
+            }
             self.compile_stmt(stmt)?;
         }
         Ok(())
@@ -989,5 +1007,20 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+}
+
+/// Is this statement a bare string-constant expression (i.e. a docstring)?
+fn is_docstring_stmt(stmt: &Stmt) -> bool {
+    let inner = match stmt {
+        Stmt::Located(_, inner) => inner.as_ref(),
+        other => other,
+    };
+    match inner {
+        Stmt::Expr(expr) => matches!(
+            expr.unlocate(),
+            Expr::Constant(Constant::String(_)) | Expr::Constant(Constant::Bytes(_))
+        ),
+        _ => false,
     }
 }

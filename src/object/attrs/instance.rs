@@ -36,18 +36,45 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                 return Ok(PyObjectRef::new(PyObject::Tuple(bases.clone())));
             }
             if name == "__base__" {
-                // CPython: `__base__` is the first of `__bases__` (the
-                // "best base" in multiple-inheritance cases, but for
-                // every class this codebase constructs there's at most
-                // one real native/exception base, so first-is-fine);
-                // `object` itself falls back to `None`. Was missing
-                // entirely — needed so e.g. `socket.gaierror.__base__
-                // is OSError` can be checked at all.
-                return Ok(bases
-                    .first()
-                    .cloned()
-                    .or_else(|| crate::object::get_primitive_type("object"))
-                    .unwrap_or_else(py_none));
+                // CPython's `__base__` is `best_base(__bases__)` — "the
+                // first one that's on the path to the solid base"
+                // (Objects/typeobject.c), NOT simply the first base:
+                // `class B: pass` + `type('C', (B, int), {})` has
+                // `C.__base__ is int`, because B adds no instance layout
+                // (its `solid_base` is still `object`) while int's solid
+                // base is int itself. `solid_base` walks the base chain to
+                // the first ancestor whose instance SHAPE differs from its
+                // own base's; this interpreter has no `tp_basicsize`, so
+                // "shape differs" is approximated by the two things that
+                // actually give a class its own storage here: a native
+                // backing, or a non-empty `__slots__`.
+                if bases.is_empty() {
+                    return Ok(crate::object::get_primitive_type("object").unwrap_or_else(py_none));
+                }
+                let mut winner: Option<PyObjectRef> = None;
+                let mut chosen: Option<PyObjectRef> = None;
+                for base_i in bases.iter() {
+                    let candidate = solid_base_of(&base_i);
+                    match &winner {
+                        None => {
+                            winner = Some(candidate);
+                            chosen = Some(base_i.clone());
+                        }
+                        Some(w) => {
+                            if crate::object::abstract_issubclass(w, &candidate)? {
+                                // keep
+                            } else if crate::object::abstract_issubclass(&candidate, w)? {
+                                winner = Some(candidate);
+                                chosen = Some(base_i.clone());
+                            } else {
+                                return Err(PyError::type_error(
+                                    "multiple bases have instance lay-out conflict",
+                                ));
+                            }
+                        }
+                    }
+                }
+                return Ok(chosen.unwrap_or_else(py_none));
             }
             if name == "__name__" {
                 return Ok(py_str(type_name));
@@ -906,5 +933,36 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
             stringify!(get),
             o.type_name()
         ),
+    }
+}
+
+/// CPython's `solid_base` (Objects/typeobject.c): the first type in the
+/// chain whose instance layout differs from its own base's. Approximated
+/// here by "has a native backing, or declares a non-empty `__slots__`" —
+/// the two things that make an instance's shape differ from plain
+/// `object`-sized storage in this interpreter.
+fn solid_base_of(typ: &PyObjectRef) -> PyObjectRef {
+    let borrowed = typ.borrow();
+    let (dict, bases) = match &*borrowed {
+        PyObject::Type { dict, bases, .. } => (dict, bases),
+        _ => return typ.clone(),
+    };
+    let has_native = dict.contains_key_str(crate::object::NATIVE_BASE_MARKER)
+        || dict.contains_key_str(crate::object::NATIVE_VALUE_CTOR_KEY);
+    let has_slots = dict.get_str("__slots__").map(|s| {
+        let b = s.borrow();
+        match &*b {
+            PyObject::Tuple(items) => !items.is_empty(),
+            PyObject::List(items) => !items.is_empty(),
+            PyObject::Str(_) => true,
+            _ => true,
+        }
+    });
+    if has_native || has_slots == Some(true) {
+        return typ.clone();
+    }
+    match bases.first() {
+        Some(first) => solid_base_of(first),
+        None => crate::object::get_primitive_type("object").unwrap_or_else(|| typ.clone()),
     }
 }

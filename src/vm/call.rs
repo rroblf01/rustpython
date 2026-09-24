@@ -65,6 +65,11 @@ impl VirtualMachine {
             let is_getattr = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_getattr as crate::object::BuiltinFunc));
             if is_getattr && (args.len() == 2 || args.len() == 3) {
                 let obj = args[0].clone();
+                // The attribute NAME must be a `str` (or subclass) — a
+                // non-string is CPython's `TypeError: attribute name must
+                // be string, not 'int'`, never an AttributeError about the
+                // stringified name (test_builtin's `test_getattr`).
+                crate::object::check_attr_name_is_str(&args[1])?;
                 let attr_name = args[1].str();
                 // `re.Pattern.__copy__`/`__deepcopy__` return self
                 // (identity for `copy.copy`/`copy.deepcopy`; test_re:
@@ -279,6 +284,7 @@ impl VirtualMachine {
             let is_hasattr = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_hasattr as crate::object::BuiltinFunc));
             if is_hasattr && args.len() == 2 {
                 let obj = args[0].clone();
+                crate::object::check_attr_name_is_str(&args[1])?;
                 let attr_name = args[1].str();
                 let own_dict_hit = if let PyObject::Instance { dict, .. } = &*obj.borrow() {
                     dict.get(&attr_name).cloned()
@@ -339,10 +345,21 @@ impl VirtualMachine {
                             vec![obj.clone(), crate::object::py_str(&attr_name)],
                             vec![],
                         );
-                        let is_ok = res.is_ok();
+                        // Only an AttributeError means "no such attribute"
+                        // (=> `False`); every other exception — a
+                        // `__getattr__` raising ValueError/SystemExit, say —
+                        // propagates out of `hasattr()` itself (CPython 3+,
+                        // test_builtin's `test_hasattr`).
+                        let out = match res {
+                            Ok(_) => Ok(Some(py_bool(true))),
+                            Err(e) if crate::object::is_attribute_error(&e) => {
+                                Ok(Some(py_bool(false)))
+                            }
+                            Err(e) => Err(e),
+                        };
                         self.exc_type = saved_exc.0;
                         self.exc_value = saved_exc.1;
-                        return Ok(Some(py_bool(is_ok)));
+                        return out;
                     }
                 }
                 return Ok(Some(py_bool(false)));
@@ -426,6 +443,86 @@ impl VirtualMachine {
                     );
                 }
                 return Ok(Some(py_none()));
+            }
+        }
+
+        // `list_iterator.__reduce__()` — CPython resolves the `iter`
+        // callable through `_PyEval_GetBuiltin` at call time
+        // (Objects/iterobject.c `listiter_reduce`), so a frame whose
+        // `__builtins__` is a custom mapping controls it: a mapping
+        // without `iter` must fail with an AttributeError naming it, and
+        // one with `iter` gets that object back (test_builtin's
+        // `test_eval_builtins_mapping_reduce`).
+        {
+            let is_list_iter_reduce = matches!(&*callable.borrow(), PyObject::BuiltinMethod { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::list_iter_reduce as crate::object::BuiltinFunc));
+            if is_list_iter_reduce {
+                let frame = self
+                    .frames
+                    .last()
+                    .ok_or_else(|| PyError::runtime_error("no frame"))?;
+                let builtins = crate::vm::helpers::frame_exec_builtins(frame)?;
+                if let Some(bm) = builtins {
+                    let iter_fn = crate::vm::helpers::mapping_builtin_get(&bm, "iter")?
+                        .ok_or_else(|| {
+                            PyError::attribute_error("'iter' not found in __builtins__")
+                        })?;
+                    // A `BuiltinMethod` receives its `self` later in
+                    // `call_function` (the interception runs before the
+                    // placeholder `self_obj` is substituted), so the
+                    // iterator itself is the callable's bound `self_obj`.
+                    let self_obj = match &*callable.borrow() {
+                        PyObject::BuiltinMethod { self_obj, .. } => self_obj.clone(),
+                        _ => args.first().cloned().unwrap_or_else(py_none),
+                    };
+                    let (list, index) = match &*self_obj.borrow() {
+                        PyObject::ListIter { list, index } => (list.clone(), *index),
+                        _ => return Err(PyError::runtime_error("__reduce__ on non-list_iterator")),
+                    };
+                    return Ok(Some(py_tuple(vec![
+                        iter_fn,
+                        py_tuple(vec![py_list(list)]),
+                        py_int(index as i64),
+                    ])));
+                }
+            }
+        }
+
+        // `sys.breakpointhook`/`sys.__breakpointhook__` and the
+        // `breakpoint()` builtin that calls it — both need the live VM to
+        // resolve `$PYTHONBREAKPOINT` (an import) and then call the
+        // resolved hook. `breakpoint()` itself only reads the CURRENT
+        // `sys.breakpointhook` out of the live sys module dict: a test (or
+        // user) may have replaced it with an arbitrary callable, which then
+        // receives `breakpoint()`'s own args/kwargs verbatim; a deleted
+        // attribute is CPython's `RuntimeError: lost sys.breakpointhook`
+        // (`_PySys_GetRequiredAttrString` in `Python/sysmodule.c`).
+        {
+            let is_bph = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::sys_breakpointhook_builtin as crate::object::BuiltinFunc));
+            let is_breakpoint = matches!(&*callable.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::object::builtin_breakpoint as crate::object::BuiltinFunc));
+            if is_bph {
+                return crate::modules::breakpointhook_resolve_and_call(self, args, keywords)
+                    .map(Some);
+            }
+            if is_breakpoint {
+                let hook = self
+                    .modules
+                    .get("sys")
+                    .and_then(|m| {
+                        if let PyObject::Module { dict, .. } = &*m.borrow() {
+                            dict.get_str("breakpointhook").cloned()
+                        } else {
+                            None
+                        }
+                    })
+                    .ok_or_else(|| PyError::runtime_error("lost sys.breakpointhook"))?;
+                let still_default = matches!(&*hook.borrow(), PyObject::BuiltinFunction { func, .. } if std::ptr::fn_addr_eq(*func, crate::modules::sys_breakpointhook_builtin as crate::object::BuiltinFunc));
+                if still_default {
+                    return crate::modules::breakpointhook_resolve_and_call(self, args, keywords)
+                        .map(Some);
+                }
+                return self
+                    .call_function(hook, args.to_vec(), keywords.to_vec())
+                    .map(Some);
             }
         }
 
@@ -592,6 +689,21 @@ impl VirtualMachine {
                     .frames
                     .last()
                     .ok_or_else(|| PyError::runtime_error("no frame"))?;
+                // An `exec`/`eval` frame with an explicit globals MAPPING
+                // has f_globals BEING that object, so `globals()` must
+                // return it itself (`eval("globals()['x']", globals=data)`
+                // reads `data`, and `globals() is data` — test_builtin's
+                // `test_eval_kwargs`/`test_general_eval`).
+                if let Some(g) = frame.exec_globals.clone() {
+                    if is_globals {
+                        return Ok(Some(g));
+                    }
+                    // Likewise `locals()`: a distinct locals mapping is
+                    // returned as-is.
+                    if let Some(l) = frame.exec_locals.clone() {
+                        return Ok(Some(l));
+                    }
+                }
                 if is_globals {
                     // Return a LIVE view of the frame's globals (same backing
                     // `Rc<RefCell<HashMap>>` that LOAD_GLOBAL reads) so
@@ -602,6 +714,11 @@ impl VirtualMachine {
                     return Ok(Some(PyObjectRef::new(PyObject::Globals(
                         frame.globals.clone(),
                     ))));
+                }
+                // `locals()` for an `exec(code, g, l)` frame: the distinct
+                // mapping itself, not a merged copy of the frame.
+                if let Some(l) = frame.exec_locals.clone() {
+                    return Ok(Some(l));
                 }
                 let mut d = crate::object::PyDict::new();
                 // Merge fast-locals (function-scope named params/vars,
@@ -1022,12 +1139,32 @@ impl VirtualMachine {
                 // (see `native_backing_of`), not a bare `PyObject::Dict`.
                 let is_dict_like =
                     |v: &PyObjectRef| -> bool { crate::object::dict_arg_to_hashmap(v, "").is_ok() };
-                let globals_dict = args.get(1).filter(|g| is_dict_like(g));
-                let locals_dict = args.get(2).filter(|l| is_dict_like(l)).or(globals_dict);
-                let distinct_locals = args
+                // `globals`/`locals` are keyword-capable in real CPython —
+                // `exec(src, globals=g)`, `eval(src, locals=data)` and
+                // `exec(src, globals=g, locals=l)` all occur in real code
+                // (test_builtin's `test_exec_kwargs`/`test_eval_kwargs`
+                // exercise exactly these). `keywords` arrives separately
+                // here, so merge the two sources positionally-first.
+                let kw_arg = |name: &str| -> Option<PyObjectRef> {
+                    keywords
+                        .iter()
+                        .find(|(k, _)| k == name)
+                        .map(|(_, v)| v.clone())
+                        .filter(|v| is_dict_like(v))
+                };
+                let globals_dict = args
+                    .get(1)
+                    .filter(|g| is_dict_like(g))
+                    .cloned()
+                    .or_else(|| kw_arg("globals"));
+                let explicit_locals = args
                     .get(2)
                     .filter(|l| is_dict_like(l))
-                    .filter(|l| globals_dict.map_or(true, |g| !l.is(g)));
+                    .cloned()
+                    .or_else(|| kw_arg("locals"));
+                let locals_dict = explicit_locals.clone().or_else(|| globals_dict.clone());
+                let distinct_locals =
+                    explicit_locals.filter(|l| globals_dict.as_ref().map_or(true, |g| !l.is(g)));
                 // Real CPython injects `__builtins__` into an explicit
                 // globals dict when missing — both so names resolve AND so
                 // the key shows up iterating the dict afterwards (the
@@ -1042,13 +1179,27 @@ impl VirtualMachine {
                         .get(&interner::intern("__builtins__"))
                         .cloned()
                 });
-                let namespace = if let Some(g) = globals_dict {
-                    if let Some(l) = distinct_locals {
+                // CPython injects `__builtins__` into the EXPLICIT globals
+                // mapping itself when it doesn't have one (that's why
+                // `exec("z = 1", g)` leaves `g['__builtins__']` behind, and
+                // every test_builtin exec case deletes it before comparing
+                // the dict). Do it on the live mapping, not just the frame
+                // copy, so `globals()['__builtins__']` and name resolution
+                // both see it.
+                if let (Some(g), Some(bm)) = (globals_dict.as_ref(), caller_builtins.clone()) {
+                    let has_builtins =
+                        crate::object::py_getitem(g, &py_str("__builtins__")).is_ok();
+                    if !has_builtins {
+                        let _ = crate::object::py_setitem(g, &py_str("__builtins__"), bm);
+                    }
+                }
+                let namespace = if let Some(g) = globals_dict.as_ref() {
+                    if let Some(l) = distinct_locals.as_ref() {
                         let mut hm: HashMap<StrId, PyObjectRef> = str_map_to_strid_map(
                             crate::object::dict_arg_to_hashmap(g, "exec() globals must be a dict")?,
                         );
                         hm.extend(str_map_to_strid_map(crate::object::dict_arg_to_hashmap(
-                            l,
+                            &l,
                             "exec() locals must be a dict",
                         )?));
                         if let Some(bm) = caller_builtins.clone() {
@@ -1164,20 +1315,30 @@ impl VirtualMachine {
                 // shape below (no distinct locals) still needs the
                 // mirror to write results back into the caller's dict.
                 let live_locals = if distinct_locals.is_some() {
-                    locals_dict.cloned()
+                    locals_dict.clone()
                 } else {
                     None
                 };
                 let result = match live_locals.clone() {
-                    Some(l) => self.exec_code_with_locals(code, Some(globals_rc.clone()), l),
-                    None => self.exec_code(code, Some(globals_rc.clone())),
+                    Some(l) => self.exec_code_with_mappings(
+                        code,
+                        Some(globals_rc.clone()),
+                        Some(l),
+                        globals_dict.clone(),
+                    ),
+                    None => self.exec_code_with_mappings(
+                        code,
+                        Some(globals_rc.clone()),
+                        None,
+                        globals_dict.clone(),
+                    ),
                 };
                 if live_locals.is_none() {
                     if let Some(target) = locals_dict {
                         let real_target = if matches!(&*target.borrow(), PyObject::Dict(_)) {
                             target.clone()
                         } else {
-                            crate::object::native_backing_of(target)
+                            crate::object::native_backing_of(&target)
                                 .unwrap_or_else(|| target.clone())
                         };
                         let mut real_target_borrow = real_target.borrow_mut();
@@ -1243,9 +1404,10 @@ impl VirtualMachine {
                             if let Ok(mut guard) = frame.try_borrow_mut() {
                                 if let Some(f) = guard.as_mut() {
                                     if f.globals_dict.is_none() {
-                                        if let Some(g) = globals_dict {
-                                            f.globals_dict = Some(g.clone());
-                                        }
+                                        f.globals_dict = globals_dict.clone();
+                                    }
+                                    if f.exec_globals.is_none() {
+                                        f.exec_globals = globals_dict.clone();
                                     }
                                 }
                             }

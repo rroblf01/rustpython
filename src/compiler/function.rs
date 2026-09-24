@@ -16,18 +16,27 @@ impl Compiler {
         if std::env::var("RPY_DEBUG_COMPILE").is_ok() {
             eprintln!("compile_function: name={} is_async={}", name, is_async);
         }
-        // Extract docstring from first statement if present
-        let docstring = body.first().and_then(|s| {
-            if let Stmt::Expr(expr) = Self::unwrap_located(s) {
-                if let Expr::Constant(Constant::String(doc)) = expr.as_ref().unlocate() {
-                    Some(doc.clone())
+        // Extract docstring from first statement if present — but only at
+        // optimize levels below 2: `python -OO` /
+        // `compile(..., optimize=2)` drops docstrings entirely, so the
+        // function must end up with `__doc__ is None`
+        // (test_builtin's `test_compile` checks both level 1, which KEEPS
+        // the docstring, and level 2).
+        let docstring = if self.optimize >= 2 {
+            None
+        } else {
+            body.first().and_then(|s| {
+                if let Stmt::Expr(expr) = Self::unwrap_located(s) {
+                    if let Expr::Constant(Constant::String(doc)) = expr.as_ref().unlocate() {
+                        Some(doc.clone())
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
-            } else {
-                None
-            }
-        });
+            })
+        };
 
         let body = if docstring.is_some() {
             &body[1..]

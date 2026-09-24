@@ -608,3 +608,27 @@ pub fn list_iter_setstate(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
     Ok(py_none())
 }
+
+/// `list_iterator.__reduce__()` — CPython's exact shape (Objects/iterobject.c
+/// `listiter_reduce`) is `(iter, (iter(<the underlying list>),), <index>)`:
+/// the CALLABLE is the frame's `iter` builtin, resolved through
+/// `_PyEval_GetBuiltin` at call time, so a frame whose `__builtins__`
+/// mapping lacks `iter` fails with an AttributeError naming it (CPython's
+/// own `test_builtin.py::test_eval_builtins_mapping_reduce` exercises
+/// exactly that through `eval`). The VM-aware resolution lives in
+/// `call_function`'s pointer-identified intercept; this fallback uses the
+/// interpreter's real `iter`.
+pub fn list_iter_reduce(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    if let PyObject::ListIter { list, index } = &*args[0].borrow() {
+        let iter_fn = crate::vm::get_shared_builtins_module()
+            .borrow()
+            .get_attribute("iter")?;
+        Ok(py_tuple(vec![
+            iter_fn,
+            py_tuple(vec![py_list(list.clone())]),
+            py_int(*index as i64),
+        ]))
+    } else {
+        Err(PyError::runtime_error("__reduce__ on non-list_iterator"))
+    }
+}

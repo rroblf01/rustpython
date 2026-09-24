@@ -14,13 +14,26 @@ use crate::ast::*;
 use crate::object::*;
 pub struct AstBuilder {
     module: PyObjectRef,
+    /// `ast.PyCF_OPTIMIZED_AST`: CPython's optimizer rewrites `__debug__`
+    /// into a `Constant` (and strips docstrings) before handing back the
+    /// tree — `compile(src, f, 'exec', flags=ast.PyCF_OPTIMIZED_AST)`
+    /// yields `Constant(value=__debug__)` where the plain `ONLY_AST` tree
+    /// still has a `Name` (test_builtin's `test_compile_ast`).
+    optimize_ast: bool,
 }
 
 impl AstBuilder {
     pub fn new() -> PyResult<Self> {
+        Self::with_optimize(false)
+    }
+
+    pub fn with_optimize(optimize_ast: bool) -> PyResult<Self> {
         let m = crate::modules::get_module("ast")
             .ok_or_else(|| PyError::ImportError("ast module not loaded".to_string()))?;
-        Ok(Self { module: m })
+        Ok(Self {
+            module: m,
+            optimize_ast,
+        })
     }
 
     fn cls(&self, name: &str) -> PyResult<PyObjectRef> {
@@ -1178,6 +1191,19 @@ impl AstBuilder {
                     ("ctx", self.build_ctx(ctx)?),
                 ],
             ),
+            Expr::Name(id) if self.optimize_ast && id == "__debug__" => {
+                // `PyCF_OPTIMIZED_AST`: `__debug__` is folded to a
+                // `Constant` holding its CURRENT value.
+                let current = crate::vm::get_shared_builtins_module()
+                    .borrow()
+                    .get_attribute("__debug__")
+                    .unwrap_or_else(|_| crate::object::py_bool(true));
+                let value = match &*current.borrow() {
+                    crate::object::PyObject::Bool(b) => crate::object::py_bool(*b),
+                    _ => crate::object::py_bool(true),
+                };
+                self.mk("Constant", vec![("value", value), ("kind", py_none())])
+            }
             Expr::Name(id) => self.mk(
                 "Name",
                 vec![("id", py_str(id)), ("ctx", self.build_ctx(ctx)?)],
@@ -1486,6 +1512,17 @@ fn parse_int_literal(s: &str) -> PyObjectRef {
 
 /// Entry point for `_ast_native._parse_tree(source, filename, mode)`.
 pub fn parse_tree(source: &str, filename: &str, mode: &str) -> PyResult<PyObjectRef> {
+    parse_tree_with_optimize(source, filename, mode, false)
+}
+
+/// `parse_tree`, with `ast.PyCF_OPTIMIZED_AST` support: the optimizer
+/// folds `__debug__` (see `AstBuilder::with_optimize`).
+pub fn parse_tree_with_optimize(
+    source: &str,
+    filename: &str,
+    mode: &str,
+    optimize_ast: bool,
+) -> PyResult<PyObjectRef> {
     let mut parser = crate::parser::Parser::new(source, mode == "eval");
     // `ast.parse` builds a tree without compiling: async constructs are
     // legal anywhere at parse time (CPython validates async context at
@@ -1498,7 +1535,7 @@ pub fn parse_tree(source: &str, filename: &str, mode: &str) -> PyResult<PyObject
         // Expression-only: parse a single expression directly.
         match parser.parse_single_expr() {
             Ok(e) => {
-                let mut b = AstBuilder::new()?;
+                let mut b = AstBuilder::with_optimize(optimize_ast)?;
                 let body = b.build_expr(&e, "Load")?;
                 return b.mk("Expression", vec![("body", body)]);
             }
@@ -1509,7 +1546,7 @@ pub fn parse_tree(source: &str, filename: &str, mode: &str) -> PyResult<PyObject
     }
     match parser.parse_program() {
         Ok(prog) => {
-            let mut b = AstBuilder::new()?;
+            let mut b = AstBuilder::with_optimize(optimize_ast)?;
             b.build_program(&prog, mode)
         }
         Err(msg) => Err(PyError::syntax_error_with_filename(msg, filename, source)),
