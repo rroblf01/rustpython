@@ -131,6 +131,71 @@ class _EnumDict(dict):
 EnumDict = _EnumDict
 
 
+
+_native_repr = repr
+
+
+def _find_member_type(cls):
+    """CPython's `EnumType._get_mixins_` member type: the first base in
+    the MRO that is a real data type (int/str/float/bytes/complex, or a
+    user data type that brought its own `__new__`), else `object`."""
+    for base in getattr(cls, '__mro__', ())[1:]:
+        name = base.__name__
+        if name in ('object', 'Enum', 'Flag', 'IntFlag', 'ReprEnum',
+                    'EnumType', 'EnumMeta'):
+            continue
+        if name in ('int', 'str', 'float', 'complex', 'bytes'):
+            return base
+        # A user data type: anything that is not one of the enum classes
+        # themselves and is not the enum machinery.
+        # Skip anything that is part of the enum machinery itself but was
+        # not caught by name (a user subclass of Enum, an intermediate mixin
+        # like `ReprEnum`). Forward references (`Flag`/`IntFlag` are defined
+        # further down this module) are resolved by name.
+        try:
+            if issubclass(base, Enum):
+                continue
+        except TypeError:
+            pass
+        return base
+    return object
+
+
+def _find_new_member(cls):
+    """The constructor CPython stores as `_new_member_`: the first
+    MIXED-IN data type's `__new__` (`int.__new__` for an IntEnum), or
+    `object.__new__` when there is no data type."""
+    for base in getattr(cls, '__mro__', ())[1:]:
+        if base.__name__ in ('object', 'Enum', 'Flag', 'IntFlag', 'ReprEnum',
+                             'IntEnum', 'StrEnum', 'EnumType', 'EnumMeta'):
+            continue
+        for d in (base.__dict__,):
+            new = d.get('__new__')
+            if new is not None:
+                return new
+    return object.__new__
+
+
+def _find_value_repr(cls):
+    """CPython's `EnumType._find_data_repr_`: the repr function of the
+    first MIXED-IN data type in the MRO (so an IntEnum member reprs its
+    value with `int.__repr__`), or None when the enum has no data type."""
+    for base in getattr(cls, '__mro__', ())[1:]:
+        name = base.__name__
+        if name in ('object', 'Enum', 'Flag', 'IntFlag', 'ReprEnum',
+                    'EnumType', 'EnumMeta'):
+            continue
+        # The native scalar mixins: their repr is the builtin slot. Checked
+        # by name (not by "__new__ in __dict__") because this codebase's
+        # native type dicts don't carry every slot.
+        if name in ('int', 'str', 'float', 'complex', 'bytes'):
+            repr_fn = getattr(base, '__repr__', None)
+            return repr_fn if repr_fn is not None else _native_repr
+        repr_fn = base.__dict__.get('__repr__')
+        if repr_fn is not None:
+            return repr_fn
+    return None
+
 class EnumType(type):
     @classmethod
     def __prepare__(metacls, name, bases, **kwds):
@@ -221,10 +286,24 @@ class EnumType(type):
         # from the first member, falling back to the mixin). 766 of
         # test_enum's own assertions read it (`self.assertIs(MyEnum._member_type_,
         # int)` and the `_missing_`/`_value2member_map_` machinery).
-        cls._member_type_ = None
-        for key in member_names:
-            cls._member_type_ = type(resolved_values[key])
-            break
+        # `_member_type_` is the MIXED-IN data type (int/str/...),
+        # defaulting to `object` — NOT the type of the first member's
+        # value: CPython's `class C(Enum): A = 1` still reports
+        # `_member_type_ is object` (it comes from `_get_mixins_`), and
+        # `EnumType.__dir__` keys off exactly that to decide whether the
+        # data type's own attributes belong in `dir()`.
+        cls._member_type_ = _find_member_type(cls)
+        # `_new_member_` / `_value_repr_` (CPython's EnumType.__new__ sets
+        # both on every enum it builds). `_new_member_` is the constructor
+        # used for members — `int.__new__` for an IntEnum, `object.__new__`
+        # otherwise — and tests call it directly
+        # (`Color._new_member_(Color, 3)`) and compare it against
+        # `object.__new__` to decide whether `__new__` shows up in
+        # `dir()`. `_value_repr_` is the MIXED-IN data type's repr function
+        # (None for a plain Enum), which is what the member `__repr__`
+        # formats the value with.
+        cls._new_member_ = _find_new_member(cls)
+        cls._value_repr_ = _find_value_repr(cls)
         for key in member_names:
             value = resolved_values[key]
             existing = None
@@ -357,6 +436,67 @@ class EnumType(type):
         bases = (cls,) if type is None else (type, cls)
         # Direct metaclass construction (avoids re-entering __call__).
         return EnumType.__new__(EnumType, name, bases, ns)
+
+    @classmethod
+    def _convert_(cls, name, module, filter, source=None, *,
+                  boundary=None, as_global=False):
+        """Create a new Enum subclass from a collection of constants.
+
+        CPython's `EnumType._convert_` (3.13+): every name in `source`
+        (a module/namespace, defaulting to `module`'s globals) that
+        `filter(name)` accepts becomes a member of a freshly built enum
+        called `name`, which is then exported back into the module.
+        `_value2member_map_` is filled in sorted-by-value order so the
+        reverse lookup is stable when several names share a value.
+        """
+        module_globals = sys.modules[module].__dict__
+        if source:
+            source = source.__dict__
+        else:
+            source = module_globals
+        members = [
+            (key, value)
+            for key, value in source.items()
+            if filter(key)
+        ]
+        try:
+            members.sort(key=lambda t: (t[1], t[0]))
+        except TypeError:
+            # values that aren't comparable with each other: sort by name
+            members.sort(key=lambda t: t[0])
+        body = {t[0]: t[1] for t in members}
+        body['__module__'] = module
+        tmp_cls = type(name, (object, ), body)
+        new_cls = _simple_enum(etype=cls, boundary=boundary or KEEP)(tmp_cls)
+        if as_global:
+            global_enum(new_cls)
+        else:
+            sys.modules[new_cls.__module__].__dict__.update(new_cls.__members__)
+        module_globals[name] = new_cls
+        return new_cls
+
+    def __dir__(cls):
+        """Customize `dir()` to hide the enum's internal bookkeeping.
+
+        CPython filters out `_member_names_`/`_member_map_`/`_new_member_`/
+        `_value_repr_`/`_generate_next_value_` and friends, which would
+        otherwise sit right next to the real members and confuse every
+        introspection tool (and test_enum's own `enum_dir`, which asserts
+        `set(dir(SomeEnum))` matches exactly this list).
+        """
+        interesting = set([
+            '__class__', '__contains__', '__doc__', '__getitem__',
+            '__iter__', '__len__', '__members__', '__module__',
+            '__name__', '__qualname__',
+        ] + list(getattr(cls, '_member_names_', ())))
+        if getattr(cls, '_new_member_', None) is not object.__new__:
+            interesting.add('__new__')
+        if getattr(cls, '__init_subclass__', None) is not object.__init_subclass__:
+            interesting.add('__init_subclass__')
+        member_type = getattr(cls, '_member_type_', object)
+        if member_type is object:
+            return sorted(interesting)
+        return sorted(set(dir(member_type)) | interesting)
 
     @property
     def __members__(cls):
@@ -813,6 +953,16 @@ def _simple_enum(etype=Enum, *, boundary=None, use_args=None):
                     except Exception:
                         member = object.__new__(enum_class)
                         member._value_ = value
+                    # `int.__new__`/`str.__new__` only build the native
+                    # backing — the enum's own `_value_` is this
+                    # implementation's bookkeeping and has to be set here
+                    # even on the success path (without it every member of an
+                    # `_simple_enum`-converted IntEnum/StrEnum lost `.value`).
+                    if not hasattr(member, "_value_"):
+                        try:
+                            member._value_ = value
+                        except Exception:
+                            pass
                 else:
                     member = new_member(enum_class)
                     member._value_ = value
