@@ -424,11 +424,15 @@ fn thread_join(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             timeout_val = second.as_f64();
         }
     }
-    if let Some(t) = timeout_val {
-        if t > 0.0 {
-            return Ok(py_none());
-        }
-    }
+    // Cooperative scheduling: a thread body only runs when the queue is
+    // drained, so `join(timeout)` must drain too. Returning early on a
+    // positive timeout (as this used to) meant the body NEVER ran and
+    // `is_alive()` stayed True forever — which is what made
+    // test_enum's two `@requires_working_threading` tests spin until the
+    // runner's 15-minute thread-join watchdog fired. There is no real
+    // wall-clock wait here: draining runs the body to completion, after
+    // which the (real) timeout is irrelevant.
+    let _ = timeout_val;
     crate::modules::coop_threads_drain();
     Ok(py_none())
 }
