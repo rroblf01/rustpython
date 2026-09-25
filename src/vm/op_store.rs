@@ -289,19 +289,29 @@ impl VirtualMachine {
                 if let Some(ref desc) = descriptor {
                     // Property is special-cased (matching STORE_ATTR): its
                     // __delete__ is not exposed via get_attribute, so we must
-                    // check the Property variant directly.
+                    // check the Property variant directly. ONLY a real
+                    // Property without a deleter is an error — a plain class
+                    // attribute found in the type dict (`x = 'v'`, as in
+                    // `email/policy.py`'s `del default.header_factory`) is not
+                    // a descriptor at all and must fall through to the normal
+                    // instance-dict deletion below; treating "not a property"
+                    // and "property with no deleter" as the same case raised
+                    // "property 'x' of 'A' object has no deleter" for every
+                    // such attribute, which broke importing `email.policy`
+                    // (and with it all of `smtplib`/`urllib`/`http.server`).
                     let property_deleter = {
                         let d = desc.borrow();
                         if let PyObject::Property(ref data) = &*d {
-                            data.deleter.clone()
+                            Some(data.deleter.clone())
                         } else {
                             None
                         }
                     };
-                    if let Some(del_fn) = property_deleter {
+                    let is_property = matches!(&*desc.borrow(), PyObject::Property(_));
+                    if let Some(Some(del_fn)) = property_deleter {
                         self.call_function(del_fn, vec![obj.clone()], vec![])?;
                         return Ok(true);
-                    } else {
+                    } else if is_property {
                         return Err(PyError::attribute_error(format!(
                             "property '{}' of '{}' object has no deleter",
                             name,

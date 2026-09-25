@@ -731,6 +731,16 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
         } else {
             0
         };
+        if family == 1 {
+            // AF_UNIX: the OS endpoint is created at bind()/connect() time,
+            // exactly like CPython, so an unbound socket starts empty.
+            return Ok(PyObjectRef::new(PyObject::Socket {
+                inner: Rc::new(RefCell::new(SocketInner::Uninitialized)),
+                family,
+                type_: sock_type,
+                proto,
+            }));
+        }
         if family != 2 {
             // Real CPython raises OSError (errno EAFNOSUPPORT) when a
             // platform/build lacks a given address family — e.g.
@@ -764,8 +774,28 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     // (TcpListener/TcpStream only), so emulate with a loopback TCP pair --
     // semantically identical for the select()/send/recv patterns tests use.
     sock_func!("socketpair", |args| {
-        let _family = args.get(0).and_then(|a| a.as_i64()).unwrap_or(2);
-        let _stype = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+        let family = args.get(0).and_then(|a| a.as_i64()).unwrap_or(2);
+        let stype = args.get(1).and_then(|a| a.as_i64()).unwrap_or(1);
+        if family == 1 {
+            // The real thing: a connected AF_UNIX pair, which is what the
+            // whole stdlib (and nearly every test) means by socketpair().
+            let (a_end, b_end) = std::os::unix::net::UnixStream::pair()
+                .map_err(|e| PyError::os_error_from_io(&e))?;
+            return Ok(py_list(vec![
+                PyObjectRef::new(PyObject::Socket {
+                    inner: Rc::new(RefCell::new(SocketInner::UnixStream(a_end))),
+                    family: 1,
+                    type_: stype,
+                    proto: 0,
+                }),
+                PyObjectRef::new(PyObject::Socket {
+                    inner: Rc::new(RefCell::new(SocketInner::UnixStream(b_end))),
+                    family: 1,
+                    type_: stype,
+                    proto: 0,
+                }),
+            ]));
+        }
         let l = std::net::TcpListener::bind("127.0.0.1:0")
             .map_err(|e| PyError::OsError(format!("socketpair bind: {}", e)))?;
         let addr = l

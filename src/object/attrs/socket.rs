@@ -67,7 +67,31 @@ fn set_sock_mode(socket: &PyObjectRef, mode: SockMode) {
                 }
                 s.as_raw_fd()
             }
+            SocketInner::UnixStream(s) => {
+                match mode {
+                    SockMode::Blocking => {
+                        let _ = s.set_read_timeout(None);
+                        let _ = s.set_write_timeout(None);
+                        let _ = s.set_nonblocking(false);
+                    }
+                    SockMode::NonBlocking => {
+                        let _ = s.set_nonblocking(true);
+                    }
+                    SockMode::Deadline(seconds) => {
+                        let duration = if seconds <= 0.0 {
+                            std::time::Duration::from_nanos(1)
+                        } else {
+                            std::time::Duration::from_secs_f64(seconds)
+                        };
+                        let _ = s.set_read_timeout(Some(duration));
+                        let _ = s.set_write_timeout(Some(duration));
+                        let _ = s.set_nonblocking(false);
+                    }
+                }
+                s.as_raw_fd()
+            }
             SocketInner::TcpListener(l) => l.as_raw_fd(),
+            SocketInner::UnixListener(l) => l.as_raw_fd(),
             SocketInner::Uninitialized => return,
         }
     };
@@ -104,12 +128,36 @@ fn sock_mode_for(socket: &PyObjectRef) -> SockMode {
         match &*guard {
             SocketInner::TcpStream(s) => s.as_raw_fd(),
             SocketInner::TcpListener(l) => l.as_raw_fd(),
+            SocketInner::UnixStream(s) => s.as_raw_fd(),
+            SocketInner::UnixListener(l) => l.as_raw_fd(),
             SocketInner::Uninitialized => return SockMode::Blocking,
         }
     };
     SOCKET_MODES
         .with(|m| m.borrow().get(&fd).copied())
         .unwrap_or(SockMode::Blocking)
+}
+
+/// AF_UNIX addresses arrive as a plain path string (or bytes).
+fn unix_path_arg(arg: &PyObjectRef) -> PyResult<std::path::PathBuf> {
+    match &*arg.borrow() {
+        PyObject::Bytes(b) => Ok(std::path::PathBuf::from(
+            String::from_utf8_lossy(b).to_string(),
+        )),
+        PyObject::ByteArray(b) => Ok(std::path::PathBuf::from(
+            String::from_utf8_lossy(b).to_string(),
+        )),
+        _ => Ok(std::path::PathBuf::from(arg.str())),
+    }
+}
+
+/// An AF_UNIX socket address is a filesystem path; the empty string is what
+/// an unbound/unnamed socket reports, exactly as CPython does.
+fn path_or_empty(addr: &std::os::unix::net::SocketAddr) -> PyObjectRef {
+    match addr.as_pathname() {
+        Some(path) => py_str(&path.to_string_lossy()),
+        None => py_str(""),
+    }
 }
 
 /// `socket.timeout` is an alias of the builtin `TimeoutError` since Python
@@ -147,6 +195,31 @@ fn sock_recv_bytes(socket: &PyObjectRef, bufsize: usize) -> PyResult<Vec<u8>> {
                     // reader starves the very thread that would send it
                     // data. A short OS-level deadline makes the wait
                     // interruptible so the scheduler can run.
+                    if mode == SockMode::Blocking {
+                        let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(20)));
+                    }
+                    let mut buf = vec![0u8; bufsize];
+                    loop {
+                        match stream.read(&mut buf) {
+                            Ok(n) => {
+                                if mode == SockMode::Blocking {
+                                    let _ = stream.set_read_timeout(None);
+                                }
+                                buf.truncate(n);
+                                break Ok(buf);
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(e)
+                                if e.kind() == std::io::ErrorKind::WouldBlock
+                                    || e.kind() == std::io::ErrorKind::TimedOut =>
+                            {
+                                break Err(std::io::ErrorKind::WouldBlock)
+                            }
+                            Err(e) => break Err(e.kind()),
+                        }
+                    }
+                }
+                SocketInner::UnixStream(stream) => {
                     if mode == SockMode::Blocking {
                         let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(20)));
                     }
@@ -241,6 +314,35 @@ fn sock_write_bytes(socket: &PyObjectRef, data: &[u8], all: bool) -> PyResult<i6
                                 Err(std::io::ErrorKind::Interrupted)
                             }
                             Err(e) => Err(e.kind()),
+                        }
+                    }
+                }
+                SocketInner::UnixStream(stream) => {
+                    if mode == SockMode::Blocking {
+                        let _ =
+                            stream.set_write_timeout(Some(std::time::Duration::from_millis(20)));
+                    }
+                    loop {
+                        let result = if all {
+                            stream.write_all(data).map(|_| data.len() as i64)
+                        } else {
+                            stream.write(data).map(|n| n as i64)
+                        };
+                        match result {
+                            Ok(n) => {
+                                if mode == SockMode::Blocking {
+                                    let _ = stream.set_write_timeout(None);
+                                }
+                                break Ok(n);
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(e)
+                                if e.kind() == std::io::ErrorKind::WouldBlock
+                                    || e.kind() == std::io::ErrorKind::TimedOut =>
+                            {
+                                break Err(std::io::ErrorKind::WouldBlock)
+                            }
+                            Err(e) => break Err(e.kind()),
                         }
                     }
                 }
@@ -375,7 +477,6 @@ fn sockfile_type() -> PyObjectRef {
     );
     type_dict.insert("flush".to_string(), meth("flush", sockfile_flush));
     type_dict.insert("close".to_string(), meth("close", sockfile_close));
-    type_dict.insert("closed".to_string(), sockfile_closed_getter());
     type_dict.insert("fileno".to_string(), meth("fileno", sockfile_fileno));
     type_dict.insert("isatty".to_string(), meth("isatty", sockfile_false));
     type_dict.insert("readable".to_string(), meth("readable", sockfile_true));
@@ -413,6 +514,7 @@ pub(crate) fn make_socket_file(
     dict.insert_str("_sock", socket.clone());
     dict.insert_str("_buf", PyObjectRef::imm(PyObject::Bytes(Vec::new())));
     dict.insert_str("_closed", py_bool(false));
+    dict.insert_str("closed", py_bool(false));
     dict.insert_str("_binary", py_bool(binary));
     match &encoding {
         Some(enc) => {
@@ -684,18 +786,15 @@ fn sockfile_flush(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 }
 
 fn sockfile_close(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // `closed` is a plain attribute in CPython (`fp.closed` is a bool, not a
+    // callable), so it lives in the instance dict alongside the internal
+    // `_closed` flag rather than as a type-dict property: this codebase
+    // resolves an instance-dict Property's getter through a path that hands
+    // it the wrong `self`.
     sockfile_set(&args[0], "_closed", py_bool(true))?;
+    sockfile_set(&args[0], "closed", py_bool(true))?;
     sockfile_set(&args[0], "_sock", PyObjectRef::new(PyObject::None))?;
     Ok(py_none())
-}
-
-fn sockfile_closed_getter() -> PyObjectRef {
-    PyObjectRef::new(PyObject::Closure(std::rc::Rc::new(
-        |args: &[PyObjectRef]| {
-            let _ = args;
-            Ok(py_bool(true))
-        },
-    )))
 }
 
 fn sockfile_fileno(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
@@ -711,6 +810,8 @@ fn sockfile_fileno(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         match &*guard {
             SocketInner::TcpStream(s) => s.as_raw_fd(),
             SocketInner::TcpListener(l) => l.as_raw_fd(),
+            SocketInner::UnixStream(s) => s.as_raw_fd(),
+            SocketInner::UnixListener(l) => l.as_raw_fd(),
             SocketInner::Uninitialized => {
                 return Err(PyError::OsError("Bad file descriptor".to_string()))
             }
@@ -799,6 +900,39 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         if args.len() < 2 {
                             return Err(PyError::type_error("bind() takes exactly 1 argument"));
                         }
+                        // AF_UNIX binds a filesystem path, which cannot go
+                        // through the (host, port) address parser at all.
+                        let is_unix = matches!(
+                            &*args[0].borrow(),
+                            PyObject::Socket { family, .. } if *family == 1
+                        );
+                        if is_unix {
+                            let path = unix_path_arg(&args[1])?;
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner, .. } = socket {
+                                let mut inner = inner.borrow_mut();
+                                match &*inner {
+                                    SocketInner::Uninitialized => {
+                                        // CPython leaves a stale socket file
+                                        // in place to be replaced; the OS
+                                        // refuses to bind over one otherwise.
+                                        let _ = std::fs::remove_file(&path);
+                                        let listener =
+                                            std::os::unix::net::UnixListener::bind(&path)
+                                                .map_err(|e| PyError::os_error_from_io(&e))?;
+                                        listener.set_nonblocking(true).ok();
+                                        *inner = SocketInner::UnixListener(listener);
+                                        return Ok(py_none());
+                                    }
+                                    _ => {
+                                        return Err(PyError::runtime_error(
+                                            "socket already bound or connected",
+                                        ))
+                                    }
+                                }
+                            }
+                            return Err(PyError::runtime_error("bind on non-socket"));
+                        }
                         let addr = socket_addr_to_string(&args[1])?;
                         let socket = &*args[0].borrow();
                         if let PyObject::Socket { inner, .. } = socket {
@@ -835,6 +969,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                             let inner = inner.borrow();
                             match &*inner {
                                 SocketInner::TcpListener(_listener) => Ok(py_none()),
+                                SocketInner::UnixListener(_listener) => Ok(py_none()),
                                 _ => Err(PyError::runtime_error("listen on non-listener")),
                             }
                         } else {
@@ -1000,6 +1135,46 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                         }
                                     }
                                 }
+                                SocketInner::UnixListener(listener) => {
+                                    let deadline = std::time::Instant::now()
+                                        + std::time::Duration::from_secs(5);
+                                    let result = loop {
+                                        match listener.accept() {
+                                            Err(e)
+                                                if e.kind() == std::io::ErrorKind::WouldBlock
+                                                    && std::time::Instant::now() < deadline =>
+                                            {
+                                                crate::modules::coop_threads_drain();
+                                                std::thread::sleep(
+                                                    std::time::Duration::from_millis(1),
+                                                );
+                                                continue;
+                                            }
+                                            other => break other,
+                                        }
+                                    };
+                                    match result {
+                                        Ok((stream, addr)) => {
+                                            *inner = SocketInner::UnixListener(listener);
+                                            let client = PyObjectRef::new(PyObject::Socket {
+                                                inner: Rc::new(std::cell::RefCell::new(
+                                                    SocketInner::UnixStream(stream),
+                                                )),
+                                                family,
+                                                type_,
+                                                proto,
+                                            });
+                                            // AF_UNIX's accept() returns a
+                                            // bare path (often empty for an
+                                            // unnamed peer), not a tuple.
+                                            Ok(py_tuple(vec![client, path_or_empty(&addr)]))
+                                        }
+                                        Err(e) => {
+                                            *inner = SocketInner::UnixListener(listener);
+                                            Err(PyError::os_error_from_io(&e))
+                                        }
+                                    }
+                                }
                                 other => {
                                     *inner = other;
                                     Err(PyError::runtime_error("accept on non-listener"))
@@ -1016,6 +1191,32 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     func: |args| {
                         if args.len() < 2 {
                             return Err(PyError::type_error("connect() takes exactly 1 argument"));
+                        }
+                        let is_unix = matches!(&*args[0].borrow(), PyObject::Socket { family, .. } if *family == 1);
+                        if is_unix {
+                            let path = unix_path_arg(&args[1])?;
+                            let socket = &*args[0].borrow();
+                            if let PyObject::Socket { inner, .. } = socket {
+                                let mut inner = inner.borrow_mut();
+                                match &*inner {
+                                    SocketInner::Uninitialized => {
+                                        match std::os::unix::net::UnixStream::connect(&path) {
+                                            Ok(stream) => {
+                                                stream.set_nonblocking(true).ok();
+                                                *inner = SocketInner::UnixStream(stream);
+                                                return Ok(py_none());
+                                            }
+                                            Err(e) => return Err(PyError::os_error_from_io(&e)),
+                                        }
+                                    }
+                                    _ => {
+                                        return Err(PyError::runtime_error(
+                                            "socket already connected or listening",
+                                        ))
+                                    }
+                                }
+                            }
+                            return Err(PyError::runtime_error("connect on non-socket"));
                         }
                         let addr = socket_addr_to_string(&args[1])?;
                         let socket = &*args[0].borrow();
@@ -1332,15 +1533,34 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         let socket = &*args[0].borrow();
                         if let PyObject::Socket { inner, .. } = socket {
                             let inner = inner.borrow();
-                            let addr = match &*inner {
-                                SocketInner::TcpListener(l) => l.local_addr(),
-                                SocketInner::TcpStream(s) => s.local_addr(),
+                            match &*inner {
+                                SocketInner::TcpListener(l) => {
+                                    let addr = l
+                                        .local_addr()
+                                        .map_err(|e| PyError::os_error_from_io(&e))?;
+                                    Ok(socket_addr_to_py_tuple(addr))
+                                }
+                                SocketInner::TcpStream(s) => {
+                                    let addr = s
+                                        .local_addr()
+                                        .map_err(|e| PyError::os_error_from_io(&e))?;
+                                    Ok(socket_addr_to_py_tuple(addr))
+                                }
+                                // AF_UNIX addresses are filesystem paths, and
+                                // `getsockname()` returns the bare string
+                                // (not a (host, port) tuple).
+                                SocketInner::UnixListener(l) => match l.local_addr() {
+                                    Ok(addr) => Ok(path_or_empty(&addr)),
+                                    Err(_) => Ok(py_str("")),
+                                },
+                                SocketInner::UnixStream(s) => match s.local_addr() {
+                                    Ok(addr) => Ok(path_or_empty(&addr)),
+                                    Err(_) => Ok(py_str("")),
+                                },
                                 SocketInner::Uninitialized => {
-                                    return Err(PyError::OsError("Bad file descriptor".to_string()))
+                                    Err(PyError::OsError("Bad file descriptor".to_string()))
                                 }
                             }
-                            .map_err(|e| PyError::os_error_from_io(&e))?;
-                            Ok(socket_addr_to_py_tuple(addr))
                         } else {
                             Err(PyError::runtime_error("getsockname on non-socket"))
                         }

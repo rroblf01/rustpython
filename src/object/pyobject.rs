@@ -516,6 +516,14 @@ pub struct PropertyData {
 pub enum SocketInner {
     TcpListener(std::net::TcpListener),
     TcpStream(std::net::TcpStream),
+    /// AF_UNIX endpoints. `socket.socketpair(AF_UNIX, SOCK_STREAM)` is how
+    /// essentially every stdlib test and library creates an isolated socket
+    /// pair (`asyncio`, `selectors`, `socket_helper`, `http.server`), and the
+    /// loopback-TCP emulation this used to fall back to cannot express a
+    /// filesystem path, which is exactly what AF_UNIX's `bind`/`connect`/
+    /// `getsockname` are for.
+    UnixListener(std::os::unix::net::UnixListener),
+    UnixStream(std::os::unix::net::UnixStream),
     Uninitialized,
 }
 impl PyObject {
