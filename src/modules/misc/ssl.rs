@@ -1,6 +1,11 @@
 use crate::object::*;
 use std::collections::HashMap;
 
+/// The Python source that defines `ssl.SSLSocket` and `ssl.wrap_socket`
+/// (see `src/modules/ssl_socket.py` for why a socket-shaped wrapper is all
+/// this interpreter provides).
+pub const SSL_SOCKET_SOURCE: &str = include_str!("../ssl_socket.py");
+
 pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! ssl_func {
@@ -85,6 +90,11 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("OP_SINGLE_ECDH_USE", py_int(0x80000));
     d.insert_str("OP_CIPHER_SERVER_PREFERENCE", py_int(0x400000));
     d.insert_str("OP_NO_COMPRESSION", py_int(0x20000));
+    // The remaining protocol-hardening knobs CPython 3.7+ exposes (and that
+    // `ssl._create_stdlib_context` composes into a context's `options`).
+    d.insert_str("OP_NO_RENEGOTIATION", py_int(0x40000000));
+    d.insert_str("OP_IGNORE_UNEXPECTED_EOF", py_int(0x80000000u32 as i32));
+    d.insert_str("OP_NO_TICKET", py_int(0x00004000));
 
     // Alert description constants
     d.insert_str("ALERT_DESCRIPTION_CLOSE_NOTIFY", py_int(0));
@@ -112,16 +122,6 @@ pub fn create_ssl_dict() -> HashMap<String, PyObjectRef> {
     d.insert_str("SSL_ERROR_WANT_CONNECT", py_int(7));
     d.insert_str("SSL_ERROR_EOF", py_int(8));
     d.insert_str("SSL_ERROR_INVALID_ERROR_CODE", py_int(20));
-
-    // wrap_socket function — returns the socket as-is
-    ssl_func!("wrap_socket", |args| {
-        if args.is_empty() {
-            return Err(PyError::type_error(
-                "wrap_socket() missing required argument: sock",
-            ));
-        }
-        Ok(args[0].clone())
-    });
 
     // get_default_verify_paths — stub
     ssl_func!("get_default_verify_paths", |_| {

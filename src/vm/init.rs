@@ -324,7 +324,10 @@ pub(crate) fn register_native_modules(
     // shadow removed — see the comment at the install_source_defined_stdlib
     // call sites this used to have, in src/vm.rs)
 
-    // Native ssl module (CPython C extension replacement for urllib3 compatibility)
+    // Native ssl module (CPython C extension replacement for urllib3
+    // compatibility); `SSLSocket`/`wrap_socket`/`SSLContext` and friends are
+    // layered on top of it from src/modules/ssl_socket.py (see the
+    // install_source_defined_stdlib call in src/vm.rs).
     modules.insert_str("ssl", create_module("ssl", create_ssl_dict()));
 
     // Native time module

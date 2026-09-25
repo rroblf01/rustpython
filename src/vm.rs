@@ -642,6 +642,42 @@ impl VirtualMachine {
                 "EnumDict",
             ],
         );
+        // `ssl.SSLSocket`/`wrap_socket` on top of the native ssl module (a
+        // socket-shaped wrapper: see src/modules/ssl_socket.py). Without the
+        // class, `ftplib`/`poplib`/`smtplib`/`urllib.request` all fail at
+        // import, since each does `isinstance(conn, ssl.SSLSocket)` or
+        // constructs one. MUST come after the `enum` install above: this
+        // source does `from enum import Enum, IntEnum`, which fails while the
+        // real `enum` module is still being bootstrapped.
+        vm.install_source_defined_stdlib(
+            "ssl",
+            crate::modules::misc::SSL_SOCKET_SOURCE,
+            &[
+                "_SSLSocketIO",
+                "_ssl_module",
+                "TLSVersion",
+                "Purpose",
+                "_SSLMethod",
+                "_PROTOCOL_NAMES",
+                "PROTOCOL_TLS",
+                "PROTOCOL_TLSv1",
+                "PROTOCOL_TLSv1_1",
+                "PROTOCOL_TLSv1_2",
+                "PROTOCOL_TLS_CLIENT",
+                "PROTOCOL_TLS_SERVER",
+                "_ASN1Object",
+                "SSLContext",
+                "SSLSocket",
+                "wrap_socket",
+                "_SSLSocketAcceptor",
+                "create_default_context",
+                "create_unverified_context",
+                "_create_stdlib_context",
+                "_create_unverified_context",
+                "_create_default_https_context",
+                "_create_default_verify_context",
+            ],
+        );
         // `gettext` — see the matching comment in the other init path above:
         // removed in favor of the real vendored Lib/gettext.py.
         vm.install_source_defined_stdlib(
