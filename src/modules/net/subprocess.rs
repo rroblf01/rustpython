@@ -333,6 +333,22 @@ fn make_completed_process(
     })
 }
 
+/// The argv sequence for `run`/`call`/`check_*`/`Popen`: CPython takes
+/// ANY sequence of strings (list OR tuple — the CPython test suite uses
+/// tuples constantly, e.g. `args = (sys.executable, '-c', code)` in
+/// test_cmd_line), and a bare string as a single command. Matching only
+/// `PyObject::List` made every tuple-shaped call fall through to the
+/// "whole tuple, debug-printed" string path, which `Command::new` then
+/// reported as a missing executable (FileNotFoundError) — the single
+/// biggest shared failure across the subprocess test files (~100 cases
+/// in test_cmd_line alone).
+fn cmd_argv(args0: &PyObjectRef) -> Vec<String> {
+    match &*args0.borrow() {
+        PyObject::List(items) | PyObject::Tuple(items) => items.iter().map(|a| a.str()).collect(),
+        _ => vec![args0.str()],
+    }
+}
+
 pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sub_func {
@@ -434,11 +450,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             apply_env(&mut cmd, args);
             spawn_with_timeout(cmd, &cmd_str, timeout)?
         } else {
-            let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
-                items.iter().map(|a| a.str()).collect()
-            } else {
-                vec![cmd_str.clone()]
-            };
+            let cmd_args: Vec<String> = cmd_argv(&args[0]);
             if cmd_args.is_empty() {
                 return Err(PyError::ValueError("empty command".to_string()));
             }
@@ -476,11 +488,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             apply_env(&mut cmd, args);
             spawn_with_timeout(cmd, &cmd_str, timeout)?
         } else {
-            let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
-                items.iter().map(|a| a.str()).collect()
-            } else {
-                cmd_str.split_whitespace().map(|s| s.to_string()).collect()
-            };
+            let cmd_args: Vec<String> = cmd_argv(&args[0]);
             if cmd_args.is_empty() {
                 return Err(PyError::type_error("call() requires a non-empty command"));
             }
@@ -516,11 +524,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             // `"['/path/to/exe',"` — every list-form call failed with a
             // spurious `OSError: No such file or directory`. Mirrors the
             // already-correct `run`/`check_output` handling just above/below.
-            let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
-                items.iter().map(|a| a.str()).collect()
-            } else {
-                cmd_str.split_whitespace().map(|s| s.to_string()).collect()
-            };
+            let cmd_args: Vec<String> = cmd_argv(&args[0]);
             if cmd_args.is_empty() {
                 return Err(PyError::type_error(
                     "check_call() requires a non-empty command",
@@ -559,11 +563,7 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             apply_env(&mut cmd, args);
             spawn_with_timeout(cmd, &cmd_str, timeout)?
         } else {
-            let cmd_args: Vec<String> = if let PyObject::List(items) = &*args[0].borrow() {
-                items.iter().map(|a| a.str()).collect()
-            } else {
-                vec![cmd_str.clone()]
-            };
+            let cmd_args: Vec<String> = cmd_argv(&args[0]);
             if cmd_args.is_empty() {
                 return Err(PyError::ValueError("empty command".to_string()));
             }
