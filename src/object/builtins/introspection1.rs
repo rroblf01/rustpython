@@ -173,6 +173,59 @@ pub fn builtin_slice(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     }
 }
 
+/// `type(cls).__dir__` for a class argument, when the metaclass defines a
+/// real (Python-level) one. CPython resolves `dir(cls)` through
+/// `type(cls).__dir__` before falling back to the plain dict/mro walk, and
+/// that is how `enum.EnumType.__dir__` gets to hide an enum's internal
+/// bookkeeping (`_member_map_`, `_new_member_`, `_value_repr_`, ...) from
+/// `dir()`.
+///
+/// Only a USER-defined `__dir__` counts: every type also answers a native
+/// `__dir__` here, and preferring that one would silently ignore the
+/// metaclass's own override (and recurse into the plain enumeration).
+fn class_metatype_dir(args: &[PyObjectRef]) -> Option<PyObjectRef> {
+    let cls = args.first()?;
+    if !matches!(&*cls.borrow(), crate::object::PyObject::Type { .. }) {
+        return None;
+    }
+    // `metatype_of` only knows natively-tracked metatypes (METATYPE_KEY);
+    // a Python-defined metaclass (enum's EnumType, any user metaclass) is
+    // reached through `type(cls)` instead.
+    let meta = crate::object::metatype_of(cls)
+        .or_else(|| crate::object::builtin_type_of(std::slice::from_ref(cls)).ok())?;
+    let mro = {
+        let borrowed = meta.borrow();
+        match &*borrowed {
+            crate::object::PyObject::Type { mro, .. } => mro.clone(),
+            _ => return None,
+        }
+    };
+    for base in mro {
+        let candidate = {
+            let borrowed = base.borrow();
+            match &*borrowed {
+                crate::object::PyObject::Type { dict, .. } => dict.get_str("__dir__").cloned(),
+                _ => None,
+            }
+        };
+        if let Some(v) = candidate {
+            // A nested `def __dir__` in a class body can land as a
+            // Function, a Closure or a bound-method wrapper depending on
+            // how the body was compiled — accept anything that is not one
+            // of the NATIVE dir implementations.
+            let is_user_defined = !matches!(
+                &*v.borrow(),
+                crate::object::PyObject::BuiltinMethod { .. }
+                    | crate::object::PyObject::BuiltinFunction { .. }
+            );
+            if is_user_defined {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
 pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     if args.is_empty() {
         return crate::object::with_vm_mut(|vm| {
@@ -311,6 +364,28 @@ pub fn builtin_dir(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             }
         }
         PyObject::Type { dict, mro, .. } => {
+            // A METACLASS `__dir__` wins over the default enumeration —
+            // real CPython resolves `dir(cls)` through `type(cls).__dir__`
+            // first. `enum.EnumType.__dir__` is exactly such a custom
+            // `__dir__`: it hides the enum's internal bookkeeping
+            // (`_member_map_`, `_new_member_`, `_value_repr_`, ...) so
+            // `dir(SomeEnum)` lists only the members and the dunders
+            // (test_enum's `enum_dir` asserts exactly that set).
+            if let Some(meta_dir) = class_metatype_dir(args) {
+                // A metaclass `__dir__` is ordinary Python code, so it
+                // needs the real call path (`call_function` only
+                // dispatches native functions/closures).
+                if let Ok(list) =
+                    crate::object::call_function_disposable(&meta_dir, args.to_vec(), vec![])
+                {
+                    if let PyObject::List(items) = &*list.borrow() {
+                        let mut result: Vec<PyObjectRef> =
+                            items.iter().map(|a| py_str(&a.str())).collect();
+                        result.sort_by(|a, b| a.str().cmp(&b.str()));
+                        return Ok(py_list(result));
+                    }
+                }
+            }
             // `dir(SomeClass)` must include every name reachable via the
             // class's OWN dict AND every ancestor's (`mro`) — real
             // CPython's `dir()` on a class is `sorted(set().union(*(vars(c)
