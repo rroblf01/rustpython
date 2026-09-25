@@ -731,17 +731,20 @@ pub(crate) fn register_native_modules(
     // Native dis module for bytecode disassembly
     modules.insert_str("dis", create_module("dis", create_dis_dict()));
 
-    // Native http module (HTTPStatus enum)
-    let http_mod = create_module("http", create_http_dict());
-    modules.insert_str("http", http_mod.clone());
+    // `http` itself is NOT registered natively either: CPython's
+    // `Lib/http/__init__.py` defines the real `HTTPStatus` enum AND does
+    // `globals().update(HTTPStatus.__members__)`, which is where
+    // `http.client`'s bare `CONTINUE` reference comes from. The native
+    // stand-in had no such update, so vendoring the package wholesale is
+    // both simpler and strictly more complete.
 
-    // Native http.client submodule (HTTPConnection, HTTPResponse)
-    let http_client_mod = create_module("http.client", create_http_client_dict());
-    // Wire client as a submodule attribute of the http parent module
-    if let PyObject::Module { dict, .. } = &mut *http_mod.borrow_mut() {
-        dict.insert_str("client", http_client_mod.clone());
-    }
-    modules.insert_str("http.client", http_client_mod);
+    // `http.client` is NOT registered natively any more: the vendored
+    // CPython `Lib/http/client.py` is the real client, and the native
+    // stand-in (a `request()` that never even opened a socket) was shadowing
+    // it, so `http.client.HTTPConnection.request()` silently did nothing.
+    // `http.client` therefore loads from `Lib/` like every other pure-Python
+    // stdlib module, and `import http.client` wires the submodule attribute
+    // itself.
 
     // Native smtplib module (SMTP stub)
     modules.insert_str("smtplib", create_module("smtplib", create_smtplib_dict()));

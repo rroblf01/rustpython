@@ -684,6 +684,23 @@ pub fn create_select_dict() -> HashMap<String, PyObjectRef> {
     d
 }
 
+/// Shared by `gethostbyname`/`gethostbyname_ex`: the literal for
+/// `localhost`, a real A lookup otherwise, and the original name when
+/// neither yields an address (matching this module's other best-effort
+/// resolver behavior).
+fn gethostbyname_impl(hostname: &str) -> PyResult<String> {
+    if hostname == "localhost" || hostname == "127.0.0.1" {
+        return Ok("127.0.0.1".to_string());
+    }
+    match std::net::ToSocketAddrs::to_socket_addrs(&(hostname, 0)) {
+        Ok(mut addrs) => Ok(addrs
+            .find(|a| a.is_ipv4())
+            .map(|a| a.ip().to_string())
+            .unwrap_or_else(|| hostname.to_string())),
+        Err(_) => Ok(hostname.to_string()),
+    }
+}
+
 pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! sock_func {
@@ -851,10 +868,381 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
     sock_func!("has_dualstack_ipv6", |_args| Ok(py_bool(false)));
     d.insert_str("AF_INET", py_int(2));
     d.insert_str("AF_INET6", py_int(10));
+    d.insert_str("AF_UNIX", py_int(1));
     d.insert_str("SOCK_STREAM", py_int(1));
     d.insert_str("SOCK_DGRAM", py_int(2));
+    d.insert_str("SOCK_RAW", py_int(3));
+    d.insert_str("SOCK_SEQPACKET", py_int(5));
+    d.insert_str("SOCK_CLOEXEC", py_int(0o2000000));
+    d.insert_str("SOCK_NONBLOCK", py_int(0o4000));
     d.insert_str("SOL_SOCKET", py_int(1));
     d.insert_str("SO_REUSEADDR", py_int(2));
+    d.insert_str("SO_TYPE", py_int(3));
+    d.insert_str("SO_ERROR", py_int(4));
+    d.insert_str("SO_BROADCAST", py_int(6));
+    d.insert_str("SO_SNDBUF", py_int(7));
+    d.insert_str("SO_RCVBUF", py_int(8));
+    d.insert_str("SO_KEEPALIVE", py_int(9));
+    d.insert_str("SO_OOBINLINE", py_int(10));
+    d.insert_str("SO_LINGER", py_int(13));
+    d.insert_str("SO_RCVLOWAT", py_int(18));
+    d.insert_str("SO_SNDLOWAT", py_int(19));
+    d.insert_str("SO_RCVTIMEO", py_int(20));
+    d.insert_str("SO_SNDTIMEO", py_int(21));
+    d.insert_str("SO_DOMAIN", py_int(39));
+    d.insert_str("SO_PROTOCOL", py_int(38));
+    d.insert_str("SO_KEEPIDLE", py_int(4));
+    d.insert_str("SO_MARK", py_int(36));
+    d.insert_str("SO_PRIORITY", py_int(35));
+    d.insert_str("SO_BINDTODEVICE", py_int(25));
+    d.insert_str("SO_PASSCRED", py_int(16));
+    d.insert_str("SO_PEERCRED", py_int(17));
+    d.insert_str("IPPROTO_IP", py_int(0));
+    d.insert_str("IPPROTO_ICMP", py_int(1));
+    d.insert_str("IPPROTO_TCP", py_int(6));
+    d.insert_str("IPPROTO_UDP", py_int(17));
+    d.insert_str("IPPROTO_IPV6", py_int(41));
+    d.insert_str("IPPROTO_RAW", py_int(255));
+    d.insert_str("TCP_NODELAY", py_int(1));
+    d.insert_str("TCP_MAXSEG", py_int(2));
+    d.insert_str("TCP_KEEPIDLE", py_int(4));
+    d.insert_str("TCP_KEEPINTVL", py_int(5));
+    d.insert_str("TCP_KEEPCNT", py_int(6));
+    d.insert_str("TCP_SYNCNT", py_int(7));
+    d.insert_str("TCP_LINGER2", py_int(8));
+    d.insert_str("TCP_DEFER_ACCEPT", py_int(9));
+    d.insert_str("TCP_USER_TIMEOUT", py_int(18));
+    d.insert_str("TCP_NOTSENT_LOWAT", py_int(17));
+    d.insert_str("TCP_QUICKACK", py_int(12));
+    d.insert_str("TCP_CONGESTION", py_int(13));
+    d.insert_str("SOMAXCONN", py_int(128));
+    d.insert_str("MSG_OOB", py_int(1));
+    d.insert_str("MSG_PEEK", py_int(2));
+    d.insert_str("MSG_DONTROUTE", py_int(4));
+    d.insert_str("MSG_CTRUNC", py_int(8));
+    d.insert_str("MSG_TRUNC", py_int(16));
+    d.insert_str("MSG_DONTWAIT", py_int(64));
+    d.insert_str("MSG_EOR", py_int(128));
+    d.insert_str("MSG_WAITALL", py_int(256));
+    d.insert_str("MSG_NOSIGNAL", py_int(16384));
+    d.insert_str("MSG_MORE", py_int(16384));
+    d.insert_str("MSG_NOSIGNAL", py_int(16384));
+    d.insert_str("MSG_CMSG_CLOEXEC", py_int(0o40000000));
+    d.insert_str("SHUT_RD", py_int(0));
+    d.insert_str("SHUT_WR", py_int(1));
+    d.insert_str("SHUT_RDWR", py_int(2));
+    d.insert_str("ZMQ_RADIO", py_int(0));
+    d.insert_str("ZMQ_DGRAM", py_int(1));
+    d.insert_str("ZMQ_STREAM", py_int(2));
+    d.insert_str("ZMQ_SEQPACKET", py_int(3));
+    d.insert_str("CANONICAL", py_int(2));
+    d.insert_str("NI_NUMERICHOST", py_int(1));
+    d.insert_str("NI_NUMERICSERV", py_int(2));
+    d.insert_str("NI_NAMEREQD", py_int(4));
+    d.insert_str("NI_NUMERIC", py_int(1 | 2));
+    d.insert_str("AI_PASSIVE", py_int(1));
+    d.insert_str("AI_CANONNAME", py_int(2));
+    d.insert_str("AI_NUMERICHOST", py_int(4));
+    d.insert_str("AI_NUMERICSERV", py_int(1024));
+    d.insert_str("AI_V4MAPPED", py_int(8));
+    d.insert_str("AI_ALL", py_int(16));
+    d.insert_str("AI_ADDRCONFIG", py_int(32));
+    d.insert_str("CMSG_LEN", py_int(16));
+    d.insert_str("CMSG_SPACE", py_int(16));
+
+    // `CMSG_LEN`/`CMSG_SPACE` are functions in CPython (they take a
+    // control-message length and return the aligned buffer size), and
+    // `socket.cmsg_len`/`cmsg_space` are their aliases.
+    sock_func!("CMSG_LEN", |args| {
+        let len = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        Ok(py_int(((len + 15) & !15) as i64))
+    });
+    sock_func!("CMSG_SPACE", |args| {
+        let len = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        Ok(py_int(((len + 15) & !15) as i64))
+    });
+    d.insert_str(
+        "cmsg_len",
+        d.get_str("CMSG_LEN").cloned().unwrap_or_else(py_none),
+    );
+    d.insert_str(
+        "cmsg_space",
+        d.get_str("CMSG_SPACE").cloned().unwrap_or_else(py_none),
+    );
+
+    // Default-timeout state for `getdefaulttimeout`/`setdefaulttimeout` and
+    // the `socket(...)` constructor's `timeout` keyword.
+    thread_local! {
+        static DEFAULT_TIMEOUT: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+    }
+    sock_func!("getdefaulttimeout", |_| {
+        Ok(match DEFAULT_TIMEOUT.with(|t| t.get()) {
+            Some(seconds) => py_float(seconds),
+            None => py_none(),
+        })
+    });
+    sock_func!("setdefaulttimeout", |args| {
+        let value = match args.first() {
+            None => None,
+            Some(v) if matches!(&*v.borrow(), PyObject::None) => None,
+            Some(v) => {
+                if !(v.as_f64().is_some() && v.as_f64().unwrap() >= 0.0) {
+                    return Err(PyError::value_error("Timeout value out of range"));
+                }
+                v.as_f64()
+            }
+        };
+        DEFAULT_TIMEOUT.with(|t| t.set(value));
+        Ok(py_none())
+    });
+
+    // Byte-order helpers: these really do need to swap (protocol code
+    // writes `struct.pack("!H", port)`-style values, and `inet_aton`/
+    // `inet_ntoa` are how tests build/compare addresses).
+    sock_func!("htons", |args| {
+        let v = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u16;
+        Ok(py_int(v.swap_bytes() as i64))
+    });
+    sock_func!("htonl", |args| {
+        let v = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u32;
+        Ok(py_int(v.swap_bytes() as i64))
+    });
+    sock_func!("ntohs", |args| {
+        let v = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u16;
+        Ok(py_int(u16::from_be(v) as i64))
+    });
+    sock_func!("ntohl", |args| {
+        let v = args.first().and_then(|a| a.as_i64()).unwrap_or(0) as u32;
+        Ok(py_int(u32::from_be(v) as i64))
+    });
+    sock_func!("inet_aton", |args| {
+        let text = args
+            .first()
+            .ok_or_else(|| PyError::type_error("inet_aton() missing argument"))?
+            .str();
+        let parsed: std::net::Ipv4Addr = text
+            .parse()
+            .map_err(|_| PyError::os_error_from_io(&std::io::Error::from_raw_os_error(99)))?;
+        Ok(PyObjectRef::imm(PyObject::Bytes(parsed.octets().to_vec())))
+    });
+    sock_func!("inet_ntoa", |args| {
+        let raw = args
+            .first()
+            .and_then(|a| match &*a.borrow() {
+                PyObject::Bytes(b) => Some(b.clone()),
+                PyObject::ByteArray(b) => Some(b.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if raw.len() != 4 {
+            return Err(PyError::os_error_from_io(
+                &std::io::Error::from_raw_os_error(22),
+            ));
+        }
+        let addr = std::net::Ipv4Addr::new(raw[0], raw[1], raw[2], raw[3]);
+        Ok(py_str(&addr.to_string()))
+    });
+    sock_func!("inet_pton", |args| {
+        let family = args.first().and_then(|a| a.as_i64()).unwrap_or(2);
+        let text = args.get(1).map(|a| a.str()).unwrap_or_default();
+        if family == 2 {
+            let parsed: std::net::Ipv4Addr = text
+                .parse()
+                .map_err(|_| PyError::os_error_from_io(&std::io::Error::from_raw_os_error(99)))?;
+            Ok(PyObjectRef::imm(PyObject::Bytes(parsed.octets().to_vec())))
+        } else {
+            let parsed: std::net::Ipv6Addr = text
+                .parse()
+                .map_err(|_| PyError::os_error_from_io(&std::io::Error::from_raw_os_error(99)))?;
+            Ok(PyObjectRef::imm(PyObject::Bytes(parsed.octets().to_vec())))
+        }
+    });
+    sock_func!("inet_ntop", |args| {
+        let family = args.first().and_then(|a| a.as_i64()).unwrap_or(2);
+        let raw = args
+            .get(1)
+            .and_then(|a| match &*a.borrow() {
+                PyObject::Bytes(b) => Some(b.clone()),
+                PyObject::ByteArray(b) => Some(b.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if family == 2 && raw.len() == 4 {
+            let addr = std::net::Ipv4Addr::new(raw[0], raw[1], raw[2], raw[3]);
+            return Ok(py_str(&addr.to_string()));
+        }
+        if raw.len() == 16 {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&raw);
+            let addr = std::net::Ipv6Addr::from(octets);
+            return Ok(py_str(&addr.to_string()));
+        }
+        Err(PyError::os_error_from_io(
+            &std::io::Error::from_raw_os_error(22),
+        ))
+    });
+    sock_func!("gethostbyaddr", |args| {
+        let address = args.first().map(|a| a.str()).unwrap_or_default();
+        let hostname = args
+            .get(1)
+            .filter(|a| !matches!(&*a.borrow(), PyObject::None))
+            .map(|a| a.str())
+            .unwrap_or_else(|| address.clone());
+        let aliases: Vec<PyObjectRef> = Vec::new();
+        let addrtype = py_int(2);
+        let addr = py_str(&address);
+        Ok(py_tuple(vec![
+            py_str(&hostname),
+            py_list(aliases),
+            addrtype,
+            addr,
+        ]))
+    });
+    sock_func!("gethostbyname_ex", |args| {
+        let hostname = args
+            .first()
+            .ok_or_else(|| PyError::type_error("gethostbyname_ex() missing argument"))?
+            .str();
+        let address = match gethostbyname_impl(&hostname) {
+            Ok(ip) => ip,
+            Err(e) => return Err(e),
+        };
+        Ok(py_tuple(vec![
+            py_str(&hostname),
+            py_list(vec![]),
+            py_list(vec![py_str(&address)]),
+        ]))
+    });
+    sock_func!("getprotobyname", |args| {
+        let name = args
+            .first()
+            .ok_or_else(|| PyError::type_error("getprotobyname() missing argument"))?
+            .str();
+        let value = match name.to_ascii_lowercase().as_str() {
+            "tcp" => 6,
+            "udp" => 17,
+            "ip" | "ipproto" => 0,
+            "icmp" => 1,
+            "ipv6" | "ipv6-protocol" => 41,
+            _ => {
+                return Err(PyError::os_error_from_io(
+                    &std::io::Error::from_raw_os_error(93),
+                ))
+            }
+        };
+        Ok(py_int(value))
+    });
+    sock_func!("getservbyname", |args| {
+        let name = args
+            .first()
+            .ok_or_else(|| PyError::type_error("getservbyname() missing argument"))?
+            .str();
+        let port = match name.as_str() {
+            "http" => 80,
+            "https" => 443,
+            "ftp" => 21,
+            "ftp-data" => 20,
+            "pop3" => 110,
+            "smtp" => 25,
+            "telnet" => 23,
+            "nntp" => 119,
+            "imap" => 143,
+            _ => {
+                return Err(PyError::os_error_from_io(
+                    &std::io::Error::from_raw_os_error(0),
+                ))
+            }
+        };
+        Ok(py_int(port))
+    });
+    sock_func!("getservbyport", |args| {
+        let port = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        let name = match port {
+            80 => "http",
+            443 => "https",
+            21 => "ftp",
+            20 => "ftp-data",
+            110 => "pop3",
+            25 => "smtp",
+            23 => "telnet",
+            119 => "nntp",
+            143 => "imap",
+            _ => {
+                return Err(PyError::os_error_from_io(
+                    &std::io::Error::from_raw_os_error(0),
+                ))
+            }
+        };
+        Ok(py_tuple(vec![py_str(name), py_int(port), py_str("tcp")]))
+    });
+    sock_func!("if_nameindex", |_| {
+        Ok(py_list(vec![py_tuple(vec![py_int(1), py_str("lo")])]))
+    });
+    sock_func!("if_nametoindex", |args| {
+        let name = args.first().map(|a| a.str()).unwrap_or_default();
+        if name == "lo" {
+            Ok(py_int(1))
+        } else {
+            Err(PyError::os_error_from_io(
+                &std::io::Error::from_raw_os_error(19),
+            ))
+        }
+    });
+    sock_func!("if_indextoname", |args| {
+        let idx = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        if idx == 1 {
+            Ok(py_str("lo"))
+        } else {
+            Err(PyError::os_error_from_io(
+                &std::io::Error::from_raw_os_error(19),
+            ))
+        }
+    });
+    sock_func!("getnameinfo", |args| {
+        let address = match args.first() {
+            Some(v) => v.str(),
+            None => return Err(PyError::type_error("getnameinfo() missing argument")),
+        };
+        let sockaddr = match &*args[0].borrow() {
+            PyObject::Tuple(items) => items.clone(),
+            _ => Vec::new(),
+        };
+        let port = sockaddr.get(1).and_then(|p| p.as_i64()).unwrap_or(0);
+        Ok(py_tuple(vec![py_str(&address), py_int(port)]))
+    });
+    // `create_server(address, *, family=AF_INET, backlog=None,
+    // reuse_port=False, dualstack_ipv6=False)`: a bound, listening socket
+    // usable as a context manager, which is how every stdlib test server
+    // (`test_httplib`, `test_urllib2_localnet`, `test_socketserver`) is
+    // written.
+    sock_func!("create_server", |args| {
+        if args.is_empty() {
+            return Err(PyError::type_error(
+                "create_server() missing required argument: 'address'",
+            ));
+        }
+        let addr = socket_addr_to_string(&args[0])?;
+        let listener = std::net::TcpListener::bind(addr.as_str())
+            .map_err(|e| PyError::os_error_from_io(&e))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| PyError::os_error_from_io(&e))?;
+        Ok(PyObjectRef::new(PyObject::Socket {
+            inner: Rc::new(RefCell::new(SocketInner::TcpListener(listener))),
+            family: 2,
+            type_: 1,
+            proto: 0,
+        }))
+    });
+    sock_func!("fromfd", |args| {
+        let _fd = args
+            .get(1)
+            .and_then(|a| a.as_i64())
+            .ok_or_else(|| PyError::type_error("fromfd() missing required argument: 'fd'"))?;
+        Err(PyError::os_error_from_io(
+            &std::io::Error::from_raw_os_error(38),
+        ))
+    });
 
     sock_func!("gethostname", |_| {
         match std::process::Command::new("hostname").output() {
@@ -919,20 +1307,7 @@ pub fn create_socket_dict() -> HashMap<String, PyObjectRef> {
             ));
         }
         let hostname = args[0].str();
-        if hostname == "localhost" || hostname == "127.0.0.1" {
-            return Ok(py_str("127.0.0.1"));
-        }
-        // Try DNS resolution
-        match std::net::ToSocketAddrs::to_socket_addrs(&(hostname.as_str(), 0)) {
-            Ok(mut addrs) => {
-                if let Some(addr) = addrs.find(|a| a.is_ipv4()) {
-                    Ok(py_str(&addr.ip().to_string()))
-                } else {
-                    Ok(py_str(&hostname))
-                }
-            }
-            Err(_) => Ok(py_str(&hostname)),
-        }
+        Ok(py_str(&gethostbyname_impl(&hostname)?))
     });
 
     d

@@ -474,14 +474,23 @@ pub fn create_os_path_dict() -> HashMap<String, PyObjectRef> {
         let p = crate::object::path_arg_to_string(&args[0]);
         if !p.starts_with('/') {
             return Ok(py_tuple(vec![py_str(""), py_str(""), py_str(&p)]));
-        } else if p.len() >= 2 && p.as_bytes()[1] != b'/' || p.len() >= 3 && p.as_bytes()[2] == b'/'
-        {
-            // Absolute path, e.g. '/foo', '///foo'
-            return Ok(py_tuple(vec![py_str(""), py_str("/"), py_str(&p[1..])]));
-        } else {
-            // Precisely two leading slashes, e.g. '//foo' (implementation-defined)
+        }
+        // posixpath.splitroot: a lone "/" has NO remainder, exactly two
+        // leading slashes keep both in the root ('//foo'), and three or
+        // more collapse to one ('///foo' -> ('/', '//foo')). The previous
+        // boolean chain fell through to `&p[2..]` for "/" and panicked
+        // ("start byte index 2 is out of bounds for string of length 1"),
+        // ABORTING the whole process — `test_urllib.py` hits it via
+        // `urlsplit` on any root-relative path.
+        if p == "/" {
+            return Ok(py_tuple(vec![py_str(""), py_str("/"), py_str("")]));
+        }
+        if p.as_bytes().get(1) == Some(&b'/') && p.as_bytes().get(2) != Some(&b'/') {
+            // Precisely two leading slashes (implementation-defined)
             return Ok(py_tuple(vec![py_str(""), py_str("//"), py_str(&p[2..])]));
         }
+        // One (or three-or-more) leading slashes, e.g. '/foo', '///foo'
+        Ok(py_tuple(vec![py_str(""), py_str("/"), py_str(&p[1..])]))
     });
 
     path_func!("commonpath", |args| {

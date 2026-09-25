@@ -1,32 +1,40 @@
 """Exception classes raised by urllib.
 
-The base classes mirror real CPython's urllib.error: URLError wraps a
-low-level reason (a string or another exception), and HTTPError is both
-an URLError *and* a valid (minimal) file-like response object, since
-real code sometimes catches HTTPError and reads it like a response.
+The base exception class is URLError, which inherits from OSError.  It
+doesn't define any behavior of its own, but is the base class for all
+exceptions defined in this package.
+
+HTTPError is an exception class that is also a valid HTTP response
+instance.  It behaves this way because HTTP protocol errors are valid
+responses, with a status code, headers, and a body.  In some contexts,
+an application may want to handle an exception like a regular
+response.
 """
+import io
+import urllib.response
 
-from io import UnsupportedOperation
-
-
-__all__ = ["URLError", "HTTPError", "ContentTooShortError"]
+__all__ = ['URLError', 'HTTPError', 'ContentTooShortError']
 
 
 class URLError(OSError):
+    # URLError is a sub-type of OSError, but it doesn't share any of
+    # the implementation.  need to override __init__ and __str__.
+    # It sets self.args for compatibility with other OSError
+    # subclasses, but args doesn't have the typical format with errno in
+    # slot 0 and strerror in slot 1.  This may be better than nothing.
     def __init__(self, reason, filename=None):
+        self.args = reason,
         self.reason = reason
-        self.filename = filename
         if filename is not None:
-            super().__init__(reason, filename)
-        else:
-            super().__init__(reason)
+            self.filename = filename
 
     def __str__(self):
-        return "<urlopen error %s>" % (self.reason,)
+        return '<urlopen error %s>' % self.reason
 
 
-class HTTPError(URLError):
-    """Raised when HTTP error occurs, but also acts like a file object."""
+class HTTPError(URLError, urllib.response.addinfourl):
+    """Raised when HTTP error occurs, but also acts like non-error return"""
+    __super_init = urllib.response.addinfourl.__init__
 
     def __init__(self, url, code, msg, hdrs, fp):
         self.code = code
@@ -34,8 +42,18 @@ class HTTPError(URLError):
         self.hdrs = hdrs
         self.fp = fp
         self.filename = url
-        URLError.__init__(self, msg)
+        if fp is None:
+            fp = io.BytesIO()
+        self.__super_init(fp, hdrs, url, code)
 
+    def __str__(self):
+        return 'HTTP Error %s: %s' % (self.code, self.msg)
+
+    def __repr__(self):
+        return '<HTTPError %s: %r>' % (self.code, self.msg)
+
+    # since URLError specifies a .reason attribute, HTTPError should also
+    #  provide this attribute. See issue13211 for discussion.
     @property
     def reason(self):
         return self.msg
@@ -48,32 +66,9 @@ class HTTPError(URLError):
     def headers(self, headers):
         self.hdrs = headers
 
-    def __str__(self):
-        return "HTTP Error %s: %s" % (self.code, self.msg)
-
-    def __repr__(self):
-        return "<HTTPError %s: %r>" % (self.code, self.msg)
-
-    def read(self, *args, **kwargs):
-        if self.fp is None:
-            raise UnsupportedOperation("no response body")
-        return self.fp.read(*args, **kwargs)
-
-    def close(self):
-        if self.fp is not None:
-            self.fp.close()
-
-    def geturl(self):
-        return self.filename
-
-    def getcode(self):
-        return self.code
-
-    def info(self):
-        return self.hdrs
-
 
 class ContentTooShortError(URLError):
+    """Exception raised when downloaded size does not match content-length."""
     def __init__(self, message, content):
         URLError.__init__(self, message)
         self.content = content

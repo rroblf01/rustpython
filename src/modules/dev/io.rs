@@ -339,8 +339,13 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         }))
     });
 
-    // BytesIO — in-memory bytes buffer
-    io_func!("BytesIO", |args| {
+    // BytesIO — in-memory bytes buffer. Registered as a real TYPE (not the
+    // factory closure) for the same reason as `StringIO` above: the stdlib
+    // subclasses `io.BytesIO` (`http.client.HTTPResponse`'s test doubles,
+    // `urllib`, `zipfile`'s test helpers, `gzip`), and subclassing a
+    // builtin function object raises "'builtin_function_or_method' object
+    // has no attribute '__init__'".
+    fn bytesio_new(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let buf = if !args.is_empty() {
             let a = args[0].borrow();
             match &*a {
@@ -669,7 +674,39 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 dict: AttrMap::new(),
             }
         }))
-    });
+    }
+    let bytesio_cls = {
+        let mut td: HashMap<String, PyObjectRef> = HashMap::new();
+        td.insert(
+            "__init__".into(),
+            PyObjectRef::new(PyObject::Closure(Rc::new(
+                |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    let rest: Vec<PyObjectRef> = args.iter().skip(1).cloned().collect();
+                    let prototype = bytesio_new(&rest)?;
+                    let per_instance_type = {
+                        let borrowed = prototype.borrow();
+                        match &*borrowed {
+                            PyObject::Instance { typ, .. } => typ.clone(),
+                            _ => return Ok(py_none()),
+                        }
+                    };
+                    if let PyObject::Instance { typ, .. } = &mut *args[0].borrow_mut() {
+                        *typ = per_instance_type;
+                    }
+                    Ok(py_none())
+                },
+            ))),
+        );
+        let typ = PyObjectRef::new(PyObject::Type {
+            name: "BytesIO".to_string(),
+            dict: Box::new(str_map_to_typedict(td)),
+            bases: vec![],
+            mro: vec![],
+        });
+        fixup_self_mro(&typ);
+        typ
+    };
+    d.insert_str("BytesIO", bytesio_cls);
 
     // IncrementalNewlineDecoder — stub
     io_func!("IncrementalNewlineDecoder", |_args| {
@@ -983,8 +1020,18 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     // input). Position is tracked in a `Rc<RefCell<usize>>` (char offset,
     // not byte offset) alongside the buffer.
     let text_cls_tiw = text_cls.clone(); // for TextIOWrapper below
-    let stringio_closure: Rc<dyn Fn(&[PyObjectRef]) -> PyResult<PyObjectRef>> =
-        Rc::new(move |args: &[PyObjectRef]| {
+                                         // `io.StringIO` used to be exposed as the FACTORY CLOSURE, which is
+                                         // callable but has no `__init__`/type identity — so the extremely common
+                                         // stdlib pattern `class MockResponse(io.StringIO)` (urllib.request's own
+                                         // tests, http.server, email) died with "'builtin_function_or_method'
+                                         // object has no attribute '__init__'". The buffer state is per-instance
+                                         // captured state, so the shared Type's `__init__` builds a prototype
+                                         // instance and copies its captured method table into `self.__dict__` —
+                                         // the same closures, now reachable both as `io.StringIO(...)` and as
+                                         // `BaseClass.__init__(self, ...)`.
+    let text_cls_sio = text_cls.clone();
+    fn stringio_new(args: &[PyObjectRef], text_cls: &PyObjectRef) -> PyResult<PyObjectRef> {
+        {
             let initial_value = if !args.is_empty() {
                 match &*args[0].borrow() {
                     PyObject::Str(s) => s.to_string(),
@@ -1344,11 +1391,48 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                     dict: AttrMap::new(),
                 }
             }))
+        }
+    }
+    let stringio_cls = {
+        let tc = text_cls_sio.clone();
+        let tc_for_init = tc.clone();
+        let mut td: HashMap<String, PyObjectRef> = HashMap::new();
+        td.insert(
+            "__init__".into(),
+            PyObjectRef::new(PyObject::Closure(Rc::new(
+                move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                    let rest: Vec<PyObjectRef> = args.iter().skip(1).cloned().collect();
+                    // The buffer state is captured per instance, so the
+                    // per-instance TYPE (not the instance dict) is what
+                    // carries the methods — `iter(obj)` and friends resolve
+                    // through the type, so they must be there. Swapping
+                    // `self`'s type is also what makes a SUBCLASS instance
+                    // (`class MockResponse(io.StringIO)`) fully functional.
+                    let prototype = stringio_new(&rest, &tc_for_init)?;
+                    let per_instance_type = {
+                        let borrowed = prototype.borrow();
+                        match &*borrowed {
+                            PyObject::Instance { typ, .. } => typ.clone(),
+                            _ => return Ok(py_none()),
+                        }
+                    };
+                    if let PyObject::Instance { typ, .. } = &mut *args[0].borrow_mut() {
+                        *typ = per_instance_type;
+                    }
+                    Ok(py_none())
+                },
+            ))),
+        );
+        let typ = PyObjectRef::new(PyObject::Type {
+            name: "StringIO".to_string(),
+            dict: Box::new(str_map_to_typedict(td)),
+            bases: vec![tc.clone()],
+            mro: vec![tc.clone()],
         });
-    d.insert_str(
-        "StringIO",
-        PyObjectRef::new(PyObject::Closure(stringio_closure)),
-    );
+        fixup_self_mro(&typ);
+        typ
+    };
+    d.insert_str("StringIO", stringio_cls);
 
     register_buffered_classes(&mut d, &buf_cls);
 
