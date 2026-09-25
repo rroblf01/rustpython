@@ -251,6 +251,8 @@ impl VirtualMachine {
                         // `for x in itertools.tee(y)[0]:` must work the same as
                         // iterating the original iterable directly.
                         PyObject::ListIter { .. }
+                        | PyObject::ListRefIter { .. }
+                        | PyObject::SetIter { .. }
                         | PyObject::FindIter { .. }
                         | PyObject::RangeIter { .. }
                         | PyObject::MapIterator { .. }
@@ -545,7 +547,14 @@ impl VirtualMachine {
                             // holds a materialized `items`/`len()` to compare
                             // against now that it's a lazy wrapper around a
                             // `source` iterator (see its own doc comment).
-                            PyObject::ZipIterator { .. }
+                            // The LIVE list iterator reads the list on every
+                            // step (so mid-iteration appends/shrinks are seen,
+                            // as CPython's list_iterator does) — delegate to
+                            // `builtin_next` like the others instead of the
+                            // in-place snapshot arm below.
+                            PyObject::ListRefIter { .. }
+                            | PyObject::SetIter { .. }
+                            | PyObject::ZipIterator { .. }
                             | PyObject::MapIterator { .. }
                             | PyObject::FilterIterator { .. }
                             | PyObject::CycleIter { .. }

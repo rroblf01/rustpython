@@ -212,6 +212,8 @@ impl PyObject {
             | PyObject::CallSentinelIter { .. }
             | PyObject::ListIter { .. }
             | PyObject::RangeIter { .. }
+            | PyObject::ListRefIter { .. }
+            | PyObject::SetIter { .. }
             | PyObject::DequeIter { .. }
             | PyObject::DequeRevIter { .. }
             | PyObject::DictIter { .. }

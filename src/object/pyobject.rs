@@ -53,6 +53,33 @@ pub enum PyObject {
         list: Vec<PyObjectRef>,
         index: usize,
     },
+    /// Backing for `iter(list)` — a LIVE iterator over the list itself
+    /// (CPython's `list_iterator`), not the snapshot `ListIter` holds.
+    /// `list_iterator` reports `operator.length_hint` from the list's
+    /// CURRENT length minus the index, so a mid-iteration `append` grows
+    /// the hint and a shrinking slice (`d[1:] = []`) drops it to 0
+    /// (test_iterlen's `TestList.test_mutation` /
+    /// `TestListReversed.test_mutation`).
+    ListRefIter {
+        list: PyObjectRef,
+        index: usize,
+        /// Set once iteration has run past the end: CPython's
+        /// `listiter_next` drops its list reference at that point
+        /// (`it_seq = NULL`), so a LATER `list.extend(...)` cannot revive
+        /// the iterator — `operator.length_hint` stays 0 forever
+        /// (test_iterlen's `TestList.test_mutation`).
+        exhausted: bool,
+    },
+    /// Backing for `iter(set)`/`iter(frozenset)` — a LIVE iterator with
+    /// CPython's mutation detection: a set whose SIZE changed raises
+    /// `RuntimeError: Set changed size during iteration` on the next step
+    /// (and `operator.length_hint` drops to 0), instead of silently
+    /// snapshotting the members as a `list_iterator` did.
+    SetIter {
+        set: PyObjectRef,
+        index: usize,
+        start_len: usize,
+    },
     /// Backing for `iter(deque)` — a LIVE iterator over the deque (mutations
     /// are reflected, unlike a snapshot), with CPython's mutation detection:
     /// if the deque's length changes between the iterator's creation and a
@@ -106,6 +133,18 @@ pub enum PyObject {
     GetItemIter {
         obj: PyObjectRef,
         index: i64,
+        /// `reversed(sequence)`: walk the LIVE object from its last index
+        /// down to 0 instead of a forward walk over a copy. CPython's
+        /// `list_reverseiterator` keeps an index into the original list,
+        /// so a later `append` is deliberately NOT picked up and
+        /// `operator.length_hint` tracks the index, not the current length
+        /// (test_iterlen's `TestListReversed.test_mutation` asserts both).
+        reverse: bool,
+        /// Same freeze-at-exhaustion rule as `ListRefIter`: once the walk
+        /// has run off the end (or the sequence shrank past the index), a
+        /// later growth must not make `operator.length_hint` non-zero
+        /// again.
+        exhausted: bool,
     },
     /// Backing for the two-argument `iter(callable, sentinel)` form: real
     /// Python calls `callable()` repeatedly, yielding each result until one
@@ -505,6 +544,8 @@ impl PyObject {
             PyObject::ListIter { .. } => "list_iterator",
             // CPython `type(re.finditer(...))` is `callable_iterator`.
             PyObject::FindIter { .. } => "callable_iterator",
+            PyObject::ListRefIter { .. } => "list_iterator",
+            PyObject::SetIter { .. } => "set_iterator",
             PyObject::DequeIter { .. } => "deque_iterator",
             PyObject::DequeRevIter { .. } => "deque_reverse_iterator",
             PyObject::GetItemIter { .. } => "iterator",

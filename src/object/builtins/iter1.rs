@@ -367,6 +367,8 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             return Ok(PyObjectRef::new(PyObject::GetItemIter {
                 obj: args[0].clone(),
                 index: 0,
+                reverse: false,
+                exhausted: false,
             }));
         }
     }
@@ -433,6 +435,12 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // deeper in its own dependency chain hits a frozenset somewhere in
         // `unicodedata`/locale data) — but the bug is general, not specific
         // to that file.
+        PyObject::Set(s) => Ok(PyObjectRef::new(PyObject::SetIter {
+            set: args[0].clone(),
+            index: 0,
+            start_len: s.len(),
+        })),
+        #[allow(unreachable_patterns)]
         PyObject::Set(s) => Ok(PyObjectRef::new(PyObject::ListIter {
             list: s.to_vec(),
             index: 0,
@@ -446,9 +454,14 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
             stop: stop.clone(),
             step: step.clone(),
         })),
-        PyObject::List(v) => Ok(PyObjectRef::new(PyObject::ListIter {
-            list: v.clone(),
+        // A LIVE iterator over the list (CPython's `list_iterator`): the
+        // snapshot `ListIter` below cannot see mid-iteration mutations, so
+        // `operator.length_hint` and `list(it)` disagreed with CPython
+        // after an append or a shrinking slice (test_iterlen).
+        PyObject::List(_) => Ok(PyObjectRef::new(PyObject::ListRefIter {
+            list: args[0].clone(),
             index: 0,
+            exhausted: false,
         })),
         PyObject::Deque { data, .. } => Ok(PyObjectRef::new(PyObject::DequeIter {
             deque: args[0].clone(),
@@ -522,6 +535,8 @@ pub fn builtin_iter(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         // recognized variants) — `iter(it)` on an existing iterator
         // just returns it unchanged, matching real Python.
         PyObject::ListIter { .. }
+        | PyObject::ListRefIter { .. }
+        | PyObject::SetIter { .. }
         | PyObject::FindIter { .. }
         | PyObject::RangeIter { .. }
         | PyObject::CycleIter { .. }

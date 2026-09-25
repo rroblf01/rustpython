@@ -1093,7 +1093,12 @@ pub fn pickle_deserialize(
             let obj = pickle_deserialize(data, pos, memo)?;
             let index = pickle_deserialize(data, pos, memo)?;
             let idx = index.as_i64().unwrap_or(0);
-            Ok(PyObjectRef::new(PyObject::GetItemIter { obj, index: idx }))
+            Ok(PyObjectRef::new(PyObject::GetItemIter {
+                obj,
+                index: idx,
+                reverse: false,
+                exhausted: false,
+            }))
         }
         b'r' => {
             let current = pickle_deserialize(data, pos, memo)?;

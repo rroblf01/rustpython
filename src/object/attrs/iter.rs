@@ -69,6 +69,122 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                 name
             ))),
         },
+        // `operator.length_hint()` on a `reversed(list)` / getitem
+        // iterator: the number of items left, which for the REVERSE case
+        // follows the walk index (so a later append is deliberately not
+        // counted, matching CPython's list_reverseiterator).
+        PyObject::GetItemIter { .. } if name == "__length_hint__" => {
+            Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                name: "__length_hint__".to_string(),
+                func: |args| {
+                    let obj = args.first().cloned().unwrap_or_else(py_none);
+                    let borrowed = obj.borrow();
+                    let (inner, index, reverse, exhausted) = match &*borrowed {
+                        PyObject::GetItemIter {
+                            obj,
+                            index,
+                            reverse,
+                            exhausted,
+                        } => (obj.clone(), *index, *reverse, *exhausted),
+                        _ => return Ok(py_int(0)),
+                    };
+                    let total = crate::object::builtin_len(std::slice::from_ref(&inner))
+                        .ok()
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    if reverse {
+                        // CPython's listreviter_length_hint also reports 0
+                        // once the list has shrunk past the walk index
+                        // (`d[1:] = []` mid-iteration), and stays 0 after
+                        // that even if the list grows again.
+                        if exhausted || index < 0 || index >= total {
+                            return Ok(py_int(0));
+                        }
+                        return Ok(py_int(index + 1));
+                    }
+                    if exhausted {
+                        return Ok(py_int(0));
+                    }
+                    Ok(py_int((total - index).max(0)))
+                },
+                self_obj: PyObjectRef::new(o.clone()),
+            }))
+        }
+        PyObject::SetIter { .. } if name == "__next__" || name == "__iter__" => {
+            Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                name: name.to_string(),
+                func: if name == "__next__" {
+                    builtin_next
+                } else {
+                    builtin_iter
+                },
+                self_obj: PyObjectRef::new(o.clone()),
+            }))
+        }
+        PyObject::SetIter { .. } if name == "__length_hint__" => {
+            Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                name: "__length_hint__".to_string(),
+                func: |args| {
+                    let obj = args.first().cloned().unwrap_or_else(py_none);
+                    let borrowed = obj.borrow();
+                    match &*borrowed {
+                        PyObject::SetIter {
+                            set,
+                            index,
+                            start_len,
+                        } => {
+                            let current = match &*set.borrow() {
+                                PyObject::Set(s) => s.len(),
+                                _ => 0,
+                            };
+                            if current != *start_len {
+                                return Ok(py_int(0));
+                            }
+                            Ok(py_int((current - index.min(&current)).max(0)))
+                        }
+                        _ => Ok(py_int(0)),
+                    }
+                },
+                self_obj: PyObjectRef::new(o.clone()),
+            }))
+        }
+        PyObject::ListRefIter { .. } if name == "__next__" || name == "__iter__" => {
+            Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                name: name.to_string(),
+                func: if name == "__next__" {
+                    builtin_next
+                } else {
+                    builtin_iter
+                },
+                self_obj: PyObjectRef::new(o.clone()),
+            }))
+        }
+        PyObject::ListRefIter { .. } if name == "__length_hint__" => {
+            Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                name: "__length_hint__".to_string(),
+                func: |args| {
+                    let obj = args.first().cloned().unwrap_or_else(py_none);
+                    let borrowed = obj.borrow();
+                    let (list, index, exhausted) = match &*borrowed {
+                        PyObject::ListRefIter {
+                            list,
+                            index,
+                            exhausted,
+                        } => (list.clone(), *index, *exhausted),
+                        _ => return Ok(py_int(0)),
+                    };
+                    if exhausted {
+                        return Ok(py_int(0));
+                    }
+                    let total = crate::object::builtin_len(std::slice::from_ref(&list))
+                        .ok()
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    Ok(py_int((total - index as i64).max(0)))
+                },
+                self_obj: PyObjectRef::new(o.clone()),
+            }))
+        }
         PyObject::MapIterator { .. }
         | PyObject::FilterIterator { .. }
         | PyObject::ZipIterator { .. }

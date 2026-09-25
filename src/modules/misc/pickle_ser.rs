@@ -177,7 +177,7 @@ pub fn pickle_serialize(
             pickle_serialize(&py_list(list.clone()), buf, memo, protocol)?;
             pickle_serialize(&py_int(*index as i64), buf, memo, protocol)?;
         }
-        PyObject::GetItemIter { obj, index } => {
+        PyObject::GetItemIter { obj, index, .. } => {
             buf.push(b'g');
             pickle_serialize(obj, buf, memo, protocol)?;
             pickle_serialize(&py_int(*index as i64), buf, memo, protocol)?;

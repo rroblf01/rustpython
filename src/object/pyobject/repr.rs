@@ -199,8 +199,11 @@ impl PyObject {
                 }
             }
             PyObject::RangeIter { .. } => "<range_iterator object>".to_string(),
-            PyObject::ListIter { .. } => "<list_iterator object>".to_string(),
+            PyObject::ListIter { .. } | PyObject::ListRefIter { .. } => {
+                "<list_iterator object>".to_string()
+            }
             PyObject::FindIter { .. } => "<callable_iterator object>".to_string(),
+            PyObject::SetIter { .. } => "<set_iterator object>".to_string(),
             PyObject::DequeIter { .. } => "<deque_iterator object>".to_string(),
             PyObject::DequeRevIter { .. } => "<deque_reverse_iterator object>".to_string(),
             PyObject::DictIter { .. } => "<dict_keyiterator object>".to_string(),

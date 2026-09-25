@@ -212,8 +212,14 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     // held, then a second short borrow to write the new index back.
     let getitem_state = {
         let obj = args[0].borrow();
-        if let PyObject::GetItemIter { obj: inner, index } = &*obj {
-            Some((inner.clone(), *index))
+        if let PyObject::GetItemIter {
+            obj: inner,
+            index,
+            reverse,
+            exhausted,
+        } = &*obj
+        {
+            Some((inner.clone(), *index, *reverse, *exhausted))
         } else {
             None
         }
@@ -253,12 +259,101 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         }
         return Ok(result);
     }
-    if let Some((inner, index)) = getitem_state {
+    // Set iterator: CPython raises as soon as the set's SIZE differs from
+    // the size recorded when iteration started.
+    let set_iter_state = {
+        let obj = args[0].borrow();
+        match &*obj {
+            PyObject::SetIter {
+                set,
+                index,
+                start_len,
+            } => Some((set.clone(), *index, *start_len)),
+            _ => None,
+        }
+    };
+    if let Some((set, index, start_len)) = set_iter_state {
+        let current_len = {
+            let borrowed = set.borrow();
+            match &*borrowed {
+                PyObject::Set(s) => s.len(),
+                _ => 0,
+            }
+        };
+        if current_len != start_len {
+            return Err(PyError::runtime_error("Set changed size during iteration"));
+        }
+        let item = {
+            let borrowed = set.borrow();
+            match &*borrowed {
+                PyObject::Set(s) => s.iter().nth(index).cloned(),
+                _ => None,
+            }
+        };
+        return match item {
+            Some(v) => {
+                let mut obj = args[0].borrow_mut();
+                if let PyObject::SetIter { index, .. } = &mut *obj {
+                    *index += 1;
+                }
+                Ok(v)
+            }
+            None => Err(PyError::stop_iteration()),
+        };
+    }
+    // Live list iterator: read `list[index]` straight from the list, so
+    // appends/shrinks during iteration are seen (CPython's list_iterator).
+    let list_ref_state = {
+        let obj = args[0].borrow();
+        match &*obj {
+            PyObject::ListRefIter {
+                list,
+                index,
+                exhausted,
+            } => Some((list.clone(), *index, *exhausted)),
+            _ => None,
+        }
+    };
+    if let Some((list, index, exhausted)) = list_ref_state {
+        if exhausted {
+            return Err(PyError::stop_iteration());
+        }
+        let item = {
+            let borrowed = list.borrow();
+            match &*borrowed {
+                PyObject::List(items) => items.get(index).cloned(),
+                _ => None,
+            }
+        };
+        return match item {
+            Some(v) => {
+                let mut obj = args[0].borrow_mut();
+                if let PyObject::ListRefIter { index, .. } = &mut *obj {
+                    *index += 1;
+                }
+                Ok(v)
+            }
+            None => {
+                // Exhausted for good — freeze the iterator.
+                let mut obj = args[0].borrow_mut();
+                if let PyObject::ListRefIter { exhausted, .. } = &mut *obj {
+                    *exhausted = true;
+                }
+                Err(PyError::stop_iteration())
+            }
+        };
+    }
+    if let Some((inner, index, reverse, exhausted)) = getitem_state {
+        // `reversed(seq)`: walk DOWN from the last index, stopping as soon
+        // as it goes below 0 (CPython's list_reverseiterator).
+        if exhausted || (reverse && index < 0) {
+            return Err(PyError::stop_iteration());
+        }
         return match py_getitem(&inner, &py_int(index)) {
             Ok(v) => {
                 let mut obj = args[0].borrow_mut();
                 if let PyObject::GetItemIter { index, .. } = &mut *obj {
-                    *index += 1;
+                    *index += if reverse { -1 } else { 1 };
                 }
                 Ok(v)
             }
@@ -280,8 +375,15 @@ pub fn builtin_next(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 // the new item — the difference is that `exhit` has already
                 // attempted and failed at that index, while `empit` hasn't).
                 let mut obj = args[0].borrow_mut();
-                if let PyObject::GetItemIter { index, .. } = &mut *obj {
+                if let PyObject::GetItemIter {
+                    index, exhausted, ..
+                } = &mut *obj
+                {
                     *index += 1;
+                    // Ran off the end for good: freeze, so a later append
+                    // cannot make the hint non-zero again (the `reversed`
+                    // variant of the same rule, which walks down).
+                    *exhausted = true;
                 }
                 drop(obj);
                 if args.len() >= 2 {
@@ -807,15 +909,18 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         let obj = args[0].borrow();
         return match &*obj {
             PyObject::List(v) => {
-                let mut rev = v.clone();
-                rev.reverse();
-                // A GetItemIter (no __len__), NOT a ListIter: real CPython's
-                // reversed-list iterator has no `__len__`, so
-                // `len(reversed([1,2,3]))` must raise TypeError
-                // (test_list::test_reversed).
+                // A GetItemIter over the LIVE list (no __len__, so
+                // `len(reversed([1,2,3]))` still raises TypeError per
+                // test_list::test_reversed), walking DOWN from the last
+                // index: a later append is not picked up and
+                // `operator.length_hint` follows the index, matching
+                // CPython's list_reverseiterator (test_iterlen).
+                let last = v.len() as i64 - 1;
                 Ok(PyObjectRef::new(PyObject::GetItemIter {
-                    obj: PyObjectRef::new(PyObject::List(rev)),
-                    index: 0,
+                    obj: args[0].clone(),
+                    index: last,
+                    reverse: true,
+                    exhausted: false,
                 }))
             }
             PyObject::Tuple(v) => {
@@ -860,11 +965,12 @@ pub fn builtin_reversed(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
                 let nb = native.borrow();
                 return match &*nb {
                     PyObject::List(v) => {
-                        let mut rev = v.clone();
-                        rev.reverse();
+                        let last = v.len() as i64 - 1;
                         Ok(PyObjectRef::new(PyObject::GetItemIter {
-                            obj: PyObjectRef::new(PyObject::List(rev)),
-                            index: 0,
+                            obj: PyObjectRef::new(PyObject::List(v.clone())),
+                            index: last,
+                            reverse: true,
+                            exhausted: false,
                         }))
                     }
                     PyObject::Tuple(v) => {
