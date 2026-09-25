@@ -257,6 +257,16 @@ fn sock_recv_bytes(socket: &PyObjectRef, bufsize: usize) -> PyResult<Vec<u8>> {
                     ))
                 }
                 SockMode::Blocking => {
+                    // Threads here are COOPERATIVE, so a blocking wait has to
+                    // hand the scheduler a turn — and when THIS body is
+                    // itself running inside a drain with nothing else queued,
+                    // spinning would wedge the whole interpreter (nobody is
+                    // left who could make the data arrive). Unwind instead:
+                    // that ends this thread's body and returns control to
+                    // whoever called the drain. Same escape `select()` uses.
+                    if crate::modules::coop_blocked_forever() {
+                        return Err(PyError::StopIteration);
+                    }
                     crate::modules::coop_threads_drain();
                     std::thread::sleep(std::time::Duration::from_millis(1));
                     continue;
@@ -362,6 +372,9 @@ fn sock_write_bytes(socket: &PyObjectRef, data: &[u8], all: bool) -> PyResult<i6
                     ))
                 }
                 SockMode::Blocking => {
+                    if crate::modules::coop_blocked_forever() {
+                        return Err(PyError::StopIteration);
+                    }
                     // Same cooperative yield as the read path.
                     crate::modules::coop_threads_drain();
                     std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1112,6 +1125,17 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     match result {
                                         Ok((stream, addr)) => {
                                             *inner = SocketInner::TcpListener(listener);
+                                            // An accepted stream INHERITS the
+                                            // listener's O_NONBLOCK on Linux,
+                                            // which would leave it spinning
+                                            // through the blocking retry loop
+                                            // (and, inside a drained thread
+                                            // body, unwinding it as if it were
+                                            // a real BlockingIOError). CPython
+                                            // sockets are blocking until
+                                            // setblocking/settimeout says
+                                            // otherwise, so normalize here.
+                                            let _ = stream.set_nonblocking(false);
                                             let client = PyObjectRef::new(PyObject::Socket {
                                                 inner: std::rc::Rc::new(std::cell::RefCell::new(
                                                     SocketInner::TcpStream(stream),
@@ -1120,6 +1144,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                                 type_,
                                                 proto,
                                             });
+                                            set_sock_mode(&client, SockMode::Blocking);
                                             // Real `accept()` returns
                                             // `(host, port)`, not a
                                             // string — same fix as
@@ -1156,6 +1181,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                     match result {
                                         Ok((stream, addr)) => {
                                             *inner = SocketInner::UnixListener(listener);
+                                            let _ = stream.set_nonblocking(false);
                                             let client = PyObjectRef::new(PyObject::Socket {
                                                 inner: Rc::new(std::cell::RefCell::new(
                                                     SocketInner::UnixStream(stream),
@@ -1164,6 +1190,7 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                                 type_,
                                                 proto,
                                             });
+                                            set_sock_mode(&client, SockMode::Blocking);
                                             // AF_UNIX's accept() returns a
                                             // bare path (often empty for an
                                             // unnamed peer), not a tuple.
