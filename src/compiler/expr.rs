@@ -5,7 +5,22 @@ use crate::ast::*;
 use crate::bytecode::*;
 
 impl Compiler {
+    /// Compile one expression. The node's own source span is made current
+    /// while its instructions are emitted (PEP 657 / `co_positions()`),
+    /// then the ENCLOSING expression's span is restored — so an operation
+    /// emitted after its operands (the `CALL` of `f(x)`, the `BINARY_OP`
+    /// of `a + b`) is attributed to the whole expression, exactly as
+    /// CPython's position table does, instead of to its last operand.
     pub(crate) fn compile_expr(&mut self, expr: &Expr) -> Result<(), String> {
+        let outer = (self.current_col, self.current_end_col);
+        self.set_expr_position(expr.position());
+        let result = self.compile_expr_inner(expr);
+        self.current_col = outer.0;
+        self.current_end_col = outer.1;
+        result
+    }
+
+    fn compile_expr_inner(&mut self, expr: &Expr) -> Result<(), String> {
         match expr.unlocate() {
             Expr::Located { .. } => unreachable!("peeled via unlocate"),
             Expr::Constant(c) => {

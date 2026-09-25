@@ -44,7 +44,14 @@ impl VirtualMachine {
             // which instead goes through RAISE_VARARGS's own now-fixed
             // assignment) — exactly the same bug, just a second, separate
             // site that produced it for a different class of raise.
-            let exc_obj = Self::error_to_exc_obj(e);
+            // Reuse the object the propagation created (see the
+            // `propagating_obj` note in the unwinding branch below), so the
+            // exception a caller sees is the very one that accumulated the
+            // traceback chain.
+            let exc_obj = match &self.propagating_obj {
+                Some(obj) => obj.clone(),
+                None => Self::error_to_exc_obj(e),
+            };
             self.exc_type = Some(self.exception_class_of(&exc_obj));
             self.exc_value = Some(exc_obj);
         }
@@ -158,7 +165,14 @@ impl VirtualMachine {
             // which instead goes through RAISE_VARARGS's own now-fixed
             // assignment) — exactly the same bug, just a second, separate
             // site that produced it for a different class of raise.
-            let exc_obj = Self::error_to_exc_obj(e);
+            // Reuse the object the propagation created (see the
+            // `propagating_obj` note in the unwinding branch below), so the
+            // exception a caller sees is the very one that accumulated the
+            // traceback chain.
+            let exc_obj = match &self.propagating_obj {
+                Some(obj) => obj.clone(),
+                None => Self::error_to_exc_obj(e),
+            };
             self.exc_type = Some(self.exception_class_of(&exc_obj));
             self.exc_value = Some(exc_obj);
         }
@@ -214,7 +228,22 @@ impl VirtualMachine {
                                 crate::interner::lookup_str(f.code.filename).to_string(),
                                 crate::interner::lookup_str(f.code.name).to_string(),
                             );
-                            let exc_obj = Self::error_to_exc_obj(&e);
+                            // The exception OBJECT is created ONCE per
+                            // propagation and reused by every enclosing
+                            // level: `error_to_exc_obj` synthesizes a FRESH
+                            // object for builtin errors (`1/0`,
+                            // AttributeError, ...), so re-deriving it per
+                            // frame made each frame prepend its traceback
+                            // node to a different object and left every
+                            // traceback chain a single frame long.
+                            let exc_obj = match &self.propagating_obj {
+                                Some(obj) => obj.clone(),
+                                None => {
+                                    let obj = Self::error_to_exc_obj(&e);
+                                    self.propagating_obj = Some(obj.clone());
+                                    obj
+                                }
+                            };
                             let frame_idx = frame_floor;
                             drop(f);
                             self.prepend_traceback(&exc_obj, frame_idx);

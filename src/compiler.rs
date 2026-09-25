@@ -57,6 +57,13 @@ pub struct Compiler {
     // it's a class body (methods don't get a `<locals>` segment).
     qual_stack: Vec<(String, bool)>,
     current_line: usize,
+    /// Source span of the expression currently being compiled, in the
+    /// compiler's 1-based CHARACTER columns; recorded per instruction so
+    /// `code.co_positions()` (PEP 657) can report real column offsets —
+    /// `traceback`'s `~~~^^^` markers and test_with/test_dictcomps'
+    /// `FrameSummary.colno/end_colno` assertions read them.
+    current_col: usize,
+    current_end_col: usize,
     // Whether `__annotations__` has already been created (via BUILD_MAP +
     // STORE_NAME) in the CURRENT module/class scope — reset per scope like
     // `current_line`. Only consulted for `Stmt::AnnAssign` at Module/
@@ -96,6 +103,8 @@ impl Compiler {
             class_name_stack: Vec::new(),
             qual_stack: Vec::new(),
             current_line: 1,
+            current_col: 0,
+            current_end_col: 0,
             /// `compile()`'s `optimize` level: >= 1 strips docstrings and
             /// makes `__debug__` False (and drops `assert` statements), as
             /// CPython's optimizer does (test_builtin's `test_compile`).
@@ -362,11 +371,27 @@ impl Compiler {
     fn emit(&mut self, op: Opcode, arg: u32) {
         let instr = Instr::with_arg(op, arg);
         self.code.line_numbers.push(self.current_line as u32);
+        // 1-based -> 0-based; `(0, 0)` is the "no span" marker that
+        // `co_positions()` reports as None/None.
+        self.code.col_offsets.push((
+            self.current_col.saturating_sub(1) as u32,
+            self.current_end_col.saturating_sub(1) as u32,
+        ));
         self.code.instructions.push(instr);
     }
 
     fn set_line(&mut self, line: usize) {
         self.current_line = line;
+    }
+
+    /// Record the source span of the expression about to be compiled.
+    pub(crate) fn set_expr_position(&mut self, pos: Option<(usize, usize, usize, usize)>) {
+        if let Some((_line, col, _end_line, end_col)) = pos {
+            if col > 0 {
+                self.current_col = col;
+                self.current_end_col = end_col;
+            }
+        }
     }
 
     fn new_label(&mut self) -> usize {

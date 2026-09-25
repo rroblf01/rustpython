@@ -176,6 +176,7 @@ impl VirtualMachine {
                 exc_traceback: None,
                 exc_context_stack: Vec::new(),
                 propagating_exc: None,
+                propagating_obj: None,
                 recursion_limit: 1000,
                 exec_globals_cache: HashMap::new(),
             };
@@ -573,6 +574,7 @@ impl VirtualMachine {
             exc_value: None,
             exc_traceback: None,
             exc_context_stack: Vec::new(),
+            propagating_obj: None,
             propagating_exc: None,
             recursion_limit: 1000,
             exec_globals_cache: HashMap::new(),

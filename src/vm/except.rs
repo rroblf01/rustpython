@@ -357,7 +357,13 @@ impl VirtualMachine {
                 .ip
                 .saturating_sub(1)
                 .min(frame.code.instructions.len().saturating_sub(1));
-            (frame.code.line_number(idx) as i64, idx as i64)
+            // `tb_lasti` is a BYTE offset in CPython, and
+            // `traceback._get_code_position` converts it with
+            // `instruction_index // 2`; this codebase's `lasti` is an
+            // instruction INDEX, so scale it to the byte convention or
+            // every `co_positions()` lookup lands on the wrong
+            // instruction (and with it the whole colno/end_colno span).
+            (frame.code.line_number(idx) as i64, (idx as i64) * 2)
         };
         let frame_obj = self.frame_object(frame_idx)?;
         // Prefer the real `types` module, but it's only registered in
@@ -524,7 +530,13 @@ impl VirtualMachine {
         // statement produced it). Done before the loop because it borrows all
         // of `&mut self` (method call), which cannot coexist with the
         // per-frame mutable borrow in the loop.
-        let exc_obj = Self::error_to_exc_obj(error);
+        // Reuse the object the propagation built (so the traceback chain
+        // accumulated by the unwinding frames is the one the handler sees);
+        // a fresh synthesis here would start an empty chain.
+        let exc_obj = match &self.propagating_obj {
+            Some(obj) => obj.clone(),
+            None => Self::error_to_exc_obj(error),
+        };
         self.capture_exception_context(&exc_obj);
         // Set the current exception info so `sys.exc_info()` inside the
         // handler returns the REAL caught exception (type, value, and the

@@ -51,6 +51,13 @@ pub struct VirtualMachine {
     /// The most recently raised exception still propagating (cleared when it
     /// is caught by a handler — PUSH_EXC_INFO resets it — or replaced).
     pub propagating_exc: Option<PyObjectRef>,
+    /// The exception OBJECT currently propagating outward (created once per
+    /// propagation). Every frame the exception unwinds through prepends ITS
+    /// traceback node to this same object — deriving a fresh object per frame
+    /// (as `error_to_exc_obj` does for synthesized errors like `1/0`) left
+    /// every traceback chain a single frame long. Cleared when a handler
+    /// catches the exception.
+    pub propagating_obj: Option<PyObjectRef>,
     /// `sys.getrecursionlimit()`/`setrecursionlimit()` — consulted by
     /// `call_function`'s own `self.frames.len()` depth guard (see there for
     /// why this exists at all). Real trigger: CPython's own `test.support.

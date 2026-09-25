@@ -828,21 +828,33 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     let lines = c.line_numbers.clone();
                     let entries: Vec<PyObjectRef> = lines
                         .iter()
-                        .map(|line| {
+                        .enumerate()
+                        .map(|(idx, line)| {
                             let line_value = if *line == 0 {
                                 py_none()
                             } else {
                                 py_int(*line as i64)
                             };
-                            // Columns are 0 rather than None: real
-                            // `traceback` does column arithmetic on the
-                            // tuple it gets back (`end_col_offset -
-                            // col_offset`) when building its PEP 657
-                            // carets, and `None` made that raise
-                            // `TypeError: unsupported operand type(s) for
-                            // -: 'NoneType' and 'int'`. A zero-width span
-                            // simply renders no marker.
-                            py_tuple(vec![line_value.clone(), line_value, py_int(0), py_int(0)])
+                            // Real spans come from the compiler's
+                            // per-instruction table; `(0, 0)` is its
+                            // "unknown" marker, which CPython reports as
+                            // None/None (jumps, RESUME, synthesized code).
+                            let (col, end_col) = c
+                                .col_offsets
+                                .get(idx)
+                                .copied()
+                                .unwrap_or((0, 0));
+                            let (col_value, end_col_value) = if col == 0 && end_col == 0 {
+                                (py_none(), py_none())
+                            } else {
+                                (py_int(col as i64), py_int(end_col as i64))
+                            };
+                            py_tuple(vec![
+                                line_value.clone(),
+                                line_value,
+                                col_value,
+                                end_col_value,
+                            ])
                         })
                         .collect();
                     // A `BuiltinMethod`'s `func` must be a plain fn

@@ -543,6 +543,12 @@ pub struct CodeObject {
     /// Line number for each instruction (0 = unknown).
     /// Same length as `instructions`; stored separately so Instr stays 8 bytes.
     pub line_numbers: Vec<u32>,
+    /// Per-instruction `(col_offset, end_col_offset)`, 0-based, in the
+    /// same order as `line_numbers` — PEP 657's `co_positions()` data.
+    /// `(0, 0)` means "no span known" (jumps, RESUME, compiler-synthesized
+    /// code), which `co_positions()` reports as `None`/`None` like
+    /// CPython.
+    pub col_offsets: Vec<(u32, u32)>,
     /// Compile-time-computed `__qualname__` (e.g. `Outer.<locals>.inner` or
     /// `MyClass.method`), distinct from `name` (the bare `__name__`). Falls
     /// back to `name`'s text for code objects the compiler didn't bother
@@ -605,6 +611,7 @@ impl CodeObject {
             kwonly_defaults_mask: Box::new(Vec::new()),
             const_cache: RefCell::new(Vec::new()),
             line_numbers: Vec::new(),
+            col_offsets: Vec::new(),
         }
     }
 
@@ -797,6 +804,7 @@ impl CodeObject {
             num_defaults,
             kwonly_defaults_mask,
             const_cache: RefCell::new(Vec::new()),
+            col_offsets: vec![(0u32, 0u32); line_numbers.len()],
             line_numbers,
         })
     }

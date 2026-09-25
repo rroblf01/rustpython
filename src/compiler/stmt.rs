@@ -861,16 +861,24 @@ impl Compiler {
                 }
             }
             Stmt::Raise { exc, cause } => {
+                // The RAISE itself is attributed to the raised expression's
+                // span (`raise ValueError("x")` -> the whole call), which
+                // is what a traceback frame for that line reports as
+                // `colno`/`end_colno` (test_with's testExceptionLocation).
                 if let Some(cause) = cause {
                     if let Some(exc) = exc {
+                        let span = exc.position();
                         self.compile_expr(exc)?;
                         self.compile_expr(cause)?;
+                        self.set_expr_position(span);
                     } else {
                         return Err("Cannot raise with cause but no exception".to_string());
                     }
                     self.emit(Opcode::RAISE_VARARGS, 2);
                 } else if let Some(exc) = exc {
+                    let span = exc.position();
                     self.compile_expr(exc)?;
+                    self.set_expr_position(span);
                     self.emit(Opcode::RAISE_VARARGS, 1);
                 } else {
                     self.emit(Opcode::RAISE_VARARGS, 0);

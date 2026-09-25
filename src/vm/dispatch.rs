@@ -213,6 +213,10 @@ impl VirtualMachine {
                         }
                         self.exc_context_stack.push((exc, value_depth));
                         self.propagating_exc = None;
+                        // The exception is now HANDLED: a later, unrelated
+                        // propagation must build its own object instead of
+                        // appending frames to this one's traceback.
+                        self.propagating_obj = None;
                     }
                 } else if let Ok(exc) = self.frames[fi].peek(0) {
                     self.frames[fi].active_exception = Some(Box::new(exc));
