@@ -533,10 +533,7 @@ impl VirtualMachine {
         // Reuse the object the propagation built (so the traceback chain
         // accumulated by the unwinding frames is the one the handler sees);
         // a fresh synthesis here would start an empty chain.
-        let exc_obj = match &self.propagating_obj {
-            Some(obj) => obj.clone(),
-            None => Self::error_to_exc_obj(error),
-        };
+        let exc_obj = Self::error_to_exc_obj(error);
         self.capture_exception_context(&exc_obj);
         // Set the current exception info so `sys.exc_info()` inside the
         // handler returns the REAL caught exception (type, value, and the
