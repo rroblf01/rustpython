@@ -3,6 +3,43 @@
 Last updated: August 30, 2026 (previous version dated August 29 — see `CLAUDE.md` for the current
 architecture and the `cpython_test_suite_compat` memory topic for the full batch-by-batch history).
 
+**2026-09-25 session (networking cluster)**: the `ssl` module gained a real `SSLSocket` (a
+socket-shaped wrapper — every socket call forwards to the wrapped socket), a real `SSLContext`
+type, the CPython context factories the stdlib calls (`_create_stdlib_context` and friends) and
+the `_SSLMethod`/`TLSVersion`/`Purpose` enums with CPython's values and member semantics
+(`src/modules/ssl_socket.py`). Without the class, `ftplib`/`poplib`/`smtplib`/`urllib.request`
+all failed at import, since each does `isinstance(conn, ssl.SSLSocket)`.
+
+That exposed the next layer: the native socket model could not carry a single protocol exchange.
+`send()` stringified its payload (binary went out as the literal string `<binary>`), `recv()`
+returned `str`, `makefile()` returned a `/dev/null`-backed file (so every stdlib client read an
+immediate EOF), and `sendall`/`getsockopt`/`recv_into`/`shutdown`/`connect_ex`/`dup` did not
+exist. All of that is now real — bytes in/bytes out, CPython's blocking/non-blocking/timeout
+modes, and a genuine socket-backed file object (`read`/`readline`/`read1`/`readinto`/`write`/
+iteration/text decoding). AF_UNIX now works too (`std::os::unix::net`), which is what
+`socketpair(AF_UNIX)` — how essentially the whole stdlib creates a socket pair — actually needs;
+the loopback-TCP emulation it used to fall back to cannot express a filesystem path at all.
+
+With a working socket, the vendored-stdlib reductions around it became the blocker:
+`Lib/http/client.py` was a stub whose `request()` never opened a socket, and
+`Lib/urllib/request.py` had no handlers at all (no `HTTPHandler`, `HTTPSHandler`,
+`build_opener`). Both, plus `urllib/error.py`, are now CPython's own files, and the native
+`http`/`http.client` modules are no longer registered so the real ones load. Also fixed:
+`posixpath.splitroot('/')` panicked (and aborted the process) on the empty remainder;
+`io.StringIO`/`io.BytesIO` were factory closures rather than types, so the ubiquitous
+`class MockResponse(io.StringIO)` died; and `del obj.attr` treated "the type dict has an entry
+for this name" as "that entry is a property", which made importing `email.policy` (and with it
+`smtplib`, `http.server`, `urllib`) fail outright.
+
+Sweep after the batch: **138 / 398 pass** (69 SKIP, 172 FAIL, 19 TIMEOUT), 515 fewer failing
+subtests than the previous sweep and zero real regressions (the one PASS->FAIL delta,
+`test_tuple`, is one of the known load-dependent ±1 flakes). The 5 newly-timing-out files
+(`test_httplib`, `test_socket`, `test_ftplib`, `test_xmlrpc`, `test_docxmlrpc`) are the
+"server thread loops on accept(), client reads" shape: this interpreter's threads are
+cooperative, so a thread body that blocks can never be resumed — the structural wall behind the
+53 thread-dependent files. They used to abort early instead, so they cost runner time now, not
+correctness.
+
 **2026-08-30 session**: fixed a real compiler bug found via a chain of investigation starting from
 `doctest.py` never scanning a module's `__test__` dict (so any file registering doctests that way —
 `test_descrtut`, `test_setcomps`, `test_unpack`, `test_generators`, ...  — silently ran ZERO of
