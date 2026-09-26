@@ -610,3 +610,19 @@ pub fn clear_cloexec(fd: i32) -> bool {
         (flags as i32 & !(FD_CLOEXEC as i32)) as i64,
     ) >= 0
 }
+
+/// `kill(2)`: the real signal delivery behind `os.kill`.
+///
+/// `pid > 0` signals that process, `0` our own process group, `-1` every
+/// process we may signal, and any other negative value the process group
+/// `-pid`.
+///
+/// This was a silent no-op for every pid except our own (where it only ran
+/// a Python-level handler), so `Popen.kill()`/`terminate()` did nothing and
+/// `subprocess.run(..., timeout=…)` sat in the follow-up `wait()` until the
+/// child finished on its own instead of dying immediately.
+pub fn raw_kill(pid: i64, signum: i64) -> PyResult<()> {
+    // SAFETY: `kill` takes two plain scalars.
+    let ret = unsafe { raw::call(62, pid, signum, 0, 0, 0, 0) };
+    check(ret).map(|_| ())
+}

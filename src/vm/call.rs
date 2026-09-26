@@ -1077,8 +1077,22 @@ impl VirtualMachine {
                 let signum = args[1]
                     .as_i64()
                     .ok_or_else(|| PyError::type_error("signalnum must be an int"))?;
-                if pid == std::process::id() as i64 {
+                // A Python-level handler for THIS process runs first and
+                // consumes the signal, exactly as CPython does; anything
+                // else (a child, a process group, another process) — and a
+                // signal with no handler installed — is delivered by the
+                // kernel. Without the real `kill(2)` this was a silent no-op
+                // for every pid but our own, so `Popen.kill()` did nothing
+                // and `subprocess.run(..., timeout=…)` blocked in the
+                // follow-up `wait()` until the child ended by itself.
+                let handler_ran = if pid == std::process::id() as i64 || pid == 0 {
                     crate::modules::invoke_signal_handler_impl(self, signum)?;
+                    crate::modules::has_python_signal_handler(signum)
+                } else {
+                    false
+                };
+                if !handler_ran {
+                    crate::modules::os_raw_kill(pid, signum)?;
                 }
                 return Ok(Some(py_none()));
             }

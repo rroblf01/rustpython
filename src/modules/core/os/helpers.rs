@@ -94,9 +94,24 @@ pub fn os_kill_builtin(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
     let signum = args[1]
         .as_i64()
         .ok_or_else(|| PyError::type_error("sig must be an int"))?;
-    if pid == std::process::id() as i64 {
-        crate::object::with_vm_mut(|vm| crate::modules::invoke_signal_handler_impl(vm, signum))??;
+    // CPython runs a Python-level handler for a signal aimed at THIS process
+    // and only falls through to the default disposition when none is
+    // installed; everything else (a child, a process group, another user) is
+    // delivered by the kernel.
+    let handler_ran = if pid == std::process::id() as i64 || pid == 0 {
+        match crate::object::with_vm_mut(|vm| {
+            crate::modules::invoke_signal_handler_impl(vm, signum)
+        }) {
+            Ok(Ok(obj)) => !matches!(&*obj.borrow(), PyObject::None),
+            _ => false,
+        }
+    } else {
+        false
+    };
+    if handler_ran {
+        return Ok(py_none());
     }
+    crate::modules::os::fd_ops::raw_kill(pid, signum)?;
     Ok(py_none())
 }
 

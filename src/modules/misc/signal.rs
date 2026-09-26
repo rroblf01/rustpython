@@ -23,6 +23,19 @@ fn signal_handlers(
 /// nothing if no handler is registered, or if the stored value is one of
 /// the `SIG_DFL`/`SIG_IGN` int sentinels rather than a real callable —
 /// matches `signal.signal()`'s own default/ignore semantics.
+/// Is a Python-level handler installed for `signum`? A signal aimed at this
+/// process with one installed is CONSUMED by it (CPython runs the handler and
+/// does not apply the default disposition); without one the real signal must
+/// be delivered so the default action (terminate, core dump, …) happens.
+pub(crate) fn has_python_signal_handler(signum: i64) -> bool {
+    SIGNAL_HANDLERS.with(|h| {
+        h.borrow()
+            .get(&signum)
+            .map(|handler| !matches!(&*handler.borrow(), PyObject::Int(_)))
+            .unwrap_or(false)
+    })
+}
+
 pub(crate) fn invoke_signal_handler_impl(
     vm: &mut crate::vm::VirtualMachine,
     signum: i64,

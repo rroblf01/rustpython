@@ -20,6 +20,9 @@ pub use extra::*;
 pub use importlib::*;
 pub use math::*;
 pub use operator::*;
+/// Real `kill(2)`, used by `os.kill` and by the VM's call-time
+/// special case for it (see `vm/call.rs`).
+pub use os::fd_ops::raw_kill as os_raw_kill;
 pub use os::*;
 
 /// `subprocess`'s `pass_fds` support: clear `FD_CLOEXEC` in the child.
