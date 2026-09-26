@@ -54,6 +54,25 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                 },
                 self_obj: PyObjectRef::new(o.clone()),
             })),
+            // `os.scandir()` returns one of these, and every caller in the
+            // stdlib writes `with os.scandir(path) as it:` — without these
+            // three the whole block raised "object does not support the
+            // context manager protocol".
+            "close" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                name: "close".to_string(),
+                func: |_args| Ok(py_none()),
+                self_obj: PyObjectRef::new(o.clone()),
+            })),
+            "__enter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                name: "__enter__".to_string(),
+                func: |args| Ok(args.first().cloned().unwrap_or_else(py_none)),
+                self_obj: PyObjectRef::new(o.clone()),
+            })),
+            "__exit__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                name: "__exit__".to_string(),
+                func: |_args| Ok(py_bool(false)),
+                self_obj: PyObjectRef::new(o.clone()),
+            })),
             "__setstate__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
                 name: "__setstate__".to_string(),
                 func: crate::object::builtins::list_iter_setstate,

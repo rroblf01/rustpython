@@ -100,7 +100,17 @@ impl VirtualMachine {
                     if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                         if let Some(mod_dict) = dict.get_str("modules") {
                             if let PyObject::Dict(d) = &*mod_dict.borrow() {
-                                return d.get(&crate::object::py_str(name)).ok().flatten();
+                                let entry = d.get(&crate::object::py_str(name)).ok().flatten()?;
+                                // `sys.modules[x] = None` is CPython's marker
+                                // for "this import failed / is blocked"
+                                // (`test.support.import_helper`'s `blocked=`
+                                // relies on it), so only a real module object
+                                // counts as imported — handing the `None`
+                                // back made `from _heapq import *` fail with
+                                // "IMPORT_STAR on non-module" instead of the
+                                // ImportError the stdlib catches.
+                                let is_module = matches!(&*entry.borrow(), PyObject::Module { .. });
+                                return if is_module { Some(entry) } else { None };
                             }
                         }
                     }

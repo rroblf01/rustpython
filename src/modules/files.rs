@@ -777,7 +777,17 @@ pub fn create_pathlib_dict() -> HashMap<String, PyObjectRef> {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.is_dir() {
+                    // `**` does NOT follow symlinks (CPython 3.13+'s
+                    // `_Globber` has `recurse_symlinks=False` by default).
+                    // `Path::is_dir()` follows them, so a symlink pointing at
+                    // an ancestor made `Path.glob('**/*')` walk the cycle
+                    // forever — `test_tarfile`'s extraction tests build
+                    // exactly such a loop on purpose and hung the whole file.
+                    let real_dir = entry
+                        .file_type()
+                        .map(|t| t.is_dir())
+                        .unwrap_or_else(|_| path.is_dir());
+                    if real_dir {
                         walk_glob_parts(&path, parts, out);
                     }
                 }
