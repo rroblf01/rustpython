@@ -252,8 +252,19 @@ pub(crate) fn register_native_modules(
     let re_dict = create_re_dict();
     modules.insert_str("re", create_module("re", re_dict));
 
-    let subprocess_dict = create_subprocess_dict();
-    modules.insert_str("subprocess", create_module("subprocess", subprocess_dict));
+    // `_posixsubprocess` — the spawn primitive CPython's `subprocess.py`
+    // imports at module scope; without it the vendored (byte-identical)
+    // `Lib/subprocess.py` cannot even be imported.
+    modules.insert_str(
+        "_posixsubprocess",
+        create_module("_posixsubprocess", create_posixsubprocess_dict()),
+    );
+
+    // `subprocess` is NOT registered natively: the vendored CPython
+    // `Lib/subprocess.py` is byte-identical to upstream, so the real
+    // `Popen`/`run`/`communicate` semantics (and CPython's own error
+    // messages) apply. The NATIVE pieces it builds on stay registered:
+    // `_posixsubprocess`-free `select`, and the `os` module below.
 
     // Native pickle module (basic stub)
     modules.insert_str("_pickle", create_module("_pickle", create_pickle_dict()));

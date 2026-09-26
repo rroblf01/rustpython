@@ -10,7 +10,8 @@ mod extra;
 mod importlib;
 mod math;
 mod operator;
-mod os;
+pub mod os;
+pub mod posixsubprocess;
 mod sys;
 
 pub use builtins::*;
@@ -20,4 +21,8 @@ pub use importlib::*;
 pub use math::*;
 pub use operator::*;
 pub use os::*;
+
+/// `subprocess`'s `pass_fds` support: clear `FD_CLOEXEC` in the child.
+pub use os::fd_ops::clear_cloexec as os_fd_clear_cloexec;
+pub use posixsubprocess::*;
 pub use sys::*;

@@ -225,7 +225,13 @@ impl PyObject {
             | PyObject::ZipIterator { .. }
             | PyObject::CycleIter { .. }
             | PyObject::GroupByIter { .. }
-            | PyObject::Socket { .. } => Ok(self as *const PyObject as usize),
+            | PyObject::Socket { .. }
+            // A file object is hashable in CPython (identity hash), and real
+            // code puts them in dicts: `subprocess.Popen._fileobj2output` is
+            // keyed by the `self.stdin`/`stdout`/`stderr` file objects, so
+            // `Popen.communicate()` raised "cannot use 'file' as a dict key
+            // (unhashable type: 'file')" for EVERY captured subprocess.
+            | PyObject::File { .. } => Ok(self as *const PyObject as usize),
             // A READ-ONLY `memoryview` (over `bytes`) IS hashable in real
             // Python, hashing exactly like the equivalent `bytes` content
             // (`hash(memoryview(b'x')) == hash(b'x')`) — a WRITABLE one

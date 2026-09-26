@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::AtomicI64;
 
+pub(crate) mod fd_ops;
 mod helpers;
 mod path;
 mod uname;
@@ -600,9 +601,15 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("write() requires at least 2 arguments"));
         }
         let fd = args[0].as_i64().unwrap_or(-1) as i32;
+        // Any bytes-like object is accepted (CPython uses the buffer
+        // protocol): `subprocess`'s `communicate` writes a SLICE of a
+        // `memoryview` of the input, which raised "write() argument 2 must be
+        // bytes or str" and broke every pipe-fed subprocess.
         let data = match &*args[1].borrow() {
             PyObject::Bytes(b) => b.clone(),
+            PyObject::ByteArray(b) => b.clone(),
             PyObject::Str(s) => s.as_bytes().to_vec(),
+            PyObject::MemoryView { .. } => crate::object::mv_tobytes(&args[1])?,
             _ => {
                 return Err(PyError::type_error(
                     "write() argument 2 must be bytes or str",
@@ -625,11 +632,14 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
 
     // os.pipe() -> (read_fd, write_fd)
     os_func!("pipe", |_args| {
+        // CPython's `os.pipe()` returns NON-inheritable fds: it calls
+        // `pipe2(O_CLOEXEC)`. `test_pipe_cloexec` and every
+        // `close_fds`/`pass_fds` test depend on that default.
         extern "C" {
-            fn pipe(fds: *mut i32) -> i32;
+            fn pipe2(fds: *mut i32, flags: i32) -> i32;
         }
         let mut fds: [i32; 2] = [0, 0];
-        let ret = unsafe { pipe(fds.as_mut_ptr()) };
+        let ret = unsafe { pipe2(fds.as_mut_ptr(), 0o2000000) };
         if ret != 0 {
             return Err(PyError::os_error_from_io(&std::io::Error::last_os_error()));
         }
@@ -972,7 +982,115 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     // going through that special case.
     os_func!("kill", os_kill_builtin);
 
+    // --- process status: waitpid + the W* status-word macros ------------
+    // CPython's vendored `subprocess.py` reads ALL of these at import time
+    // (`class _del_safe: waitpid = os.waitpid; waitstatus_to_exitcode =
+    // os.waitstatus_to_exitcode; WIFSTOPPED = os.WIFSTOPPED; ...`), so their
+    // absence made `import subprocess` fail outright with "'module' object
+    // has no attribute 'waitpid'". `waitpid` is implemented over the child
+    // registry in `posixsubprocess` (every waitable child is one this
+    // interpreter spawned); the macros are pure functions on the status
+    // word and follow the kernel's encoding exactly.
+    // `os.strerror(errno)` — `subprocess` builds every exec-failure message
+    // with it, so its absence turned a `FileNotFoundError` into an
+    // `AttributeError`. std's io::Error carries the very same strerror(3)
+    // text, only with Rust's " (os error N)" suffix appended.
+    // fd-level entry points that need raw syscalls (dup/inheritable/xattr/…)
+    fd_ops::install(&mut d);
+
+    os_func!("strerror", |args| {
+        let errno = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        let text = std::io::Error::from_raw_os_error(errno as i32).to_string();
+        Ok(py_str(text.split(" (os error").next().unwrap_or(&text)))
+    });
+    d.insert_str("WNOHANG", py_int(1));
+    d.insert_str("WUNTRACED", py_int(2));
+    d.insert_str("WCONTINUED", py_int(8));
+    os_func!("WIFSTOPPED", |args| {
+        let status = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        Ok(py_bool((status & 0xff) == 0x7f))
+    });
+    os_func!("WSTOPSIG", |args| {
+        let status = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        Ok(py_int(status & 0x7f))
+    });
+    os_func!("WIFSIGNALED", |args| {
+        let status = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        Ok(py_bool((status & 0x7f) + 1 >> 1 > 0))
+    });
+    os_func!("WIFEXITED", |args| {
+        let status = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        Ok(py_bool((status & 0x7f) == 0))
+    });
+    os_func!("WEXITSTATUS", |args| {
+        let status = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        Ok(py_int((status >> 8) & 0xff))
+    });
+    os_func!("WTERMSIG", |args| {
+        let status = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        Ok(py_int(status & 0x7f))
+    });
+    os_func!("waitstatus_to_exitcode", |args| {
+        let status = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        if status & 0x7f == 0 {
+            return Ok(py_int((status >> 8) & 0xff));
+        }
+        if (status & 0x7f) + 1 >> 1 > 0 {
+            return Ok(py_int(-(status & 0x7f)));
+        }
+        // CPython: "process not exited or terminated by a signal"
+        Err(PyError::value_error(
+            "process not exited or terminated by signal",
+        ))
+    });
+    os_func!("waitpid", |args| {
+        let pid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        let options = args.get(1).and_then(|a| a.as_i64()).unwrap_or(0);
+        // `os.wait()` (any child) is `waitpid(-1, ...)`; there is no way to
+        // pick "any" from the registry here, so answer ECHILD, which is what
+        // CPython reports when there is nothing to reap.
+        if pid <= 0 {
+            return Err(PyError::os_error_from_io(
+                &std::io::Error::from_raw_os_error(crate::modules::posixsubprocess::ECHILD),
+            ));
+        }
+        let result: Result<Option<i32>, i32> =
+            if options & crate::modules::posixsubprocess::WNOHANG_CONST != 0 {
+                crate::modules::posixsubprocess::try_wait_child(pid)
+            } else {
+                crate::modules::posixsubprocess::wait_for_child(pid).map(Some)
+            };
+        match result {
+            Ok(Some(status)) => Ok(py_tuple(vec![py_int(pid), py_int(status as i64)])),
+            Ok(None) => Ok(py_tuple(vec![py_int(0), py_int(0)])),
+            Err(errno) => Err(PyError::os_error_from_io(
+                &std::io::Error::from_raw_os_error(errno),
+            )),
+        }
+    });
+    os_func!("wait", |args| {
+        // `os.wait()` with no waitable child is ECHILD in CPython.
+        let _ = args;
+        Err(PyError::os_error_from_io(
+            &std::io::Error::from_raw_os_error(crate::modules::posixsubprocess::ECHILD),
+        ))
+    });
+
     // --- os.getppid() ---
+    // `os.getsid` / `os.getpgid` — `subprocess(start_new_session=True)` is
+    // verified by the child printing `os.getsid(0) == os.getpid()`.
+    os_func!("getsid", |args| {
+        let pid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        Ok(py_int(
+            crate::modules::posixsubprocess::get_session_id(pid) as i64
+        ))
+    });
+    os_func!("getpgid", |args| {
+        let pid = args.first().and_then(|a| a.as_i64()).unwrap_or(0);
+        Ok(py_int(
+            crate::modules::posixsubprocess::get_group_id(pid) as i64
+        ))
+    });
     os_func!("getppid", |_| {
         // Parse /proc/self/stat for parent PID
         match std::fs::read_to_string("/proc/self/stat") {

@@ -60,10 +60,22 @@ impl VirtualMachine {
                 };
                 let mut dict = AttrMap::new();
                 dict.insert_str("exc_type", exc_type_obj);
-                dict.insert_str("exc_value", py_str(&err.message()));
+                // A raised exception object is what CPython hands the hook —
+                // `test.support.catch_unraisable_exception` and user hooks
+                // read `.exc_value.args`, `.traceback`, and re-raise it, so a
+                // bare `str` (or a `str()` of it) is not enough.
+                let (exc_value, traceback) = match &err {
+                    PyError::Exception(_, exc_obj) => (
+                        exc_obj.clone(),
+                        ObjectAccess::get_attribute(&*exc_obj.borrow(), "__traceback__")
+                            .unwrap_or_else(|_| py_none()),
+                    ),
+                    _ => (py_str(&err.message()), py_none()),
+                };
+                dict.insert_str("exc_value", exc_value);
                 dict.insert_str("object", self_obj);
                 dict.insert_str("truncated", py_bool(false));
-                dict.insert_str("traceback", py_none());
+                dict.insert_str("traceback", traceback);
                 let carrier = PyObjectRef::new(PyObject::Instance {
                     typ: carrier_typ,
                     dict,

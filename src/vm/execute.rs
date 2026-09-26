@@ -80,7 +80,38 @@ impl VirtualMachine {
             }
         }
 
-        let module = self.modules.get(name)?.clone();
+        // `self.modules` is only an internal fast-path cache: a DOTTED name
+        // whose parent was imported by the `IMPORT_NAME` opcode lands in
+        // `sys.modules` without ever being registered here. Missing it
+        // therefore does NOT mean "not imported" — fall back to the
+        // `sys.modules` entry (CPython's `_find_and_load` returns it as is).
+        //
+        // Without this, `importlib.import_module('collections.abc')`
+        // re-executed `Lib/collections/abc.py` on every call — which is also
+        // what `pkgutil.resolve_name` (and therefore every
+        // `mock.patch('mod.attr')`, the most common test-corpus idiom there
+        // is) does while hunting for the package boundary: it re-imported the
+        // PATCH TARGET module, installing a second module object in
+        // `sys.modules`, so the patch landed on a copy nobody else holds.
+        let module = match self.modules.get(name) {
+            Some(m) => m.clone(),
+            None => {
+                let from_sys = self.modules.get("sys").and_then(|sys_mod| {
+                    if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
+                        if let Some(mod_dict) = dict.get_str("modules") {
+                            if let PyObject::Dict(d) = &*mod_dict.borrow() {
+                                return d.get(&crate::object::py_str(name)).ok().flatten();
+                            }
+                        }
+                    }
+                    None
+                });
+                match from_sys {
+                    Some(m) => m,
+                    None => return None,
+                }
+            }
+        };
         let in_sys_modules = if let Some(sys_mod) = self.modules.get("sys") {
             if let PyObject::Module { dict, .. } = &*sys_mod.borrow() {
                 if let Some(mod_dict) = dict.get_str("modules") {
