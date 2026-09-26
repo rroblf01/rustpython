@@ -419,6 +419,16 @@ pub fn builtin_callable(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
         PyObject::BuiltinMethod { .. } | PyObject::Type { .. } | PyObject::BuildClass |
         PyObject::BoundMethod { .. } | PyObject::Partial { .. } |
         PyObject::Generator { .. } | PyObject::Coroutine { .. } |
+        // A `Closure` is this codebase's capturing-function representation
+        // (what most native methods are) and is of course callable — its
+        // `type_name()` even reports "builtin_function_or_method", so code
+        // that special-cased the latter without this arm saw a callable
+        // object claim `callable(x) is False`. Real trigger:
+        // `functools.partial(re.compile(...).sub, ...)` inside
+        // `email/_encoded_words.py`, which made importing `email.message`
+        // (and with it every HTTP/SMTP path) fail with "the first argument
+        // must be callable" once the vendored `functools` took over.
+        PyObject::Closure(_) |
         // Instances may be callable if they have __call__
         PyObject::Instance { .. }
     );
