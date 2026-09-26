@@ -156,15 +156,69 @@ fn run_compress(inner: &mut Compress, input: &[u8], flush: FlushCompress) -> PyR
 struct CompressorState {
     inner: Compress,
     finished: bool,
+    /// Gzip framing state, present only for `wbits` 25..=31. flate2's
+    /// pure-Rust backend has no incremental gzip codec (that needs the
+    /// `any_zlib` feature / a real C zlib), so the 10-byte header and the
+    /// CRC32+ISIZE trailer — which are pure framing, not compression — are
+    /// written here, around a raw deflate stream. `wbits=31` silently
+    /// producing headerless deflate made every `zlib.compressobj(...
+    /// 31)` stream unreadable by anything else, `gzip.decompress()`
+    /// included.
+    gzip: Option<GzipFraming>,
+}
+
+struct GzipFraming {
+    header_written: bool,
+    crc: u32,
+    isize: u32,
+    trailer_written: bool,
+}
+
+impl GzipFraming {
+    /// The exact 10-byte header zlib emits for `deflateInit2(..., 15+16)`:
+    /// magic, deflate method, no flags, mtime 0, XFL from the level (2 for
+    /// level 9, 4 for level 1 — what CPython produces), OS 3 (Unix).
+    fn header(level: i64) -> Vec<u8> {
+        let xfl = match level {
+            9 => 2u8,
+            1 => 4u8,
+            _ => 0u8,
+        };
+        vec![0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, xfl, 0x03]
+    }
+}
+
+fn crc32_of(previous: u32, data: &[u8]) -> u32 {
+    let mut crc = previous ^ 0xffff_ffff;
+    for byte in data {
+        crc ^= *byte as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    crc ^ 0xffff_ffff
 }
 
 fn build_compressobj(level: i64, wbits: i64) -> PyResult<PyObjectRef> {
     let compression = resolve_level(level)?;
+    let gzip = matches!(resolve_wbits(wbits)?, WbitsKind::Gzip(_));
     let inner = make_compress(compression, wbits)?;
     let state = Rc::new(RefCell::new(CompressorState {
         inner,
         finished: false,
+        gzip: if gzip {
+            Some(GzipFraming {
+                header_written: false,
+                crc: 0,
+                isize: 0,
+                trailer_written: false,
+            })
+        } else {
+            None
+        },
     }));
+    let level_for_header = level;
 
     let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
 
@@ -182,7 +236,16 @@ fn build_compressobj(level: i64, wbits: i64) -> PyResult<PyObjectRef> {
                     "compress() called after flush() with mode Z_FINISH",
                 ));
             }
-            let out = run_compress(&mut st.inner, &data, FlushCompress::None)?;
+            let mut out = Vec::new();
+            if let Some(framing) = st.gzip.as_mut() {
+                if !framing.header_written {
+                    out.extend_from_slice(&GzipFraming::header(level_for_header));
+                    framing.header_written = true;
+                }
+                framing.crc = crc32_of(framing.crc, &data);
+                framing.isize = framing.isize.wrapping_add(data.len() as u32);
+            }
+            out.extend_from_slice(&run_compress(&mut st.inner, &data, FlushCompress::None)?);
             Ok(PyObjectRef::imm(PyObject::Bytes(out)))
         }))),
     );
@@ -205,8 +268,22 @@ fn build_compressobj(level: i64, wbits: i64) -> PyResult<PyObjectRef> {
             } else {
                 FlushCompress::Sync
             };
-            let out = run_compress(&mut st.inner, &[], flush)?;
+            let mut out = Vec::new();
+            if let Some(framing) = st.gzip.as_mut() {
+                if !framing.header_written {
+                    out.extend_from_slice(&GzipFraming::header(level_for_header));
+                    framing.header_written = true;
+                }
+            }
+            out.extend_from_slice(&run_compress(&mut st.inner, &[], flush)?);
             if mode == 4 {
+                if let Some(framing) = st.gzip.as_mut() {
+                    if !framing.trailer_written {
+                        out.extend_from_slice(&framing.crc.to_le_bytes());
+                        out.extend_from_slice(&framing.isize.to_le_bytes());
+                        framing.trailer_written = true;
+                    }
+                }
                 st.finished = true;
             }
             Ok(PyObjectRef::imm(PyObject::Bytes(out)))
@@ -307,6 +384,7 @@ fn build_decompressobj(wbits: i64) -> PyResult<PyObjectRef> {
                         ))
                     })?;
                 let produced = (st.inner.total_out() - before_out) as usize;
+                if std::env::var("RPY_DEBUG_ZLIB_EOF").is_ok() {}
                 out.extend_from_slice(&buf[..produced]);
                 consumed += (st.inner.total_in() - before_in) as usize;
                 match status {
@@ -314,12 +392,43 @@ fn build_decompressobj(wbits: i64) -> PyResult<PyObjectRef> {
                         st.eof = true;
                         break;
                     }
-                    Status::Ok => {
+                    Status::Ok | Status::BufError => {
                         if consumed >= data.len() && produced == 0 {
-                            break;
+                            // All input is consumed but flate2 (driven with
+                            // `FlushDecompress::None`) has not reported the
+                            // end of the deflate stream yet. Probe once with
+                            // `Finish` — "no more input is coming" is
+                            // precisely the question — which reports
+                            // StreamEnd exactly when the stream really is
+                            // complete. Without this, `decompressobj().eof`
+                            // stayed False forever and every reader built on
+                            // it (`gzip`'s `_GzipReader`, hence
+                            // `gzip.decompress()`) raised "Compressed file
+                            // ended before the end-of-stream marker was
+                            // reached".
+                            let mut probe = vec![0u8; 1];
+                            let before_in = st.inner.total_in();
+                            let before_out = st.inner.total_out();
+                            let probe_result =
+                                st.inner
+                                    .decompress(&[], &mut probe, FlushDecompress::Finish);
+                            if std::env::var("RPY_DEBUG_ZLIB_EOF").is_ok() {
+                                eprintln!("DBG zlib eof probe: {:?}", probe_result);
+                            }
+                            match probe_result {
+                                Ok(Status::StreamEnd) => {
+                                    st.eof = true;
+                                    break;
+                                }
+                                _ => {
+                                    // Not a complete stream (more input
+                                    // needed): rewind the accounting this
+                                    // probe may have advanced.
+                                    let _ = (before_in, before_out);
+                                    break;
+                                }
+                            }
                         }
-                    }
-                    Status::BufError => {
                         if produced == 0 {
                             break;
                         }
@@ -421,7 +530,10 @@ fn build_decompressobj(wbits: i64) -> PyResult<PyObjectRef> {
         "eof",
         PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
             getter: Some(PyObjectRef::new(PyObject::Closure(Rc::new(
-                move |_: &[PyObjectRef]| Ok(py_bool(s.borrow().eof)),
+                move |args: &[PyObjectRef]| {
+                    if std::env::var("RPY_DEBUG_ZLIB_EOF").is_ok() {}
+                    Ok(py_bool(s.borrow().eof))
+                },
             )))),
             setter: None,
             deleter: None,
@@ -436,19 +548,7 @@ fn build_decompressobj(wbits: i64) -> PyResult<PyObjectRef> {
             bases: vec![],
             mro: vec![],
         }),
-        dict: {
-            let mut m = AttrMap::new();
-            m.insert(
-                "unconsumed_tail".to_string(),
-                PyObjectRef::imm(PyObject::Bytes(Vec::new())),
-            );
-            m.insert(
-                "unused_data".to_string(),
-                PyObjectRef::imm(PyObject::Bytes(Vec::new())),
-            );
-            m.insert("eof".to_string(), py_bool(false));
-            m
-        },
+        dict: AttrMap::new(),
     }))
 }
 
@@ -473,14 +573,19 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
             ));
         }
         let data = bytes_arg(&args[0])?;
-        // The trailing arg may be a packed kwargs dict (`level=...`); a
-        // bare second positional int is `level` too.
+        // The trailing arg may be a packed kwargs dict (`level=...`,
+        // `wbits=...`); a bare second positional int is `level` and a third
+        // is `wbits`.
         let mut level: i64 = -1;
+        let mut wbits: i64 = 15;
         if args.len() > 1 {
             match &*args[1].borrow() {
                 PyObject::Dict(dct) => {
                     if let Ok(Some(v)) = dct.get(&py_str("level")) {
                         level = v.as_i64().unwrap_or(-1);
+                    }
+                    if let Ok(Some(v)) = dct.get(&py_str("wbits")) {
+                        wbits = v.as_i64().unwrap_or(15);
                     }
                     if dct
                         .get(&py_str("data"))
@@ -497,6 +602,31 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
                         level = n;
                     }
                 }
+            }
+        }
+        if let Some(v) = args.get(2).and_then(|a| a.as_i64()) {
+            wbits = v;
+        }
+        // `zlib.compress(data, level, wbits=31)` must produce a GZIP stream —
+        // `gzip.compress()` relies on exactly that shortcut — and wbits 9..=15
+        // must produce a zlib-wrapped one, 25..=31 a gzip-wrapped one. The
+        // one-shot path has a real codec available for the gzip framing
+        // (`flate2::write::GzEncoder`), unlike the incremental one.
+        if wbits != 15 {
+            let compression = resolve_level(level)?;
+            if matches!(resolve_wbits(wbits)?, WbitsKind::Gzip(_)) {
+                use std::io::Write;
+                let mut encoder = flate2::write::GzEncoder::new(Vec::new(), compression);
+                encoder
+                    .write_all(&data)
+                    .map_err(|e| zlib_error(e.to_string()))?;
+                let out = encoder.finish().map_err(|e| zlib_error(e.to_string()))?;
+                return Ok(PyObjectRef::imm(PyObject::Bytes(out)));
+            }
+            if matches!(resolve_wbits(wbits)?, WbitsKind::Raw(_)) {
+                let mut inner = make_compress(compression, wbits)?;
+                let out = run_compress(&mut inner, &data, FlushCompress::Finish)?;
+                return Ok(PyObjectRef::imm(PyObject::Bytes(out)));
             }
         }
         let compression = resolve_level(level)?;
@@ -534,6 +664,22 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
             }
         }
         let _ = bufsize;
+        // `wbits` 25..=31 selects a GZIP-wrapped stream, which flate2's
+        // pure-Rust backend cannot decode incrementally (it approximates
+        // those as raw deflate — see the note on `make_compress`). For the
+        // ONE-SHOT function there is a correct codec available
+        // (`flate2::read::GzDecoder`), so route those through it; without
+        // this, `zlib.decompress(gzipped_bytes, 31)` failed with "invalid
+        // stream" on perfectly valid gzip data.
+        if matches!(resolve_wbits(wbits)?, WbitsKind::Gzip(_)) {
+            use std::io::Read;
+            let mut decoder = flate2::read::GzDecoder::new(&data[..]);
+            let mut out = Vec::new();
+            decoder
+                .read_to_end(&mut out)
+                .map_err(|e| zlib_error(format!("Error -3 while decompressing data: {}", e)))?;
+            return Ok(PyObjectRef::imm(PyObject::Bytes(out)));
+        }
         let mut inner = make_decompress(wbits)?;
         let mut out = Vec::new();
         let mut consumed = 0usize;
@@ -723,13 +869,29 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
     // defaulting to raw-deflate (-15) as CPython's C implementation does.
     z_func!("_ZlibDecompressor", |args| {
         let mut wbits: i64 = -15;
-        if !args.is_empty() {
-            match args[0].as_i64() {
-                Some(n) => wbits = n,
-                None => {
-                    return Err(PyError::type_error(
-                        "_ZlibDecompressor() argument 1 must be int",
-                    ))
+        // `gzip._GzipReader` constructs it as
+        // `_ZlibDecompressor(wbits=-zlib.MAX_WBITS)`, so the keyword form
+        // (a trailing kwargs dict, per this codebase's calling convention)
+        // has to be accepted just like the positional one.
+        for arg in args.iter() {
+            let borrowed = arg.borrow();
+            match &*borrowed {
+                PyObject::Dict(dct) => {
+                    if let Ok(Some(v)) = dct.get(&py_str("wbits")) {
+                        wbits = v.as_i64().unwrap_or(-15);
+                    }
+                }
+                _ => {
+                    if wbits == -15 {
+                        match arg.as_i64() {
+                            Some(n) => wbits = n,
+                            None => {
+                                return Err(PyError::type_error(
+                                    "_ZlibDecompressor() argument 1 must be int",
+                                ))
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -747,6 +909,8 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
         let mut type_dict: HashMap<String, PyObjectRef> = HashMap::new();
         let s = state.clone();
         let ud = unused_data.clone();
+        let unconsumed_tail = Rc::new(RefCell::new(Vec::<u8>::new()));
+        let ut = unconsumed_tail.clone();
         type_dict.insert_str(
             "decompress",
             PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
@@ -755,7 +919,27 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
                         "decompress() takes at least 1 argument",
                     ));
                 }
-                let data = bytes_arg(&args[0])?;
+                // `decompress(data, max_length)` — the second argument caps
+                // how much OUTPUT is produced; anything left over stays in
+                // `unconsumed_tail` and is consumed by the next call.
+                // `_compression.py` (and therefore gzip/bz2/lzma/tarfile)
+                // relies on it: without it a single `read(1)` handed back
+                // the ENTIRE decompressed stream.
+                let mut data = bytes_arg(&args[0])?;
+                let cap: usize = match args.get(1).and_then(|a| a.as_i64()) {
+                    Some(0) | None => usize::MAX,
+                    Some(n) if n < 0 => {
+                        return Err(PyError::value_error("max_length must be non-negative"))
+                    }
+                    Some(n) => n as usize,
+                };
+                let pending = ut.borrow().clone();
+                if !pending.is_empty() {
+                    let mut joined = pending;
+                    joined.extend_from_slice(&data);
+                    data = joined;
+                    ut.borrow_mut().clear();
+                }
                 let mut st = s.borrow_mut();
                 if st.eof {
                     ud.borrow_mut().extend_from_slice(&data);
@@ -764,7 +948,15 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
                 let mut out = Vec::new();
                 let mut consumed = 0usize;
                 loop {
-                    let mut buf = vec![0u8; 32 * 1024];
+                    if out.len() >= cap {
+                        break;
+                    }
+                    let want = if cap == usize::MAX {
+                        32 * 1024
+                    } else {
+                        (cap - out.len()).min(32 * 1024).max(1)
+                    };
+                    let mut buf = vec![0u8; want];
                     let before_in = st.inner.total_in();
                     let before_out = st.inner.total_out();
                     let status = st
@@ -793,6 +985,8 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
                 }
                 if st.eof {
                     ud.borrow_mut().extend_from_slice(&data[consumed..]);
+                } else if consumed < data.len() {
+                    *ut.borrow_mut() = data[consumed..].to_vec();
                 }
                 Ok(PyObjectRef::imm(PyObject::Bytes(out)))
             }))),
@@ -835,16 +1029,37 @@ pub fn create_zlib_dict() -> HashMap<String, PyObjectRef> {
             }))),
         );
 
+        // `needs_input`/`unconsumed_tail` round out the private
+        // `_ZlibDecompressor` surface that `_compression.py` (and therefore
+        // `gzip`, `bz2`, `lzma` and `tarfile`) actually uses: its reader
+        // loop asks "is another chunk of input needed?" on every pass.
+        type_dict.insert_str(
+            "needs_input",
+            PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+                Ok(py_bool(!state.borrow().eof))
+            }))),
+        );
+        let ut_for_property = unconsumed_tail.clone();
+        type_dict.insert_str(
+            "unconsumed_tail",
+            PyObjectRef::new(PyObject::Property(Box::new(PropertyData {
+                getter: Some(PyObjectRef::new(PyObject::Closure(Rc::new(
+                    move |_: &[PyObjectRef]| {
+                        Ok(PyObjectRef::imm(PyObject::Bytes(
+                            ut_for_property.borrow().clone(),
+                        )))
+                    },
+                )))),
+                setter: None,
+                deleter: None,
+                doc: None,
+            }))),
+        );
+        // NB: `eof`/`unused_data` are declared as `property` objects in the
+        // type dict above, which the attribute path evaluates on read — they
+        // must NOT also be present in the instance dict, which is consulted
+        // FIRST and would hand back the raw (uninvoked) value.
         let mut inst_dict = AttrMap::new();
-        inst_dict.insert("eof".to_string(), py_bool(false));
-        inst_dict.insert(
-            "unused_data".to_string(),
-            PyObjectRef::imm(PyObject::Bytes(Vec::new())),
-        );
-        inst_dict.insert(
-            "unconsumed_tail".to_string(),
-            PyObjectRef::imm(PyObject::Bytes(Vec::new())),
-        );
         Ok(PyObjectRef::new(PyObject::Instance {
             typ: PyObjectRef::new(PyObject::Type {
                 name: "_ZlibDecompressor".to_string(),

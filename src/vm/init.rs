@@ -649,13 +649,18 @@ pub(crate) fn register_native_modules(
     modules.insert_str("cmath", create_module("cmath", create_cmath_dict()));
 
     // Native gzip module
-    modules.insert_str("gzip", create_module("gzip", create_gzip_dict()));
+    // `gzip` likewise: the vendored CPython `Lib/gzip.py` is byte-identical
+    // to upstream, while the native stand-in's `GzipFile` lacked `tell()`
+    // and produced archives the real `tarfile`/`zipfile` rejected with
+    // "invalid gzip header".
 
     // Native zlib module
     modules.insert_str("zlib", create_module("zlib", create_zlib_dict()));
 
     // Native tarfile module
-    modules.insert_str("tarfile", create_module("tarfile", create_tarfile_dict()));
+    // `tarfile` is NOT registered natively: the vendored CPython
+    // `Lib/tarfile.py` is the real implementation, and the native stand-in's
+    // `open()` returned an object with a hardcoded empty `getnames()`.
 
     // Native zipfile module (read-only)
     // modules.insert_str("zipfile", create_module("zipfile", create_zipfile_dict()));

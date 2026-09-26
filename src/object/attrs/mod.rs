@@ -121,6 +121,10 @@ fn check_type_text_encodable(s: &str) -> PyResult<()> {
     Ok(())
 }
 
+thread_local! {
+    static PROPERTY_RESOLUTION_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl PyObject {
     /// Every real Python object has `__doc__` (defaulting to `None` if not
     /// otherwise set — `bool`/`int`/etc. all inherit it from `object`).
@@ -133,6 +137,41 @@ impl PyObject {
     /// introspection over arbitrary values (e.g. something in the stdlib
     /// `email`/`dataclasses` machinery checking `.__doc__` while walking a
     /// structure that isn't guaranteed to be a function/class) hit this.
+    /// Native property getters that end up reading another native property
+    /// (a few do) must not recurse without bound; this bounds the nesting
+    /// and falls back to the raw value at the limit.
+    fn enter_property_resolution() -> bool {
+        PROPERTY_RESOLUTION_DEPTH.with(|depth| {
+            let current = depth.get();
+            if current >= 8 {
+                return false;
+            }
+            depth.set(current + 1);
+            true
+        })
+    }
+
+    fn leave_property_resolution() {
+        PROPERTY_RESOLUTION_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+
+    /// The getter of a `property` stored in `typ`'s OWN dict (an inherited
+    /// one is found by the caller's MRO walk), when the named attribute is
+    /// one.
+    fn lookup_type_dict_property(typ: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
+        let typ_ref = typ.borrow();
+        match &*typ_ref {
+            PyObject::Type { dict, .. } => {
+                let value = dict.get_str(name)?;
+                match &*value.borrow() {
+                    PyObject::Property(data) => data.getter.clone(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn get_attribute_impl(&self, name: &str) -> PyResult<PyObjectRef> {
         // `.__class__` (equivalent to `type(x)`) universally, for every
         // variant — this was entirely missing from `get_attribute_impl`
@@ -327,8 +366,27 @@ impl PyObject {
                 }
             },
             PyObject::Module { .. } => return module_obj::get(self, name),
+            // A `property` in an INSTANCE's type dict is a data descriptor:
+            // reading the attribute must run its getter, not hand back the
+            // property object (which then reads as a bare function, or
+            // coerces to False). CPython does the same for a Python-defined
+            // class, and native types that model a computed attribute this
+            // way depend on it — `zlib._ZlibDecompressor.eof` (permanently
+            // False before this, which made every `gzip.decompress()` raise
+            // "Compressed file ended before the end-of-stream marker was
+            // reached"), `zlib.decompressobj().unused_data`, ...
+            PyObject::Instance { typ, .. } => {
+                if let Some(getter) = Self::lookup_type_dict_property(typ, name) {
+                    if Self::enter_property_resolution() {
+                        let result =
+                            call_bound_method(getter, PyObjectRef::new(self.clone()), vec![]);
+                        Self::leave_property_resolution();
+                        return result;
+                    }
+                }
+                return instance::get(self, name);
+            }
             PyObject::Type { .. }
-            | PyObject::Instance { .. }
             | PyObject::Property(_)
             | PyObject::StaticMethod { .. }
             | PyObject::ClassMethod { .. } => return instance::get(self, name),

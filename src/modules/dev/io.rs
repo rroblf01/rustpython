@@ -950,6 +950,39 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             func: |_: &[PyObjectRef]| Ok(py_none()),
         }),
     );
+    // `tell()`/`seek()` on the abstract buffered base. Python subclasses of
+    // `io.BufferedIOBase` reach these through `super()` — `gzip.GzipFile`
+    // (whose `BaseStream` base is exactly this class) calls `super().tell()`
+    // on every `tell()`, and `tarfile` calls it while writing, so a missing
+    // `tell` made "'super' object has no attribute 'tell'" the first error
+    // of every `tarfile.open(..., 'w:gz')`. CPython resolves this to the C
+    // `_io._BufferedIOBase.tell`, which for a subclass answers through
+    // `seek(0, 1)` — the same delegation here, falling back to 0 for a
+    // subclass that has no `seek` either.
+    buf_dict.insert_str(
+        "tell",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "tell".to_string(),
+            func: |args: &[PyObjectRef]| {
+                let self_obj = args.first().cloned().unwrap_or_else(py_none);
+                let seek = self_obj.borrow().get_attribute("seek").ok();
+                if let Some(seek) = seek {
+                    return crate::object::with_vm_mut(|vm| {
+                        vm.call_function(seek, vec![args[0].clone(), py_int(0), py_int(1)], vec![])
+                    })
+                    .and_then(|inner| inner);
+                }
+                Ok(py_int(0))
+            },
+        }),
+    );
+    buf_dict.insert_str(
+        "seekable",
+        PyObjectRef::new(PyObject::BuiltinFunction {
+            name: "seekable".to_string(),
+            func: |_: &[PyObjectRef]| Ok(py_bool(false)),
+        }),
+    );
     let buf_cls = PyObjectRef::new(PyObject::Type {
         name: "BufferedIOBase".to_string(),
         dict: Box::new(str_map_to_typedict(buf_dict)),

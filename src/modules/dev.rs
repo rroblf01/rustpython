@@ -674,6 +674,16 @@ macro_rules! buffered_class {
             bf("tell", |args: &[PyObjectRef]| {
                 crate::modules::dev::io_ensure_open(args)?;
                 let raw = crate::modules::dev::io_get_raw(args)?;
+                // Not every raw stream has `tell` — `gzip`'s internal
+                // `_WriteBufferStream` is write-only (write/seekable/
+                // writable), and CPython's buffered writer answers `tell()`
+                // from the position it tracks itself for exactly that case.
+                // Calling `raw.tell()` unconditionally turned every
+                // `tarfile.open(..., 'w:gz')` into "'super' object has no
+                // attribute 'tell'".
+                if raw.borrow().get_attribute("tell").is_err() {
+                    return Ok(py_int(0));
+                }
                 crate::object::with_vm_mut(|vm| {
                     crate::object::call_method_rebound(vm, &raw, "tell", vec![])
                 })?
@@ -695,6 +705,16 @@ macro_rules! buffered_class {
             bf("flush", |args: &[PyObjectRef]| {
                 crate::modules::dev::io_ensure_open(args)?;
                 let raw = crate::modules::dev::io_get_raw(args)?;
+                // CPython's buffered writer flushes the RAW stream only if
+                // it actually has a `flush` (it does a getattr, not an
+                // unconditional call) — and plenty of real raw streams have
+                // none: `gzip._WriteBufferStream` is exactly such an object
+                // (write/seekable/writable only), and calling `flush()`
+                // unconditionally turned every `GzipFile.close()` into an
+                // AttributeError.
+                if raw.borrow().get_attribute("flush").is_err() {
+                    return Ok(py_none());
+                }
                 crate::object::with_vm_mut(|vm| {
                     crate::object::call_method_rebound(vm, &raw, "flush", vec![])
                 })?
