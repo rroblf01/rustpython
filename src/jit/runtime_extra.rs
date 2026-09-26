@@ -88,7 +88,7 @@ pub(crate) extern "C" fn jit_unpack_sequence(
                     if let Ok(item) = item {
                         collected.push(item);
                     } else {
-                        return 1;
+                        return unpack_failed(n, items, out);
                     }
                 }
                 for (i, item) in collected.iter().enumerate() {
@@ -98,8 +98,27 @@ pub(crate) extern "C" fn jit_unpack_sequence(
                 return 0;
             }
         }
-        1
+        unpack_failed(n, items, out)
     }
+}
+
+/// Every slot the `UNPACK_SEQUENCE` emitter reads must be initialized on
+/// EVERY exit path: the emitter loads the `n` unpacked items
+/// unconditionally (it cannot branch on this status code at runtime), so a
+/// failure that simply returned left three words of uninitialized stack
+/// memory on the JIT's eval stack — which were then used as a CALLABLE
+/// pointer, and dereferencing that segfaulted inside `jit_call`. Real
+/// trigger: `tarfile.TarFile._proc_gnusparse_10` (its
+/// `fields, buf = buf.split(b"\n", 1)` on a member that does not split),
+/// which crashed `test_tarfile` outright.
+fn unpack_failed(n: i64, items: *mut PyObjectRef, out: *mut PyObjectRef) -> i64 {
+    unsafe {
+        for i in 0..n as isize {
+            std::ptr::write(items.offset(i), crate::object::py_none());
+        }
+        std::ptr::write(out, crate::object::py_none());
+    }
+    1
 }
 
 // IMPORT_NAME: import a module by name
