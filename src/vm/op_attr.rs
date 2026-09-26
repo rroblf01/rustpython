@@ -29,6 +29,20 @@ impl VirtualMachine {
                         // — same fix shape as `GET_AWAITABLE`'s own
                         // `self_obj`-rebind elsewhere in this file, for the
                         // identical underlying limitation.
+                        // `d.__iter__()` must hand back an iterator bound to
+                        // the LIVE dict: the generic path below builds the
+                        // method from `get(o: &PyObject, name)`, whose
+                        // `self_obj` is a shallow COPY — the resulting
+                        // iterator compared versions against that stale copy
+                        // and could never raise "dictionary changed size
+                        // during iteration".
+                        PyObject::Dict(_) if name == "__iter__" => {
+                            Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                                name: name.clone(),
+                                func: crate::object::builtin_iter,
+                                self_obj: obj.clone(),
+                            }))
+                        }
                         PyObject::ListIter { .. }
                         | PyObject::RangeIter { .. }
                         | PyObject::MapIterator { .. }
@@ -39,6 +53,24 @@ impl VirtualMachine {
                         | PyObject::EnumerateIter { .. }
                         | PyObject::GetItemIter { .. }
                         | PyObject::CallSentinelIter { .. }
+                        // The dict/deque views were missing here, so
+                        // `d.__iter__()` produced a method bound to a shallow
+                        // COPY of the iterator (the `get(o: &PyObject, …)`
+                        // signature has no owning ref) and `it.__next__()`
+                        // then advanced that copy — every explicit dunder call
+                        // on a dict/deque iterator returned the FIRST element
+                        // forever, and the version check that raises
+                        // "dictionary changed size during iteration" could
+                        // never fire.
+                        | PyObject::ListRefIter { .. }
+                        | PyObject::SetIter { .. }
+                        | PyObject::DequeIter { .. }
+                        | PyObject::DequeRevIter { .. }
+                        | PyObject::DictIter { .. }
+                        | PyObject::DictValuesIter { .. }
+                        | PyObject::DictItemsIter { .. }
+                        | PyObject::DictRevIter { .. }
+                        | PyObject::FindIter { .. }
                             if name == "__next__" || name == "__iter__" =>
                         {
                             let func: crate::object::BuiltinFunc = if name == "__next__" {

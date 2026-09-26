@@ -871,14 +871,31 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                         move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> { Ok(py_int(len)) },
                     ))))
                 }
-                "__iter__" => {
-                    let keys: Vec<PyObjectRef> = _d.keys();
-                    Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
-                        move |_args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
-                            Ok(py_list(keys.clone()))
-                        },
-                    ))))
-                }
+                "__iter__" => Ok(PyObjectRef::imm(PyObject::BuiltinMethod {
+                    name: "__iter__".to_string(),
+                    // A live, version-checked `dict_keyiterator`, NOT a
+                    // snapshot list: CPython raises "dictionary changed size
+                    // during iteration" when the dict is mutated between two
+                    // `next()` calls, and code relies on it (a `__iter__`
+                    // generator that mutates the dict it walks —
+                    // test_unpack_ex's `CrazyDict` — must surface the error
+                    // instead of silently yielding stale keys). It stays a
+                    // METHOD so an explicit `d.__iter__()` still works.
+                    func: |args| {
+                        let dict = args.first().cloned().unwrap_or_else(py_none);
+                        let (keys, version) = match &*dict.borrow() {
+                            PyObject::Dict(d) => (d.keys(), d.version()),
+                            _ => (Vec::new(), 0),
+                        };
+                        Ok(PyObjectRef::new(PyObject::DictIter {
+                            dict,
+                            keys,
+                            index: 0,
+                            expected_version: version,
+                        }))
+                    },
+                    self_obj: PyObjectRef::new(o.clone()),
+                })),
                 "__contains__" => {
                     let d_clone = _d.clone();
                     Ok(PyObjectRef::new(PyObject::Closure(Rc::new(

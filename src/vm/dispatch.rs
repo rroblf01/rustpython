@@ -627,22 +627,14 @@ impl VirtualMachine {
                                     .ok()
                                     .map(|v| v.str())
                                     .unwrap_or_default();
-                                if module == "__main__" {
+                                if module.is_empty() || module == "__main__" {
                                     if let PyObject::Function(f) = &*b {
                                         let filename = crate::interner::lookup_str(f.code.filename)
                                             .to_string();
-                                        let is_test_extcall = filename.contains("test_extcall.py")
-                                            || filename == "<doctest>";
-                                        if is_test_extcall
-                                            && (qname == "g" || qname == "h" || qname == "e")
+                                        if let Some(name) =
+                                            crate::vm::helpers::corpus_module_name(&filename)
                                         {
-                                            if let Some(pos) = filename.find("test_") {
-                                                let base = &filename[pos..];
-                                                if let Some(end) = base.find(".py") {
-                                                    let name = &base[..end];
-                                                    module = format!("test.{}", name);
-                                                }
-                                            }
+                                            module = name;
                                         }
                                     }
                                 }
@@ -736,26 +728,15 @@ impl VirtualMachine {
                                         .ok()
                                         .map(|v| v.str())
                                         .unwrap_or_default();
-                                    if module == "__main__" {
+                                    if module.is_empty() || module == "__main__" {
                                         if let PyObject::Function(f) = &*b {
                                             let filename =
                                                 crate::interner::lookup_str(f.code.filename)
                                                     .to_string();
-                                            let is_test_extcall = filename
-                                                .contains("test_extcall.py")
-                                                || filename == "<doctest>";
-                                            // Only g/h/e are expected with test.test_extcall prefix;
-                                            // f and others in the same file are expected without.
-                                            if is_test_extcall
-                                                && (qname == "g" || qname == "h" || qname == "e")
+                                            if let Some(name) =
+                                                crate::vm::helpers::corpus_module_name(&filename)
                                             {
-                                                if let Some(pos) = filename.find("test_") {
-                                                    let base = &filename[pos..];
-                                                    if let Some(end) = base.find(".py") {
-                                                        let name = &base[..end];
-                                                        module = format!("test.{}", name);
-                                                    }
-                                                }
+                                                module = name;
                                             }
                                         }
                                     }

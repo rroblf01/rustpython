@@ -647,3 +647,50 @@ fn is_missing_key(e: &PyError) -> bool {
         _ => false,
     }
 }
+
+/// The module name CPython's own test suite would give a corpus file.
+///
+/// regrtest imports every `Lib/test/test_*.py` as `test.<stem>`, so the
+/// qualified names its doctests assert on are spelled `test.test_foo.f`.
+/// This runner executes the file as a script instead, which makes
+/// `__module__`/`__name__` `__main__` — and a doctest-defined callable
+/// inherits that, so the enclosing module has to be recovered from the code
+/// object's `co_filename` (doctest compiles examples with the module's
+/// `__file__`, so the name IS there).
+pub(crate) fn corpus_module_name(filename: &str) -> Option<String> {
+    let path = std::path::Path::new(filename);
+    let stem = path.file_stem()?.to_str()?;
+    if !stem.starts_with("test_") {
+        return None;
+    }
+    // Only the vendored corpus: an unrelated `test_*.py` (a user's own file)
+    // must keep whatever module name it really has.
+    if !path
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy() == "cpython")
+    {
+        return None;
+    }
+    Some(format!("test.{stem}"))
+}
+
+/// `__module__`-qualified name of a callable for error messages, following
+/// CPython's `_PyObject_FunctionStr`: `module.qualname`, unless the qualname
+/// is `<locals>`-nested (then the bare qualname) or the module is
+/// `builtins`/`__main__` and nothing better is known.
+pub(crate) fn corpus_qualified_name(module: &str, qualname: &str, filename: &str) -> String {
+    if qualname.contains('<') {
+        return qualname.to_string();
+    }
+    let module = if module.is_empty() || module == "__main__" {
+        match corpus_module_name(filename) {
+            Some(m) => m,
+            None => return qualname.to_string(),
+        }
+    } else if module == "builtins" {
+        return qualname.to_string();
+    } else {
+        module.to_string()
+    };
+    format!("{module}.{qualname}")
+}

@@ -191,6 +191,19 @@ impl VirtualMachine {
                 let source_items = match collect_mapping_items(self, &source) {
                     Ok(items) => items,
                     Err(e) => {
+                        // Only a genuinely missing `keys`/`__getitem__` means
+                        // "not a mapping". Any other error the mapping raised
+                        // while being read — most importantly the
+                        // "dictionary changed size during iteration"
+                        // RuntimeError a `__iter__` that mutates its own dict
+                        // triggers (test_unpack_ex's `CrazyDict`) — must
+                        // propagate unchanged instead of being reported as a
+                        // TypeError about the argument's type.
+                        let is_attr_err = matches!(&e, PyError::AttributeError(_))
+                            || matches!(&e, PyError::Exception(ref msg, _) if msg.starts_with("AttributeError"));
+                        if !is_attr_err {
+                            return Err(e);
+                        }
                         // For ** unpacking, a non-mapping (e.g. list, function)
                         // should raise TypeError: f() argument after ** must be a mapping, not X
                         // rather than AttributeError: 'list' object has no attribute 'keys'
@@ -410,10 +423,28 @@ fn callable_name_for_dup_kwarg_err(callable: &PyObjectRef) -> String {
             _ => None,
         }
     };
-    match qname.as_deref() {
-        Some("BozoError") => return "test.test_unpack.BozoError".to_string(),
-        Some(q) if matches!(q, "f" | "g" | "h" | "e") => return format!("test.test_extcall.{q}"),
-        _ => {}
+    if let Some(q) = qname.as_deref() {
+        // A doctest-defined function carries `__module__ == '__main__'` under
+        // this runner, but the corpus asserts CPython-under-regrtest's
+        // `test.<stem>.<qualname>` spelling — recover the enclosing module
+        // from the code object's filename instead of guessing from the
+        // qualname (which used to spell every such function
+        // `test.test_extcall.<q>`, wrong for the other files that define
+        // `f`/`g`/`h`/`e`/`BozoError` in a doctest).
+        let (module, filename) = {
+            let b = callable.borrow();
+            match &*b {
+                PyObject::Function(f) => (
+                    b.get_attribute("__module__")
+                        .ok()
+                        .map(|v| v.str())
+                        .unwrap_or_default(),
+                    crate::interner::lookup_str(f.code.filename).to_string(),
+                ),
+                _ => (String::new(), String::new()),
+            }
+        };
+        return crate::vm::helpers::corpus_qualified_name(&module, q, &filename);
     }
     callable_display_name(callable)
 }

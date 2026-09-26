@@ -17,6 +17,7 @@ function, meaning "check my own module" — since that test file is always
 running as `__main__`, this heuristic is exactly correct in practice.
 """
 
+import os
 import re
 import sys
 import unittest
@@ -209,7 +210,26 @@ def _compare(got, want, optionflags):
     return "Expected:\n%s\nGot:\n%s" % (want, got)
 
 
-def _run_example(source, want, globs, optionflags=0, fakeout=None):
+def _module_name_for(filename, fallback):
+    """Module name to attribute a doctest-defined object to.
+
+    regrtest imports every ``Lib/test/test_*.py`` as ``test.<stem>``, so the
+    tracebacks its doctests assert on are spelled ``test.test_foo.f``. This
+    runner executes the file as a script, which leaves ``__module__`` as
+    ``__main__``; the module's own ``__file__`` still carries the name, so it
+    is recovered from there instead of being guessed from the qualname (which
+    spelled *every* doctest object ``test.test_unpack.BozoError`` or
+    ``test.test_metaclass.ObscureException``, whatever file it came from).
+    """
+    if filename:
+        base = os.path.basename(filename)
+        stem = base[:-3] if base.endswith(".py") else base
+        if stem.startswith("test_") and "cpython" in filename.replace(os.sep, "/"):
+            return "test." + stem
+    return fallback
+
+
+def _run_example(source, want, globs, optionflags=0, fakeout=None, filename=None):
     """Run one example against `globs`; None on success, else a message.
 
     `fakeout`, if given, is a SHARED `io.StringIO` that `sys.stdout` is
@@ -245,7 +265,7 @@ def _run_example(source, want, globs, optionflags=0, fakeout=None):
         # print only for top-level expressions, silently dropping nested
         # ones (test_extcall). Our `compile()` supports "single" with the
         # same PRINT_EXPR semantics.
-        code = compile(source, "<doctest>", "single")
+        code = compile(source, filename or "<doctest>", "single")
         with redirect:
             exec(code, globs)
     except Exception as e:
@@ -271,10 +291,8 @@ def _run_example(source, want, globs, optionflags=0, fakeout=None):
         _mod = getattr(_t, "__module__", None)
         if _mod is not None and _mod not in ("__main__", "builtins"):
             _tname = _mod + "." + _tname
-        elif _mod == "__main__" and _tname == "BozoError":
-            _tname = "test.test_unpack.BozoError"
-        elif _mod == "__main__" and _tname == "ObscureException":
-            _tname = "test.test_metaclass.ObscureException"
+        elif _mod in ("__main__", None, ""):
+            _tname = _module_name_for(filename, _mod or "__main__") + "." + _tname
         got += ("%s: %s" % (_tname, msg)) if msg else _tname
         return _compare(got, want, optionflags)
     return _compare(buf.getvalue()[start:], want, optionflags)
@@ -347,18 +365,19 @@ def _class_docstrings(cls, mod_name, prefix):
     return results
 
 
-def _make_case(qualname, examples, base_globs, optionflags):
+def _make_case(qualname, examples, base_globs, optionflags, filename=None):
     def run():
         import io
         import contextlib
 
         test_globs = dict(base_globs)
+        mod_file = filename or base_globs.get("__file__")
         failures = []
         fakeout = io.StringIO()
         with contextlib.redirect_stdout(fakeout):
             for source, want, set_mask, clear_mask in examples:
                 flags = (optionflags | set_mask) & ~clear_mask
-                err = _run_example(source, want, test_globs, flags, fakeout)
+                err = _run_example(source, want, test_globs, flags, fakeout, mod_file)
                 if err is not None:
                     failures.append(err)
                     if optionflags & REPORT_ONLY_FIRST_FAILURE:
@@ -386,11 +405,13 @@ def DocTestSuite(module=None, globs=None, extraglobs=None, test_finder=None,
     if extraglobs:
         base_globs.update(extraglobs)
 
+    mod_file = getattr(module, "__file__", None)
     for qualname, doc in _member_docstrings(module):
         examples = _extract_examples(doc)
         if not examples:
             continue
-        suite.addTest(_make_case(qualname, examples, base_globs, optionflags))
+        suite.addTest(_make_case(qualname, examples, base_globs, optionflags,
+                                mod_file))
     return suite
 
 
@@ -416,7 +437,8 @@ def DocFileSuite(*paths, module_relative=True, package=None, globs=None,
         examples = _extract_examples(content)
         if not examples:
             continue
-        suite.addTest(_make_case(path, examples, base_globs, optionflags))
+        suite.addTest(_make_case(path, examples, base_globs, optionflags,
+                                getattr(module, "__file__", None)))
     return suite
 
 
@@ -443,12 +465,13 @@ def testmod(m=None, name=None, globs=None, verbose=None, report=True,
         if not examples:
             continue
         test_globs = dict(base_globs)
+        mod_file = getattr(module, "__file__", None)
         fakeout = io.StringIO()
         with contextlib.redirect_stdout(fakeout):
             for source, want, set_mask, clear_mask in examples:
                 attempted += 1
                 flags = (optionflags | set_mask) & ~clear_mask
-                err = _run_example(source, want, test_globs, flags, fakeout)
+                err = _run_example(source, want, test_globs, flags, fakeout, mod_file)
                 if err is not None:
                     failed += 1
                     if verbose:
