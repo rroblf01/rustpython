@@ -37,6 +37,11 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         }
     }
     // Check for __getitem__ on custom classes and __class_getitem__ on types (PEP 560)
+    let is_type_object = matches!(&*obj.borrow(), PyObject::Type { .. });
+    // Whether the match came from the METATYPE (bound as a method) or from
+    // the class's own namespace (`__class_getitem__`, called with the class
+    // as an explicit argument) — the two are called differently, see below.
+    let mut from_metatype = false;
     let f = {
         let o = obj.borrow();
         match &*o {
@@ -54,6 +59,9 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
                 // metaclass method.
                 let metatype_getitem =
                     metatype_of(obj).and_then(|mt| lookup_dunder_via_mro(&mt, "__getitem__"));
+                if metatype_getitem.is_some() {
+                    from_metatype = true;
+                }
                 metatype_getitem.or_else(|| {
                     type_dict.get_str("__class_getitem__").cloned().or_else(|| {
                         for base in mro.iter().skip(1) {
@@ -153,6 +161,44 @@ pub fn py_getitem(obj: &PyObjectRef, index: &PyObjectRef) -> PyResult<PyObjectRe
         }
     };
     if let Some(f) = f {
+        // `Cls[key]` where the class (not its metatype) supplies
+        // `__class_getitem__` is `type.__getitem__`'s two-argument
+        // vector call — the CLASS is passed explicitly, not bound as `self`
+        // (CPython dropped the implicit-classmethod wrapping in 3.12). A
+        // `def __class_getitem__(*args)` therefore sees `(cls, (int, str))`;
+        // binding it silently dropped the class, and every `*args` signature
+        // in the wild (and `test_genericclass`) saw one argument too few.
+        if is_type_object && !from_metatype {
+            // The two callable kinds need the class passed differently:
+            // `call_bound_method` PREPENDS `self_obj` for a native
+            // builtin (`list[int]`), but a plain Python function gets no
+            // implicit `self` at all — there the class has to be an explicit
+            // argument, or a `def __class_getitem__(*args)` signature sees
+            // one argument too few.
+            // Which form the class is passed in depends on the signature:
+            //  * a native `__class_getitem__` (`list[int]`) and a
+            //    `classmethod` one (`collections.abc.Callable`'s
+            //    `classmethod(_CallableGenericAlias)`) want it BOUND;
+            //  * `def __class_getitem__(cls, item)` wants it bound too —
+            //    that is its `cls`;
+            //  * `def __class_getitem__(*args)` needs it as an EXPLICIT
+            //    argument instead: `call_bound_method` parks the bound self
+            //    in local slot 0, which for such a signature IS the `*args`
+            //    slot and is then overwritten by the vararg tuple — so the
+            //    class vanished and the call saw one argument too few.
+            let (is_native, takes_positional) = match &*f.borrow() {
+                PyObject::Function(fd) => (
+                    false,
+                    fd.code.arg_count > 0 || fd.code.vararg_name.is_none(),
+                ),
+                _ => (true, true),
+            };
+            return if is_native || takes_positional {
+                call_bound_method(f, obj.clone(), vec![index.clone()])
+            } else {
+                call_bound_method(f, py_none(), vec![obj.clone(), index.clone()])
+            };
+        }
         return call_bound_method(f, obj.clone(), vec![index.clone()]);
     }
     // Not overridden anywhere in the mro: for a class that transparently

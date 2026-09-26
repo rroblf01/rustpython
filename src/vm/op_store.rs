@@ -60,6 +60,7 @@ impl VirtualMachine {
                     if let PyObject::Instance { typ, .. } = &mut *obj.borrow_mut() {
                         if matches!(&*val.borrow(), PyObject::Type { .. }) {
                             *typ = val.clone();
+                            crate::object::rare_events::bump(crate::object::rare_events::SET_CLASS);
                             return Ok(true);
                         } else {
                             return Err(PyError::type_error(
@@ -223,6 +224,19 @@ impl VirtualMachine {
                 let val = self.frames[fi].pop()?;
                 let index = self.frames[fi].pop()?;
                 let obj = self.frames[fi].pop()?;
+                // Mutating the BUILTINS dict is a "rare event" for CPython's
+                // adaptive interpreter — every name lookup can miss the
+                // specialised cache — and `test_optimizer`'s
+                // `test_builtin_dict` asserts the counter goes up by one.
+                let is_builtins_dict = match &*obj.borrow() {
+                    PyObject::Dict(d) => d
+                        .backing_instance()
+                        .is_some_and(|owner| crate::vm::get_shared_builtins_module().is(&owner)),
+                    _ => false,
+                };
+                if is_builtins_dict {
+                    crate::object::rare_events::bump(crate::object::rare_events::BUILTIN_DICT);
+                }
                 // If `obj` is an Instance with a Python-defined __setitem__,
                 // call it via `self.call_function` (the real, already-live
                 // VM) rather than falling into the free `py_setitem`

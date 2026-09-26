@@ -279,9 +279,44 @@ fn build_generic_alias_type() -> PyObjectRef {
                 // `__repr__` tries to `.borrow_mut()` the same list to clear
                 // it. `PyObjectRef::repr()` already clones-then-drops before
                 // recursing into elements, so it doesn't have this problem.
+                // A TYPE argument is spelled by its qualified name, not by
+                // its `repr()`: CPython renders `list[int]`, not
+                // `list[<class 'int'>]` (a nested class keeps its dotted
+                // path, e.g. `list[types.GenericAlias]`).
                 let arg_reprs: Vec<String> = generic_alias_args(&args[0])
                     .iter()
-                    .map(|a| a.repr())
+                    .map(|a| {
+                        // Classify under a SHORT borrow that is RELEASED
+                        // before anything else runs: an argument can be any
+                        // object, and holding its borrow across a recursive
+                        // `a.repr()` panicked with "RefCell already borrowed
+                        // on list" the moment an element's own `__repr__`
+                        // mutated that very list (test_genericalias's
+                        // `test_evil_repr3`).
+                        let is_type = matches!(&*a.borrow(), PyObject::Type { .. });
+                        if !is_type {
+                            return a.repr();
+                        }
+                        let qualname = a
+                            .borrow()
+                            .get_attribute("__qualname__")
+                            .map(|v| v.str())
+                            .unwrap_or_default();
+                        let module = a
+                            .borrow()
+                            .get_attribute("__module__")
+                            .map(|v| v.str())
+                            .unwrap_or_default();
+                        if module.is_empty()
+                            || module == "builtins"
+                            || module == "__main__"
+                            || qualname.contains('<')
+                        {
+                            qualname
+                        } else {
+                            format!("{}.{}", module, qualname)
+                        }
+                    })
                     .collect();
                 Ok(py_str(&format!(
                     "{}[{}]",

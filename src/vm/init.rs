@@ -252,6 +252,64 @@ pub(crate) fn register_native_modules(
     let re_dict = create_re_dict();
     modules.insert_str("re", create_module("re", re_dict));
 
+    // `_rare_events` — the counter table behind
+    // `_testinternalcapi.get_rare_event_counters()` (see
+    // `object::rare_events`). `_testinternalcapi` itself is the pure-Python
+    // stub in `Lib/`, which delegates here.
+    {
+        use crate::object::rare_events as revents;
+        let mut rd = std::collections::HashMap::new();
+        rd.insert(
+            "get_rare_event_counters".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "get_rare_event_counters".to_string(),
+                func: |_args| {
+                    let mut d = crate::object::PyDict::new();
+                    for (n, v) in revents::snapshot() {
+                        let _ = d.set(py_str(n), py_int(v as i64));
+                    }
+                    Ok(PyObjectRef::new(PyObject::Dict(Box::new(d))))
+                },
+            }),
+        );
+        rd.insert(
+            "reset_rare_event_counters".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "reset_rare_event_counters".to_string(),
+                func: |_args| {
+                    revents::reset();
+                    Ok(py_none())
+                },
+            }),
+        );
+        rd.insert(
+            "set_eval_frame_record".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "set_eval_frame_record".to_string(),
+                func: |args: &[PyObjectRef]| {
+                    // CPython installs an auditing hook that appends one
+                    // record per executed frame. Installing it is the rare
+                    // event being counted; the records themselves are not
+                    // inspected by the corpus, so they are not kept.
+                    let _records = args.first().cloned();
+                    revents::bump(revents::SET_EVAL_FRAME_FUNC);
+                    Ok(py_none())
+                },
+            }),
+        );
+        rd.insert(
+            "set_eval_frame_default".to_string(),
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: "set_eval_frame_default".to_string(),
+                func: |_args| {
+                    revents::bump(revents::SET_EVAL_FRAME_FUNC);
+                    Ok(py_none())
+                },
+            }),
+        );
+        modules.insert_str("_rare_events", create_module("_rare_events", rd));
+    }
+
     // `_posixsubprocess` — the spawn primitive CPython's `subprocess.py`
     // imports at module scope; without it the vendored (byte-identical)
     // `Lib/subprocess.py` cannot even be imported.

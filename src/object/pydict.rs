@@ -70,6 +70,14 @@ pub struct PyDict {
 }
 
 impl PyDict {
+    /// The object this dict is a `__dict__` VIEW of, if any. `x.__dict__`
+    /// hands back a copy carrying a back-reference, which is what lets
+    /// `builtins.__dict__` be recognised as "the builtins mapping" without
+    /// having a second handle on it.
+    pub fn backing_instance(&self) -> Option<PyObjectRef> {
+        self.instance_ref.clone()
+    }
+
     pub fn new() -> Self {
         PyDict {
             entries: Rc::new(Vec::new()),

@@ -1438,12 +1438,25 @@ impl ObjectAccess for PyObject {
                         dict.remove(&interner::intern("__firstlineno__"));
                     }
                     _ => {
+                        // Re-parenting a class is a "rare event" for CPython's
+                        // adaptive interpreter (it has to drop the specialiser
+                        // for every method), counted by
+                        // `_testinternalcapi.get_rare_event_counters()`.
+                        if name == "__bases__" {
+                            crate::object::rare_events::bump(crate::object::rare_events::SET_BASES);
+                        }
                         dict.insert_str(&name, value);
                     }
                 }
                 Ok(())
             }
             PyObject::Function(ref mut f) => {
+                // Same for mutating a function's code object or its defaults —
+                // CPython invalidates the specialiser (`test_optimizer`'s
+                // `test_func_modification` asserts one bump per attribute).
+                if matches!(name, "__code__" | "__defaults__" | "__kwdefaults__") {
+                    crate::object::rare_events::bump(crate::object::rare_events::FUNC_MODIFICATION);
+                }
                 f.dict.insert_str(&name, value);
                 Ok(())
             }

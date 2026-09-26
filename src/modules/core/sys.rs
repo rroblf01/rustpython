@@ -594,6 +594,14 @@ pub fn create_sys_dict(argv: Vec<String>) -> HashMap<String, PyObjectRef> {
     // raised `AttributeError` just from that, before any such machinery
     // would even matter. Default mirrors real CPython's own default
     // behavior: print a short summary to stderr.
+    // `sys.reset_rare_event_counters()` — added in 3.12 alongside
+    // `sys.activate_stack_trampoline`; `test_optimizer`'s rare-event-counter
+    // tests call it in `setUp` to get a clean baseline, so without it every
+    // one of them errored in setUp ("'module' object has no attribute
+    // 'reset_rare_event_counters'"). This interpreter has no event counters
+    // to reset, so it is a no-op — but it must EXIST for the tests to run.
+    sys_func!("reset_rare_event_counters", |_args| Ok(py_none()));
+
     sys_func!("unraisablehook", |args| {
         if let Some(unraisable) = args.first() {
             eprintln!("Exception ignored: {}", unraisable.repr());

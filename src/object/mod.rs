@@ -5,6 +5,7 @@ pub use errors::*;
 mod pyset;
 pub use pyset::*;
 mod pydict;
+pub mod rare_events;
 pub use pydict::*;
 pub mod pystring;
 pub use pystring::PyStr;
