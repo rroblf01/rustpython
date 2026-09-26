@@ -1,7 +1,65 @@
 # RustPython — CPython 3.14 Compatibility Gap Analysis
 
-Last updated: August 30, 2026 (previous version dated August 29 — see `CLAUDE.md` for the current
+Last updated: September 26, 2026 (previous version dated August 30 — see `CLAUDE.md` for the current
 architecture and the `cpython_test_suite_compat` memory topic for the full batch-by-batch history).
+
+**2026-09-26 session (process spawning, and the bugs it uncovered)**:
+
+`subprocess` could not be real until three things existed, and none of them did. The vendored
+`Lib/subprocess.py` (byte-identical to CPython 3.14) reads `os.waitpid`,
+`os.waitstatus_to_exitcode`, the `W*` status-word macros and `os.strerror` at module scope, so
+`import subprocess` died with "'module' object has no attribute 'waitpid'"; and `_posixsubprocess`
+— the module it imports for `fork_exec` — did not exist at all. Both are now implemented: a
+`fork_exec` built on `std::process::Command` (fds duplicated before std takes ownership, the
+child's copies closed in a `pre_exec` closure, `setsid`/`setpgid`/`pass_fds` as raw syscalls,
+CPython's exact `EXC:hex_errno:message` errpipe format, the bare pid as the return value), and
+the `os` process-status API on top of a child registry. Alongside it, a set of fd-level `os`
+entry points that needed raw syscalls (`dup`, `dup2`, `pipe2`, `set_inheritable`/
+`get_inheritable`, `fsync`, `ftruncate`, the xattr family, `sendfile`, `fallocate`,
+`posix_fadvise`, `mknod`, `lchown`, `fchdir`, `sync`/`syncfs`, `abort`), `os.pipe` returning
+non-inheritable fds like CPython's, and `os.write` accepting any bytes-like object. The native
+`subprocess` module is retired in favour of the real one. Two interpreter bugs surfaced here:
+`sys.unraisablehook` was handed `str(exc)` with no traceback instead of the exception object,
+and file objects were unhashable — `Popen._fileobj2output` is keyed by them, so *every* captured
+subprocess raised "cannot use 'file' as a dict key".
+
+The import machinery had a bug with much wider reach: `import_cached_or_fresh` read a miss in
+the internal module cache as "not imported" and re-executed the module. Dotted names such as
+`collections.abc` only ever land in `sys.modules`, so `importlib.import_module` re-ran them on
+every call — and since `pkgutil.resolve_name` walks that path while hunting for a package
+boundary, **every** `mock.patch('mod.attr')` (the most common idiom in the whole corpus)
+re-imported its patch target, installed a second module object in `sys.modules`, and patched the
+copy nobody else held. Fixed by consulting `sys.modules` when the internal cache misses, while
+still treating a `None` entry as CPython's "import failed/blocked" marker.
+
+Dict iteration was snapshot-based: `dict.__iter__` returned a list, `d.__iter__()` bound to a
+shallow copy of the dict, and an explicit `it.__next__()` on any built-in iterator advanced that
+copy and returned the first element forever. All three are fixed, so "dictionary changed size
+during iteration" is raised again (code with a `__iter__` that mutates the dict it walks depends
+on it) and `f(**mapping)` propagates the mapping's own errors instead of reporting every one as
+"argument after ** must be a mapping". doctest compiled its examples with the literal filename
+`<doctest>` and carried hardcoded `test.test_unpack.BozoError`-style names, so every doctest
+object in every corpus file was reported under whichever name happened to be hardcoded; the
+module's `__file__` is now threaded through (as real doctest does) and `test.<stem>` is derived
+from it.
+
+`Path.glob('**/*')` recursed through `Path::is_dir()`, which follows symlinks, so a symlink
+pointing at an ancestor looped forever — `test_tarfile` builds exactly such a loop on purpose and
+the file ran to the sweep timeout while climbing to 2GB. `**` no longer follows symlinks (as
+CPython has not since 3.13), and `os.scandir()` answers `close`/`__enter__`/`__exit__` (every
+stdlib caller writes `with os.scandir(...) as it:`).
+
+`os.kill` was a silent no-op for every pid but our own, so `Popen.kill()`/`terminate()` did
+nothing and `subprocess.run(..., timeout=…)` raised `TimeoutExpired` on schedule and then sat in
+the follow-up `wait()` until the child ended by itself — 30s for a 2s timeout, which is what
+pushed `test_subprocess` past the sweep limit. It now runs a Python-level handler for our own
+pid and delivers everything else through `kill(2)`.
+
+Sweep after the batch: **140 / 398 pass** (71 SKIP, 168 FAIL, 19 TIMEOUT), up from 138, with no
+regressions in any of the four intermediate sweeps. Newly passing: `test_hashlib`,
+`test_remote_pdb`, `test_userlist`, `test_unpack`, `test_unpack_ex`, `test_extcall`.
+`test_subprocess` now completes (46s) instead of timing out, and `test_tarfile` runs in 39s
+instead of hanging to the limit.
 
 **2026-09-25 session (networking cluster)**: the `ssl` module gained a real `SSLSocket` (a
 socket-shaped wrapper — every socket call forwards to the wrapped socket), a real `SSLContext`
