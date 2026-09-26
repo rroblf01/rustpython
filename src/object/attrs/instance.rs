@@ -323,12 +323,21 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     }
                 }
             }
-            // Fallback: for dict-derived types, provide common dict methods
-            if name == "__iter__"
-                || name == "items"
-                || name == "keys"
-                || name == "values"
-                || name == "get"
+            // Fallback: for dict-DERIVED types, provide the common dict
+            // methods. Restricting it to classes that actually inherit from
+            // `dict` matters: applied to every class, it shadowed a real
+            // `__getattr__`, so `MagicMock().get` returned the dict `get`
+            // builtin instead of an auto-created child mock (which is what
+            // broke test_getpass's `environ.get.return_value = ...`).
+            let dict_derived = mro.iter().skip(1).any(
+                |base| matches!(&*base.borrow(), PyObject::Type { name, .. } if name == "dict"),
+            );
+            if dict_derived
+                && (name == "__iter__"
+                    || name == "items"
+                    || name == "keys"
+                    || name == "values"
+                    || name == "get")
             {
                 static DICT_METHODS: std::sync::OnceLock<
                     std::collections::HashMap<String, BuiltinFunc>,

@@ -4,6 +4,38 @@ use crate::interner;
 use crate::object::*;
 use std::rc::Rc;
 
+/// A `UnicodeDecodeError` for `buf`, which `encoding` could not decode.
+pub fn unicode_decode_error(encoding: &str, buf: &[u8]) -> PyError {
+    let (valid_up_to, start, reason) = match std::str::from_utf8(buf) {
+        Err(e) => {
+            let valid_up_to = e.valid_up_to();
+            match e.error_len() {
+                Some(len) => (valid_up_to, valid_up_to + len + 1, "invalid start byte"),
+                None => (valid_up_to, valid_up_to + 1, "unexpected end of data"),
+            }
+        }
+        Ok(_) => (0, 1, "invalid start byte"),
+    };
+    PyError::Exception(
+        "UnicodeDecodeError".to_string(),
+        PyObjectRef::new(PyObject::Exception {
+            typ: "UnicodeDecodeError".to_string(),
+            args: vec![
+                py_str(encoding),
+                PyObjectRef::new(PyObject::Bytes(buf.to_vec())),
+                py_int(valid_up_to as i64),
+                py_int(start as i64),
+                py_str(reason),
+            ],
+            cause: None,
+            suppress_context: false,
+            context: None,
+            traceback: None,
+            extra: None,
+        }),
+    )
+}
+
 /// Decode bytes to a Python string, respecting the file's encoding.
 /// Returns UnicodeDecodeError for non-UTF-8 encodings when bytes are invalid.
 pub fn decode_with_encoding(buf: &[u8], encoding: &Option<String>) -> PyResult<PyObjectRef> {
@@ -33,7 +65,42 @@ pub fn decode_with_encoding(buf: &[u8], encoding: &Option<String>) -> PyResult<P
         }
         Ok(py_str(&String::from_utf8_lossy(buf)))
     } else {
-        // UTF-8 or other: use lossy decode (existing behavior)
+        // UTF-8 (the default) is decoded STRICTLY, like CPython's text mode:
+        // an undecodable byte must raise `UnicodeDecodeError`, not come back
+        // as U+FFFD. Code depends on that — `tokenize.open` is how CPython
+        // reads source honouring PEP 263, and a file whose declared encoding
+        // does not fit its bytes has to FAIL there, which is what makes
+        // `linecache.getline` return '' for a badly-encoded file (and what
+        // makes `compile()` reject it) instead of silently reinterpreting it.
+        if enc.eq_ignore_ascii_case("utf-8") || enc.eq_ignore_ascii_case("utf8") {
+            return match std::str::from_utf8(buf) {
+                Ok(text) => Ok(py_str(text)),
+                Err(e) => {
+                    let valid_up_to = e.valid_up_to();
+                    let start = e.error_len().map(|l| l + valid_up_to).unwrap_or(0) + 1;
+                    Err(PyError::Exception(
+                        "UnicodeDecodeError".to_string(),
+                        PyObjectRef::new(PyObject::Exception {
+                            typ: "UnicodeDecodeError".to_string(),
+                            args: vec![
+                                py_str("utf-8"),
+                                PyObjectRef::new(PyObject::Bytes(buf.to_vec())),
+                                py_int(valid_up_to as i64),
+                                py_int(start as i64),
+                                py_str("invalid start byte"),
+                            ],
+                            cause: None,
+                            suppress_context: false,
+                            context: None,
+                            traceback: None,
+                            extra: None,
+                        }),
+                    ))
+                }
+            };
+        }
+        // Any other codec we do not implement: keep the historical lossy
+        // behaviour rather than refusing to read the file at all.
         Ok(py_str(&String::from_utf8_lossy(buf)))
     }
 }
@@ -278,12 +345,13 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                             let mut extra = [0u8; 1];
                                             match file.borrow_mut().read(&mut extra) {
                                                 Ok(0) => {
-                                                    // EOF — decode what we
-                                                    // have lossily rather
-                                                    // than hang forever.
-                                                    return Ok(py_str(&String::from_utf8_lossy(
-                                                        &full,
-                                                    )));
+                                                    // EOF: decode what we
+                                                    // have rather than hang
+                                                    // forever (strict for
+                                                    // UTF-8, an incomplete
+                                                    // tail is a decode error
+                                                    // just like any other).
+                                                    return decode_with_encoding(&full, encoding);
                                                 }
                                                 Ok(_) => full.push(extra[0]),
                                                 Err(e) => {
@@ -293,12 +361,18 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                                         }
                                         Err(_) => {
                                             // Genuinely invalid bytes, or
-                                            // an incomplete tail at EOF:
-                                            // lossy-decode everything
-                                            // (preserving the pre-existing
-                                            // lossy behavior so no existing
-                                            // caller regresses).
-                                            return Ok(py_str(&String::from_utf8_lossy(&full)));
+                                            // an incomplete tail at EOF.
+                                            // STRICT for UTF-8, matching
+                                            // CPython's text mode: silently
+                                            // substituting U+FFFD here made
+                                            // `tokenize.open` (the PEP 263
+                                            // reader) accept a file whose
+                                            // declared encoding does not
+                                            // fit its bytes, and
+                                            // `linecache`/`compile()` then
+                                            // read mis-decoded source
+                                            // instead of failing.
+                                            return decode_with_encoding(&full, encoding);
                                         }
                                     }
                                 }

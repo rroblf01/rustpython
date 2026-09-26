@@ -923,6 +923,35 @@ fn real_main() {
                     crate::interner::intern("__file__"),
                     object::py_str(filename),
                 );
+                // ... and `__loader__` (a real `SourceFileLoader` for the
+                // script) with `__spec__ = None`, exactly as CPython does
+                // for `__main__`. Absent here, every consumer of the module's
+                // own source through the PEP 302 hook silently found
+                // nothing: `linecache.lazycache`/`updatecache` (so
+                // `traceback`/`doctest`/`inspect.getsource` on the running
+                // script came up empty, and `test_linecache`'s lazycache
+                // tests never got their 4-tuple cache entry).
+                {
+                    let mut loader = None;
+                    if let Ok(machinery) = vm.import_module_from_file("importlib.machinery") {
+                        if let Ok(cls) = machinery.borrow().get_attribute("SourceFileLoader") {
+                            loader = crate::object::call_bound_method(
+                                cls,
+                                object::py_str("__main__"),
+                                vec![object::py_str(filename)],
+                            )
+                            .ok();
+                        }
+                    }
+                    if let Some(loader) = loader {
+                        vm.globals
+                            .borrow_mut()
+                            .insert(crate::interner::intern("__loader__"), loader);
+                    }
+                    vm.globals
+                        .borrow_mut()
+                        .insert(crate::interner::intern("__spec__"), object::py_none());
+                }
                 match vm.run(code) {
                     Ok(_val) => {
                         crate::modules::run_atexit_handlers(&mut vm);

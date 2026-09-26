@@ -105,6 +105,41 @@ pub fn tiw_delegate_marker(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
 /// Real body for every `TextIOWrapper` method/property dispatched through
 /// `tiw_delegate_marker`. `args[0]` is always `self`; the raw handle backing
 /// it is fetched via `io_get_raw`.
+
+/// Decode a chunk read through a `TextIOWrapper`.
+///
+/// STRICT for UTF-8, as CPython's text layer is: a chunk that is not valid
+/// UTF-8 raises `UnicodeDecodeError` instead of silently coming back with
+/// U+FFFD. `tokenize.open` — the PEP 263 source reader every traceback,
+/// doctest and `linecache` lookup goes through — is built on this, so a file
+/// whose declared encoding does not fit its bytes has to fail there
+/// (`linecache.getline` then correctly returns `''` for it).
+fn decode_text_chunk(bytes: &[u8], encoding: &str) -> PyResult<PyObjectRef> {
+    if encoding.eq_ignore_ascii_case("utf-8") || encoding.eq_ignore_ascii_case("utf8") {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return Ok(py_str(text));
+        }
+        return Err(crate::object::attrs::file::unicode_decode_error(
+            "utf-8", bytes,
+        ));
+    }
+    Ok(py_str(&String::from_utf8_lossy(bytes)))
+}
+
+/// The encoding a `TextIOWrapper` was constructed with (default UTF-8).
+fn tiw_encoding(args: &[PyObjectRef]) -> String {
+    if let Some(PyObjectRef::Mut(rc)) = args.first() {
+        if let Ok(inst) = rc.try_borrow() {
+            if let PyObject::Instance { dict, .. } = &*inst {
+                if let Some(enc) = dict.get_str("encoding") {
+                    return enc.str();
+                }
+            }
+        }
+    }
+    "utf-8".to_string()
+}
+
 pub fn tiw_delegate_with_vm(
     vm: &mut crate::vm::VirtualMachine,
     method: &str,
@@ -116,6 +151,7 @@ pub fn tiw_delegate_with_vm(
     if method != "close" && method != "name" && method != "mode" && method != "mode_setter" {
         crate::modules::dev::io_ensure_open(args)?;
     }
+    let text_encoding = tiw_encoding(args);
     if method == "mode_setter" {
         let value = args.get(1).cloned().unwrap_or_else(py_none);
         if let PyObject::Instance { dict, .. } = &mut *args[0].borrow_mut() {
@@ -129,7 +165,7 @@ pub fn tiw_delegate_with_vm(
             let n = args.get(1).cloned().unwrap_or_else(|| py_int(-1));
             let data = crate::object::call_method_rebound(vm, &raw, "read", vec![n])?;
             if let PyObject::Bytes(ref b) = &*data.borrow() {
-                return Ok(py_str(&String::from_utf8_lossy(&b[..])));
+                return decode_text_chunk(&b[..], &text_encoding);
             }
             Ok(data)
         }
@@ -137,14 +173,14 @@ pub fn tiw_delegate_with_vm(
             let n = args.get(1).cloned().unwrap_or_else(|| py_int(-1));
             let data = crate::object::call_method_rebound(vm, &raw, "readline", vec![n])?;
             if let PyObject::Bytes(ref b) = &*data.borrow() {
-                return Ok(py_str(&String::from_utf8_lossy(&b[..])));
+                return decode_text_chunk(&b[..], &text_encoding);
             }
             Ok(data)
         }
         "__next__" => {
             let data = crate::object::call_method_rebound(vm, &raw, "readline", vec![py_int(-1)])?;
             let s = if let PyObject::Bytes(ref b) = &*data.borrow() {
-                py_str(&String::from_utf8_lossy(&b[..]))
+                decode_text_chunk(&b[..], &text_encoding)?
             } else {
                 data.clone()
             };
@@ -169,7 +205,7 @@ pub fn tiw_delegate_with_vm(
                 let data =
                     crate::object::call_method_rebound(vm, &raw, "readline", vec![py_int(-1)])?;
                 let s = if let PyObject::Bytes(ref b) = &*data.borrow() {
-                    py_str(&String::from_utf8_lossy(&b[..]))
+                    decode_text_chunk(&b[..], &text_encoding)?
                 } else {
                     data.clone()
                 };
@@ -345,7 +381,11 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
     // `urllib`, `zipfile`'s test helpers, `gzip`), and subclassing a
     // builtin function object raises "'builtin_function_or_method' object
     // has no attribute '__init__'".
-    fn bytesio_new(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    fn bytesio_new(
+        args: &[PyObjectRef],
+        shell: Option<PyObjectRef>,
+        original: Option<PyObjectRef>,
+    ) -> PyResult<PyObjectRef> {
         let buf = if !args.is_empty() {
             let a = args[0].borrow();
             match &*a {
@@ -662,11 +702,17 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
         );
 
         Ok(PyObjectRef::new({
+            let mut bases: Vec<PyObjectRef> = Vec::new();
+            for base in [shell, original].into_iter().flatten() {
+                if !bases.iter().any(|b| b.is(&base)) {
+                    bases.push(base);
+                }
+            }
             let typ = PyObjectRef::new(PyObject::Type {
                 name: "BytesIO".to_string(),
                 dict: Box::new(str_map_to_typedict(type_dict)),
-                bases: vec![],
-                mro: vec![],
+                mro: bases.clone(),
+                bases,
             });
             fixup_self_mro(&typ);
             PyObject::Instance {
@@ -675,14 +721,27 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             }
         }))
     }
+    // The class object itself, filled in right after it is built. Instances
+    // get a PER-INSTANCE type (so the buffer state lives in the type, not the
+    // instance dict), which used to leave `isinstance(io.BytesIO(),
+    // io.BytesIO)` — and the same for `StringIO` — False. Real code depends on
+    // that check constantly (`mock.patch(..., new_callable=io.StringIO)`,
+    // `unittest`'s `assertIsInstance`, `isinstance(x, io.IOBase)` chains), so
+    // the per-instance type now lists the public class as a base.
+    let bytesio_shell: Rc<RefCell<Option<PyObjectRef>>> = Rc::new(RefCell::new(None));
     let bytesio_cls = {
+        let shell = bytesio_shell.clone();
         let mut td: HashMap<String, PyObjectRef> = HashMap::new();
         td.insert(
             "__init__".into(),
             PyObjectRef::new(PyObject::Closure(Rc::new(
-                |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
+                move |args: &[PyObjectRef]| -> PyResult<PyObjectRef> {
                     let rest: Vec<PyObjectRef> = args.iter().skip(1).cloned().collect();
-                    let prototype = bytesio_new(&rest)?;
+                    let original = match &*args[0].borrow() {
+                        PyObject::Instance { typ, .. } => Some(typ.clone()),
+                        _ => None,
+                    };
+                    let prototype = bytesio_new(&rest, shell.borrow().clone(), original)?;
                     let per_instance_type = {
                         let borrowed = prototype.borrow();
                         match &*borrowed {
@@ -697,6 +756,33 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 },
             ))),
         );
+        // See the StringIO note: the methods live on the per-instance type,
+        // so without `__dir__` a `Mock(spec=io.BytesIO)` has no attributes.
+        let method_names: Vec<PyObjectRef> = bytesio_new(&[], None, None)
+            .ok()
+            .and_then(|proto| match &*proto.borrow() {
+                PyObject::Instance { typ, .. } => match &*typ.borrow() {
+                    PyObject::Type { dict, .. } => Some(
+                        dict.iter()
+                            .map(|(k, _)| py_str(crate::interner::lookup_str(*k)))
+                            .collect(),
+                    ),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or_default();
+        td.insert(
+            "__dir__".to_string(),
+            PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+                let mut all: Vec<PyObjectRef> = method_names.clone();
+                all.push(py_str("__class__"));
+                all.push(py_str("__doc__"));
+                all.push(py_str("__init__"));
+                all.push(py_str("__dir__"));
+                Ok(py_list(all))
+            }))),
+        );
         let typ = PyObjectRef::new(PyObject::Type {
             name: "BytesIO".to_string(),
             dict: Box::new(str_map_to_typedict(td)),
@@ -704,6 +790,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             mro: vec![],
         });
         fixup_self_mro(&typ);
+        *bytesio_shell.borrow_mut() = Some(typ.clone());
         typ
     };
     d.insert_str("BytesIO", bytesio_cls);
@@ -1063,7 +1150,12 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                                          // the same closures, now reachable both as `io.StringIO(...)` and as
                                          // `BaseClass.__init__(self, ...)`.
     let text_cls_sio = text_cls.clone();
-    fn stringio_new(args: &[PyObjectRef], text_cls: &PyObjectRef) -> PyResult<PyObjectRef> {
+    fn stringio_new(
+        args: &[PyObjectRef],
+        text_cls: &PyObjectRef,
+        shell: Option<PyObjectRef>,
+        original: Option<PyObjectRef>,
+    ) -> PyResult<PyObjectRef> {
         {
             let initial_value = if !args.is_empty() {
                 match &*args[0].borrow() {
@@ -1412,11 +1504,26 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             );
 
             Ok(PyObjectRef::new({
+                // The public `io.StringIO` class — and the SUBCLASS the
+                // instance was actually created from, if any — are bases of
+                // the per-instance type. Without them the type swap in
+                // `__init__` dropped the subclass: `class M(io.StringIO)`
+                // gave instances that were neither `isinstance(m, M)` nor
+                // `isinstance(m, io.StringIO)`, and lost `M`'s own methods.
+                let mut bases: Vec<PyObjectRef> = Vec::new();
+                for base in [shell, original].into_iter().flatten() {
+                    if !bases.iter().any(|b| b.is(&base)) {
+                        bases.push(base);
+                    }
+                }
+                if !bases.iter().any(|b| b.is(text_cls)) {
+                    bases.push(text_cls.clone());
+                }
                 let typ = PyObjectRef::new(PyObject::Type {
                     name: "StringIO".to_string(),
                     dict: Box::new(str_map_to_typedict(type_dict)),
-                    bases: vec![text_cls.clone()],
-                    mro: vec![text_cls.clone()],
+                    mro: bases.clone(),
+                    bases,
                 });
                 fixup_self_mro(&typ);
                 PyObject::Instance {
@@ -1426,9 +1533,11 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             }))
         }
     }
+    let stringio_shell: Rc<RefCell<Option<PyObjectRef>>> = Rc::new(RefCell::new(None));
     let stringio_cls = {
         let tc = text_cls_sio.clone();
         let tc_for_init = tc.clone();
+        let shell = stringio_shell.clone();
         let mut td: HashMap<String, PyObjectRef> = HashMap::new();
         td.insert(
             "__init__".into(),
@@ -1441,7 +1550,14 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                     // through the type, so they must be there. Swapping
                     // `self`'s type is also what makes a SUBCLASS instance
                     // (`class MockResponse(io.StringIO)`) fully functional.
-                    let prototype = stringio_new(&rest, &tc_for_init)?;
+                    // The type the instance already has — a subclass when
+                    // `class M(io.StringIO)` is what is being instantiated.
+                    let original = match &*args[0].borrow() {
+                        PyObject::Instance { typ, .. } => Some(typ.clone()),
+                        _ => None,
+                    };
+                    let prototype =
+                        stringio_new(&rest, &tc_for_init, shell.borrow().clone(), original)?;
                     let per_instance_type = {
                         let borrowed = prototype.borrow();
                         match &*borrowed {
@@ -1456,6 +1572,40 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
                 },
             ))),
         );
+        // The methods live on the PER-INSTANCE type (they capture that
+        // instance's buffer), so `io.StringIO` itself would otherwise look
+        // empty: `hasattr(io.StringIO, "read")` is False and — what actually
+        // broke `test_getpass` — `mock.Mock(spec=io.StringIO)` rejects
+        // `stream.flush()`, because a spec only admits names `dir()` lists.
+        // One throwaway instance gives the authoritative name list.
+        let method_names: Vec<PyObjectRef> = {
+            let names = stringio_new(&[], &tc, None, None)
+                .ok()
+                .and_then(|proto| match &*proto.borrow() {
+                    PyObject::Instance { typ, .. } => match &*typ.borrow() {
+                        PyObject::Type { dict, .. } => Some(
+                            dict.iter()
+                                .map(|(k, _)| py_str(crate::interner::lookup_str(*k)))
+                                .collect(),
+                        ),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .unwrap_or_default();
+            names
+        };
+        td.insert(
+            "__dir__".to_string(),
+            PyObjectRef::new(PyObject::Closure(Rc::new(move |_: &[PyObjectRef]| {
+                let mut all: Vec<PyObjectRef> = method_names.clone();
+                all.push(py_str("__class__"));
+                all.push(py_str("__doc__"));
+                all.push(py_str("__init__"));
+                all.push(py_str("__dir__"));
+                Ok(py_list(all))
+            }))),
+        );
         let typ = PyObjectRef::new(PyObject::Type {
             name: "StringIO".to_string(),
             dict: Box::new(str_map_to_typedict(td)),
@@ -1463,6 +1613,7 @@ pub fn create_io_module_dict() -> HashMap<String, PyObjectRef> {
             mro: vec![tc.clone()],
         });
         fixup_self_mro(&typ);
+        *stringio_shell.borrow_mut() = Some(typ.clone());
         typ
     };
     d.insert_str("StringIO", stringio_cls);

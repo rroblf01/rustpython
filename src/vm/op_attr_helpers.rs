@@ -123,7 +123,16 @@ pub fn try_exception_attributes(
 }
 
 /// Fallback for dict methods on dict-derived instances (e.g. Counter, defaultdict subclasses)
+///
+/// Only for classes that actually inherit from `dict`. Applied to EVERY
+/// instance it shadowed a real `__getattr__`: `MagicMock().get` came back as
+/// the dict `get` builtin instead of an auto-created child mock, which is
+/// what broke `test_getpass`'s `environ.get.return_value = ...` (and any
+/// other mock attribute named `get`/`keys`/`items`/`values`).
 pub fn try_dict_methods(obj: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
+    if !is_dict_derived_class(obj) {
+        return None;
+    }
     if name == "__iter__" || name == "items" || name == "keys" || name == "values" || name == "get"
     {
         let func: BuiltinFunc = match name {
@@ -142,4 +151,20 @@ pub fn try_dict_methods(obj: &PyObjectRef, name: &str) -> Option<PyObjectRef> {
     } else {
         None
     }
+}
+
+/// Does this object's class inherit from `dict` (directly or through its MRO)?
+fn is_dict_derived_class(obj: &PyObjectRef) -> bool {
+    let typ = match &*obj.borrow() {
+        PyObject::Instance { typ, .. } => typ.clone(),
+        PyObject::Type { .. } => obj.clone(),
+        _ => return false,
+    };
+    let mro = match &*typ.borrow() {
+        PyObject::Type { mro, .. } => mro.clone(),
+        _ => return false,
+    };
+    mro.iter()
+        .skip(1)
+        .any(|base| matches!(&*base.borrow(), PyObject::Type { name, .. } if name == "dict"))
 }

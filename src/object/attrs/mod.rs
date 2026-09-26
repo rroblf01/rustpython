@@ -15,7 +15,7 @@ mod deque;
 mod dict;
 mod exception;
 pub(crate) mod exception_group;
-mod file;
+pub(crate) mod file;
 mod float;
 mod frozenset;
 mod generator;
