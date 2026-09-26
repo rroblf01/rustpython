@@ -40,6 +40,26 @@ cooperative, so a thread body that blocks can never be resumed — the structura
 53 thread-dependent files. They used to abort early instead, so they cost runner time now, not
 correctness.
 
+Later in the same session, the compression cluster: `tarfile` and `gzip` were shadowed by
+native stand-ins (`open()` returning an object with a hardcoded empty `getnames()`, a
+`/dev/null`-backed `GzipFile`), so both vendored files — byte-identical to CPython's — now load
+instead. That exposed the zlib gaps underneath: `wbits` 25..=31 (gzip framing) was approximated
+as headerless deflate, so `gzip.compress()`/`zlib.compress(data, level, 31)` produced streams
+nothing could read; `decompressobj().eof` never became True (flate2 needs a `Finish` probe to
+report stream end), which made every `gzip.decompress()` raise "Compressed file ended before the
+end-of-stream marker was reached"; and `decompress(data, max_length)` ignored `max_length`, so
+`GzipFile.read(1)` returned the entire stream. Also fixed: reading a `property` out of a NATIVE
+type's dict returned the bare property object instead of running its getter, and
+`io.BufferedWriter`/`io.BufferedIOBase` called `raw.flush()`/`raw.tell()` unconditionally where
+CPython only does so when the raw stream has them. `test_gzip` went 62 -> 24 failures and
+`.tar.gz` round-trips correctly.
+
+**Open crash-blocker**: `test_tarfile` now segfaults inside the JIT (`jit_call`) on a construct it
+only reaches with the working modules; the same file runs to its 180s timeout under
+`--no-default-features`, so the interpreter path is sound and the fault is in JIT-compiled code.
+That is the next thing to chase.
+
+
 **2026-08-30 session**: fixed a real compiler bug found via a chain of investigation starting from
 `doctest.py` never scanning a module's `__test__` dict (so any file registering doctests that way —
 `test_descrtut`, `test_setcomps`, `test_unpack`, `test_generators`, ...  — silently ran ZERO of
