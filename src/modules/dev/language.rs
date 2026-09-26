@@ -1282,26 +1282,60 @@ pub fn create_zipimport_dict() -> HashMap<String, PyObjectRef> {
             }),
         );
     }
+    // `zipimport.zipimporter` is a CLASS in CPython, and real code depends
+    // on that: `pkgutil` does `iter_importer_modules.register(zipimporter,
+    // ...)` through `functools.singledispatch`, whose `register()` rejects
+    // anything that is not a class ("Invalid first argument to
+    // `register()`"). Exposing the bare `zi_cls` Type (with the same
+    // construction logic behind its `__init__`) is therefore required for
+    // the vendored `functools`/`pkgutil` pair to import at all.
+    // A `BuiltinMethod` (unlike a `Closure`) is invoked WITH the instance
+    // prepended as `args[0]`, which is what lets `__init__` populate the
+    // instance the VM just created.
+    zi_dict.insert(
+        "__init__".to_string(),
+        PyObjectRef::imm(PyObject::BuiltinMethod {
+            name: "__init__".to_string(),
+            func: |args: &[PyObjectRef]| {
+                // The instance is the first `PyObject::Instance` in the
+                // argument list (a `BuiltinMethod`'s own `self_obj` slot is
+                // prepended as a leading `None` here), and the archive path
+                // is the constructor's argument.
+                let instance = args
+                    .iter()
+                    .find(|a| matches!(&*a.borrow(), PyObject::Instance { .. }))
+                    .cloned();
+                let path = args
+                    .iter()
+                    .rev()
+                    .find(|a| !matches!(&*a.borrow(), PyObject::Instance { .. } | PyObject::None))
+                    .cloned();
+                let (archive, prefix_slash) = match path {
+                    Some(path) => zipimporter_fields(std::slice::from_ref(&path))?,
+                    None => {
+                        return Err(PyError::type_error(
+                            "zipimporter() missing required argument 'path'",
+                        ))
+                    }
+                };
+                let instance =
+                    instance.ok_or_else(|| PyError::type_error("zipimporter() missing self"))?;
+                if let PyObject::Instance { dict, .. } = &mut *instance.borrow_mut() {
+                    dict.insert_str("archive", py_str(&archive));
+                    dict.insert_str("prefix", py_str(&prefix_slash));
+                }
+                Ok(py_none())
+            },
+            self_obj: PyObjectRef::new(PyObject::None),
+        }),
+    );
     let zi_cls = PyObjectRef::new(PyObject::Type {
         name: "zipimporter".to_string(),
         dict: Box::new(str_map_to_typedict(zi_dict)),
         bases: vec![],
         mro: vec![],
     });
-    // The actual CALLABLE bound to `zipimport.zipimporter` is a `Closure`
-    // capturing `zi_cls` directly (so instances get the real type, and
-    // hence real bound methods, attached) — NOT the bare `PyObject::Type`
-    // itself, and NOT a plain non-capturing `BuiltinFunction` needing a
-    // live-VM lookup of "the zipimporter type" (which would need the
-    // unsound-from-live-bytecode `with_vm_mut`, see `zipimporter_new`'s
-    // old doc comment history). A `Closure` needs no VM access at all
-    // here since `split_zip_archive` is a pure filesystem check.
-    d.insert_str(
-        "zipimporter",
-        PyObjectRef::new(PyObject::Closure(Rc::new(move |args: &[PyObjectRef]| {
-            zipimporter_new(args, zi_cls.clone())
-        }))),
-    );
+    d.insert_str("zipimporter", zi_cls);
 
     d.insert_str("_zip_directory_cache", py_dict());
     d
@@ -1345,20 +1379,27 @@ pub fn zipimporter_new(args: &[PyObjectRef], zi_cls: PyObjectRef) -> PyResult<Py
             }),
         ));
     }
-    match crate::vm::VirtualMachine::split_zip_archive(&path_str) {
+    let (archive, prefix_slash) = zipimporter_fields_from_str(&path_str)?;
+    {
+        let mut inst_dict = AttrMap::new();
+        inst_dict.insert_str("archive", py_str(&archive));
+        inst_dict.insert_str("prefix", py_str(&prefix_slash));
+        Ok(PyObjectRef::new(PyObject::Instance {
+            typ: zi_cls,
+            dict: inst_dict,
+        }))
+    }
+}
+
+fn zipimporter_fields_from_str(path_str: &str) -> PyResult<(String, String)> {
+    match crate::vm::VirtualMachine::split_zip_archive(path_str) {
         Some((archive, prefix)) => {
             let prefix_slash = if prefix.is_empty() {
                 String::new()
             } else {
                 format!("{}/", prefix)
             };
-            let mut inst_dict = AttrMap::new();
-            inst_dict.insert_str("archive", py_str(&archive));
-            inst_dict.insert_str("prefix", py_str(&prefix_slash));
-            Ok(PyObjectRef::new(PyObject::Instance {
-                typ: zi_cls,
-                dict: inst_dict,
-            }))
+            Ok((archive, prefix_slash))
         }
         None => Err(PyError::Exception(
             "ZipImportError".to_string(),
@@ -1373,4 +1414,39 @@ pub fn zipimporter_new(args: &[PyObjectRef], zi_cls: PyObjectRef) -> PyResult<Py
             }),
         )),
     }
+}
+
+/// `zipimporter.__init__`'s argument handling: validate the path argument
+/// and return the `(archive, prefix)` pair it stores on the instance.
+fn zipimporter_fields(args: &[PyObjectRef]) -> PyResult<(String, String)> {
+    let path_str = match args.first() {
+        Some(a) => match &*a.borrow() {
+            PyObject::Str(s) => s.to_string(),
+            _ => {
+                return Err(PyError::type_error(
+                    "zipimporter() argument path must be str, not bytes/None/other",
+                ))
+            }
+        },
+        None => {
+            return Err(PyError::type_error(
+                "zipimporter() missing required argument 'path'",
+            ))
+        }
+    };
+    if path_str.is_empty() {
+        return Err(PyError::Exception(
+            "ZipImportError".to_string(),
+            PyObjectRef::new(PyObject::Exception {
+                typ: "ZipImportError".to_string(),
+                args: vec![py_str("archive path is empty")],
+                cause: None,
+                suppress_context: false,
+                context: None,
+                traceback: None,
+                extra: None,
+            }),
+        ));
+    }
+    zipimporter_fields_from_str(&path_str)
 }

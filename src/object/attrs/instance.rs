@@ -934,6 +934,24 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
             match name {
                 "__func__" => Ok(func.clone()),
                 "__wrapped__" => Ok(func.clone()),
+                // The descriptor protocol itself: `staticmethod`/`classmethod`
+                // objects are descriptors, and real code checks for exactly
+                // that (`functools._partial_new` accepts a descriptor as its
+                // first argument, and `functools.partialmethod(staticmethod(f),
+                // 8)` — CPython's own test_functools — is rejected with "the
+                // first argument <staticmethod(<function capture>)> must be a
+                // callable or a descriptor" without it).
+                "__get__" => {
+                    let f = func.clone();
+                    Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                        move |args: &[PyObjectRef]| {
+                            // A staticmethod's `__get__` returns the wrapped
+                            // function itself, unbound.
+                            let _ = args;
+                            Ok(f.clone())
+                        },
+                    ))))
+                }
                 "__isabstractmethod__" => Ok(py_bool(
                     func.borrow()
                         .get_attribute("__isabstractmethod__")
@@ -955,6 +973,23 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
         PyObject::ClassMethod { func } => match name {
             "__func__" => Ok(func.clone()),
             "__wrapped__" => Ok(func.clone()),
+            "__get__" => {
+                let f = func.clone();
+                Ok(PyObjectRef::new(PyObject::Closure(Rc::new(
+                    move |args: &[PyObjectRef]| {
+                        // `classmethod.__get__(instance, owner)` binds the
+                        // OWNER class as the wrapped function's first
+                        // argument.
+                        let owner = args.get(1).cloned();
+                        match owner {
+                            Some(owner) => {
+                                crate::object::call_bound_method(f.clone(), owner, vec![])
+                            }
+                            None => Ok(f.clone()),
+                        }
+                    },
+                ))))
+            }
             "__isabstractmethod__" => Ok(py_bool(
                 func.borrow()
                     .get_attribute("__isabstractmethod__")

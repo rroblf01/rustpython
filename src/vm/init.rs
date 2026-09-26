@@ -200,8 +200,9 @@ pub(crate) fn register_native_modules(
         create_module("_collections", collections_dict),
     );
 
-    let functools_dict = create_functools_dict();
-    modules.insert_str("functools", create_module("functools", functools_dict));
+    // `functools` is NOT registered natively: the vendored CPython
+    // `Lib/functools.py` is byte-identical to upstream (and `enum_extra.py`
+    // layers on top of it), so the real module loads.
 
     let itertools_dict = create_itertools_dict();
     modules.insert_str("itertools", create_module("itertools", itertools_dict));
@@ -420,7 +421,6 @@ pub(crate) fn register_native_modules(
     modules.insert_str("_hashlib", create_module("_hashlib", create_hashlib_dict()));
 
     // Native secrets module
-    modules.insert_str("secrets", create_module("secrets", create_secrets_dict()));
 
     // Native base64 module
     modules.insert_str("base64", create_module("base64", create_base64_dict()));
@@ -432,7 +432,6 @@ pub(crate) fn register_native_modules(
     );
 
     // Native uuid module
-    modules.insert_str("uuid", create_module("uuid", create_uuid_dict()));
 
     // Native string module (with capwords and Formatter)
     let mut string_dict = create_string_dict();
@@ -449,7 +448,6 @@ pub(crate) fn register_native_modules(
     );
 
     // Native wave module
-    modules.insert_str("wave", create_module("wave", create_wave_dict()));
 
     // Native numbers module — DISABLED: was bare STRING placeholders
     // (`d.insert_str("Number", py_str("Number"))` etc.) instead of
@@ -487,7 +485,6 @@ pub(crate) fn register_native_modules(
     let csv_dict = create_csv_dict();
     let csv_mod = create_module("csv", csv_dict.clone());
     let csv_mod2 = create_module("_csv", csv_dict);
-    modules.insert_str("csv", csv_mod.clone());
     modules.insert_str("_csv", csv_mod2);
 
     // Native io module — DISABLED: CPython io.py is used instead (imports from _io)
@@ -571,7 +568,6 @@ pub(crate) fn register_native_modules(
     // native Rust version never had, and its algorithm is authoritative.
 
     // Native getpass module
-    modules.insert_str("getpass", create_module("getpass", create_getpass_dict()));
 
     // Native errno module
     modules.insert_str("errno", create_module("errno", create_errno_dict()));
@@ -752,7 +748,6 @@ pub(crate) fn register_native_modules(
     // itself.
 
     // Native smtplib module (SMTP stub)
-    modules.insert_str("smtplib", create_module("smtplib", create_smtplib_dict()));
 
     // Native html/html.entities/html.parser — DISABLED: `html.parser`
     // was a near-empty stub (no real tokenizer at all — `feed()` just
@@ -862,7 +857,6 @@ pub(crate) fn register_native_modules(
     modules.insert_str("xml", xml_mod);
 
     // Native this module (Zen of Python)
-    modules.insert_str("this", create_module("this", create_this_dict()));
 
     // argparse now loads from Lib/argparse.py (real CPython source,
     // vendored verbatim) instead of the old native stub — the stub's
@@ -990,7 +984,6 @@ pub(crate) fn register_native_modules(
     );
 
     // Native trace module (code tracing / coverage stubs)
-    modules.insert_str("trace", create_module("trace", create_trace_dict()));
 
     // Native _concurrent module (concurrent.futures backend)
     let concurrent_futures_mod =
