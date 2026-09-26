@@ -71,42 +71,21 @@ impl VirtualMachine {
         // from an earlier, already-handled invocation and wrongly re-raise it.
         take_pending_descriptor_error();
         let is_class = matches!(&*obj.borrow(), PyObject::Type { .. });
-        let typ: Option<PyObjectRef> = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
-            Some(typ.clone())
-        } else if is_class {
-            // Attribute on the METACLASS: reading `SomeEnum.__members__`
-            // must find `EnumType.__members__` — a `property` whose getter
-            // takes the CLASS as self — and invoke it. Without this,
-            // `getattr(cls, name)`/`hasattr(cls, name)` reported every
-            // metaclass-provided attribute as missing while the dot form
-            // (`cls.__members__`, LOAD_ATTR's own metatype fallback) worked.
-            crate::object::metatype_of(obj).and_then(|mt| {
-                if let PyObject::Type { mro, .. } = &*mt.borrow() {
-                    for base in mro.iter() {
-                        if let PyObject::Type { dict, .. } = &*base.borrow() {
-                            if let Some(val) = dict.get_str(name) {
-                                return Some(val.clone());
-                            }
-                        }
-                    }
-                }
-                None
-            })
-        } else {
-            return None;
-        };
-        let typ = typ?;
-        let found = if is_class {
-            // Already resolved through the metaclass chain above; skip the
-            // instance-type dict/MRO walk.
-            Some(typ.clone())
-        } else {
-            let typ_ref = typ.borrow();
+        // Look the attribute up in `cls`'s OWN dict + MRO first and in the
+        // metatype's only afterwards — CPython's `type.__getattribute__`
+        // order. Resolving through the metatype first made every
+        // ABC-derived class report its metatype's `__module__` and `__doc__`:
+        // `getattr(configparser.ConfigParser, '__module__')` answered
+        // `'abc'`, and `test.support.check__all__` — which decides a
+        // module's public names by comparing each against `value.__module__`
+        // — then found none of them.
+        let lookup_in = |cls: &PyObjectRef| -> Option<PyObjectRef> {
+            let cls_ref = cls.borrow();
             if let PyObject::Type {
                 dict: type_dict,
                 mro,
                 ..
-            } = &*typ_ref
+            } = &*cls_ref
             {
                 type_dict.get_str(name).cloned().or_else(|| {
                     for base in mro.iter().skip(1) {
@@ -124,7 +103,31 @@ impl VirtualMachine {
             } else {
                 None
             }
-        }?;
+        };
+        // `bind_target` is what a `classmethod` found here binds to: the
+        // instance's type, or — for an attribute on a class — the class
+        // itself. Passing the descriptor instead would hand back an unbound
+        // `ClassMethod`, which then refused the following assignment
+        // ("cannot set attribute 'tearDown_exceptions' on 'classmethod'",
+        // from `unittest`'s own class-fixture bookkeeping).
+        let (bind_target, found) = if let PyObject::Instance { typ, .. } = &*obj.borrow() {
+            let typ = typ.clone();
+            let found = lookup_in(&typ);
+            (typ, found)
+        } else if is_class {
+            // Reading `SomeEnum.__members__` must still find
+            // `EnumType.__members__` — a `property` whose getter takes the
+            // CLASS as self — and invoke it, but only once the class's own
+            // namespace has missed (that part used to work, and the metatype
+            // must not get to answer first).
+            let found = lookup_in(obj)
+                .or_else(|| crate::object::metatype_of(obj).and_then(|mt| lookup_in(&mt)));
+            (obj.clone(), found)
+        } else {
+            return None;
+        };
+        let typ = bind_target;
+        let found = found?;
         let val_borrowed = found.borrow();
         match &*val_borrowed {
             PyObject::Property(ref d) if d.getter.is_some() => {
