@@ -54,6 +54,25 @@ type's dict returned the bare property object instead of running its getter, and
 CPython only does so when the raw stream has them. `test_gzip` went 62 -> 24 failures and
 `.tar.gz` round-trips correctly.
 
+**Un-shadowing the vendored stdlib**: 26 of the files in `Lib/` are byte-identical to CPython
+3.14's yet were hidden behind native modules. Removing those registrations one group at a time
+(verifying each with its corpus file) is the cheapest PASS-per-line lever in the tree:
+`tarfile`+`gzip` (above), then `csv`/`getpass`/`secrets`/`smtplib`/`this`/`trace`/`uuid`/`wave`
+(`test_wave` 113 -> 40 failures, `test_getpass` 57 -> 4, `test_smtplib` 85 -> 61, `test_secrets`
+passes) and `functools` (`test_functools` 213 -> 154). Each one uncovers real interpreter gaps
+underneath: `zipimport.zipimporter` had to become a real class (`pkgutil` registers it with
+`functools.singledispatch`), `staticmethod`/`classmethod` needed descriptor `__get__`, and
+`callable()` had to learn that a native `Closure` is callable — without which the vendored
+`functools.partial` rejected `re.compile(...).sub` and importing `email.message` failed, taking
+the five `test_codecmaps_*` files down with it. Still native, and why: `pdb` (CPython 3.14's
+`pdb.py` uses PEP 634 mapping patterns — `case {"complete": {...}}` — which this parser rejects),
+`os`/`posixpath`/`enum`/`_pydatetime`/`unittest` (bootstrap-critical), `subprocess`/`csv`'s
+`_csv` twin, `http`/`http.client` (already replaced), and the genuinely reduced files.
+
+Sweep after the un-shadowing batch: **138 / 398 pass** (69 SKIP, 172 FAIL, 19 TIMEOUT), 329 fewer
+failing subtests than the previous sweep and no real regressions (`test_sort`/`test_userlist` are
+the known load-dependent ±1 flakes).
+
 **Open crash-blocker**: `test_tarfile` now segfaults inside the JIT (`jit_call`) on a construct it
 only reaches with the working modules; the same file runs to its 180s timeout under
 `--no-default-features`, so the interpreter path is sound and the fault is in JIT-compiled code.
