@@ -592,6 +592,54 @@ impl VirtualMachine {
             }
         }
 
+        // `bytes.decode(b"...")`, `bytes.hex(b)`, ... — the UNBOUND form of
+        // the instance methods, which CPython also exposes on the class
+        // object and real code uses (every `test_pdb` subprocess helper does
+        // `bytes.decode(stdout)`). All of them share ONE marker fn, with
+        // the method name carried by the `BuiltinFunction`'s own `name`
+        // field, and dispatch to the instance's attribute of that name.
+        if let PyObject::BuiltinFunction { func, name } = &*callable.borrow() {
+            if std::ptr::fn_addr_eq(
+                *func,
+                crate::modules::core::builtins::collection_types::bytes_unbound_method_marker
+                    as crate::object::BuiltinFunc,
+            ) {
+                let method = name.clone();
+                let mut all_args = args.to_vec();
+                if all_args.is_empty() {
+                    return Err(PyError::type_error(format!(
+                        "{}() missing required argument",
+                        method
+                    )));
+                }
+                let receiver = all_args.remove(0);
+                let bound = receiver.borrow().get_attribute(&method).map_err(|_| {
+                    PyError::type_error(format!(
+                        "descriptor '{}' requires a '{}' object",
+                        method,
+                        receiver.borrow().type_name()
+                    ))
+                })?;
+                // Rebind the method to the receiver the way the LOAD_ATTR
+                // path does, then call it with the REMAINING arguments (a
+                // `BuiltinMethod` whose `self_obj` is set gets it prepended).
+                let rebound = {
+                    let borrowed = bound.borrow();
+                    match &*borrowed {
+                        PyObject::BuiltinMethod { name, func, .. } => {
+                            PyObjectRef::imm(PyObject::BuiltinMethod {
+                                name: name.clone(),
+                                func: *func,
+                                self_obj: receiver.clone(),
+                            })
+                        }
+                        _ => bound.clone(),
+                    }
+                };
+                return self.call_function(rebound, all_args, Vec::new()).map(Some);
+            }
+        }
+
         // Every `zipimporter` instance method (`is_package`, `get_source`,
         // `find_spec`, `exec_module`, ...) shares ONE marker fn
         // (`zipimporter_method_marker`) rather than one distinct marker

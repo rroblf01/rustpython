@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicI64;
 use super::codecs::create_codecs_dict;
 use super::math::create_math_dict;
 
-mod collection_types;
+pub mod collection_types;
 mod primitive_types;
 
 /// `object.__reduce__`'s default body — a named `fn` (not an inline closure)

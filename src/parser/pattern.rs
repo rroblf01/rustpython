@@ -343,6 +343,16 @@ impl Parser {
                 if !self.eat(&Token::Comma) {
                     break;
                 }
+                // A trailing comma is legal in a mapping pattern
+                // (`{"k": v,}`) — including a NESTED one, which is what
+                // CPython 3.14's own `pdb.py` writes:
+                // `case {"complete": {"text": ..., "line": ...,},}:`
+                // Without this the loop went round again and tried to
+                // parse the closing `}` as the next key, so "Expected
+                // expression, got RightBrace" — and `import pdb` failed.
+                if self.at(&Token::RightBrace) {
+                    break;
+                }
             }
         }
         self.expect(&Token::RightBrace)?;

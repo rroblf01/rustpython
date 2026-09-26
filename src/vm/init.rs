@@ -591,7 +591,10 @@ pub(crate) fn register_native_modules(
     );
 
     // Native pdb module
-    modules.insert_str("pdb", create_module("pdb", create_pdb_dict()));
+    // `pdb` is NOT registered natively: the vendored CPython `Lib/pdb.py`
+    // is byte-identical to upstream, and its 3.14 completion-dispatch
+    // `match` uses a nested mapping pattern (see the parser's
+    // `parse_mapping_pattern`), which the native stand-in had no use for.
 
     // traceback now loads from Lib/traceback.py — the old native stub
     // (`create_traceback_dict`, kept as dead code) had only

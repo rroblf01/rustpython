@@ -649,6 +649,16 @@ impl VirtualMachine {
         // constructs one. MUST come after the `enum` install above: this
         // source does `from enum import Enum, IntEnum`, which fails while the
         // real `enum` module is still being bootstrapped.
+        // `warnings.deprecated` (PEP 702) on top of the NATIVE warnings
+        // module, which deliberately stays native (it owns the real shared
+        // filter list `test.support` asserts against). CPython 3.14's `pdb`
+        // imports it at module scope, so its absence made `import pdb` —
+        // and everything built on `bdb` — fail outright.
+        vm.install_source_defined_stdlib(
+            "warnings",
+            crate::modules::WARNINGS_EXTRA_SOURCE,
+            &["deprecated"],
+        );
         vm.install_source_defined_stdlib(
             "ssl",
             crate::modules::misc::SSL_SOCKET_SOURCE,

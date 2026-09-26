@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::AtomicI64;
 
-mod builtins;
+pub mod builtins;
 mod codecs;
 mod extra;
 mod importlib;

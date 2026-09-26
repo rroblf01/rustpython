@@ -9,6 +9,29 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
             dict,
             name: mod_name,
         } => {
+            // Every CPython module object carries `__spec__`, `__loader__`
+            // and `__submodule_search_locations__` (None for a regular
+            // module, the package's `__path__` list for a package), and the
+            // import machinery reads the last one constantly:
+            // `importlib._bootstrap._find_and_load` does
+            // `hasattr(module, 'submodule_search_locations')` to tell a
+            // namespace package from a regular one, and `_handle_fromlist`
+            // consults it before every submodule import. Without it,
+            // `importlib._bootstrap_external` raised
+            // "'module' object has no attribute
+            // 'submodule_search_locations'" and EVERY import of a package
+            // failed — which is how `test_pdb`'s own
+            // `python -m t_main` subprocess runs died.
+            if name == "submodule_search_locations" {
+                let path = dict.get_str("__path__").cloned();
+                return Ok(path.unwrap_or_else(py_none));
+            }
+            if name == "__spec__" {
+                return Ok(dict.get_str("__spec__").cloned().unwrap_or_else(py_none));
+            }
+            if name == "__loader__" {
+                return Ok(dict.get_str("__loader__").cloned().unwrap_or_else(py_none));
+            }
             if name == "__dict__" {
                 // Convert module's HashMap to a PyDict
 

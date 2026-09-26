@@ -272,6 +272,11 @@ pub fn warnings_pop_record() {
     });
 }
 
+/// `warnings.deprecated` (PEP 702), installed onto the native `warnings`
+/// module by `VirtualMachine::install_source_defined_stdlib` (see
+/// `src/vm.rs` and `src/modules/warnings_extra.py`).
+pub const WARNINGS_EXTRA_SOURCE: &str = include_str!("../warnings_extra.py");
+
 pub fn create_warnings_dict() -> HashMap<String, PyObjectRef> {
     let mut d = HashMap::new();
     macro_rules! warn_func {

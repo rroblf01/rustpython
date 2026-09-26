@@ -1,4 +1,4 @@
-mod core;
+pub mod core;
 pub mod rand;
 pub use core::*;
 mod crypto;

@@ -460,13 +460,32 @@ pub fn create_subprocess_dict() -> HashMap<String, PyObjectRef> {
             spawn_with_timeout(cmd, &cmd_str, timeout)?
         };
         let returncode = output.status.code().unwrap_or(-1) as i64;
-        let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+        // `CompletedProcess.stdout`/`stderr` are BYTES unless the caller
+        // asked for text mode (`text=True`/`universal_newlines=True`/
+        // `encoding=`); handing back `str` broke every consumer that treats
+        // them as bytes — e.g. `test.support`'s macOS launchd probe does
+        // `rc.stdout.decode("utf-8")` and every `test_pdb` subprocess test
+        // hit "'bytes' object has no attribute 'decode'" (in reverse: the
+        // str it got had no `.decode` at all).
+        let want_text = kwarg_bool(args, "text")
+            || kwarg_bool(args, "universal_newlines")
+            || kwarg_dict(args, "encoding").is_some();
+        let (stdout_value, stderr_value) = if want_text {
+            (
+                py_str(&String::from_utf8_lossy(&output.stdout)),
+                py_str(&String::from_utf8_lossy(&output.stderr)),
+            )
+        } else {
+            (
+                PyObjectRef::imm(PyObject::Bytes(output.stdout.clone())),
+                PyObjectRef::imm(PyObject::Bytes(output.stderr.clone())),
+            )
+        };
         Ok(make_completed_process(
             args[0].clone(),
             returncode,
-            py_str(&stdout_str),
-            py_str(&stderr_str),
+            stdout_value,
+            stderr_value,
         ))
     });
 

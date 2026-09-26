@@ -3,6 +3,16 @@ use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 use std::collections::HashMap;
 
+/// `bytes.<method>(value, ...)` — the unbound form. The name is threaded
+/// through `PyObject::Closure` (a `BuiltinFunction` cannot capture it), and
+/// the call is delegated to the instance's own attribute, so there is
+/// exactly one implementation of every method.
+pub fn bytes_unbound_method_marker(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    Err(PyError::runtime_error(
+        "bytes unbound-method marker reached directly (interception missing)",
+    ))
+}
+
 pub fn register_collection_types(
     builtins: &mut HashMap<String, PyObjectRef>,
     object_type: &PyObjectRef,
@@ -726,6 +736,64 @@ pub fn register_collection_types(
             func: crate::object::builtin_bytes_repr as BuiltinFunc,
         }),
     );
+    // Unbound-style access to the instance methods CPython also exposes on
+    // the class object. `bytes.decode(b)` (rather than `b.decode()`) is how
+    // real code reaches for them — `tests/cpython/test_pdb.py` does exactly
+    // that on every subprocess helper (`stdout = bytes.decode(stdout) if
+    // isinstance(stdout, bytes) else stdout`), and it raised
+    // "'bytes' object has no attribute 'decode'". Delegating to the
+    // instance-level implementation keeps ONE implementation of each.
+    for name in [
+        "decode",
+        "encode",
+        "hex",
+        "count",
+        "find",
+        "index",
+        "join",
+        "split",
+        "rsplit",
+        "splitlines",
+        "startswith",
+        "endswith",
+        "strip",
+        "lstrip",
+        "rstrip",
+        "replace",
+        "title",
+        "upper",
+        "lower",
+        "capitalize",
+        "swapcase",
+        "center",
+        "ljust",
+        "rjust",
+        "zfill",
+        "removeprefix",
+        "removesuffix",
+        "partition",
+        "rpartition",
+        "translate",
+        "expandtabs",
+        "isalnum",
+        "isalpha",
+        "isascii",
+        "isdigit",
+        "islower",
+        "isnumeric",
+        "isprintable",
+        "isspace",
+        "istitle",
+        "isupper",
+    ] {
+        bytes_dict.insert_str(
+            name,
+            PyObjectRef::new(PyObject::BuiltinFunction {
+                name: name.to_string(),
+                func: bytes_unbound_method_marker,
+            }),
+        );
+    }
     let bytes_type = PyObjectRef::new(PyObject::Type {
         name: "bytes".to_string(),
         dict: Box::new(str_map_to_typedict(bytes_dict)),
