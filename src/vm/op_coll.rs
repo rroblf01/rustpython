@@ -199,8 +199,14 @@ impl VirtualMachine {
                         // triggers (test_unpack_ex's `CrazyDict`) — must
                         // propagate unchanged instead of being reported as a
                         // TypeError about the argument's type.
+                        // `collect_mapping_items` already turns a missing
+                        // `keys` into "'X' object is not a mapping", so that
+                        // exact TypeError has to fall through to the phrasing
+                        // below ("f() argument after ** must be a mapping")
+                        // rather than be propagated as-is.
                         let is_attr_err = matches!(&e, PyError::AttributeError(_))
-                            || matches!(&e, PyError::Exception(ref msg, _) if msg.starts_with("AttributeError"));
+                            || matches!(&e, PyError::Exception(ref msg, _) if msg.starts_with("AttributeError"))
+                            || e.message().ends_with("object is not a mapping");
                         if !is_attr_err {
                             return Err(e);
                         }
