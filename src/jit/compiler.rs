@@ -446,8 +446,35 @@ impl JitCompiler {
         s
     }
 
+    /// The JIT is OPT-IN (`RPY_JIT=1`) because it miscompiles.
+    ///
+    /// Its locals live in one Cranelift stack slot that is only partially
+    /// initialized at entry (the `arg_count` leading slots are copied from
+    /// the caller's argument array; the rest are whatever the stack held),
+    /// and its `eval_stack` model is rebuilt per basic block rather than
+    /// merged at join points. Both are fine for the shapes it was exercised
+    /// on, and quietly wrong for others: the smallest reproducer is a
+    /// function with a loop and a tuple return —
+    ///
+    /// ```python
+    /// def f(a, b):
+    ///     c = 0
+    ///     while c < 3:
+    ///         c += 1
+    ///     return a, b, c      # -> ('', '', 3) instead of ('A', 'B', 3)
+    /// ```
+    ///
+    /// which is CPython's own `Lib/genericpath.py::_splitext` shape (it
+    /// made `os.path.splitext('file.test2')` return `('', '')`, and with it
+    /// 65 test_mimetypes failures, every `mimetypes.init(files=...)`, and a
+    /// pile of path handling). Other shapes aborted the process outright
+    /// (SIGSEGV: a `LOAD_FAST` of a local that is only assigned inside a
+    /// nested block reads 24 bytes of uninitialized stack as a `PyObjectRef`
+    /// pointer). Wrong answers and crashes are far worse than the speed-up,
+    /// so the interpreter runs the bytecode VM unless JIT is asked for by
+    /// name.
     pub fn is_enabled() -> bool {
-        true
+        std::env::var("RPY_JIT").map(|v| v != "0").unwrap_or(false)
     }
 
     pub fn precompute_consts(code: &CodeObject) -> Vec<PyObjectRef> {

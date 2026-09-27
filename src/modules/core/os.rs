@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::AtomicI64;
 
+mod extras;
 pub(crate) mod fd_ops;
 mod helpers;
 mod path;
@@ -1618,6 +1619,11 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         PyObjectRef::imm(PyObject::FrozenSet(fs_set)),
     );
     d.insert_str("supports_bytes_environ", py_bool(true));
+
+    // The POSIX/constant surface CPython has and this dict never grew:
+    // `os.get_exec_path` alone was enough to break every `Popen` that
+    // resolved its executable through `Lib/subprocess.py`.
+    extras::register(&mut d);
 
     // os._walk_symlinks_as_files — sentinel object used by Lib/os.py's walk()
     // to implement followlinks=os._walk_symlinks_as_files mode.
