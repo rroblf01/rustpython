@@ -819,7 +819,17 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     );
 
     // --- os.getpid() ---
-    os_func!("getpid", |_| { Ok(py_int(std::process::id() as i64)) });
+    os_func!("getpid", |args| {
+        // `test_posix`'s NO_ARG_FUNCTIONS loop requires `os.getpid(1)` to
+        // raise TypeError, like every other zero-parameter call.
+        if !args.is_empty() {
+            return Err(PyError::type_error(format!(
+                "getpid() takes no arguments ({} given)",
+                args.len()
+            )));
+        }
+        Ok(py_int(std::process::id() as i64))
+    });
 
     // ── The POSIX SCHED_* API ────────────────────────────────────────────
     // test_posix calls `os.sched_getscheduler(0)` in a CLASS BODY (a

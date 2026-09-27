@@ -167,7 +167,14 @@ fn make_uname_result(values: [PyObjectRef; 5]) -> PyObjectRef {
 }
 
 /// `os.uname()` — returns THIS process's real system info.
-pub(crate) fn os_uname(_args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+pub(crate) fn os_uname(args: &[PyObjectRef]) -> PyResult<PyObjectRef> {
+    // `os.uname()` takes no arguments (test_posix's NO_ARG_FUNCTIONS loop).
+    if !args.is_empty() {
+        return Err(PyError::type_error(format!(
+            "uname() takes no arguments ({} given)",
+            args.len()
+        )));
+    }
     let sysname = py_str(std::env::consts::OS);
     let nodename = py_str(&std::env::var("HOSTNAME").unwrap_or_default());
     let machine = py_str(std::env::consts::ARCH);
