@@ -1923,12 +1923,18 @@ fn validate_group_syntax(
                     "FutureWarning",
                 );
             }
-            // A bare `[` inside a class is a literal today but may become a
-            // nested set in the future (test_re: test_possible_set_operations).
-            // Warn regardless of position (`[[0-9]|]` warns).
-            if c == '[' {
+            // A `[` IMMEDIATELY after the class opener (or after its `^`) is
+            // a literal today but may become a nested set in the future
+            // (test_re: test_possible_set_operations wants `[[0-9]|]` to
+            // warn). CPython 3.14's `_parser.py` tests exactly that
+            // position — `if source.next == '['` — and reports the
+            // character INDEX, so warning for a `[` anywhere else in the
+            // class is wrong: CPython's own `Lib/glob.py` compiles
+            // `([*?[])` on every `import glob`, and the spurious warning
+            // went to stderr for the whole process.
+            if c == '[' && i == class_start + 1 + usize::from(chars[class_start + 1] == '^') {
                 crate::modules::warnings_emit(
-                    "Possible nested set (and future set operations) in the character class",
+                    &format!("Possible nested set at position {}", i),
                     "FutureWarning",
                 );
             }

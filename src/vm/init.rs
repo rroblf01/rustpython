@@ -23,6 +23,15 @@ pub(crate) fn is_native_module(name: &str) -> bool {
     NATIVE_MODULE_NAMES.with(|s| s.borrow().contains(name))
 }
 
+/// Un-record `name` as native — used when CPython's own pure-Python file
+/// takes over from a hand-rolled native dict, so a later
+/// `del sys.modules[...]` + re-import reads the file again.
+pub(crate) fn unnote_native_module(name: &str) {
+    NATIVE_MODULE_NAMES.with(|s| {
+        s.borrow_mut().remove(name);
+    });
+}
+
 /// Populate the standard library modules into `modules`.
 pub(crate) fn register_native_modules(
     modules: &mut HashMap<String, PyObjectRef>,

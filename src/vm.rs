@@ -592,6 +592,12 @@ impl VirtualMachine {
             ],
         );
         vm.install_collections_abc_alias();
+        vm.install_posixpath_alias();
+        // `glob`: CPython 3.14 rewrote it around a `_Globber` class with
+        // `translate()`/`has_magic()` and symlink-aware `**` recursion. The
+        // native dict had none of those, so `glob.translate` was simply
+        // missing (18 errors in test_glob alone).
+        vm.prefer_vendored_module("glob", &[]);
         vm.install_source_defined_stdlib(
             "contextvars",
             "import collections.abc\nfrom contextvars import _ContextRaw\nclass Context(_ContextRaw, collections.abc.Mapping):\n    pass\n",

@@ -182,7 +182,7 @@ pub(crate) fn fstat_result(fd: i64) -> PyResult<PyObjectRef> {
     let res = file.metadata();
     std::mem::forget(file);
     match res {
-        Ok(meta) => Ok(create_module("stat_result", stat_to_dict(&meta))),
+        Ok(meta) => Ok(super::stat_result::make_stat_result(stat_to_dict(&meta))),
         Err(e) => Err(PyError::os_error_from_io(&e)),
     }
 }

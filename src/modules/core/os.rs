@@ -12,6 +12,7 @@ use std::sync::atomic::AtomicI64;
 pub(crate) mod fd_ops;
 mod helpers;
 mod path;
+mod stat_result;
 mod uname;
 
 pub(crate) use helpers::dup_std_fd;
@@ -154,7 +155,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
                 "access() missing required argument: 'path'",
             ));
         }
-        let path = args[0].str();
+        let path = os_path_arg(&args[0])?;
         // Best-effort: this interpreter has no real per-bit POSIX
         // permission-checking machinery (setuid/gid, ACLs, etc.) — F_OK
         // (existence) is always answerable exactly; R_OK/W_OK/X_OK fall
@@ -307,7 +308,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
                         func: |args| {
                             let path = args[0].borrow().get_attribute("path")?.str();
                             match std::fs::metadata(&path) {
-                                Ok(meta) => Ok(create_module("stat_result", stat_to_dict(&meta))),
+                                Ok(meta) => Ok(stat_result::make_stat_result(stat_to_dict(&meta))),
                                 Err(e) => Err(PyError::os_error_from_io(&e)),
                             }
                         },
@@ -367,7 +368,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
     d.insert("DirEntry".to_string(), make_dir_entry_type());
     os_func!("scandir", |args| {
         let path = if !args.is_empty() {
-            args[0].str()
+            os_path_arg(&args[0])?
         } else {
             ".".to_string()
         };
@@ -398,7 +399,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("mkdir() takes at least 1 argument"));
         }
-        match std::fs::create_dir(&args[0].str()) {
+        match std::fs::create_dir(&os_path_arg(&args[0])?) {
             Ok(()) => Ok(py_none()),
             Err(e) => Err(PyError::os_error_from_io(&e)),
         }
@@ -454,7 +455,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("chdir() takes at least 1 argument"));
         }
-        let path = args[0].str();
+        let path = os_path_arg(&args[0])?;
         match std::env::set_current_dir(&path) {
             Ok(()) => Ok(py_none()),
             Err(e) => Err(PyError::os_error_from_io_path(&e, Some(&path))),
@@ -466,6 +467,16 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             Ok(p) => Ok(py_str(&p.to_string_lossy())),
             Err(e) => Err(PyError::os_error_from_io(&e)),
         }
+    });
+
+    // `os.getcwdb()` — the BYTES flavour of getcwd(). `tempfile` uses it to
+    // remember the cwd as bytes (`_os.getcwdb()` in `_get_default_tempdir`),
+    // so its absence was an outright AttributeError there and in shutil.
+    os_func!("getcwdb", |_| match std::env::current_dir() {
+        Ok(p) => Ok(PyObjectRef::new(PyObject::Bytes(
+            p.to_string_lossy().as_bytes().to_vec(),
+        ))),
+        Err(e) => Err(PyError::os_error_from_io(&e)),
     });
 
     // `os.isatty(fd)` — was missing entirely (`AttributeError`), breaking
@@ -543,7 +554,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 {
             return Err(PyError::type_error("open() requires at least 2 arguments"));
         }
-        let path = args[0].str();
+        let path = os_path_arg(&args[0])?;
         let flags = args[1].as_i64().unwrap_or(0) as i32;
         let mut opts = std::fs::OpenOptions::new();
         // O_RDONLY=0, O_WRONLY=1, O_RDWR=2 — check access mode
@@ -1160,7 +1171,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         }
         let path = os_path_arg(&args[0])?;
         match std::fs::metadata(&path) {
-            Ok(meta) => Ok(create_module("stat_result", stat_to_dict(&meta))),
+            Ok(meta) => Ok(stat_result::make_stat_result(stat_to_dict(&meta))),
             Err(e) => Err(PyError::os_error_from_io_path(&e, Some(&path))),
         }
     });
@@ -1185,14 +1196,14 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         }
         let path = os_path_arg(&args[0])?;
         match std::fs::symlink_metadata(&path) {
-            Ok(meta) => Ok(create_module("stat_result", stat_to_dict(&meta))),
+            Ok(meta) => Ok(stat_result::make_stat_result(stat_to_dict(&meta))),
             Err(e) => Err(PyError::os_error_from_io(&e)),
         }
     });
 
     // --- stat_result module with field index constants ---
     {
-        let mut sr = HashMap::new();
+        let mut sr: HashMap<String, PyObjectRef> = HashMap::new();
         sr.insert_str("ST_MODE", py_int(0));
         sr.insert_str("ST_INO", py_int(1));
         sr.insert_str("ST_DEV", py_int(2));
@@ -1209,7 +1220,14 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             "__doc__",
             py_str("stat_result: stat results as a module with named field indices"),
         );
-        d.insert_str("stat_result", create_module("stat_result", sr));
+        // The `ST_*` index constants live on the real `stat_result` type
+        // (CPython puts them there), which is also what `os.stat()` returns.
+        if let PyObject::Type { dict, .. } = &mut *stat_result::stat_result_type().borrow_mut() {
+            for (k, v) in sr {
+                dict.insert_str(&k, v);
+            }
+        }
+        d.insert_str("stat_result", stat_result::stat_result_type());
     }
 
     // --- os.chmod(path, mode) ---
@@ -1340,7 +1358,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 3 {
             return Err(PyError::type_error("chown() takes at least 3 arguments"));
         }
-        let path = args[0].str();
+        let path = os_path_arg(&args[0])?;
         let uid = args[1].as_i64().unwrap_or(-1);
         let gid = args[2].as_i64().unwrap_or(-1);
         use std::os::unix::fs::chown;
@@ -1359,7 +1377,8 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         if args.len() < 2 {
             return Err(PyError::type_error("link() takes at least 2 arguments"));
         }
-        match std::fs::hard_link(&args[0].str(), &args[1].str()) {
+        let (src, dst) = (os_path_arg(&args[0])?, os_path_arg(&args[1])?);
+        match std::fs::hard_link(&src, &dst) {
             Ok(()) => Ok(py_none()),
             Err(e) => Err(PyError::os_error_from_io(&e)),
         }
@@ -1371,7 +1390,8 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
             return Err(PyError::type_error("symlink() takes at least 2 arguments"));
         }
         use std::os::unix::fs::symlink;
-        match symlink(&args[0].str(), &args[1].str()) {
+        let (src, dst) = (os_path_arg(&args[0])?, os_path_arg(&args[1])?);
+        match symlink(&src, &dst) {
             Ok(()) => Ok(py_none()),
             Err(e) => Err(PyError::os_error_from_io(&e)),
         }
@@ -1382,7 +1402,8 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("readlink() takes at least 1 argument"));
         }
-        match std::fs::read_link(&args[0].str()) {
+        let path = os_path_arg(&args[0])?;
+        match std::fs::read_link(&path) {
             Ok(p) => Ok(py_str(&p.to_string_lossy())),
             Err(e) => Err(PyError::os_error_from_io(&e)),
         }
@@ -1393,7 +1414,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("makedirs() takes at least 1 argument"));
         }
-        let path = args[0].str();
+        let path = os_path_arg(&args[0])?;
         match std::fs::create_dir_all(&path) {
             Ok(()) => Ok(py_none()),
             Err(e) => Err(PyError::os_error_from_io(&e)),
@@ -1405,7 +1426,7 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
         if args.is_empty() {
             return Err(PyError::type_error("rmdir() takes at least 1 argument"));
         }
-        let path = args[0].str();
+        let path = os_path_arg(&args[0])?;
         match std::fs::remove_dir(&path) {
             Ok(()) => Ok(py_none()),
             Err(e) => Err(PyError::os_error_from_io_path(&e, Some(&path))),
@@ -1565,21 +1586,37 @@ pub fn create_os_dict() -> HashMap<String, PyObjectRef> {
 
     // `os.supports_dir_fd`/`supports_follow_symlinks`/`supports_effective_ids`/
     // `supports_fd` — real CPython exposes frozensets of the os functions
-    // honoring each keyword. Ours honor NONE of them, so expose empty
-    // frozensets: tests guard `{os.open, os.stat} <= os.supports_dir_fd`
-    // (test_glob.py) and skip the dir_fd/symlinks path when the subset check
-    // fails, falling back to the plain path — which is exactly what this
-    // interpreter supports. `supports_bytes_environ` is a plain bool.
+    // honoring each keyword. The other three are still exposed empty: tests
+    // guard `{os.open, os.stat} <= os.supports_dir_fd` (test_glob.py) and
+    // skip the dir_fd path when the subset check fails, falling back to the
+    // plain path — which is what this interpreter supports.
+    // `supports_follow_symlinks`, though, is load-bearing the OTHER way:
+    // `shutil.copystat` only calls `stat`/`utime`/`chmod` at all when the
+    // function is in that set, substituting a no-op `_nop` otherwise — and
+    // the no-op returns None, so `st.st_mode` died on
+    // `'NoneType' object has no attribute 'st_mode'` (test_shutil's
+    // `test_copy2_symlinks` and every other symlink copy). All five of
+    // CPython's members accept the keyword here.
     let empty_frozen: PyObjectRef = crate::object::builtin_frozenset(&[])
         .unwrap_or_else(|_| PyObjectRef::imm(PyObject::FrozenSet(crate::object::PySet::new())));
-    for name in [
-        "supports_dir_fd",
-        "supports_effective_ids",
-        "supports_fd",
-        "supports_follow_symlinks",
-    ] {
+    for name in ["supports_dir_fd", "supports_effective_ids", "supports_fd"] {
         d.insert(name.to_string(), empty_frozen.clone());
     }
+    let follow_symlinks: Vec<PyObjectRef> = ["access", "chown", "link", "stat", "utime"]
+        .iter()
+        .filter_map(|name| d.get(&name.to_string()).cloned())
+        .collect();
+    // `builtin_frozenset` reads its ARGUMENT as a single collection
+    // (`args[0]`), so handing it the members directly silently produced the
+    // empty-set fallback — hence the explicit PySet here.
+    let mut fs_set = crate::object::PySet::new();
+    for member in &follow_symlinks {
+        let _ = fs_set.add(member.clone());
+    }
+    d.insert_str(
+        "supports_follow_symlinks",
+        PyObjectRef::imm(PyObject::FrozenSet(fs_set)),
+    );
     d.insert_str("supports_bytes_environ", py_bool(true));
 
     // os._walk_symlinks_as_files — sentinel object used by Lib/os.py's walk()

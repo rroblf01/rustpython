@@ -4,6 +4,32 @@ use crate::interner;
 use crate::object::*;
 use std::rc::Rc;
 
+/// The whole builtin `OSError` subtree — the members that inherit
+/// `.errno`/`.strerror`/`.filename`/`.filename2` (CPython sets them in
+/// `OSError.__init__`, so every subclass has them).
+fn is_oserror_subclass(typ: &str) -> bool {
+    matches!(
+        typ,
+        "OSError"
+            | "EnvironmentError"
+            | "BlockingIOError"
+            | "ChildProcessError"
+            | "ConnectionError"
+            | "ConnectionAbortedError"
+            | "ConnectionRefusedError"
+            | "ConnectionResetError"
+            | "BrokenPipeError"
+            | "FileExistsError"
+            | "FileNotFoundError"
+            | "InterruptedError"
+            | "IsADirectoryError"
+            | "NotADirectoryError"
+            | "PermissionError"
+            | "ProcessLookupError"
+            | "TimeoutError"
+    )
+}
+
 pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
     match o {
         PyObject::Exception {
@@ -341,10 +367,13 @@ pub(crate) fn get(o: &PyObject, name: &str) -> PyResult<PyObjectRef> {
                     Ok(py_none())
                 }
                 // `OSError.errno`/`.strerror`/`.filename`/`.filename2`
-                // (derived from the ctor's positional args).
-                "errno" | "strerror" | "filename" | "filename2"
-                    if typ == "OSError" || typ == "EnvironmentError" =>
-                {
+                // (derived from the ctor's positional args). Every
+                // OSError SUBCLASS inherits them, and the hierarchy is
+                // long — `shutil` alone trips over a
+                // `NotADirectoryError` with no `.errno`, and 14 of the 15
+                // names below are raised somewhere in the corpus — so the
+                // gate can't be an exact type match.
+                "errno" | "strerror" | "filename" | "filename2" if is_oserror_subclass(typ) => {
                     if let Some(extra) = extra {
                         if let Some(v) = extra.get(name) {
                             return Ok(v.clone());

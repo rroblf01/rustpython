@@ -215,6 +215,88 @@ impl VirtualMachine {
     /// this, every one of the (potentially thousands of) disposable VMs
     /// spun up for nested Python-level calls would re-run the whole module
     /// from scratch.
+    /// `os.path` IS CPython's own `posixpath` (its `os.py` does
+    /// `import posixpath as path; sys.modules['os.path'] = path`), and that
+    /// file is vendored verbatim in `Lib/`. The hand-rolled native dict it
+    /// replaces was wrong in ways that leak into every stdlib consumer:
+    /// `join` was literally `parts.join("/")` — so `join('/a', '/b')` gave
+    /// `/a//b` instead of `/b` — and no function accepted `bytes` paths
+    /// (`os.path.join(b'/tmp', b'x')` returned the STRING `"b'/tmp'/b'x'"`,
+    /// which then made `tempfile.mkdtemp(dir=b'/tmp')` fail with a bogus
+    /// `FileNotFoundError`, and took `test_tempfile` with it). Swap in the
+    /// vendored module, keeping the native dict only if the import fails.
+    pub(crate) fn install_posixpath_alias(&mut self) {
+        let native = match self.modules.get("posixpath").cloned() {
+            Some(m) => m,
+            None => return,
+        };
+        let imported = match self.import_module_from_file("posixpath") {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        for name in ["posixpath", "os.path"] {
+            self.modules.insert(name.to_string(), imported.clone());
+            crate::vm::init::unnote_native_module(name);
+        }
+        if let Some(os_mod) = self.modules.get("os").cloned() {
+            if let PyObject::Module { dict, .. } = &mut *os_mod.borrow_mut() {
+                dict.insert_str("path", imported.clone());
+            }
+        }
+        // `sys.modules` is a real dict on the sys module; keep it in step so
+        // `del sys.modules['os.path']` + re-import behaves like CPython's.
+        if let Some(sys_mod) = self.modules.get("sys").cloned() {
+            let sys_borrow = sys_mod.borrow();
+            if let PyObject::Module { dict, .. } = &*sys_borrow {
+                if let Some(mod_dict) = dict.get_str("modules").cloned() {
+                    drop(sys_borrow);
+                    let mut d = mod_dict.borrow_mut();
+                    if let PyObject::Dict(d) = &mut *d {
+                        let _ = d.set(py_str("os.path"), imported.clone());
+                        let _ = d.set(py_str("posixpath"), imported);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Prefer CPython's own pure-Python `Lib/<name>.py` over a hand-rolled
+    /// native module dict registered under `name`/`aliases`, keeping the
+    /// native object only if the file can't be imported. Same reasoning as
+    /// `install_posixpath_alias`: the vendored file is CPython's own code,
+    /// so it is strictly more faithful (and it grows with CPython for free).
+    pub(crate) fn prefer_vendored_module(&mut self, name: &str, aliases: &[&str]) {
+        let native = match self.modules.get(name).cloned() {
+            Some(m) => m,
+            None => return,
+        };
+        let imported = match self.import_module_from_file(name) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let mut keys: Vec<String> = vec![name.to_string()];
+        keys.extend(aliases.iter().map(|a| a.to_string()));
+        for key in &keys {
+            self.modules.insert(key.clone(), imported.clone());
+            crate::vm::init::unnote_native_module(key);
+        }
+        if let Some(sys_mod) = self.modules.get("sys").cloned() {
+            let sys_borrow = sys_mod.borrow();
+            if let PyObject::Module { dict, .. } = &*sys_borrow {
+                if let Some(mod_dict) = dict.get_str("modules").cloned() {
+                    drop(sys_borrow);
+                    let mut d = mod_dict.borrow_mut();
+                    if let PyObject::Dict(d) = &mut *d {
+                        for key in &keys {
+                            let _ = d.set(py_str(key), imported.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let _ = native;
+    }
+
     pub(crate) fn install_collections_abc_alias(&mut self) {
         thread_local! {
             static CACHED_ABC_MODULE: RefCell<Option<PyObjectRef>> = RefCell::new(None);
